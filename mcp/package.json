@@ -1,0 +1,59 @@
+{
+  "name": "@nikshilov/pulse-mcp",
+  "version": "0.1.1",
+  "description": "MCP server for Pulse — salience-aware empathic-memory engine. Plug into Claude/Anthropic agents (Claude Desktop, Cursor, mcp-agent) for state-aware memory retrieval.",
+  "license": "MIT",
+  "author": "Nikita Shilov",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pulse-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "anthropic",
+    "claude",
+    "memory",
+    "rag",
+    "empathic-memory",
+    "ai-companion",
+    "stateful-retrieval",
+    "pulse"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikshilov/pulse.git",
+    "directory": "mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/nikshilov/pulse/issues"
+  },
+  "homepage": "https://github.com/nikshilov/pulse#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}
