@@ -120,4 +120,9 @@ running Pulse HTTP engine. It contains no memory engine itself. See
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Pulse is licensed under the **GNU AGPL-3.0** — see [LICENSE](LICENSE).
+
+For proprietary or closed-SaaS use without AGPL obligations, a commercial
+license is available — see [COMMERCIAL.md](COMMERCIAL.md).
+
+© 2026 Nikita Shilov · developed under the zbs.gg banner.
