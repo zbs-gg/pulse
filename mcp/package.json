@@ -1,24 +1,31 @@
 {
-  "name": "@nikshilov/pulse-mcp",
-  "version": "0.1.1",
-  "description": "MCP server for Pulse — salience-aware empathic-memory engine. Plug into Claude/Anthropic agents (Claude Desktop, Cursor, mcp-agent) for state-aware memory retrieval.",
+  "name": "@zbs-gg/pulse-mcp",
+  "version": "0.3.0",
+  "description": "MCP server for Pulse host-extracted portable memory and continuity.",
   "license": "MIT",
   "author": "Nikita Shilov",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "pulse-mcp": "dist/index.js"
+    "pulse-mcp": "dist/index.js",
+    "pulse-mcp-claude-smoke": "scripts/claude-connector-smoke.mjs"
   },
   "files": [
     "dist",
+    "scripts",
+    "docs",
     "README.md",
+    "README_DEV_PREVIEW.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
+    "test": "node --import tsx --test src/*.test.ts",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "smoke:claude-connector": "node scripts/claude-connector-smoke.mjs",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -37,22 +44,23 @@
     "model-context-protocol",
     "anthropic",
     "claude",
+    "claude-code",
     "memory",
-    "rag",
-    "empathic-memory",
-    "ai-companion",
-    "stateful-retrieval",
+    "continuity",
+    "host-extracted",
+    "portable-memory",
+    "mcp-memory",
     "pulse"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nikshilov/pulse.git",
+    "url": "git+https://github.com/zbs-gg/pulse.git",
     "directory": "mcp"
   },
   "bugs": {
-    "url": "https://github.com/nikshilov/pulse/issues"
+    "url": "https://github.com/zbs-gg/pulse/issues"
   },
-  "homepage": "https://github.com/nikshilov/pulse#readme",
+  "homepage": "https://github.com/zbs-gg/pulse#readme",
   "publishConfig": {
     "access": "public"
   }

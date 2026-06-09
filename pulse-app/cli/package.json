@@ -1,0 +1,48 @@
+{
+  "name": "@zbs-gg/pulse",
+  "version": "0.4.2",
+  "description": "CLI installer for Pulse MCP host-extracted memory and local-auto continuity.",
+  "license": "MIT",
+  "author": "Nikita Shilov",
+  "type": "module",
+  "bin": {
+    "pulse": "src/cli.js"
+  },
+  "files": [
+    "src/cli.js",
+    "scripts",
+    "vendor/pulse-preview-source",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node src/cli.js --help",
+    "test": "node --test src/*.test.js",
+    "prepack": "node scripts/prepare-preview-vendor.mjs",
+    "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "pulse",
+    "claude-code",
+    "mcp",
+    "memory",
+    "continuity",
+    "host-extracted",
+    "portable-memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zbs-gg/pulse.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/zbs-gg/pulse/issues"
+  },
+  "homepage": "https://github.com/zbs-gg/pulse#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

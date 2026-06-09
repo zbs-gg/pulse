@@ -5,12 +5,46 @@
 *.out
 vendor/
 
+# Local workspace / release artifacts
+node_modules/
+/node_modules/
+/.worktrees/
+/artifacts/
+/review-bundles/
+/archive/
+/__board/
+/package.json
+/package-lock.json
+/pulse-app/.agents/
+/pulse-app/.claude/
+/pulse-app/.mcp.json
+/pulse-app/.pytest_cache/
+/pulse-app/.venv-mlx/
+/pulse-app/bin/
+/pulse-app/pulse
+/pulse-app/pulse-data/
+/pulse-app/pulse-dev/
+/pulse-app/lab/
+/pulse-app/web/
+/pulse-app/elle-prompt-brief.md
+/pulse-app/elle-prompt-raw-response.json
+/pulse-app/lmstudio-model-eval-agent-chat-*.json
+/pulse-app/skills-lock.json
+/pulse-app/graph-explorer-pr26-vitaly.png
+/pulse-app/graph-explorer-*.html
+/pulse-app/web/node_modules/
+
 # SQLite / DB
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# But keep test fixtures tracked
+!scripts/tests/fixtures/*.db
+!scripts/tests/fixtures/*.sqlite
+!scripts/tests/fixtures/*.sqlite3
 
 # Secrets
 .env
@@ -25,11 +59,14 @@ secrets/
 .vscode/
 .idea/
 
-# Python
+# Python (for scripts/)
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 
-# Local parity golden fixture — generate locally, never commit
+# Large raw response dumps (keep brief .md, drop the JSON dumps)
+elle-prompt-raw-response.json
+
+# Private: embeds owner real empathic corpus — regenerate locally, never commit
 internal/retrieve/testdata/parity_golden.json
