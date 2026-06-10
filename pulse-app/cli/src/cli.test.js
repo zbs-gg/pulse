@@ -602,7 +602,8 @@ test('connect claude-code dry run includes MCP and continuity hooks', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MCP command:/);
-  assert.match(result.stdout, /pulse\/mcp\/dist\/index\.js/);
+  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
+  assert.match(result.stdout, /mcp\/dist\/index\.js/);
   assert.match(result.stdout, /SessionStart/);
   assert.match(result.stdout, /UserPromptSubmit/);
   assert.match(result.stdout, /PostToolUse/);
@@ -791,7 +792,8 @@ test('connect claude-code writes local hook config and gitignore entry', () => {
   assert.equal(existsSync(settingsPath), true);
   const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8')).mcpServers.pulse;
   assert.equal(mcp.command, process.execPath);
-  assert.match(mcp.args[0], /pulse\/mcp\/dist\/index\.js/);
+  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
+  assert.match(mcp.args[0], /mcp\/dist\/index\.js/);
   assert.equal(mcp.env.PULSE_BASE_URL, 'http://127.0.0.1:18789');
   const settings = readFileSync(settingsPath, 'utf8');
   assert.match(settings, /SessionStart/);
