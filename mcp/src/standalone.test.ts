@@ -76,6 +76,34 @@ test('standalone store remembers, recalls, forgets, and wipes locally', () => {
   }
 });
 
+test('first run returns a guided demo that disappears after the first memory', () => {
+  const dataDir = tempDataDir();
+  try {
+    const store = new StandaloneStore(dataDir);
+
+    const emptyStatus = store.status() as { first_run?: { guided_demo: string[] } };
+    assert.ok(emptyStatus.first_run, 'empty store status must carry first_run');
+    assert.equal(emptyStatus.first_run.guided_demo.length, 4);
+
+    const emptyResume = store.resume({}) as {
+      first_run?: unknown;
+      resume_markdown: string;
+    };
+    assert.ok(emptyResume.first_run, 'empty store resume must carry first_run');
+    assert.match(emptyResume.resume_markdown, /lived demo/);
+    assert.match(emptyResume.resume_markdown, /pulse_remember/);
+
+    store.remember(sampleCapsule('First real memory ends onboarding.'));
+    const status = store.status() as { first_run?: unknown };
+    assert.equal(status.first_run, undefined);
+    const resume = store.resume({}) as { first_run?: unknown; resume_markdown: string };
+    assert.equal(resume.first_run, undefined);
+    assert.doesNotMatch(resume.resume_markdown, /lived demo/);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('standalone recall respects privacy ceiling and scope filters', () => {
   const dataDir = tempDataDir();
   try {

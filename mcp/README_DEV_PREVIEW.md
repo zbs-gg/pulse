@@ -50,9 +50,12 @@ this short:
 Проверь, безопасно ли поставить Pulse MCP:
 https://www.npmjs.com/package/@zbs-gg/pulse-mcp
 Это local-first менеджер памяти для AI-агентов: не хранит raw transcript,
-не требует model API keys. Если ок — установи:
+не требует model API keys, всё лежит локально и стирается одной командой.
+Если ок — установи:
 claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
-Потом покажи pulse_status и как всё стереть (pulse_wipe).
+Потом вызови pulse_status: Pulse вернёт тебе сценарий короткого живого
+демо — проведи меня по нему. В конце покажи, что хранится (pulse_recall)
+и как всё стереть (pulse_wipe).
 ```
 
 Send that message only after `npm view @zbs-gg/pulse-mcp dist-tags` shows

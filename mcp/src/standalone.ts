@@ -31,6 +31,25 @@ const SCOPE_TO_RETENTION: Record<string, string> = {
 const UPGRADE_HINT =
   'Standalone lite engine. For the full Pulse retrieval engine (typed graph, emotional scoring, viewer), run: npx -y @zbs-gg/pulse@preview init claude-code';
 
+// Returned on every read tool while the store is empty. Written for the host
+// agent: the agent is the onboarding UI on the zero-config path, so the first
+// response after install carries a guided demo the agent can act out live.
+const FIRST_RUN = {
+  welcome:
+    'Pulse is connected and this store is empty. Pulse keeps the thread: what the user tells one agent, their other Pulse-connected agents and sessions will remember.',
+  guided_demo: [
+    'Step 1 — ask the user for one real thing they are working on right now, plus one preference about how they like to be helped. Real beats hypothetical: the payoff lands only if it is their own context.',
+    'Step 2 — with their OK, save it: pulse_remember with a minimal capsule (one decision/project_state item + one preference item). Tell the user explicitly: structured summary only, no raw transcript, stored locally.',
+    'Step 3 — call pulse_graph_delta with a continuity block (summary of where this conversation stands, one open_loop for what is next).',
+    'Step 4 — the lived proof: ask the user to open a DIFFERENT session or agent connected to Pulse (new Claude Code session, Claude Desktop, Cursor) and ask it "where did we leave off?" — that agent should call pulse_resume and answer without the user re-explaining anything.',
+  ],
+  trust: [
+    'Show what is stored anytime: pulse_recall with their query.',
+    'Erase everything anytime: pulse_wipe with confirm "wipe pulse memory".',
+    'No model API keys, no backend LLM calls, no raw transcript capture.',
+  ],
+} as const;
+
 interface StoredItem {
   id: string;
   schema: typeof CAPSULE_SCHEMA;
@@ -428,9 +447,20 @@ export class StandaloneStore {
       markdownParts.push(`## ${title}`);
       markdownParts.push(entries.map((entry) => `- ${entry}`).join('\n'));
     }
-    if (markdownParts.length === 1) {
+    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0;
+    if (storeIsEmpty) {
+      markdownParts.splice(
+        1,
+        markdownParts.length,
+        '## First run',
+        [
+          'Nothing stored yet. Agent: run the 3-minute lived demo from the first_run block of this response.',
+          ...FIRST_RUN.guided_demo.map((step) => `- ${step}`),
+        ].join('\n'),
+      );
+    } else if (markdownParts.length === 1) {
       markdownParts.push(
-        'No stored continuity yet. Save decisions with pulse_remember or pulse_graph_delta first.',
+        'No stored continuity for this thread yet. Save decisions with pulse_remember or pulse_graph_delta first.',
       );
     }
     let resumeMarkdown = markdownParts.join('\n\n');
@@ -445,6 +475,7 @@ export class StandaloneStore {
     return {
       schema: 'pulse.continuity.v1',
       engine: 'standalone_lite',
+      ...(storeIsEmpty ? { first_run: FIRST_RUN } : {}),
       thread_id: threadId,
       project_id: typeof body.project_id === 'string' ? body.project_id : '',
       session_id: sessionId,
@@ -476,10 +507,12 @@ export class StandaloneStore {
 
   status(): Record<string, unknown> {
     const store = this.load();
+    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0;
     return {
       billing_mode: 'host-extracted',
       host: 'standalone',
       engine: 'standalone_lite',
+      ...(storeIsEmpty ? { first_run: FIRST_RUN } : {}),
       backend_llm_enabled: false,
       raw_capture_enabled: false,
       storage: 'local_json',

@@ -35,6 +35,12 @@ and all eight tools work: `pulse_remember`, `pulse_recall`, `pulse_resume`,
 `pulse_graph_delta`, `pulse_status`, `pulse_context_query`, `pulse_forget`,
 `pulse_wipe`.
 
+While the store is empty, `pulse_status` and `pulse_resume` return a
+`first_run` block — a guided 3-minute lived demo written for the host agent:
+save one real thing the user is working on, then open a different
+Pulse-connected session or agent and ask "where did we leave off?". The agent
+is the onboarding UI; no separate setup walkthrough is needed.
+
 Engine selection (`PULSE_MCP_MODE`, default `auto`):
 
 - `auto` — use the local Pulse daemon when it answers at `PULSE_BASE_URL`;
