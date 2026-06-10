@@ -28,13 +28,13 @@ The preview should let a technical user complete one clean path:
 
 ## Canonical Install Path
 
-Fastest path since `@zbs-gg/pulse-mcp` v0.4.0 — zero-config standalone. Check
-first that the `preview` dist-tag resolves to v0.4.0+
-(`npm view @zbs-gg/pulse-mcp dist-tags`); older published versions still
-require a daemon:
+Fastest path since `@zbs-gg/pulse` v0.5.0 — zero-config standalone, one
+package (claude-mem style: MCP server + CLI together). Check first that the
+`preview` dist-tag resolves to v0.5.0+ (`npm view @zbs-gg/pulse dist-tags`);
+older published versions do not carry the `mcp` subcommand:
 
 ```bash
-claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
 No daemon, no keys; the MCP server creates a standalone lite store at
@@ -47,19 +47,19 @@ For someone who wants their agent to vet the install first, the message can be
 this short:
 
 ```text
-Проверь, безопасно ли поставить Pulse MCP:
-https://www.npmjs.com/package/@zbs-gg/pulse-mcp
+Проверь, безопасно ли поставить Pulse:
+https://www.npmjs.com/package/@zbs-gg/pulse
 Это local-first менеджер памяти для AI-агентов: не хранит raw transcript,
 не требует model API keys, всё лежит локально и стирается одной командой.
 Если ок — установи:
-claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 Потом вызови pulse_status: Pulse вернёт тебе сценарий короткого живого
 демо — проведи меня по нему. В конце покажи, что хранится (pulse_recall)
 и как всё стереть (pulse_wipe).
 ```
 
-Send that message only after `npm view @zbs-gg/pulse-mcp dist-tags` shows
-`preview` at v0.4.0 or newer.
+Send that message only after `npm view @zbs-gg/pulse dist-tags` shows
+`preview` at v0.5.0 or newer.
 
 Full-engine path (daemon + viewer + hooks) is agent-first:
 
@@ -151,12 +151,14 @@ Pulse keeps the thread.
 
 ## Package Boundary
 
-`@zbs-gg/pulse` is the CLI installer/local preview wrapper for v0.4.2 — the
-full engine: Go daemon, viewer, hooks, migrations, doctor.
-`@zbs-gg/pulse-mcp` (v0.4.0) is the MCP server package. With a running daemon
-it is a thin stdio/HTTP bridge to the full engine; without one it falls back
-to a standalone lite store so the zero-config install still works. The lite
-store is structured local memory, not the full retrieval engine.
+`@zbs-gg/pulse` (v0.5.0) is THE package — claude-mem style, one install for
+everything: `pulse mcp` runs the bundled prebuilt MCP server (standalone lite
+store by default, daemon proxy when the full engine is running), and the rest
+of the CLI covers init/doctor/demo/viewer/migrations.
+`@zbs-gg/pulse-mcp` (v0.4.0) is the internal server component, published only
+as a low-level/dev artifact. Do not point friends at it; point them at
+`@zbs-gg/pulse`. The lite store is structured local memory, not the full
+retrieval engine.
 
 ## Required Reading
 

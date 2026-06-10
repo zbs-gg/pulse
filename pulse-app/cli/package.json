@@ -1,7 +1,7 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.4.2",
-  "description": "CLI installer for Pulse MCP host-extracted memory and local-auto continuity.",
+  "version": "0.5.0",
+  "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
   "license": "MIT",
   "author": "Nikita Shilov",
   "type": "module",
@@ -12,9 +12,13 @@
     "src/cli.js",
     "scripts",
     "vendor/pulse-preview-source",
+    "vendor/pulse-mcp-dist",
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.4.0"
+  },
   "scripts": {
     "check": "node src/cli.js --help",
     "test": "node --test src/*.test.js",

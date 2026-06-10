@@ -14,20 +14,24 @@ product or a store-safe public connector build yet.
 
 Version boundary for this bundle:
 
-- `@zbs-gg/pulse` CLI preview is v0.4.2.
-- `@zbs-gg/pulse-mcp` package is v0.4.0 (standalone lite engine).
+- `@zbs-gg/pulse` v0.5.0 is THE package: MCP server (`pulse mcp`) + installer
+  CLI in one, claude-mem style. Users install only this.
+- `@zbs-gg/pulse-mcp` v0.4.0 is the internal server component (this
+  directory). It is bundled prebuilt inside `@zbs-gg/pulse`; installing it
+  directly is a low-level/dev path, not the recommended one.
 
 ## Zero-Config Install (Recommended Start)
 
 One command, no daemon, no API keys:
 
 ```bash
-claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
-Availability check first: this path needs the `preview` dist-tag to resolve to
-v0.4.0 or newer (`npm view @zbs-gg/pulse-mcp dist-tags`). Older published
-versions require a running local daemon.
+Availability check first: this path needs the `preview` dist-tag of
+`@zbs-gg/pulse` to resolve to v0.5.0 or newer
+(`npm view @zbs-gg/pulse dist-tags`). Older published versions do not carry
+the `mcp` subcommand or the standalone lite store.
 
 That is the whole install. On the first tool call Pulse creates a local store
 at `~/.pulse/standalone/store.json` (override the root with `PULSE_DATA_DIR`)
@@ -116,14 +120,18 @@ See [README_DEV_PREVIEW.md](README_DEV_PREVIEW.md),
 ## Manual MCP Install
 
 ```bash
-npm i -g @zbs-gg/pulse-mcp@preview
+npm i -g @zbs-gg/pulse@preview
+pulse mcp
 ```
 
 Or run on demand:
 
 ```bash
-npx -y @zbs-gg/pulse-mcp@preview
+npx -y @zbs-gg/pulse@preview mcp
 ```
+
+(`@zbs-gg/pulse-mcp` still exists as the raw server package for low-level/dev
+use; everything below applies to it equally.)
 
 The MCP server prefers a local Pulse HTTP engine at `http://127.0.0.1:18789`
 and falls back to the built-in standalone lite store when no daemon answers
@@ -161,10 +169,10 @@ debugging the low-level MCP package.
    same secret through `PULSE_DATA_DIR` and `secret.key`, so custom hook smoke
    tests must point `PULSE_DATA_DIR` at the daemon's data directory.
 
-3. Install the MCP package:
+3. Install the package:
 
    ```bash
-   npm i -g @zbs-gg/pulse-mcp@preview
+   npm i -g @zbs-gg/pulse@preview
    ```
 
 4. Add Pulse to Claude Code:
@@ -173,7 +181,8 @@ debugging the low-level MCP package.
    {
      "mcpServers": {
        "pulse": {
-         "command": "pulse-mcp",
+         "command": "pulse",
+         "args": ["mcp"],
          "env": {
            "PULSE_BASE_URL": "http://127.0.0.1:18789",
            "PULSE_API_KEY": "paste-your-local-secret-here"
@@ -229,7 +238,7 @@ Manual config uses the same MCP command:
   "mcpServers": {
     "pulse": {
       "command": "npx",
-      "args": ["-y", "@zbs-gg/pulse-mcp@preview"],
+      "args": ["-y", "@zbs-gg/pulse@preview", "mcp"],
       "env": {
         "PULSE_BASE_URL": "http://127.0.0.1:18789",
         "PULSE_API_KEY": "your-pulse-ipc-secret"
@@ -255,7 +264,7 @@ uses a static bearer gate:
 PULSE_BASE_URL=http://127.0.0.1:18789 \
 PULSE_API_KEY=your-pulse-ipc-secret \
 PULSE_REMOTE_BEARER=dev-token \
-npx -y @zbs-gg/pulse-mcp@preview --http --port 8787
+npx -y @zbs-gg/pulse@preview mcp --http --port 8787
 ```
 
 Development endpoint:
@@ -268,7 +277,7 @@ For a local preview behind a tunnel, keep the bearer gate and bind publicly:
 
 ```bash
 PULSE_REMOTE_BEARER=dev-token \
-npx -y @zbs-gg/pulse-mcp@preview --http --host 0.0.0.0 --port 8787
+npx -y @zbs-gg/pulse@preview mcp --http --host 0.0.0.0 --port 8787
 ```
 
 `--http` requires `PULSE_REMOTE_BEARER` by default and refuses authless public
@@ -284,7 +293,7 @@ readiness mode:
 ```bash
 PULSE_REMOTE_PUBLIC_BASE_URL=https://pulse.example.com \
 PULSE_REMOTE_AUTH_ISSUER=https://auth.example.com \
-npx -y @zbs-gg/pulse-mcp@preview --http --host 0.0.0.0 --port 8787
+npx -y @zbs-gg/pulse@preview mcp --http --host 0.0.0.0 --port 8787
 ```
 
 This exposes:
@@ -308,7 +317,7 @@ dev OAuth loop:
 PULSE_REMOTE_PUBLIC_BASE_URL=https://pulse.example.com \
 PULSE_REMOTE_AUTH_ISSUER=https://pulse.example.com \
 PULSE_REMOTE_OAUTH_DEV=1 \
-npx -y @zbs-gg/pulse-mcp@preview --http --host 0.0.0.0 --port 8787
+npx -y @zbs-gg/pulse@preview mcp --http --host 0.0.0.0 --port 8787
 ```
 
 This serves authorization-server metadata, dynamic client registration,

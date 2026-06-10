@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
 const DATA_DIR = process.env.PULSE_DATA_DIR ?? join(homedir(), '.pulse');
@@ -40,6 +40,7 @@ function usage() {
 
 Usage:
   pulse --why
+  pulse mcp [--http --port <port>]
   pulse install-plan claude-code [--json]
   pulse init claude-code
   pulse init claude-code --dry-run
@@ -207,7 +208,12 @@ function mcpConfig(secret) {
   const localEntrypoint = localMcpEntrypoint();
   const commandConfig = localEntrypoint
     ? { command: process.execPath, args: [localEntrypoint] }
-    : { command: 'npx', args: ['-y', process.env.PULSE_MCP_PACKAGE ?? '@zbs-gg/pulse-mcp@preview'] };
+    : {
+        command: 'npx',
+        args: process.env.PULSE_MCP_PACKAGE
+          ? ['-y', process.env.PULSE_MCP_PACKAGE]
+          : ['-y', '@zbs-gg/pulse@preview', 'mcp'],
+      };
   return {
     type: 'stdio',
     ...commandConfig,
@@ -224,6 +230,31 @@ function localMcpEntrypoint() {
   }
   const candidate = resolve(dirname(CLI_PATH), '..', '..', '..', 'mcp', 'dist', 'index.js');
   return existsSync(candidate) ? candidate : undefined;
+}
+
+function mcpServerEntrypoint() {
+  if (process.env.PULSE_MCP_ENTRYPOINT) {
+    return existsSync(process.env.PULSE_MCP_ENTRYPOINT) ? process.env.PULSE_MCP_ENTRYPOINT : undefined;
+  }
+  // Published package ships a prebuilt server; a repo checkout uses mcp/dist.
+  const vendored = join(CLI_PACKAGE_ROOT, 'vendor', 'pulse-mcp-dist', 'index.js');
+  if (existsSync(vendored)) {
+    return vendored;
+  }
+  const checkout = resolve(CLI_PACKAGE_ROOT, '..', '..', 'mcp', 'dist', 'index.js');
+  return existsSync(checkout) ? checkout : undefined;
+}
+
+async function runMcpServer() {
+  const entrypoint = mcpServerEntrypoint();
+  if (!entrypoint) {
+    console.error(
+      '[pulse] MCP server build not found. In a repo checkout run: cd mcp && npm ci && npm run build',
+    );
+    process.exit(1);
+  }
+  // The server module starts itself on import and owns stdio from here.
+  await import(pathToFileURL(entrypoint).href);
 }
 
 function commandOnPath(name) {
@@ -6016,6 +6047,12 @@ function getRestArg(rest, name) {
 }
 
 async function main() {
+  if (command === 'mcp') {
+    // Stdio MCP server: nothing may touch stdout before the JSON-RPC handshake.
+    await runMcpServer();
+    return;
+  }
+
   if (command === '--why' || command === 'why') {
     console.log('Because repeating yourself to machines is a terrible way to live.');
     return;

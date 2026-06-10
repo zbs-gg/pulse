@@ -14,11 +14,11 @@ review bundle briefs.
 - Pulse shows what it will tell Claude next.
 - Pulse can be installed trust-first by asking an AI agent to inspect the repo,
   show the plan, ask confirmation, and run the preview installer.
-- Pulse MCP v0.4.0+ installs with one command
-  (`claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview`) and works
+- Pulse v0.5.0+ installs with one command
+  (`claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`) and works
   without a local daemon through a standalone lite store. Use this claim only
-  after the npm `preview` dist-tag resolves to v0.4.0+
-  (`npm view @zbs-gg/pulse-mcp dist-tags`).
+  after the npm `preview` dist-tag resolves to v0.5.0+
+  (`npm view @zbs-gg/pulse dist-tags`).
 - Standalone lite recall is keyword ranking, not the full Pulse retrieval
   engine; say "lite store" when describing it, and never quote bench numbers
   for standalone mode.

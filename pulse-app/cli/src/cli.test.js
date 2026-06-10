@@ -622,7 +622,47 @@ test('connect claude-code dry run falls back to preview npm package outside loca
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /MCP command: npx -y @zbs-gg\/pulse-mcp@preview/);
+  assert.match(result.stdout, /MCP command: npx -y @zbs-gg\/pulse@preview mcp/);
+});
+
+test('pulse mcp serves stdio MCP tools with the standalone store', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
+  const requests = [
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'cli-test', version: '0' },
+      },
+    }),
+    JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'pulse_status', arguments: {} },
+    }),
+  ].join('\n');
+  const result = spawnSync(process.execPath, [CLI, 'mcp'], {
+    env: {
+      ...process.env,
+      HOME: home,
+      PULSE_DATA_DIR: join(home, '.pulse'),
+      PULSE_MCP_MODE: 'standalone',
+    },
+    input: `${requests}\n`,
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /pulse_graph_delta/);
+  assert.match(result.stdout, /standalone_lite/);
+  assert.match(result.stderr, /standalone lite store/);
+  assert.equal(existsSync(join(home, '.pulse', 'standalone', 'store.json')), true);
 });
 
 test('init claude-code uses preview first-run flow', () => {

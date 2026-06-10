@@ -6,7 +6,8 @@ consumer release.
 ## Product Boundary
 
 - Claude Code-first preview.
-- Local daemon optional since `@zbs-gg/pulse-mcp` v0.4.0: without a daemon the
+- Local daemon optional since `@zbs-gg/pulse` v0.5.0 (server component
+  `pulse-mcp` v0.4.0): without a daemon the
   MCP server uses a standalone lite store (plain local JSON). The lite engine
   has no full retrieval engine (typed graph scoring, emotional retrieval), no
   viewer, and no lifecycle hooks with automatic resume injection — resume works
@@ -24,9 +25,10 @@ consumer release.
 ## Install Boundary
 
 - The zero-config path is
-  `claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview`: standalone lite
+  `claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`: standalone lite
   store, no daemon, no keys. It covers memory + continuity tools only, and it
-  is only real once the npm `preview` dist-tag resolves to v0.4.0+.
+  is only real once the npm `preview` dist-tag of `@zbs-gg/pulse` resolves to
+  v0.5.0+.
 - The full-engine path stays agent-first: copy the prompt from
   `pulse/docs/INSTALL_WITH_AGENT.md`, let the agent audit the repo, show the
   plan, ask confirmation, then run `pulse init claude-code --yes`.

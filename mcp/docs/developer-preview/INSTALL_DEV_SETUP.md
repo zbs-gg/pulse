@@ -4,10 +4,10 @@ This is the technical install reference for the partner preview.
 
 It is technical. It is not the final consumer install.
 
-## Fastest Path: Zero-Config Standalone (pulse-mcp v0.4.0+)
+## Fastest Path: Zero-Config Standalone (@zbs-gg/pulse v0.5.0+)
 
 ```bash
-claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
 No Go toolchain, no daemon, no keys. The MCP server creates a standalone lite

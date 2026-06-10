@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,10 +60,18 @@ copyFileList(mcpRoot, vendorMcp, [
   'README_DEV_PREVIEW.md',
   'tsconfig.json',
 ]);
-mkdirSync(join(vendorMcp, 'src'), { recursive: true });
-cpSync(join(mcpRoot, 'src', 'index.ts'), join(vendorMcp, 'src', 'index.ts'));
+// Whole src tree (minus tests): index.ts alone no longer builds since standalone.ts.
+copyTree(join(mcpRoot, 'src'), join(vendorMcp, 'src'));
 copyTree(join(mcpRoot, 'scripts'), join(vendorMcp, 'scripts'));
 copyTree(join(mcpRoot, 'docs'), join(vendorMcp, 'docs'));
+
+// Prebuilt MCP server so `pulse mcp` works from the published package with no
+// TS toolchain on the user machine.
+const vendorMcpDist = join(cliRoot, 'vendor', 'pulse-mcp-dist');
+rmSync(vendorMcpDist, { recursive: true, force: true });
+execSync('npm ci', { cwd: mcpRoot, stdio: ['ignore', 'inherit', 'inherit'] });
+execSync('npm run build', { cwd: mcpRoot, stdio: ['ignore', 'inherit', 'inherit'] });
+cpSync(join(mcpRoot, 'dist'), vendorMcpDist, { recursive: true });
 
 copyFileList(pulseRoot, vendorRoot, [
   'AGENTS.md',
