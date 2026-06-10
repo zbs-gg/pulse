@@ -4,6 +4,19 @@ This is the technical install reference for the partner preview.
 
 It is technical. It is not the final consumer install.
 
+## Fastest Path: Zero-Config Standalone (pulse-mcp v0.4.0+)
+
+```bash
+claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+```
+
+No Go toolchain, no daemon, no keys. The MCP server creates a standalone lite
+store at `~/.pulse/standalone/store.json` on the first tool call. Memory,
+recall, resume, graph deltas, status, forget, and wipe all work. The viewer,
+lifecycle hooks, and the full retrieval engine require the full path below;
+when a local daemon is later installed, the same MCP server prefers it
+automatically (`PULSE_MCP_MODE=auto` is the default).
+
 ## Recommended Path: Install With Your Agent
 
 The primary path is trust-first:

@@ -14,6 +14,12 @@ review bundle briefs.
 - Pulse shows what it will tell Claude next.
 - Pulse can be installed trust-first by asking an AI agent to inspect the repo,
   show the plan, ask confirmation, and run the preview installer.
+- Pulse MCP v0.4.0+ installs with one command
+  (`claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview`) and works
+  without a local daemon through a standalone lite store.
+- Standalone lite recall is keyword ranking, not the full Pulse retrieval
+  engine; say "lite store" when describing it, and never quote bench numbers
+  for standalone mode.
 - No backend OpenAI, Anthropic, or Cohere key is required by default.
 - Raw transcript capture is off by default.
 - Import preview is review-first and private by default.

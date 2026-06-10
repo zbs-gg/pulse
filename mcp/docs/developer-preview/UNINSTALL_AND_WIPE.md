@@ -2,6 +2,25 @@
 
 Pulse MCP Preview v0.4.2 must be easy to leave.
 
+## Standalone (Zero-Config) Install
+
+If you installed only the MCP package (no daemon), everything lives in one
+place. Ask the host to call `pulse_wipe` with confirm `"wipe pulse memory"`,
+or delete the store directly:
+
+```bash
+rm -rf ~/.pulse/standalone
+```
+
+Disconnect the server with:
+
+```bash
+claude mcp remove pulse
+```
+
+There is no daemon process to stop in this mode. The sections below cover the
+full-engine install.
+
 ## Wipe Local Memory
 
 From the Pulse CLI:

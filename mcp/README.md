@@ -5,16 +5,53 @@ first supported install target, but the product surface is Pulse MCP.
 
 Pulse keeps the thread across AI chats.
 
-Status: Pulse MCP package for Pulse MCP Preview v0.4.2. This package is
-shareable with technical friends and partner/investor-adjacent reviewers as a
-Claude Code-first preview. It requires a running local Pulse Go daemon; it is
-not a standalone memory database, a consumer installer, or a store-safe public
-connector build yet.
+Status: Pulse MCP package for Pulse MCP Preview. This package is shareable
+with technical friends and partner/investor-adjacent reviewers as a Claude
+Code-first preview. Since v0.4.0 it runs standalone: when no local Pulse Go
+daemon is reachable, it stores memory in a built-in lite local store, so a
+plain MCP install works with zero extra setup. It is still not a consumer
+product or a store-safe public connector build yet.
 
 Version boundary for this bundle:
 
 - `@zbs-gg/pulse` CLI preview is v0.4.2.
-- `@zbs-gg/pulse-mcp` package remains v0.3.0.
+- `@zbs-gg/pulse-mcp` package is v0.4.0 (standalone lite engine).
+
+## Zero-Config Install (Recommended Start)
+
+One command, no daemon, no API keys:
+
+```bash
+claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+```
+
+That is the whole install. On the first tool call Pulse creates a local store
+at `~/.pulse/standalone/store.json` (override the root with `PULSE_DATA_DIR`)
+and all eight tools work: `pulse_remember`, `pulse_recall`, `pulse_resume`,
+`pulse_graph_delta`, `pulse_status`, `pulse_context_query`, `pulse_forget`,
+`pulse_wipe`.
+
+Engine selection (`PULSE_MCP_MODE`, default `auto`):
+
+- `auto` — use the local Pulse daemon when it answers at `PULSE_BASE_URL`;
+  otherwise fall back to the standalone lite store. A daemon that has answered
+  in the current process is never silently downgraded.
+- `daemon` — always require the daemon (pre-0.4.0 behavior).
+- `standalone` — never touch the daemon, lite store only.
+
+What the lite engine does NOT have: the full retrieval engine (typed graph
+scoring, emotional retrieval), the local viewer, and the Claude Code lifecycle
+hooks with automatic resume injection. For those, upgrade to the full local
+engine later:
+
+```bash
+npx -y @zbs-gg/pulse@preview init claude-code
+```
+
+The standalone store keeps items in the daemon's export item shape, so
+upgrading does not strand your memories: wrap the `items` array from
+`store.json` as `{"schema": "pulse.memory_capsule.v1", "items": [...]}` and
+feed it to `pulse import --file`.
 
 Pulse does not call an LLM backend by default. Claude Code creates a minimal
 `pulse.memory_capsule.v1` in tool arguments, and Pulse stores, recalls, resumes,
@@ -78,10 +115,11 @@ Or run on demand:
 npx -y @zbs-gg/pulse-mcp@preview
 ```
 
-The MCP server is a thin stdio wrapper over a local Pulse HTTP engine, normally
-running at `http://127.0.0.1:18789`.
+The MCP server prefers a local Pulse HTTP engine at `http://127.0.0.1:18789`
+and falls back to the built-in standalone lite store when no daemon answers
+(see Zero-Config Install above).
 
-Start the local daemon separately before connecting a host:
+To use the full engine, start the local daemon before connecting a host:
 
 ```bash
 go run ./cmd/pulse -addr 127.0.0.1:18789 -data-dir ~/.pulse
@@ -190,6 +228,12 @@ Manual config uses the same MCP command:
   }
 }
 ```
+
+Both env vars are optional since v0.4.0: `PULSE_BASE_URL` defaults to
+`http://127.0.0.1:18789`, and when `PULSE_API_KEY` is unset the MCP server
+reads `~/.pulse/secret.key` if it exists (so a daemon installed by the CLI
+works without pasting secrets). With neither a daemon nor a secret, the
+standalone lite store takes over.
 
 ## Streamable HTTP MCP
 

@@ -8,6 +8,9 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -17,12 +20,67 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
+import { StandaloneStore } from './standalone.js';
+
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
-const PULSE_API_KEY = process.env.PULSE_API_KEY ?? '';
+// `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path.
+const PULSE_DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const args = process.argv.slice(2);
+
+type EngineMode = 'auto' | 'daemon' | 'standalone';
+const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
+// In auto mode the first daemon connection failure locks the process into the
+// standalone lite store; a daemon that answered once is never silently
+// downgraded, so one process never splits writes across two stores.
+let resolvedEngine: 'daemon' | 'standalone' | null =
+  ENGINE_MODE === 'auto' ? null : ENGINE_MODE;
+const standaloneStore = new StandaloneStore(PULSE_DATA_DIR);
+
+function parseEngineMode(value: string | undefined): EngineMode {
+  if (value === undefined || value === '' || value === 'auto') {
+    return 'auto';
+  }
+  if (value === 'daemon' || value === 'standalone') {
+    return value;
+  }
+  throw new Error(`invalid PULSE_MCP_MODE: ${value} (use auto, daemon, or standalone)`);
+}
+
+let apiKeyCache: string | null = null;
+function resolveApiKey(): string {
+  if (apiKeyCache !== null) {
+    return apiKeyCache;
+  }
+  const fromEnv = process.env.PULSE_API_KEY ?? '';
+  if (fromEnv !== '') {
+    apiKeyCache = fromEnv;
+    return apiKeyCache;
+  }
+  try {
+    apiKeyCache = readFileSync(join(PULSE_DATA_DIR, 'secret.key'), 'utf8').trim();
+  } catch {
+    apiKeyCache = '';
+  }
+  return apiKeyCache;
+}
+
+function isConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  if (err.message.startsWith('Pulse HTTP')) {
+    return false;
+  }
+  const cause = (err as { cause?: { code?: string } }).cause;
+  const code = cause?.code ?? '';
+  return (
+    err.message === 'fetch failed' ||
+    ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code)
+  );
+}
 
 type Host =
   | 'chatgpt'
@@ -139,8 +197,9 @@ async function pulseFetch<T>(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (PULSE_API_KEY) {
-    headers['X-Pulse-Key'] = PULSE_API_KEY;
+  const apiKey = resolveApiKey();
+  if (apiKey) {
+    headers['X-Pulse-Key'] = apiKey;
   }
   const resp = await fetch(url, {
     method,
@@ -175,7 +234,9 @@ function redactStatusForMcp(value: unknown): unknown {
     return value;
   }
   const status = { ...(value as Record<string, unknown>) };
-  status.storage = 'local_sqlite';
+  if (typeof status.storage !== 'string') {
+    status.storage = 'local_sqlite';
+  }
   if ('storage_path' in status) {
     status.storage_path = '<local>';
   }
@@ -657,53 +718,28 @@ function createPulseMcpServer(): Server {
     const { name, arguments: args } = request.params;
 
     try {
-      if (name === 'pulse_remember') {
-        const out = await pulseFetch<{ ok: boolean; ids: string[] }>(
-          '/memory/remember',
-          args as unknown as MemoryCapsule,
-        );
-        return jsonText(out);
+      if (resolvedEngine === 'standalone') {
+        return standaloneResult(name, args);
       }
-
-      if (name === 'pulse_recall') {
-        const out = await pulseFetch('/memory/recall', args as unknown as RecallBody);
-        return jsonText(out);
-      }
-
-      if (name === 'pulse_context_query') {
-        const out = await pulseFetch('/context/query', args as unknown as ContextQueryBody);
-        return jsonText(out);
-      }
-
-      if (name === 'pulse_graph_delta') {
-        const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody);
-        return jsonText(out);
-      }
-
-      if (name === 'pulse_resume') {
-        const out = await pulseFetch('/continuity/resume', args as unknown as ResumeBody);
-        return jsonText(out);
-      }
-
-      if (name === 'pulse_status') {
-        const out = await pulseFetch('/memory/status', undefined, 'GET');
-        return jsonText(redactStatusForMcp(out));
-      }
-
-      if (name === 'pulse_forget') {
-        const out = await pulseFetch('/memory/delete', { id: args?.id });
-        return jsonText(out);
-      }
-
-      if (name === 'pulse_wipe') {
-        if (args?.confirm !== 'wipe pulse memory') {
-          throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
+      try {
+        const out = await daemonToolCall(name, args);
+        resolvedEngine = 'daemon';
+        return out;
+      } catch (err: unknown) {
+        // Concurrent calls may race the first failure; any call may fall back
+        // as long as the daemon has never answered in this process.
+        if (resolvedEngine !== 'daemon' && isConnectionError(err)) {
+          if (resolvedEngine === null) {
+            resolvedEngine = 'standalone';
+            // eslint-disable-next-line no-console
+            console.error(
+              `[pulse-mcp v${VERSION}] no Pulse daemon at ${PULSE_BASE_URL}; using standalone lite store`,
+            );
+          }
+          return standaloneResult(name, args);
         }
-        const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' });
-        return jsonText(out);
+        throw err;
       }
-
-      throw new Error(`Unknown tool: ${name}`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return {
@@ -716,6 +752,61 @@ function createPulseMcpServer(): Server {
   return server;
 }
 
+function standaloneResult(name: string, args: unknown) {
+  const out = standaloneStore.call(name, args);
+  return jsonText(name === 'pulse_status' ? redactStatusForMcp(out) : out);
+}
+
+async function daemonToolCall(name: string, args: Record<string, unknown> | undefined) {
+  if (name === 'pulse_remember') {
+    const out = await pulseFetch<{ ok: boolean; ids: string[] }>(
+      '/memory/remember',
+      args as unknown as MemoryCapsule,
+    );
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_recall') {
+    const out = await pulseFetch('/memory/recall', args as unknown as RecallBody);
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_context_query') {
+    const out = await pulseFetch('/context/query', args as unknown as ContextQueryBody);
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_graph_delta') {
+    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody);
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_resume') {
+    const out = await pulseFetch('/continuity/resume', args as unknown as ResumeBody);
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_status') {
+    const out = await pulseFetch('/memory/status', undefined, 'GET');
+    return jsonText(redactStatusForMcp(out));
+  }
+
+  if (name === 'pulse_forget') {
+    const out = await pulseFetch('/memory/delete', { id: args?.id });
+    return jsonText(out);
+  }
+
+  if (name === 'pulse_wipe') {
+    if (args?.confirm !== 'wipe pulse memory') {
+      throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
+    }
+    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' });
+    return jsonText(out);
+  }
+
+  throw new Error(`Unknown tool: ${name}`);
+}
+
 async function main(): Promise<void> {
   if (args.includes('--http')) {
     await startHttpMode();
@@ -726,7 +817,13 @@ async function main(): Promise<void> {
   await server.connect(transport);
   // eslint-disable-next-line no-console
   console.error(
-    `[pulse-mcp v${VERSION}] host-extracted stdio connected; backing Pulse: ${PULSE_BASE_URL}`,
+    `[pulse-mcp v${VERSION}] host-extracted stdio connected; engine: ${
+      ENGINE_MODE === 'auto'
+        ? `auto (daemon at ${PULSE_BASE_URL} when reachable, standalone lite store otherwise)`
+        : ENGINE_MODE === 'daemon'
+          ? `daemon at ${PULSE_BASE_URL}`
+          : 'standalone lite store'
+    }`,
   );
 }
 

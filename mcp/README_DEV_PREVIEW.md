@@ -28,7 +28,31 @@ The preview should let a technical user complete one clean path:
 
 ## Canonical Install Path
 
-Preferred v0.4.2 path is agent-first:
+Fastest path since `@zbs-gg/pulse-mcp` v0.4.0 — zero-config standalone:
+
+```bash
+claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+```
+
+No daemon, no keys; the MCP server creates a standalone lite store at
+`~/.pulse/standalone/store.json` on the first tool call. This covers
+remember/recall/resume/graph-delta/status/forget/wipe. The viewer, lifecycle
+hooks with automatic resume injection, and the full retrieval engine still
+require the full install below.
+
+For someone who wants their agent to vet the install first, the message can be
+this short:
+
+```text
+Проверь, безопасно ли поставить Pulse MCP:
+https://www.npmjs.com/package/@zbs-gg/pulse-mcp
+Это local-first менеджер памяти для AI-агентов: не хранит raw transcript,
+не требует model API keys. Если ок — установи:
+claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
+Потом покажи pulse_status и как всё стереть (pulse_wipe).
+```
+
+Full-engine path (daemon + viewer + hooks) is agent-first:
 
 1. Give your AI agent the prompt in
    [`../docs/INSTALL_WITH_AGENT.md`](../docs/INSTALL_WITH_AGENT.md).
@@ -118,10 +142,12 @@ Pulse keeps the thread.
 
 ## Package Boundary
 
-`@zbs-gg/pulse` is the CLI installer/local preview wrapper for v0.4.2.
-`@zbs-gg/pulse-mcp` is only the MCP server package. It is a thin stdio/HTTP
-bridge to a running local Pulse daemon, not the whole product and not a
-standalone memory database.
+`@zbs-gg/pulse` is the CLI installer/local preview wrapper for v0.4.2 — the
+full engine: Go daemon, viewer, hooks, migrations, doctor.
+`@zbs-gg/pulse-mcp` (v0.4.0) is the MCP server package. With a running daemon
+it is a thin stdio/HTTP bridge to the full engine; without one it falls back
+to a standalone lite store so the zero-config install still works. The lite
+store is structured local memory, not the full retrieval engine.
 
 ## Required Reading
 
