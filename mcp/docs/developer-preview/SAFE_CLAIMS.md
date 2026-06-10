@@ -16,7 +16,9 @@ review bundle briefs.
   show the plan, ask confirmation, and run the preview installer.
 - Pulse MCP v0.4.0+ installs with one command
   (`claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview`) and works
-  without a local daemon through a standalone lite store.
+  without a local daemon through a standalone lite store. Use this claim only
+  after the npm `preview` dist-tag resolves to v0.4.0+
+  (`npm view @zbs-gg/pulse-mcp dist-tags`).
 - Standalone lite recall is keyword ranking, not the full Pulse retrieval
   engine; say "lite store" when describing it, and never quote bench numbers
   for standalone mode.

@@ -25,6 +25,10 @@ One command, no daemon, no API keys:
 claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
 ```
 
+Availability check first: this path needs the `preview` dist-tag to resolve to
+v0.4.0 or newer (`npm view @zbs-gg/pulse-mcp dist-tags`). Older published
+versions require a running local daemon.
+
 That is the whole install. On the first tool call Pulse creates a local store
 at `~/.pulse/standalone/store.json` (override the root with `PULSE_DATA_DIR`)
 and all eight tools work: `pulse_remember`, `pulse_recall`, `pulse_resume`,

@@ -25,7 +25,8 @@ consumer release.
 
 - The zero-config path is
   `claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview`: standalone lite
-  store, no daemon, no keys. It covers memory + continuity tools only.
+  store, no daemon, no keys. It covers memory + continuity tools only, and it
+  is only real once the npm `preview` dist-tag resolves to v0.4.0+.
 - The full-engine path stays agent-first: copy the prompt from
   `pulse/docs/INSTALL_WITH_AGENT.md`, let the agent audit the repo, show the
   plan, ask confirmation, then run `pulse init claude-code --yes`.

@@ -28,7 +28,10 @@ The preview should let a technical user complete one clean path:
 
 ## Canonical Install Path
 
-Fastest path since `@zbs-gg/pulse-mcp` v0.4.0 — zero-config standalone:
+Fastest path since `@zbs-gg/pulse-mcp` v0.4.0 — zero-config standalone. Check
+first that the `preview` dist-tag resolves to v0.4.0+
+(`npm view @zbs-gg/pulse-mcp dist-tags`); older published versions still
+require a daemon:
 
 ```bash
 claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
@@ -51,6 +54,9 @@ https://www.npmjs.com/package/@zbs-gg/pulse-mcp
 claude mcp add pulse -- npx -y @zbs-gg/pulse-mcp@preview
 Потом покажи pulse_status и как всё стереть (pulse_wipe).
 ```
+
+Send that message only after `npm view @zbs-gg/pulse-mcp dist-tags` shows
+`preview` at v0.4.0 or newer.
 
 Full-engine path (daemon + viewer + hooks) is agent-first:
 
