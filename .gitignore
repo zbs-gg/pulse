@@ -34,6 +34,15 @@ node_modules/
 /pulse-app/graph-explorer-*.html
 /pulse-app/web/node_modules/
 
+# Private: owner's local companion infrastructure — never commit
+/pulse-app/CLAUDE.md
+/pulse-app/bridge/
+/pulse-app/scripts/gen-elle-soul.py
+/pulse-app/scripts/elle_feel/
+/pulse-app/scripts/launchd/
+/pulse-app/scripts/pulse_book_skeleton.py
+/pulse-app/scripts/telethon-bridge-m1.py
+
 # SQLite / DB
 *.db
 *.db-wal
