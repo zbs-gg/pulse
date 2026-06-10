@@ -143,9 +143,17 @@ test('standalone recall respects privacy ceiling and scope filters', () => {
     const privateCeiling = store.recall({ query: 'pulse', privacy_ceiling: 'private' });
     assert.equal(privateCeiling.items.length, 2);
 
+    // Daemon semantics: scope "user" means no retention filter.
     const userScope = store.recall({ query: 'pulse', privacy_ceiling: 'private', scope: 'user' });
-    assert.equal(userScope.items.length, 1);
-    assert.equal(userScope.items[0].retention, 'long_term');
+    assert.equal(userScope.items.length, 2);
+
+    const projectScope = store.recall({
+      query: 'pulse',
+      privacy_ceiling: 'private',
+      scope: 'project',
+    });
+    assert.equal(projectScope.items.length, 1);
+    assert.equal(projectScope.items[0].retention, 'project');
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

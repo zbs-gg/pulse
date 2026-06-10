@@ -17,8 +17,10 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
-const DATA_DIR = process.env.PULSE_DATA_DIR ?? join(homedir(), '.pulse');
+const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
+// `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
+// (same rule as mcp/src/index.ts and standalone.ts).
+const DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
@@ -206,12 +208,22 @@ async function pulseFetch(path, options = {}) {
 
 function mcpConfig(secret) {
   const localEntrypoint = localMcpEntrypoint();
-  const commandConfig = localEntrypoint
-    ? { command: process.execPath, args: [localEntrypoint] }
+  // An entrypoint inside the npx cache dangles once the cache is pruned or
+  // the dist-tag moves — register the npx package form instead.
+  const durableEntrypoint =
+    localEntrypoint && !/[\\/]_npx[\\/]/.test(localEntrypoint) ? localEntrypoint : undefined;
+  const overridePackage = process.env.PULSE_MCP_PACKAGE;
+  const commandConfig = durableEntrypoint
+    ? { command: process.execPath, args: [durableEntrypoint] }
     : {
         command: 'npx',
-        args: process.env.PULSE_MCP_PACKAGE
-          ? ['-y', process.env.PULSE_MCP_PACKAGE]
+        args: overridePackage
+          ? [
+              '-y',
+              overridePackage,
+              // The main package needs the subcommand; the raw connector does not.
+              ...(/^@zbs-gg\/pulse(@|$)/.test(overridePackage) ? ['mcp'] : []),
+            ]
           : ['-y', '@zbs-gg/pulse@preview', 'mcp'],
       };
   return {
@@ -219,6 +231,10 @@ function mcpConfig(secret) {
     ...commandConfig,
     env: {
       PULSE_BASE_URL: DEFAULT_BASE_URL,
+      // Daemon installs must fail loudly when the daemon is down instead of
+      // silently splitting writes into the standalone lite store.
+      PULSE_MCP_MODE: 'daemon',
+      PULSE_DATA_DIR: DATA_DIR,
       PULSE_API_KEY: secret,
     },
   };

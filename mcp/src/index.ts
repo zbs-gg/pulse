@@ -37,6 +37,8 @@ const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
 // downgraded, so one process never splits writes across two stores.
 let resolvedEngine: 'daemon' | 'standalone' | null =
   ENGINE_MODE === 'auto' ? null : ENGINE_MODE;
+// Gate serializing tool calls while the engine is still unresolved.
+let firstCallGate: Promise<void> | null = null;
 const standaloneStore = new StandaloneStore(PULSE_DATA_DIR);
 
 function parseEngineMode(value: string | undefined): EngineMode {
@@ -49,9 +51,11 @@ function parseEngineMode(value: string | undefined): EngineMode {
   throw new Error(`invalid PULSE_MCP_MODE: ${value} (use auto, daemon, or standalone)`);
 }
 
-let apiKeyCache: string | null = null;
+let apiKeyCache = '';
 function resolveApiKey(): string {
-  if (apiKeyCache !== null) {
+  // Cache only a found key: `pulse init` may create secret.key after this
+  // server already started, so keep re-checking while none is known.
+  if (apiKeyCache !== '') {
     return apiKeyCache;
   }
   const fromEnv = process.env.PULSE_API_KEY ?? '';
@@ -62,7 +66,7 @@ function resolveApiKey(): string {
   try {
     apiKeyCache = readFileSync(join(PULSE_DATA_DIR, 'secret.key'), 'utf8').trim();
   } catch {
-    apiKeyCache = '';
+    // no secret yet — try again on the next call
   }
   return apiKeyCache;
 }
@@ -721,13 +725,33 @@ function createPulseMcpServer(): Server {
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);
       }
+      // Serialize calls until the engine is resolved: without this, two
+      // concurrent first calls can split between daemon and standalone
+      // when the daemon dies between them.
+      let releaseGate: (() => void) | undefined;
+      if (resolvedEngine === null) {
+        while (firstCallGate) {
+          await firstCallGate;
+        }
+        if (resolvedEngine !== null) {
+          return resolvedEngine === 'standalone'
+            ? standaloneResult(name, args)
+            : await daemonToolCall(name, args);
+        }
+        firstCallGate = new Promise((resolve) => {
+          releaseGate = resolve;
+        });
+      }
       try {
         const out = await daemonToolCall(name, args);
         resolvedEngine = 'daemon';
         return out;
       } catch (err: unknown) {
-        // Concurrent calls may race the first failure; any call may fall back
-        // as long as the daemon has never answered in this process.
+        if (err instanceof Error && err.message.startsWith('Pulse HTTP')) {
+          // The daemon answered (even with an error): it exists — lock to it.
+          resolvedEngine = 'daemon';
+          throw err;
+        }
         if (resolvedEngine !== 'daemon' && isConnectionError(err)) {
           if (resolvedEngine === null) {
             resolvedEngine = 'standalone';
@@ -739,6 +763,11 @@ function createPulseMcpServer(): Server {
           return standaloneResult(name, args);
         }
         throw err;
+      } finally {
+        if (releaseGate) {
+          firstCallGate = null;
+          releaseGate();
+        }
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

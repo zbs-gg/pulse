@@ -9,12 +9,16 @@
  */
 import { randomBytes } from 'node:crypto';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -23,10 +27,12 @@ const STORE_SCHEMA = 'pulse.standalone_store.v1';
 const CAPSULE_SCHEMA = 'pulse.memory_capsule.v1';
 const DELTA_SCHEMA = 'pulse.semantic_delta.v1';
 const PRIVACY_RANK: Record<string, number> = { normal: 0, sensitive: 1, private: 2 };
-const SCOPE_TO_RETENTION: Record<string, string> = {
+// Mirrors the daemon's retentionFilter (internal/store/memory_capsule.go):
+// scope "user" means "everything", not a retention tier.
+const SCOPE_TO_RETENTION: Record<string, string | undefined> = {
   session: 'session',
   project: 'project',
-  user: 'long_term',
+  user: undefined,
 };
 const UPGRADE_HINT =
   'Standalone lite engine. For the full Pulse retrieval engine (typed graph, emotional scoring, viewer), run: npx -y @zbs-gg/pulse@preview init claude-code';
@@ -164,7 +170,57 @@ export class StandaloneStore {
     return this.storePath;
   }
 
+  /**
+   * Cross-process advisory lock. Multiple MCP server processes (one per host
+   * session) share one store.json; unguarded read-modify-write loses updates
+   * because the last tmp+rename wins. All store ops are short and synchronous,
+   * so a spin lock with a stale-steal is enough.
+   */
+  private withLock<T>(fn: () => T): T {
+    const lockPath = `${this.storePath}.lock`;
+    mkdirSync(dirname(this.storePath), { recursive: true, mode: 0o700 });
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      try {
+        const fd = openSync(lockPath, 'wx');
+        try {
+          writeSync(fd, String(process.pid));
+        } finally {
+          closeSync(fd);
+        }
+        break;
+      } catch {
+        try {
+          // A crashed holder must not deadlock the store: steal stale locks.
+          if (Date.now() - statSync(lockPath).mtimeMs > 10_000) {
+            rmSync(lockPath, { force: true });
+            continue;
+          }
+        } catch {
+          continue; // lock vanished between openSync and statSync — retry now
+        }
+        if (Date.now() > deadline) {
+          throw new Error('standalone store is locked by another Pulse process (timeout after 5s)');
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  }
+
   private load(): StoreFile {
+    if (!existsSync(this.storePath)) {
+      // First-run creation races other processes too — create under the lock.
+      return this.withLock(() => this.loadUnlocked());
+    }
+    return this.loadUnlocked();
+  }
+
+  private loadUnlocked(): StoreFile {
     if (!existsSync(this.storePath)) {
       const fresh = emptyStore();
       this.persist(fresh);
@@ -199,10 +255,12 @@ export class StandaloneStore {
     if (!Array.isArray(capsule.items) || capsule.items.length === 0) {
       throw new Error('invalid memory capsule: items must be a non-empty array');
     }
-    const store = this.load();
+    const capsuleItems: unknown[] = capsule.items;
+    return this.withLock(() => {
+    const store = this.loadUnlocked();
     const now = new Date().toISOString();
     const ids: string[] = [];
-    capsule.items.forEach((entry, index) => {
+    capsuleItems.forEach((entry, index) => {
       const item = asRecord(entry, `memory capsule item ${index}`);
       const id = newMemoryID(index);
       store.items.push({
@@ -224,6 +282,7 @@ export class StandaloneStore {
     store.last_write = now;
     this.persist(store);
     return { ok: true, ids };
+    });
   }
 
   recall(input: unknown): { items: Array<Record<string, unknown>> } {
@@ -285,7 +344,8 @@ export class StandaloneStore {
     const host = asString(source.host, 'semantic delta source.host');
     asString(source.conversation_scope, 'semantic delta source.conversation_scope');
     asString(source.timestamp, 'semantic delta source.timestamp');
-    const store = this.load();
+    return this.withLock(() => {
+    const store = this.loadUnlocked();
     const now = new Date().toISOString();
 
     let nodesUpserted = 0;
@@ -376,6 +436,7 @@ export class StandaloneStore {
       event_ids: eventIds,
       checkpoint_saved: checkpointSaved,
     };
+    });
   }
 
   resume(input: unknown): Record<string, unknown> {
@@ -541,24 +602,28 @@ export class StandaloneStore {
 
   forget(id: unknown): { ok: true } {
     const target = asString(id, 'memory id');
-    const store = this.load();
-    const index = store.items.findIndex((item) => item.id === target);
-    if (index < 0) {
-      throw new Error(`memory id not found: ${target}`);
-    }
-    store.items.splice(index, 1);
-    store.last_write = new Date().toISOString();
-    this.persist(store);
-    return { ok: true };
+    return this.withLock(() => {
+      const store = this.loadUnlocked();
+      const index = store.items.findIndex((item) => item.id === target);
+      if (index < 0) {
+        throw new Error(`memory id not found: ${target}`);
+      }
+      store.items.splice(index, 1);
+      store.last_write = new Date().toISOString();
+      this.persist(store);
+      return { ok: true } as const;
+    });
   }
 
   wipe(confirm: unknown): { ok: true } {
     if (confirm !== 'wipe pulse memory') {
       throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
     }
-    rmSync(this.storePath, { force: true });
-    rmSync(`${this.storePath}.tmp`, { force: true });
-    return { ok: true };
+    return this.withLock(() => {
+      rmSync(this.storePath, { force: true });
+      rmSync(`${this.storePath}.tmp`, { force: true });
+      return { ok: true } as const;
+    });
   }
 
   call(name: string, args: unknown): unknown {

@@ -132,8 +132,10 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 		return nil, fmt.Errorf("query is required")
 	}
 	limit := q.Limit
-	if limit <= 0 || limit > 50 {
+	if limit <= 0 {
 		limit = 5
+	} else if limit > 50 {
+		limit = 50
 	}
 	ceiling := strings.TrimSpace(q.PrivacyCeiling)
 	if ceiling == "" {
