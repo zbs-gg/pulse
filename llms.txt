@@ -1,0 +1,45 @@
+# Pulse
+
+> Pulse keeps the thread across AI chats: a local-first MCP memory and
+> continuity layer. What a user tells one agent, their other Pulse-connected
+> agents and sessions remember — as host-extracted structured capsules stored
+> locally, never raw transcripts, with no backend model API keys by default.
+> Developer preview; Claude Code-first; not production.
+
+Install (zero-config, one command, no daemon/keys):
+`claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`
+Requires npm dist-tag `preview` >= 0.5.0 (`npm view @zbs-gg/pulse dist-tags`).
+First tool call creates `~/.pulse/standalone/store.json` and returns a
+`first_run` guided demo for the host agent. Tools: pulse_remember,
+pulse_recall, pulse_resume, pulse_graph_delta, pulse_status,
+pulse_context_query, pulse_forget, pulse_wipe. Uninstall:
+`claude mcp remove pulse` + `rm -rf ~/.pulse/standalone`.
+
+## Docs
+
+- [Agent install + safety instructions](AGENTS.md): the script an AI agent
+  should follow to audit, explain, install, and run the lived demo.
+- [README](README.md): product overview, install paths, trust boundaries.
+- [Known limitations](mcp/docs/developer-preview/KNOWN_LIMITATIONS.md): what
+  the preview does not do; lite store vs full engine.
+- [Safe claims](mcp/docs/developer-preview/SAFE_CLAIMS.md): allowed and
+  forbidden marketing claims.
+- [Uninstall and wipe](mcp/docs/developer-preview/UNINSTALL_AND_WIPE.md): exit
+  paths for both install modes.
+- [Full-engine agent install](docs/INSTALL_WITH_AGENT.md): daemon + viewer +
+  lifecycle hooks path.
+
+## Packages
+
+- [@zbs-gg/pulse on npm](https://www.npmjs.com/package/@zbs-gg/pulse): the one
+  package — MCP server (`pulse mcp`) plus installer/CLI.
+- [@zbs-gg/pulse-mcp on npm](https://www.npmjs.com/package/@zbs-gg/pulse-mcp):
+  internal server component (low-level/dev artifact).
+
+## Boundaries
+
+- Not production ready; developer preview for technical users.
+- Standalone lite recall is keyword ranking — retrieval bench numbers apply
+  only to the full local engine.
+- No automatic chat import; import is explicit, review-first, private by
+  default.
