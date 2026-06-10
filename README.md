@@ -1,128 +1,76 @@
 # Pulse
 
-State-aware memory and retrieval engine, written in Go. Pulse stores
-conversational events plus a lightweight knowledge graph in a single SQLite
-file and retrieves them with a hybrid ranker that combines dense embeddings,
-lexical search, and a set of *conditional* affective boosts.
+Pulse owns all Pulse-related code, MCP packages, review bundles, screenshots,
+archives, and local proof artifacts.
 
-The design goal is simple: a retrieval engine for AI companions and
-assistants that surfaces the right memory at the right moment, and that
-degrades gracefully to a plain semantic-retrieval baseline whenever the
-extra signals are absent.
+Nothing Pulse-specific should live directly in the Garden workspace root.
 
-## What makes it different
+## Current Preview
 
-Most memory engines rank purely on embedding similarity (optionally with a
-recency decay). Pulse keeps that as its base score and then layers
-*conditional* boosts on top:
+Pulse MCP Preview v0.4.2 is Claude Code-first and agent-first.
 
+Recommended entry:
+
+1. Give your AI agent `docs/INSTALL_WITH_AGENT.md`.
+2. The agent reads `AGENTS.md` and `docs/SECURITY_INSTALL_CHECKLIST.md`.
+3. The agent shows `pulse install-plan claude-code --json`.
+4. The agent asks for confirmation.
+5. The agent runs `pulse init claude-code --yes`, then `pulse doctor`,
+   `pulse demo`, and `pulse viewer`.
+
+Manual install remains available, but it is the fallback:
+
+```bash
+npx @zbs-gg/pulse@preview init claude-code
 ```
-score = base × emotion × state × anchor × date
-        └─ cosine × recency × belief-class weighting
+
+Availability note: the `@preview` npm commands are valid only after the preview
+packages are published. Before sharing a recipient flow, verify with
+`npm view @zbs-gg/pulse dist-tags`. If npm returns 404, use the local
+source/tarball/review-bundle path and say explicitly that the public npm path is
+not available yet.
+
+`@zbs-gg/pulse` is the CLI installer and local preview wrapper.
+`@zbs-gg/pulse-mcp` is the MCP server package used by Claude Code and later
+hosts; it is not the whole product.
+
+## Material Graph Direction
+
+Pulse is moving toward a native Material Graph:
+
+```text
+Material Graph + Salience Overlay + Continuity Pack
 ```
 
-Each boost term is `1.0` (a no-op) unless its signal is genuinely present:
+Pulse does not use Graphify internally. Graphify is only a reference and
+external benchmark for packaging, demos, and review discipline. The native
+Pulse direction is source-backed graph memory that can feed continuity/resume
+without claiming autonomous prioritization or production readiness.
 
-- **Emotion** — a Plutchik-10 typed emotion vector. When the query (or the
-  caller-supplied user state) has a dominant emotion, events whose emotion
-  vector aligns are boosted. No dominant emotion → term collapses to 1.0.
-- **State** — fit between the event and the user's current state (body
-  load, recent life events, restoration/depletion). Neutral state → 1.0.
-- **Anchor** — a small bump for high-salience "anchor" events, applied only
-  within the top-N by base score so it can re-rank but not hijack.
-- **Date** — proximity boost when the query carries a temporal reference
-  ("yesterday", "last week", "сегодня", …). No temporal cue → 1.0.
+See:
 
-Because every boost is multiplicative and gated, a fully neutral query
-returns exactly the semantic-retrieval baseline. The conditional gating is
-load-bearing: always-on boosts measurably hurt retrieval, so they only fire
-when the signal is real.
-
-On top of the scored substrate, Pulse fuses a parallel **BM25 / FTS5**
-lexical ranking via Reciprocal Rank Fusion (RRF, k=60). Lexical catches the
-exact-phrase matches that dense embeddings round off; if the FTS5 layer or
-the DB is unavailable, retrieval falls through to pure cosine and never
-fails the request.
-
-A **query router** classifies each query into one of three modes before
-retrieval:
-
-- **factual** — wh-questions about names / dates / lists → atomic-fact cosine
-- **chain** — causal / temporal "what led to…" requests → predecessor BFS
-- **empathic** — everything else → the full conditional formula above
-
-Routing is heuristic-first, with an optional LLM fallback when heuristic
-confidence is low.
-
-## Implementation status
-
-The Go scoring substrate (`internal/retrieve`) is parity-validated against a
-frozen Python reference: per-event scores match to float precision and the
-top-5 ordering matches on the reference test set. The boost constants and the
-conditional gating logic are frozen — see `internal/retrieve/v3boosts.go`.
-
-Benchmark framing here is deliberately conservative: Pulse is built to be
-evaluated on public memory benchmarks (e.g. LongMemEval, LoCoMo). This
-repository ships the engine and its unit/parity tests, not any private
-evaluation corpus.
+- `docs/PULSE_GRAPHIFY_BOUNDARY.md`
+- `docs/PULSE_MATERIAL_GRAPH_V0.md`
+- `docs/PULSE_MATERIAL_GRAPH_CURRENT_STATE.md`
+- `docs/PULSE_MATERIAL_GRAPH_STORIES.md`
+- `docs/PULSE_MATERIAL_GRAPH_PROSHA_POINT_AUDIT.md`
 
 ## Layout
 
-```
-cmd/pulse/         HTTP server entrypoint
-cmd/pulse-smoke/   minimal smoke-test client
-internal/retrieve/ hybrid retrieval: router, factual/empathic/chain, v3 boosts
-internal/store/    SQLite store + migrations (events, graph, emotions, FTS5)
-internal/embed/    embedders (Cohere API + optional local subprocess)
-internal/ingest/   observation ingest + sensitive-actor redaction
-internal/contextquery/ scoped context projection over the graph
-internal/server/   HTTP handlers
-internal/...       prompt assembly, providers, erasure (GDPR), health, outbox
-mcp/               MCP server (thin wrapper over the HTTP API)
-```
+- `pulse-app/` - Pulse local app, daemon, storage, server, CLI-adjacent app code.
+- `mcp/` - Pulse MCP npm package.
+- `artifacts/` - Pulse screenshots, viewer captures, demo pages, and local proof.
+- `review-bundles/` - Pulse MCP / Pulse review handoff bundles.
+- `archive/` - old Pulse backups, public-clean snapshots, and legacy exports.
 
-## Build & run
+## Rule
 
-Requires Go 1.25+. SQLite is pure-Go (`modernc.org/sqlite`), so no CGo and
-no separate vector database.
+When creating a Pulse artifact, choose the destination inside this folder first:
 
-```bash
-# build
-go build ./cmd/pulse
-
-# run on 127.0.0.1:18789 with a data dir
-go run ./cmd/pulse -addr 127.0.0.1:18789 -data-dir ~/.pulse
-
-# test
-go test ./...
-```
-
-### Embeddings
-
-Pulse picks an embedder at startup:
-
-1. `COHERE_API_KEY` (env, or `~/.pulse/cohere-key.txt`) → Cohere `embed-v4.0`
-2. `PULSE_LOCAL_EMBED_PYTHON` + `PULSE_LOCAL_EMBED_HELPER` +
-   `PULSE_LOCAL_EMBED_MODEL`, all set and pointing at existing files →
-   an optional local embedding helper subprocess
-3. otherwise: retrieval-only mode (`/retrieve` and `/context/query` return
-   `503` until an embedder is configured; previously-ingested data is still
-   served)
-
-An optional grounded query-expansion helper can be enabled with
-`PULSE_QUERY_EXPAND=1` plus the matching `PULSE_QUERY_EXPAND_*` paths.
-
-## MCP
-
-`mcp/` is a thin Model Context Protocol server that hands queries to a
-running Pulse HTTP engine. It contains no memory engine itself. See
-`mcp/README.md`.
-
-## License
-
-Pulse is licensed under the **GNU AGPL-3.0** — see [LICENSE](LICENSE).
-
-For proprietary or closed-SaaS use without AGPL obligations, a commercial
-license is available — see [COMMERCIAL.md](COMMERCIAL.md).
-
-© 2026 Nikita Shilov · developed under the zbs.gg banner.
+- MCP package/review bundle: `review-bundles/mcp/`
+- Prosha bundle for Pulse: `review-bundles/proshka/`
+- Screenshots and browser captures: `artifacts/screenshots/<topic-or-date>/`
+- Prototype/demo HTML: `artifacts/<topic>/`
+- Old snapshots/backups: `archive/`
+- Pulse app code: `pulse-app/`
+- Pulse MCP code: `mcp/`

@@ -1,0 +1,52 @@
+{
+  "name": "@zbs-gg/pulse",
+  "version": "0.5.0",
+  "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
+  "license": "MIT",
+  "author": "Nikita Shilov",
+  "type": "module",
+  "bin": {
+    "pulse": "src/cli.js"
+  },
+  "files": [
+    "src/cli.js",
+    "scripts",
+    "vendor/pulse-preview-source",
+    "vendor/pulse-mcp-dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.4.0"
+  },
+  "scripts": {
+    "check": "node src/cli.js --help",
+    "test": "node --test src/*.test.js",
+    "prepack": "node scripts/prepare-preview-vendor.mjs",
+    "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "pulse",
+    "claude-code",
+    "mcp",
+    "memory",
+    "continuity",
+    "host-extracted",
+    "portable-memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zbs-gg/pulse.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/zbs-gg/pulse/issues"
+  },
+  "homepage": "https://github.com/zbs-gg/pulse#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}
