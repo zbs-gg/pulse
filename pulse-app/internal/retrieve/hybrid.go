@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/embed"
@@ -42,6 +43,10 @@ type Engine struct {
 	embedder Embedder
 	expander Expander // optional; nil disables query expansion (B+)
 	router   *Router
+
+	// mu guards the in-memory indexes: Retrieve takes the read lock, Reload
+	// the write lock, so interactive ingest can refresh indexes live.
+	mu sync.RWMutex
 
 	// Decay constants (mirrors Python defaults from retrieval_v3.py:444-446).
 	decayLambda       float64
@@ -128,6 +133,71 @@ func (e *Engine) Init(ctx context.Context) error {
 		return fmt.Errorf("retrieve init chains: %w", err)
 	}
 	return nil
+}
+
+// Reload re-reads the in-memory indexes under the write lock so events
+// ingested after startup become retrievable without a daemon restart.
+func (e *Engine) Reload(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.Init(ctx)
+}
+
+// EmbedderReady reports whether full retrieval can run (an embedder is wired).
+func (e *Engine) EmbedderReady() bool {
+	return e.embedder != nil
+}
+
+// EmbedderModel names the embedding model the index is built with.
+func (e *Engine) EmbedderModel() string {
+	return e.embedModel
+}
+
+// IndexEventDoc is one freshly ingested event to embed and index.
+type IndexEventDoc struct {
+	EventID int64
+	Text    string
+}
+
+// EmbedAndIndexEvents embeds freshly ingested events as search documents,
+// writes them into event_embeddings, and reloads the in-memory index. This is
+// what makes interactive ingest (/graph/delta) retrievable immediately.
+func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) error {
+	if e.embedder == nil {
+		return fmt.Errorf("retrieve index: embedder is nil")
+	}
+	if len(docs) == 0 {
+		return nil
+	}
+	texts := make([]string, len(docs))
+	for i, doc := range docs {
+		texts[i] = doc.Text
+	}
+	vecs, err := e.embedder.Embed(ctx, texts, embed.TypeSearchDocument)
+	if err != nil {
+		return fmt.Errorf("retrieve index embed: %w", err)
+	}
+	if len(vecs) != len(docs) {
+		return fmt.Errorf("retrieve index: embedder returned %d vectors for %d docs", len(vecs), len(docs))
+	}
+	for i, doc := range docs {
+		raw, err := json.Marshal(vecs[i])
+		if err != nil {
+			return fmt.Errorf("retrieve index marshal vector: %w", err)
+		}
+		if _, err := e.store.DB().ExecContext(ctx, `
+			INSERT INTO event_embeddings (event_id, model, dim, vector_json, text_source)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(event_id) DO UPDATE SET
+			  model = excluded.model,
+			  dim = excluded.dim,
+			  vector_json = excluded.vector_json,
+			  text_source = excluded.text_source`,
+			doc.EventID, e.embedModel, len(vecs[i]), string(raw), doc.Text); err != nil {
+			return fmt.Errorf("retrieve index upsert event %d: %w", doc.EventID, err)
+		}
+	}
+	return e.Reload(ctx)
 }
 
 // loadEvents pulls (id, ts, embedding, emotion_vec) per event.
@@ -388,6 +458,9 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	if err != nil {
 		return nil, fmt.Errorf("retrieve embed: %w", err)
 	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
 	var cosineIDs []int64
 	var breakdowns map[int64]ScoreBreakdown

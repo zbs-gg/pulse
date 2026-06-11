@@ -9,6 +9,7 @@ import {
   readdirSync,
   mkdtempSync,
   openSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -47,9 +48,9 @@ Usage:
   pulse init claude-code
   pulse init claude-code --dry-run
   pulse init claude-code --yes
+  pulse demo [--clean]
   pulse doctor
   pulse doctor --json
-  pulse demo
   pulse connect claude-code [--remote-control]
   pulse connect claude-chat --base <https-origin-or-mcp-url> [--open]
   pulse disconnect claude-code
@@ -713,17 +714,47 @@ async function doctorReport() {
   };
   const backendEnabled = daemon.ok ? Boolean(daemon.data?.backend_llm_enabled) : false;
   const rawEnabled = daemon.ok ? Boolean(daemon.data?.raw_capture_enabled) : false;
+  const fullRetrieval = daemon.ok ? Boolean(daemon.data?.full_retrieval) : false;
+  const cohereKeyPresent =
+    Boolean(process.env.COHERE_API_KEY) || existsSync(join(DATA_DIR, 'cohere-key.txt'));
+  const localEmbedModel = process.env.PULSE_LOCAL_EMBED_MODEL ?? '';
   return {
-    product: 'Pulse MCP Preview',
+    product: 'Pulse Local Preview',
     version: PREVIEW_VERSION,
     target_host: 'claude-code',
     mode: 'developer_preview',
     base_url: DEFAULT_BASE_URL.replace(/\/$/, ''),
+    // Headline verdict. Never claim "Pulse ready" while full retrieval is off:
+    // without an embedder this machine runs the safe fallback, not Pulse.
+    verdict: fullRetrieval
+      ? 'Pulse Local Preview ready.'
+      : 'Pulse MCP fallback is ready. Full retrieval is not enabled.',
     checks,
+    engine: {
+      full_retrieval: fullRetrieval,
+      embedder: daemon.ok ? String(daemon.data?.embedder ?? '') : '',
+      embedding_path: fullRetrieval
+        ? cohereKeyPresent && !localEmbedModel
+          ? 'external embedding API'
+          : 'local'
+        : 'none',
+    },
+    local_resources: {
+      disk_free: diskFreeLabel(),
+      memory_total: memoryTotalLabel(),
+      local_embedding_model: localEmbedModel
+        ? existsSync(localEmbedModel)
+          ? 'found'
+          : 'configured but missing'
+        : 'not configured (optional)',
+      external_embedding_key: cohereKeyPresent ? 'present' : 'absent',
+    },
     trust: {
       backend_llm_enabled: backendEnabled,
       raw_capture_enabled: rawEnabled,
+      external_embedding_api: fullRetrieval && cohereKeyPresent && !localEmbedModel,
       old_chat_import_default: false,
+      wipe_available: true,
     },
     next_steps: [
       'pulse init claude-code --yes',
@@ -732,6 +763,41 @@ async function doctorReport() {
       'pulse wipe --confirm "wipe pulse memory"',
     ],
   };
+}
+
+function diskFreeLabel() {
+  try {
+    const result = spawnSync('df', ['-k', DATA_DIR], { encoding: 'utf8' });
+    const line = (result.stdout ?? '').trim().split('\n').pop() ?? '';
+    const fields = line.split(/\s+/);
+    const availKB = Number.parseInt(fields[3] ?? '', 10);
+    if (Number.isFinite(availKB)) {
+      return `${Math.round(availKB / 1024 / 1024)}GB`;
+    }
+  } catch {
+    // best effort
+  }
+  return 'unknown';
+}
+
+function memoryTotalLabel() {
+  try {
+    if (process.platform === 'darwin') {
+      const result = spawnSync('sysctl', ['-n', 'hw.memsize'], { encoding: 'utf8' });
+      const bytes = Number.parseInt((result.stdout ?? '').trim(), 10);
+      if (Number.isFinite(bytes)) {
+        return `${Math.round(bytes / 1024 / 1024 / 1024)}GB`;
+      }
+    } else if (existsSync('/proc/meminfo')) {
+      const match = readFileSync('/proc/meminfo', 'utf8').match(/MemTotal:\s+(\d+) kB/);
+      if (match) {
+        return `${Math.round(Number.parseInt(match[1], 10) / 1024 / 1024)}GB`;
+      }
+    }
+  } catch {
+    // best effort
+  }
+  return 'unknown';
 }
 
 async function runDoctor(rest = []) {
@@ -764,14 +830,28 @@ async function runDoctor(rest = []) {
     printDoctorLine(label, check);
   }
 
+  console.log('\nEngine:');
+  console.log(`  full retrieval: ${report.engine.full_retrieval ? 'enabled' : 'disabled'}`);
+  console.log(`  embedder: ${report.engine.embedder || 'none'}`);
+  console.log(`  embedding path: ${report.engine.embedding_path}`);
+
+  console.log('Local resources:');
+  console.log(`  disk free: ${report.local_resources.disk_free}`);
+  console.log(`  memory: ${report.local_resources.memory_total}`);
+  console.log(`  local embedding model: ${report.local_resources.local_embedding_model}`);
+  console.log(`  external embedding key: ${report.local_resources.external_embedding_key}`);
+
   if (report.checks.daemon.ok) {
     const backend = report.trust.backend_llm_enabled ? 'on' : 'off';
     const raw = report.trust.raw_capture_enabled ? 'on' : 'off';
-    console.log(`\nTrust: backend LLM ${backend}; raw transcript capture ${raw}`);
+    const extEmbed = report.trust.external_embedding_api ? 'on' : 'off';
+    console.log(`\nPrivacy: backend LLM ${backend}; raw transcript capture ${raw}; external embedding API ${extEmbed}; raw import off`);
     console.log('What Pulse will tell Claude next: pulse viewer');
   } else {
-    console.log('\nTrust: backend LLM unknown; raw transcript capture unknown until daemon answers.');
+    console.log('\nPrivacy: backend LLM unknown; raw transcript capture unknown until daemon answers.');
   }
+
+  console.log(`\nVerdict: ${report.verdict}`);
 
   const failed = checks.filter(([, check]) => !check.ok);
   if (failed.length > 0) {
@@ -1049,7 +1129,7 @@ ${daemonMissing ? 'Pulse daemon is not reachable yet.\n' : ''}Without Pulse:
 
 First proof:
 1. Run:
-   pulse doctor
+   pulse demo
 2. Ask Claude Code:
    "${FIRST_PROOF_REMEMBER_PROMPT}"
 3. Open a fresh Claude Code session and ask:
@@ -1065,67 +1145,240 @@ Start with one memory first. Old chats can wait.
 `);
 }
 
-async function printPulseDemo() {
-  const status = await pulseStatusDetails(500);
-  if (!status.ok) {
-    printDemoRitual({ daemonMissing: true });
-    console.log('Next: run `pulse init claude-code --yes`, then run `pulse demo` again.');
-    return;
+// --- Stateful preview demo -------------------------------------------------
+//
+// The demo Pulse actually has to prove: same query, different user state →
+// different retrieved episodes, with visible reasons; old anchors beating
+// recent noise; and the continuity pack the next agent receives. It runs on
+// an ISOLATED demo instance (own port, own data dir, simulated corpus) so it
+// never touches the user's real store and wipes clean in one command.
+
+const DEMO_BASE_URL = process.env.PULSE_DEMO_BASE_URL || 'http://127.0.0.1:18790';
+const DEMO_DATA_DIR = join(DATA_DIR, 'preview-demo');
+const DEMO_SECRET_PATH = join(DEMO_DATA_DIR, 'secret.key');
+const DEMO_PID_FILE = join(DEMO_DATA_DIR, 'pulse-demo-daemon.pid');
+
+function demoCorpus() {
+  const corpusPath = join(dirname(CLI_PATH), 'demo-corpus.json');
+  return JSON.parse(readFileSync(corpusPath, 'utf8'));
+}
+
+function demoSecret() {
+  mkdirSync(DEMO_DATA_DIR, { recursive: true, mode: 0o700 });
+  if (!existsSync(DEMO_SECRET_PATH)) {
+    writeFileSync(DEMO_SECRET_PATH, randomBytes(32).toString('hex'), { mode: 0o600 });
   }
+  return readFileSync(DEMO_SECRET_PATH, 'utf8').trim();
+}
 
-  console.log(`
-[pulse] Pulse demo
+async function demoFetch(path, { body, method, timeoutMs = 15000 } = {}) {
+  const response = await fetch(`${DEMO_BASE_URL.replace(/\/$/, '')}${path}`, {
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': demoSecret(),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`demo daemon HTTP ${response.status} on ${path}: ${text.slice(0, 400)}`);
+  }
+  if (response.status === 204) {
+    return { ok: true };
+  }
+  return response.json();
+}
 
-Stop re-explaining your project to Claude Code.
-Pulse keeps the thread.
+async function startDemoDaemon() {
+  const daemonBin = join(DATA_DIR, 'bin', 'pulse-preview-daemon');
+  if (!existsSync(daemonBin)) {
+    throw new Error(
+      'Pulse Local Preview daemon is not built yet. Run `pulse init claude-code --yes` first.',
+    );
+  }
+  demoSecret();
+  const logDir = join(DEMO_DATA_DIR, 'logs');
+  mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  const logFd = openSync(join(logDir, 'pulse-demo-daemon.log'), 'a');
+  const addr = DEMO_BASE_URL.replace(/^https?:\/\//, '');
+  const child = spawn(daemonBin, ['-addr', addr, '-data-dir', DEMO_DATA_DIR], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    env: { ...process.env, ANTHROPIC_API_KEY: '', PULSE_MODE: 'local-auto' },
+  });
+  child.unref();
+  writeFileSync(DEMO_PID_FILE, String(child.pid), { mode: 0o600 });
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      return await demoFetch('/memory/status', { timeoutMs: 600 });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  throw new Error(`demo daemon did not become ready at ${DEMO_BASE_URL}`);
+}
 
-Without Pulse:
-  A fresh Claude Code session would not know this decision.
-`);
+function stopDemoDaemon() {
+  if (!existsSync(DEMO_PID_FILE)) {
+    return false;
+  }
+  const pid = Number.parseInt(readFileSync(DEMO_PID_FILE, 'utf8').trim(), 10);
   try {
-    const remembered = await pulseFetch('/memory/remember', {
-      body: demoMemoryCapsule(),
-      timeoutMs: 2500,
-    });
-    const recall = await pulseFetch('/memory/recall', {
+    if (Number.isFinite(pid) && pid > 1) {
+      process.kill(pid, 'SIGTERM');
+    }
+  } catch {
+    // already gone
+  }
+  unlinkSync(DEMO_PID_FILE);
+  return true;
+}
+
+function demoCleanup() {
+  const stopped = stopDemoDaemon();
+  rmSync(DEMO_DATA_DIR, { recursive: true, force: true });
+  console.log(`[pulse] Demo ${stopped ? 'daemon stopped and ' : ''}preview corpus removed: ${DEMO_DATA_DIR}`);
+}
+
+function formatBreakdown(breakdown) {
+  if (!breakdown) {
+    return 'base ranking (cosine x recency)';
+  }
+  const parts = [`cos ${Number(breakdown.cosine ?? 0).toFixed(2)}`, `recency ${Number(breakdown.recency ?? 0).toFixed(2)}`];
+  const boosts = [
+    ['state', breakdown.state_boost],
+    ['anchor', breakdown.anchor_boost],
+    ['emotion', breakdown.emotion_boost],
+    ['date', breakdown.date_boost],
+  ];
+  for (const [name, value] of boosts) {
+    if (typeof value === 'number' && Math.abs(value - 1) > 0.0005) {
+      parts.push(`${name} x${value.toFixed(2)}`);
+    }
+  }
+  return parts.join(' · ');
+}
+
+async function runStatefulDemo() {
+  const corpus = demoCorpus();
+  console.log(`
+[pulse] Pulse Local Preview demo
+${corpus.label}
+
+One question, three user states. Watch which memory surfaces — and why.
+`);
+
+  console.log('[pulse] Starting isolated demo instance...');
+  const status = await startDemoDaemon();
+  try {
+    if (!status.full_retrieval) {
+      console.log(`
+Pulse MCP fallback is ready. Full retrieval is NOT enabled, so the stateful
+demo cannot run honestly on this machine.
+
+To enable full retrieval, give the engine an embedder:
+  - Cohere key in ~/.pulse/cohere-key.txt (external embedding API), or
+  - local MLX embeddings (Apple Silicon): set PULSE_LOCAL_EMBED_PYTHON,
+    PULSE_LOCAL_EMBED_HELPER, PULSE_LOCAL_EMBED_MODEL.
+
+Run \`pulse doctor\` to see the full picture. No fake demo will be shown.`);
+      return;
+    }
+    console.log(`[pulse] Full retrieval: ON (embedder: ${status.embedder || 'configured'})`);
+
+    const now = Date.now();
+    const events = corpus.events.map(({ occurred_days_ago: daysAgo, ...event }) => ({
+      ...event,
+      occurred_at: new Date(now - daysAgo * 24 * 3600 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    }));
+    console.log(`[pulse] Seeding ${events.length} simulated memories (anchors, noise, state-typed episodes)...`);
+    const seeded = await demoFetch('/graph/delta', {
       body: {
-        query: FIRST_PROOF_RECALL_PROMPT,
-        limit: 5,
-        privacy_ceiling: 'private',
-        include_evidence_refs: true,
+        schema: 'pulse.semantic_delta.v1',
+        source: {
+          host: 'claude-code',
+          conversation_scope: 'project_context',
+          timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          thread_id: corpus.thread_id,
+          project_id: corpus.project_id,
+        },
+        nodes: corpus.nodes,
+        events,
+        continuity: corpus.continuity,
+        raw_input_included: false,
       },
-      timeoutMs: 2500,
+      timeoutMs: 120000,
     });
-    const resume = await pulseFetch('/continuity/resume', {
+    if (seeded.events_indexed !== true) {
+      throw new Error('seeded events were not indexed for retrieval — demo cannot proceed honestly');
+    }
+
+    const titleById = new Map();
+    const daysById = new Map();
+    corpus.events.forEach((event, index) => {
+      const id = seeded.event_ids?.[index];
+      if (id !== undefined) {
+        titleById.set(id, event.title);
+        daysById.set(id, event.occurred_days_ago);
+      }
+    });
+
+    console.log(`\nQUERY (same every time): "${corpus.query}"`);
+    const topSets = [];
+    for (const state of corpus.states) {
+      const result = await demoFetch('/context/query', {
+        body: {
+          query: corpus.query,
+          mode: 'empathic',
+          top_k: 3,
+          include_trace: true,
+          user_state: state.user_state,
+        },
+        timeoutMs: 60000,
+      });
+      const ids = result?.trace?.retrieval?.event_ids ?? [];
+      const breakdowns = result?.trace?.retrieval?.score_breakdowns ?? {};
+      topSets.push(new Set(ids.slice(0, 3)));
+      console.log(`\n— state: ${state.label}`);
+      ids.slice(0, 3).forEach((id, rank) => {
+        const title = titleById.get(id) ?? `event ${id}`;
+        const age = daysById.has(id) ? `${daysById.get(id)}d ago` : '';
+        console.log(`  ${rank + 1}. ${title} ${age ? `(${age})` : ''}`);
+        console.log(`     why: ${formatBreakdown(breakdowns[String(id)] ?? breakdowns[id])}`);
+      });
+    }
+
+    const allSame = topSets.every(
+      (set) => set.size === topSets[0].size && [...set].every((id) => topSets[0].has(id)),
+    );
+    console.log(
+      allSame
+        ? '\n[pulse] NOTE: top results did not differ across states on this run.'
+        : '\n[pulse] Same question. Different state. Different memory — with the reason on every line.',
+    );
+
+    const resume = await demoFetch('/continuity/resume', {
       body: {
-        thread_id: localThreadContext().threadId,
-        project_id: localThreadContext().projectId,
-        session_id: localThreadContext().sessionId,
+        thread_id: corpus.thread_id,
+        project_id: corpus.project_id,
         host: 'claude-code',
         token_budget: 1200,
       },
-      timeoutMs: 2500,
+      timeoutMs: 30000,
     });
-    const recalled = Array.isArray(recall.items) ? recall.items : [];
-    const resumeMarkdown = String(resume?.resume_markdown ?? '');
-    const viewer = firstRunViewerURL('claude-code');
+    console.log(`\nWHAT THE NEXT AGENT GETS (continuity pack, injected at session start):\n`);
+    console.log(String(resume?.resume_markdown ?? '').trim());
 
-    console.log(`With Pulse:
-  Saved: ${(remembered.ids ?? []).join(', ') || 'pulse:demo:first-proof'}
-  Recall found: ${recalled.length} item(s)
-  Resume includes: ${resumeMarkdown.includes(FIRST_PROOF_MEMORY) ? FIRST_PROOF_MEMORY : 'open Pulse viewer to inspect next context'}
-
-Viewer:
-  ${viewer}
-
-Control:
-  pulse wipe --confirm "wipe pulse memory"
-  pulse disconnect claude-code
+    console.log(`
+---
+${corpus.label}
+Inspect the store: ${DEMO_DATA_DIR}
+Erase everything:  pulse demo --clean
 `);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.log(`Pulse daemon answered, but the live demo did not complete: ${message}`);
-    console.log('Next: run `pulse doctor`, then open `pulse viewer` to inspect local state.');
+  } finally {
+    stopDemoDaemon();
   }
 }
 
@@ -6089,7 +6342,11 @@ async function main() {
   }
 
   if (command === 'demo') {
-    await printPulseDemo();
+    if (args.includes('--clean')) {
+      demoCleanup();
+      return;
+    }
+    await runStatefulDemo();
     return;
   }
 

@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
+	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
@@ -17,6 +19,25 @@ func (s *Server) handleGraphDelta(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "semantic delta error: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Make freshly ingested events retrievable immediately: embed them as
+	// search documents and reload the in-memory index. Best-effort — a
+	// failed embed must not fail the write, but the response says so.
+	if s.cfg.Retrieval != nil && s.cfg.Retrieval.EmbedderReady() &&
+		len(res.EventIDs) == len(req.Events) && len(req.Events) > 0 {
+		docs := make([]retrieve.IndexEventDoc, 0, len(req.Events))
+		for i, ev := range req.Events {
+			docs = append(docs, retrieve.IndexEventDoc{
+				EventID: res.EventIDs[i],
+				Text:    ev.Title + "\n" + ev.Summary,
+			})
+		}
+		indexed := true
+		if err := s.cfg.Retrieval.EmbedAndIndexEvents(r.Context(), docs); err != nil {
+			log.Printf("graph delta: index events failed: %v", err)
+			indexed = false
+		}
+		res.EventsIndexed = &indexed
 	}
 	writeJSON(w, res)
 }

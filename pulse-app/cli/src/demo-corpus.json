@@ -1,0 +1,273 @@
+{
+  "label": "PREVIEW CORPUS — SIMULATED. NOT YOUR DATA.",
+  "thread_id": "pulse-preview-demo",
+  "project_id": "preview-demo",
+  "query": "Where are we with the launch — what actually matters right now?",
+  "nodes": [
+    {
+      "client_id": "demo:project:launch",
+      "kind": "project",
+      "canonical_name": "Preview Launch",
+      "summary": "Simulated project: shipping a local-first memory preview.",
+      "privacy_tier": "normal"
+    },
+    {
+      "client_id": "demo:person:sam",
+      "kind": "person",
+      "canonical_name": "Sam",
+      "summary": "Simulated cofounder in the preview corpus.",
+      "privacy_tier": "normal"
+    }
+  ],
+  "events": [
+    {
+      "client_id": "demo:anchor:trust-line",
+      "title": "Drew the trust line for the launch",
+      "summary": "Decided the launch ships local-first: no raw transcripts, no backend keys, wipe always available. The line everything else hangs on.",
+      "sentiment": "milestone",
+      "emotional_weight": 0.85,
+      "confidence": 0.95,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 92,
+      "anchor": true,
+      "entity_refs": ["demo:project:launch"],
+      "emotions": { "trust": 0.8, "joy": 0.6, "anticipation": 0.5 }
+    },
+    {
+      "client_id": "demo:anchor:burnout-ship",
+      "title": "The burnout ship that broke the launch demo",
+      "summary": "Pushed the launch while exhausted and the demo broke on stage. The lesson that shipping tired costs more than shipping late.",
+      "sentiment": "wound",
+      "emotional_weight": 0.9,
+      "confidence": 0.95,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 120,
+      "anchor": true,
+      "entity_refs": ["demo:project:launch"],
+      "biometrics": { "hrv": 50, "sleep_quality": 0.25, "stress_proxy": 0.85, "hrv_trend": "declining_3d" },
+      "emotions": { "sadness": 0.8, "shame": 0.7, "fear": 0.5 }
+    },
+    {
+      "client_id": "demo:anchor:rift-repair",
+      "title": "Repaired the rift with Sam about the launch scope",
+      "summary": "After the scope fight we sat down and rebuilt the launch agreement: smaller cut, honest labels, no silent compromises.",
+      "sentiment": "repair",
+      "emotional_weight": 0.85,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 60,
+      "anchor": true,
+      "entity_refs": ["demo:person:sam", "demo:project:launch"],
+      "emotions": { "trust": 0.7, "sadness": 0.4, "joy": 0.4 }
+    },
+    {
+      "client_id": "demo:restore:run-plan",
+      "title": "Morning run, then the launch plan finally clicked",
+      "summary": "Clear-headed after a run: mapped the launch cut list, picked the one demo that matters, and felt the plan settle.",
+      "sentiment": "restoration",
+      "emotional_weight": 0.7,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 9,
+      "entity_refs": ["demo:project:launch"],
+      "biometrics": { "hrv": 82, "sleep_quality": 0.85, "stress_proxy": 0.15, "workout": true },
+      "emotions": { "joy": 0.7, "anticipation": 0.8 }
+    },
+    {
+      "client_id": "demo:restore:first-user",
+      "title": "First outside user ran the launch preview end to end",
+      "summary": "Watched a stranger install the preview, follow the demo, and smile at the resume. Proof the launch story lands.",
+      "sentiment": "milestone",
+      "emotional_weight": 0.75,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 14,
+      "entity_refs": ["demo:project:launch"],
+      "biometrics": { "hrv": 76, "sleep_quality": 0.8, "stress_proxy": 0.2 },
+      "emotions": { "joy": 0.8, "trust": 0.6, "anticipation": 0.6 }
+    },
+    {
+      "client_id": "demo:burden:3am-hotfix",
+      "title": "3am hotfix before the launch freeze",
+      "summary": "Four hours of sleep, hands shaking, shipped the hotfix anyway. The launch date is eating the body budget.",
+      "sentiment": "burden",
+      "emotional_weight": 0.8,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 10,
+      "entity_refs": ["demo:project:launch"],
+      "biometrics": { "hrv": 52, "sleep_quality": 0.3, "stress_proxy": 0.8, "hrv_trend": "declining_3d" },
+      "emotions": { "sadness": 0.6, "fear": 0.5, "shame": 0.3 }
+    },
+    {
+      "client_id": "demo:burden:viewer-cut",
+      "title": "Cut the viewer from the launch to make the date",
+      "summary": "Deadline panic decision: dropped the trust viewer from the launch scope and hated every minute of it.",
+      "sentiment": "burden",
+      "emotional_weight": 0.7,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 18,
+      "entity_refs": ["demo:project:launch"],
+      "biometrics": { "sleep_quality": 0.4, "stress_proxy": 0.7 },
+      "emotions": { "anger": 0.5, "sadness": 0.6, "shame": 0.5 }
+    },
+    {
+      "client_id": "demo:conflict:scope-fight",
+      "title": "Conflict with Sam over cutting safe mode from the launch",
+      "summary": "Argued about whether safe mode belongs in the launch at all. Said things I regret; the conflict is still warm.",
+      "sentiment": "conflict",
+      "emotional_weight": 0.85,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 8,
+      "entity_refs": ["demo:person:sam", "demo:project:launch"],
+      "emotions": { "anger": 0.8, "disgust": 0.3, "sadness": 0.4 }
+    },
+    {
+      "client_id": "demo:conflict:dismissive-review",
+      "title": "Dismissive review called the launch a wrapper",
+      "summary": "A reviewer waved the launch off as 'another memory wrapper'. Wrote an angry rebuttal at midnight and deleted it.",
+      "sentiment": "conflict",
+      "emotional_weight": 0.7,
+      "confidence": 0.85,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 25,
+      "entity_refs": ["demo:project:launch"],
+      "emotions": { "anger": 0.7, "shame": 0.4, "disgust": 0.4 }
+    },
+    {
+      "client_id": "demo:noise:standup",
+      "title": "Tuesday standup notes",
+      "summary": "Routine sync: tickets moved, nothing decided, calendar shuffled.",
+      "sentiment": "routine",
+      "emotional_weight": 0.1,
+      "confidence": 0.8,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 1,
+      "emotions": { "anticipation": 0.1 }
+    },
+    {
+      "client_id": "demo:noise:config-rename",
+      "title": "Renamed a config flag for the launch build",
+      "summary": "Mechanical rename across the launch build scripts; CI stayed green.",
+      "sentiment": "routine",
+      "emotional_weight": 0.1,
+      "confidence": 0.8,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 2,
+      "entity_refs": ["demo:project:launch"],
+      "emotions": { "anticipation": 0.1 }
+    },
+    {
+      "client_id": "demo:noise:ci-bump",
+      "title": "Bumped the CI runner image",
+      "summary": "Dependency bump, ten minutes, nothing interesting.",
+      "sentiment": "routine",
+      "emotional_weight": 0.05,
+      "confidence": 0.8,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 3
+    },
+    {
+      "client_id": "demo:noise:icons",
+      "title": "Lunch thread about launch page icons",
+      "summary": "Bikeshed about icon weight on the launch page; parked it.",
+      "sentiment": "routine",
+      "emotional_weight": 0.1,
+      "confidence": 0.8,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 2,
+      "entity_refs": ["demo:project:launch"]
+    },
+    {
+      "client_id": "demo:noise:tweet-draft",
+      "title": "Drafted a launch tweet",
+      "summary": "Wrote three versions of a launch tweet, scheduled none.",
+      "sentiment": "routine",
+      "emotional_weight": 0.15,
+      "confidence": 0.8,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 4,
+      "entity_refs": ["demo:project:launch"]
+    },
+    {
+      "client_id": "demo:plan:ingest-consent",
+      "title": "Wrote the ingest consent rule for the launch",
+      "summary": "Locked the rule: real user context enters memory only by explicit opt-in, never by default scan.",
+      "sentiment": "decision",
+      "emotional_weight": 0.6,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 30,
+      "entity_refs": ["demo:project:launch"],
+      "emotions": { "trust": 0.6, "anticipation": 0.4 }
+    },
+    {
+      "client_id": "demo:plan:doctor-gate",
+      "title": "Made doctor the gate before any launch demo",
+      "summary": "Agreed no demo runs unless doctor proves full retrieval is actually on. No fake demos.",
+      "sentiment": "decision",
+      "emotional_weight": 0.65,
+      "confidence": 0.9,
+      "privacy_tier": "normal",
+      "occurred_days_ago": 21,
+      "entity_refs": ["demo:project:launch"],
+      "emotions": { "trust": 0.5, "anticipation": 0.5 }
+    }
+  ],
+  "continuity": {
+    "summary": "Launch prep: trust line drawn, scope repaired with Sam, doctor gates every demo. Body budget is the live risk.",
+    "decisions": [
+      "Local-first launch: no raw transcripts, no backend keys, wipe always available.",
+      "No demo without doctor proving full retrieval is on.",
+      "Real user context enters memory only by explicit opt-in."
+    ],
+    "open_loops": [
+      "Restore the trust viewer that was cut from the launch scope.",
+      "Close the loop with Sam after the safe-mode argument."
+    ],
+    "do_not_repeat": [
+      "Do not ship the launch exhausted — the burnout ship already cost one demo."
+    ],
+    "emotional_anchors": [
+      "The burnout ship on stage is the wound the launch must not repeat."
+    ]
+  },
+  "states": [
+    {
+      "key": "drained",
+      "label": "drained / 3am (sleep debt, declining HRV, shame loud)",
+      "user_state": {
+        "sleep_quality": 0.2,
+        "stress_proxy": 0.8,
+        "hrv": 48,
+        "hrv_trend": "declining_3d",
+        "time_of_day": "night",
+        "mood_vector": { "sadness": 0.7, "shame": 0.5, "fear": 0.4 }
+      }
+    },
+    {
+      "key": "restored",
+      "label": "restored / shipping morning (good sleep, high HRV, plan energy)",
+      "user_state": {
+        "sleep_quality": 0.9,
+        "stress_proxy": 0.1,
+        "hrv": 85,
+        "hrv_trend": "rising",
+        "time_of_day": "morning",
+        "mood_vector": { "joy": 0.7, "anticipation": 0.8, "trust": 0.5 }
+      }
+    },
+    {
+      "key": "angry",
+      "label": "angry / defensive (fresh conflict, anger high)",
+      "user_state": {
+        "stress_proxy": 0.6,
+        "time_of_day": "evening",
+        "recent_life_events_7d": ["conflict with cofounder"],
+        "mood_vector": { "anger": 0.8, "disgust": 0.4, "sadness": 0.3 }
+      }
+    }
+  ]
+}

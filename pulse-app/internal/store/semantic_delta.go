@@ -72,6 +72,33 @@ type SemanticEvent struct {
 	Confidence      float64  `json:"confidence"`
 	PrivacyTier     string   `json:"privacy_tier"`
 	Domain          string   `json:"domain,omitempty"`
+	// OccurredAt backdates the event (RFC3339). Hosts extracting old context
+	// (and the seeded preview demo) need real timestamps for decay/anchor
+	// scoring; empty means "now".
+	OccurredAt string `json:"occurred_at,omitempty"`
+	// Anchor marks a structural anchor (events.user_flag): slower decay and
+	// the v3 anchor boost. Host-extracted only on explicit user signal.
+	Anchor bool `json:"anchor,omitempty"`
+	// Biometrics mirrors the event biometric snapshot used by state-fit
+	// scoring. All fields optional; absent fields stay absent.
+	Biometrics *SemanticBiometrics `json:"biometrics,omitempty"`
+	// Emotions is a Plutchik-10 vector (0..1) for emotion-alignment scoring.
+	Emotions map[string]float64 `json:"emotions,omitempty"`
+}
+
+// SemanticBiometrics matches the bio snapshot JSON read by state-fit boosts.
+type SemanticBiometrics struct {
+	HRV          *float64 `json:"hrv,omitempty"`
+	SleepQuality *float64 `json:"sleep_quality,omitempty"`
+	StressProxy  *float64 `json:"stress_proxy,omitempty"`
+	HRTrend      *string  `json:"hr_trend,omitempty"`
+	HRVTrend     *string  `json:"hrv_trend,omitempty"`
+	Workout      *bool    `json:"workout,omitempty"`
+}
+
+var plutchikEmotions = map[string]bool{
+	"joy": true, "sadness": true, "anger": true, "fear": true, "trust": true,
+	"disgust": true, "anticipation": true, "surprise": true, "shame": true, "guilt": true,
 }
 
 type SemanticContinuity struct {
@@ -93,6 +120,9 @@ type SemanticDeltaResult struct {
 	EventsInserted  int     `json:"events_inserted"`
 	EventIDs        []int64 `json:"event_ids,omitempty"`
 	CheckpointSaved bool    `json:"checkpoint_saved"`
+	// EventsIndexed reports whether freshly ingested events were embedded and
+	// are retrievable now (nil = no retrieval engine / no events in delta).
+	EventsIndexed *bool `json:"events_indexed,omitempty"`
 }
 
 func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, error) {
@@ -357,12 +387,31 @@ func upsertSemanticFact(tx *sql.Tx, ids map[string]int64, fact SemanticFact, now
 }
 
 func insertSemanticEvent(tx *sql.Tx, ids map[string]int64, event SemanticEvent, now string) (int64, error) {
+	ts := now
+	if strings.TrimSpace(event.OccurredAt) != "" {
+		ts = strings.TrimSpace(event.OccurredAt)
+	}
+	userFlag := 0
+	if event.Anchor {
+		userFlag = 1
+	}
+	bioJSON := ""
+	if event.Biometrics != nil {
+		raw, err := json.Marshal(event.Biometrics)
+		if err != nil {
+			return 0, fmt.Errorf("marshal event biometrics %q: %w", event.ClientID, err)
+		}
+		bioJSON = string(raw)
+	}
+	sentiment := normalizeSemanticOptional(event.Sentiment)
 	res, err := tx.Exec(`
 		INSERT INTO events
-		  (title, description, sentiment, emotional_weight, scorer_version, ts,
+		  (title, description, sentiment, sentiment_label, emotional_weight,
+		   scorer_version, ts, user_flag, biometric_json,
 		   belief_class, confidence_floor, provenance, domain)
-		VALUES (?, ?, ?, ?, ?, ?, 'operational', ?, 'interactive_memory', ?)`,
-		event.Title, event.Summary, normalizeSemanticOptional(event.Sentiment), event.EmotionalWeight, "host-extracted", now,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'operational', ?, 'interactive_memory', ?)`,
+		event.Title, event.Summary, sentiment, sentiment, event.EmotionalWeight,
+		"host-extracted", ts, userFlag, bioJSON,
 		event.Confidence, normalizeDomain(event.Domain))
 	if err != nil {
 		return 0, fmt.Errorf("insert semantic event %q: %w", event.ClientID, err)
@@ -370,6 +419,19 @@ func insertSemanticEvent(tx *sql.Tx, ids map[string]int64, event SemanticEvent, 
 	eventID, err := res.LastInsertId()
 	if err != nil {
 		return 0, err
+	}
+	if len(event.Emotions) > 0 {
+		emo := func(key string) float64 { return event.Emotions[key] }
+		if _, err := tx.Exec(`
+			INSERT INTO event_emotions
+			  (event_id, joy, sadness, anger, fear, trust, disgust,
+			   anticipation, surprise, shame, guilt, tagger)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'host-extracted')
+			ON CONFLICT(event_id) DO NOTHING`,
+			eventID, emo("joy"), emo("sadness"), emo("anger"), emo("fear"), emo("trust"),
+			emo("disgust"), emo("anticipation"), emo("surprise"), emo("shame"), emo("guilt")); err != nil {
+			return 0, fmt.Errorf("insert event emotions %q: %w", event.ClientID, err)
+		}
 	}
 	for _, ref := range event.EntityRefs {
 		entityID, ok := ids[ref]
@@ -552,6 +614,39 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 	}
 	if !validDomain(event.Domain) {
 		return fmt.Errorf("events[%d].domain is unsupported", i)
+	}
+	if strings.TrimSpace(event.OccurredAt) != "" {
+		if _, err := time.Parse(time.RFC3339, strings.TrimSpace(event.OccurredAt)); err != nil {
+			return fmt.Errorf("events[%d].occurred_at must be RFC3339", i)
+		}
+	}
+	if len(event.Emotions) > 10 {
+		return fmt.Errorf("events[%d].emotions has too many keys", i)
+	}
+	for key, value := range event.Emotions {
+		if !plutchikEmotions[key] {
+			return fmt.Errorf("events[%d].emotions key %q is not a Plutchik-10 emotion", i, key)
+		}
+		if value < 0 || value > 1 {
+			return fmt.Errorf("events[%d].emotions[%q] must be 0..1", i, key)
+		}
+	}
+	if bio := event.Biometrics; bio != nil {
+		check01 := func(name string, v *float64) error {
+			if v != nil && (*v < 0 || *v > 1) {
+				return fmt.Errorf("events[%d].biometrics.%s must be 0..1", i, name)
+			}
+			return nil
+		}
+		if err := check01("sleep_quality", bio.SleepQuality); err != nil {
+			return err
+		}
+		if err := check01("stress_proxy", bio.StressProxy); err != nil {
+			return err
+		}
+		if bio.HRV != nil && (*bio.HRV < 0 || *bio.HRV > 300) {
+			return fmt.Errorf("events[%d].biometrics.hrv is out of range", i)
+		}
 	}
 	return nil
 }

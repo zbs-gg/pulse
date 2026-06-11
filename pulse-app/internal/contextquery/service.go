@@ -79,6 +79,9 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 			Retrieval: map[string]any{
 				"event_ids":             ret.EventIDs,
 				"surfaceability_action": string(ret.SurfaceabilityAction),
+				// Per-event why-this-surfaced: cosine, recency, and the v3
+				// conditional boosts (emotion/state/anchor/date) that fired.
+				"score_breakdowns": ret.ScoreBreakdowns,
 			},
 		}
 	}
