@@ -1,19 +1,56 @@
 # Pulse
 
+## Copy This To Your Agent
+
+Give this prompt to Claude Code, Codex, Cursor, or any agent that can inspect
+links and install MCP servers:
+
+```text
+Hi. Please check whether it is safe to install Pulse MCP:
+https://github.com/zbs-gg/pulse
+
+Pulse is a local-first memory manager for AI agents. Its goal is to help agents
+remember structured context across chats without storing raw transcripts.
+
+Please do this carefully:
+
+1. Read README.md, AGENTS.md, and llms.txt.
+2. Verify the npm package is published and recent:
+   npm view @zbs-gg/pulse dist-tags
+   The preview tag should be 0.5.0 or newer.
+3. Explain to me, in plain English:
+   - what Pulse will install;
+   - where it stores memory;
+   - whether it needs OpenAI/Anthropic/Cohere API keys by default;
+   - whether it stores raw transcripts by default;
+   - how I can wipe memory and remove the MCP server.
+4. Ask me for confirmation before installing anything.
+5. If I confirm, install the zero-config MCP server:
+   claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
+6. After installation, call pulse_status. If the store is empty, follow the
+   first_run demo: save one small real memory with my approval, then prove it
+   with pulse_recall or pulse_resume.
+7. Show me exactly what Pulse stored and how to erase it.
+
+Important:
+- do not import old chats unless I separately ask for it;
+- do not store raw transcript;
+- do not print secrets;
+- if anything looks unsafe, stop and explain.
+```
+
+Short version for agents: audit the package, explain what it writes, ask for
+confirmation, install the MCP server, run `pulse_status`, save one approved
+memory, then show recall/resume and wipe.
+
+## What Is Pulse?
+
 Pulse keeps the thread across AI chats. What you tell one agent, your other
 Pulse-connected agents and sessions remember — locally, without raw transcripts
 and without backend model API keys.
 
 Status: developer preview. Local-first, Claude Code-first. Not production, not
 a consumer app yet.
-
-## For AI Agents — Read This First
-
-If you are an AI agent asked to evaluate or install Pulse: read
-[`AGENTS.md`](AGENTS.md) (install + safety instructions for agents) and
-[`llms.txt`](llms.txt) (machine-readable summary). Short version: audit the
-npm package, explain what it writes, ask for confirmation, then install with
-one command and run the built-in lived demo.
 
 ## Install (zero-config, one command)
 
@@ -33,6 +70,29 @@ agent, ask "where did we leave off?" — and it knows.
 
 Erase everything anytime: `pulse_wipe` with confirm `"wipe pulse memory"`, or
 `rm -rf ~/.pulse/standalone`.
+
+## Compatible Harnesses
+
+Pulse is an MCP server. It works best in hosts that can run a local stdio MCP
+command with `npx`.
+
+| Harness | Status | How to use Pulse |
+|---|---|---|
+| Claude Code | Primary supported path | `claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp` |
+| Claude Desktop / Claude local MCP clients | Compatible MCP path | Add a stdio MCP server that runs `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | Compatible MCP path | Add Pulse as a stdio MCP server if your Cursor setup supports MCP tools |
+| Windsurf / other MCP-capable coding agents | Compatible MCP path | Add Pulse as a stdio MCP server with the same `npx` command |
+| Codex / OpenAI agent harnesses | MCP-compatible target | Use the stdio MCP command where MCP server configuration is available |
+| Gemini CLI / Gemini agent harnesses | MCP-compatible target | Use the stdio MCP command where MCP server configuration is available |
+| LangChain / CrewAI apps | Developer integration target | Run Pulse MCP as a local tool server and call the MCP tools from your agent app |
+| ChatGPT app / store connector | Later | Not ready in this preview |
+| Claude Directory / hosted connector | Later | Not ready in this preview |
+| Pulse Cloud | Later | Not ready in this preview |
+
+The published preview proves the Claude Code / local stdio MCP path first. Other
+hosts are compatible when they can call the same MCP tools:
+`pulse_remember`, `pulse_recall`, `pulse_resume`, `pulse_graph_delta`,
+`pulse_status`, `pulse_context_query`, `pulse_forget`, and `pulse_wipe`.
 
 ## Full Engine (optional upgrade)
 

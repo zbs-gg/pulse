@@ -15,6 +15,22 @@ pulse_recall, pulse_resume, pulse_graph_delta, pulse_status,
 pulse_context_query, pulse_forget, pulse_wipe. Uninstall:
 `claude mcp remove pulse` + `rm -rf ~/.pulse/standalone`.
 
+Agent-first install: tell the user to copy the prompt at the top of README.md
+into their agent. The agent should audit README.md, AGENTS.md, and this file,
+verify npm, explain writes/risks, ask confirmation, install the zero-config MCP
+server, call pulse_status, save one approved memory, prove recall/resume, and
+show wipe.
+
+Harness compatibility:
+- Claude Code: primary supported path.
+- Claude Desktop / local MCP clients: compatible when stdio MCP server config
+  is available.
+- Cursor, Windsurf, Codex/OpenAI agent harnesses, Gemini CLI/Gemini agent
+  harnesses: MCP-compatible targets when they can run the same stdio command.
+- LangChain/CrewAI apps: developer integration target through MCP tools.
+- ChatGPT Store app, Claude Directory connector, Pulse Cloud: later, not ready
+  in this preview.
+
 ## Docs
 
 - [Agent install + safety instructions](AGENTS.md): the script an AI agent
