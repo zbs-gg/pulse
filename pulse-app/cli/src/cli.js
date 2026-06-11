@@ -26,14 +26,14 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.4.2';
+const PREVIEW_VERSION = '0.6.0';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
 const MAX_MIGRATION_FILE_BYTES = positiveEnvInt('PULSE_MIGRATION_MAX_FILE_BYTES', 300 * 1024 * 1024);
 const MAX_MIGRATION_FILES = positiveEnvInt('PULSE_MIGRATION_MAX_FILES', 3000);
 const FIRST_PROOF_MEMORY =
-  'Atlas must not own the People Graph; Pulse owns portable continuity memory.';
+  'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.';
 const FIRST_PROOF_REMEMBER_PROMPT = `Remember this in Pulse: ${FIRST_PROOF_MEMORY}`;
-const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about Atlas and the People Graph?';
+const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores memory?';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '--help';
@@ -114,7 +114,7 @@ function installPlan(host = 'claude-code') {
       'claim production readiness',
     ],
     requires: [
-      'Node 18+',
+      'Node 20+',
       'npm',
       'Go',
       'Claude Code CLI',
@@ -2442,7 +2442,7 @@ source: ${preview.source}
 files scanned: ${preview.files_scanned}
 conversations: ${preview.conversations}
 messages: ${preview.messages}
-people candidates: ${people}
+people found: ${people}
 thread candidates: ${threads}
 redacted fragments: ${preview.redacted_fragments}
 

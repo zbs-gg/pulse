@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
-  'Atlas must not own the People Graph; Pulse owns portable continuity memory.';
+  'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.';
 
 function run(args, env = {}) {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
@@ -276,7 +276,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.4.2');
+  assert.equal(plan.version, '0.6.0');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -295,7 +295,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.match(plan.will_not_do.join('\n'), /import old chats/);
   assert.match(plan.will_not_do.join('\n'), /store raw transcripts/);
   assert.match(plan.will_not_do.join('\n'), /backend OpenAI\/Anthropic\/Cohere/);
-  assert.match(plan.requires.join('\n'), /Node 18\+/);
+  assert.match(plan.requires.join('\n'), /Node 20\+/);
   assert.match(plan.rollback.join('\n'), /pulse wipe --confirm "wipe pulse memory"/);
   assert.doesNotMatch(result.stdout, /PULSE_API_KEY|secret\.key|sk-|ghp_|xoxb-/);
 });
@@ -334,7 +334,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.4.2');
+  assert.equal(report.version, '0.6.0');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
@@ -776,8 +776,8 @@ test('connect claude-code writes local hook config and gitignore entry', () => {
   assert.match(result.stdout, /raw transcript capture off/);
   assert.match(result.stdout, /What Pulse will tell Claude next/);
   assert.match(result.stdout, /Try first memory/);
-  assert.match(result.stdout, /Atlas must not own the People Graph/);
-  assert.match(result.stdout, /What did we decide about Atlas and the People Graph/);
+  assert.match(result.stdout, /Pulse keeps the thread: structured memories/);
+  assert.match(result.stdout, /What did we decide about how Pulse stores memory/);
   assert.match(result.stdout, /Explore your universe and yourself with Claude Code \+ Pulse/);
   assert.match(result.stdout, /Dashboard:/);
   assert.match(result.stdout, /first_run=1/);
@@ -1068,7 +1068,7 @@ test('post-tool hook preserves approved pulse_remember capsule summaries as reda
         },
         items: [{
           kind: 'decision',
-          redacted_summary: 'Atlas must not own the People Graph; Pulse owns portable continuity memory.',
+          redacted_summary: 'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.',
           confidence: 1,
           evidence_hint: 'current_turn',
           privacy_tier: 'private',
@@ -1081,7 +1081,7 @@ test('post-tool hook preserves approved pulse_remember capsule summaries as reda
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(seen.length, 1);
-    assert.equal(seen[0].redacted_summary, 'Decision: Atlas must not own the People Graph; Pulse owns portable continuity memory.');
+    assert.equal(seen[0].redacted_summary, 'Decision: Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.');
     assert.match(seen[0].source_ref, /^pulse:hook:PostToolUse:/);
   } finally {
     await stub.close();
@@ -1149,7 +1149,7 @@ test('migrate preview scans a ChatGPT export without writing raw text', () => {
   assert.match(result.stdout, /source: chatgpt/);
   assert.match(result.stdout, /conversations: 1/);
   assert.match(result.stdout, /messages: 2/);
-  assert.match(result.stdout, /people candidates: Vitaly/);
+  assert.match(result.stdout, /people found: Vitaly/);
   assert.match(result.stdout, /thread candidates: Garden launch/);
   assert.match(result.stdout, /raw text will not be written/);
 });
