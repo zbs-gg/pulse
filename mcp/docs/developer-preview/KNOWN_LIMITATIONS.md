@@ -6,14 +6,16 @@ consumer release.
 ## Product Boundary
 
 - Claude Code-first preview.
-- Local daemon optional since `@zbs-gg/pulse` v0.5.0 (server component
-  `pulse-mcp` v0.4.0): without a daemon the
-  MCP server uses a standalone lite store (plain local JSON). The lite engine
-  has no full retrieval engine (typed graph scoring, emotional retrieval), no
-  viewer, and no lifecycle hooks with automatic resume injection — resume works
-  only when the host calls `pulse_resume`.
-- Lite recall is keyword-overlap ranking, not the Pulse retrieval engine. Do
-  not quote bench numbers for standalone mode.
+- The public product path is Pulse Local Preview (daemon + embedder):
+  state-aware retrieval with visible reasons, viewer, lifecycle hooks, and
+  the seeded stateful demo (`pulse demo`). It requires Node 20+, a Go
+  toolchain, Claude Code CLI, and an embedder (local MLX on Apple Silicon or
+  a Cohere key); `pulse doctor` reports the honest verdict.
+- Safe Mode (MCP without a daemon) is a fallback, not a product tier:
+  structured local memory in plain JSON, keyword-overlap recall, no retrieval
+  engine, no viewer, no automatic resume injection. It must always be named
+  as the fallback, and no bench numbers apply to it.
+- `pulse demo` refuses to run on fallback — no fake demos.
 - No signed binaries or auto-update.
 - `@zbs-gg/pulse` CLI is still not a broad npm consumer installer, even though
   v0.4.2 adds agent-first `install-plan`, `init --dry-run`, `doctor --json`,
@@ -24,14 +26,12 @@ consumer release.
 
 ## Install Boundary
 
-- The zero-config path is
-  `claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`: standalone lite
-  store, no daemon, no keys. It covers memory + continuity tools only, and it
-  is only real once the npm `preview` dist-tag of `@zbs-gg/pulse` resolves to
-  v0.5.0+.
-- The full-engine path stays agent-first: copy the prompt from
-  `pulse/docs/INSTALL_WITH_AGENT.md`, let the agent audit the repo, show the
-  plan, ask confirmation, then run `pulse init claude-code --yes`.
+- The public path is Pulse Local Preview, agent-first: audit → confirm →
+  `npx @zbs-gg/pulse@preview init claude-code` → `pulse doctor` →
+  `pulse demo`. Needs the npm `preview` dist-tag at v0.6.0+.
+- Safe Mode (`claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`) is
+  the fallback for unsupported machines: memory + continuity tools only, no
+  daemon, no keys. It is not advertised as a product tier.
 - The source-bundle script remains a fallback for reviewers.
 - The future public full-engine command is `npx @zbs-gg/pulse init claude-code`,
   but daemon distribution must be solved before calling that consumer-ready.

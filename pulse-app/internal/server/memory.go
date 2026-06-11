@@ -27,6 +27,11 @@ type statusResponse struct {
 	Schema            string `json:"schema"`
 	ItemCount         int    `json:"item_count"`
 	LastWrite         string `json:"last_write,omitempty"`
+	// FullRetrieval is true only when the state-aware retrieval engine is
+	// running with an embedder. False means fallback memory only — callers
+	// must not present this as full Pulse.
+	FullRetrieval bool   `json:"full_retrieval"`
+	Embedder      string `json:"embedder,omitempty"`
 }
 
 func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +78,11 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	if billing.StoragePath == "" {
 		billing.StoragePath = s.cfg.Store.DBPath()
 	}
+	fullRetrieval := s.cfg.Retrieval != nil && s.cfg.Retrieval.EmbedderReady()
+	embedder := ""
+	if fullRetrieval {
+		embedder = s.cfg.Retrieval.EmbedderModel()
+	}
 	writeJSON(w, statusResponse{
 		BillingMode:       billing.Mode,
 		Host:              billing.Host,
@@ -82,6 +92,8 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		Schema:            store.MemoryCapsuleSchema,
 		ItemCount:         storeStatus.ItemCount,
 		LastWrite:         storeStatus.LastWrite,
+		FullRetrieval:     fullRetrieval,
+		Embedder:          embedder,
 	})
 }
 

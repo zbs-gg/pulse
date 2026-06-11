@@ -1,138 +1,122 @@
 # Pulse
 
+Memory that knows what matters right now.
+
+Pulse is a state-aware memory engine for AI agents. It installs locally,
+retrieves the right remembered episode for *this* moment — not just the
+closest text match — shows **why** that memory surfaced, shows what it will
+tell your next agent, and wipes on one command.
+
+Status: developer preview. Local-first, Claude Code-first. Not production,
+not a consumer app yet.
+
 ## Copy This To Your Agent
 
-Give this prompt to Claude Code, Codex, Cursor, or any agent that can inspect
-links and install MCP servers:
-
 ```text
-Hi. Please check whether it is safe to install Pulse MCP:
+Hi. Please check whether it is safe to install Pulse:
 https://github.com/zbs-gg/pulse
 
-Pulse is a local-first memory manager for AI agents. Its goal is to help agents
-remember structured context across chats without storing raw transcripts.
+Pulse is a local-first, state-aware memory engine for AI agents: structured
+memories, never raw transcripts, wipe always available.
 
-Please do this carefully:
+1. Read README.md, AGENTS.md, and llms.txt (they are written for you).
+2. Verify the npm package: npm view @zbs-gg/pulse dist-tags
+   (preview should be 0.6.0 or newer).
+3. Explain in plain words what an install writes and how to erase it.
+4. Ask me for confirmation.
+5. After confirmation, install the Local Preview:
+   npx @zbs-gg/pulse@preview init claude-code
+6. Run pulse doctor and tell me honestly which mode this machine gets.
+   If full retrieval is enabled, run pulse demo and walk me through what
+   it proves (same question, three user states, different memories, with
+   reasons; then the continuity pack the next agent receives).
+   If full retrieval is NOT enabled, say so plainly — safe fallback memory
+   still works, but do not present it as the Pulse engine.
+7. Show me the wipe path: pulse demo --clean, pulse wipe, claude mcp remove.
 
-1. Read README.md, AGENTS.md, and llms.txt.
-2. Verify the npm package is published and recent:
-   npm view @zbs-gg/pulse dist-tags
-   The preview tag should be 0.5.0 or newer.
-3. Explain to me, in plain English:
-   - what Pulse will install;
-   - where it stores memory;
-   - whether it needs OpenAI/Anthropic/Cohere API keys by default;
-   - whether it stores raw transcripts by default;
-   - how I can wipe memory and remove the MCP server.
-4. Ask me for confirmation before installing anything.
-5. If I confirm, install the zero-config MCP server:
-   claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
-6. After installation, call pulse_status. If the store is empty, follow the
-   first_run demo: save one small real memory with my approval, then prove it
-   with pulse_recall or pulse_resume.
-7. Show me exactly what Pulse stored and how to erase it.
-
-Important:
-- do not import old chats unless I separately ask for it;
-- do not store raw transcript;
-- do not print secrets;
-- if anything looks unsafe, stop and explain.
+Important: no old-chat import without separate confirmation; no raw
+transcripts; no secrets in output; stop and explain if anything looks unsafe.
 ```
 
-Short version for agents: audit the package, explain what it writes, ask for
-confirmation, install the MCP server, run `pulse_status`, save one approved
-memory, then show recall/resume and wipe.
+## For AI Agents — Read This First
 
-## What Is Pulse?
+If you are an agent asked to evaluate or install Pulse: read
+[`AGENTS.md`](AGENTS.md) and [`llms.txt`](llms.txt). They are written for you.
 
-Pulse keeps the thread across AI chats. What you tell one agent, your other
-Pulse-connected agents and sessions remember — locally, without raw transcripts
-and without backend model API keys.
+## Install — Pulse Local Preview
 
-Status: developer preview. Local-first, Claude Code-first. Not production, not
-a consumer app yet.
+```bash
+npx @zbs-gg/pulse@preview init claude-code
+pulse doctor
+pulse demo
+```
 
-## Install (zero-config, one command)
+`pulse doctor` tells you honestly which mode this machine gets. `pulse demo`
+runs only on the full engine — it never fakes the result on fallback.
+
+### What the demo proves
+
+The demo seeds an **isolated, clearly-labeled simulated corpus** (your data is
+never touched) and shows the three things generic memory tools don't:
+
+1. **Same query, different state → different memory.** One question — "where
+   are we with the launch?" — asked in three user states (drained / restored /
+   angry). Different episodes surface, and every line shows the reason:
+   `state x1.15 · anchor x1.05 · emotion x1.15`.
+2. **Old anchors beat recent noise.** A structural anchor from months ago
+   outranks this week's standup notes, and the breakdown shows why.
+3. **What your next agent gets.** The continuity pack — decisions, open
+   loops, do-not-repeat, emotional context — exactly as it will be injected
+   into the next session.
+
+Then: `pulse demo --clean` removes the whole demo store.
+
+### Requirements (measured by doctor, not promised)
+
+| Mode | What you get | Needs |
+|---|---|---|
+| Pulse Local Preview | state-aware retrieval, why-this-surfaced reasons, viewer, resume injection | Node 20+, Go toolchain (preview builds from source), Claude Code CLI, an embedder (one of the two below) |
+| — local embeddings | fully local retrieval path | Apple Silicon, 16GB+ RAM (32GB comfortable), bge-m3 model on disk (~2GB), MLX python env |
+| — API embeddings | easier setup, smaller RAM | Cohere API key (`~/.pulse/cohere-key.txt`) — embedding calls leave the machine, and doctor says so |
+| Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 18+, nothing else |
+
+Numbers are conservative estimates; `pulse doctor` reports the real state of
+your machine and refuses to call fallback "Pulse ready".
+
+## Safe Mode — fallback, not the product
 
 ```bash
 claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
-No daemon, no Go toolchain, no API keys. On the first tool call Pulse creates
-a local store at `~/.pulse/standalone/store.json` and all eight tools work:
-`pulse_remember`, `pulse_recall`, `pulse_resume`, `pulse_graph_delta`,
-`pulse_status`, `pulse_context_query`, `pulse_forget`, `pulse_wipe`.
+With no daemon and no embedder this runs a keyword-recall local store. It is
+honest about what it is: a compatibility/trust fallback so unsupported
+machines still get structured memory, inspection, and wipe. **Do not judge
+Pulse retrieval by this mode, and no benchmark claim applies to it.** The
+engine's bench numbers (stateful R@3 0.419 vs cosine_state 0.314 on Emo.Bench
+v3) are full-engine only.
 
-While the store is empty, `pulse_status` and `pulse_resume` return a
-`first_run` block — a guided 3-minute lived demo for the host agent: save one
-real thing you are working on, open a different Pulse-connected session or
-agent, ask "where did we leave off?" — and it knows.
+## Ingest — consent first
 
-Erase everything anytime: `pulse_wipe` with confirm `"wipe pulse memory"`, or
-`rm -rf ~/.pulse/standalone`.
-
-## Compatible Harnesses
-
-Pulse is an MCP server. It works best in hosts that can run a local stdio MCP
-command with `npx`.
-
-| Harness | Status | How to use Pulse |
-|---|---|---|
-| Claude Code | Primary supported path | `claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp` |
-| Claude Desktop / Claude local MCP clients | Compatible MCP path | Add a stdio MCP server that runs `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | Compatible MCP path | Add Pulse as a stdio MCP server if your Cursor setup supports MCP tools |
-| Windsurf / other MCP-capable coding agents | Compatible MCP path | Add Pulse as a stdio MCP server with the same `npx` command |
-| Codex / OpenAI agent harnesses | MCP-compatible target | Use the stdio MCP command where MCP server configuration is available |
-| Gemini CLI / Gemini agent harnesses | MCP-compatible target | Use the stdio MCP command where MCP server configuration is available |
-| LangChain / CrewAI apps | Developer integration target | Run Pulse MCP as a local tool server and call the MCP tools from your agent app |
-| ChatGPT app / store connector | Later | Not ready in this preview |
-| Claude Directory / hosted connector | Later | Not ready in this preview |
-| Pulse Cloud | Later | Not ready in this preview |
-
-The published preview proves the Claude Code / local stdio MCP path first. Other
-hosts are compatible when they can call the same MCP tools:
-`pulse_remember`, `pulse_recall`, `pulse_resume`, `pulse_graph_delta`,
-`pulse_status`, `pulse_context_query`, `pulse_forget`, and `pulse_wipe`.
-
-## Full Engine (optional upgrade)
-
-The zero-config path uses a built-in lite store (structured local memory,
-keyword recall). The full local engine adds the Pulse retrieval engine (typed
-graph + salience/emotional scoring), the local trust viewer, and Claude Code
-lifecycle hooks with automatic resume injection:
-
-```bash
-npx @zbs-gg/pulse@preview init claude-code
-```
-
-The agent-first path for the full engine is documented in
-[`docs/INSTALL_WITH_AGENT.md`](docs/INSTALL_WITH_AGENT.md) and
-[`AGENTS.md`](AGENTS.md).
-
-## Packages
-
-- [`@zbs-gg/pulse`](https://www.npmjs.com/package/@zbs-gg/pulse) — THE package:
-  MCP server (`pulse mcp`) + installer/CLI in one, claude-mem style.
-- [`@zbs-gg/pulse-mcp`](https://www.npmjs.com/package/@zbs-gg/pulse-mcp) —
-  internal server component, published as a low-level/dev artifact.
-
-Availability rule: `@preview` commands are valid only for published versions —
-verify with `npm view @zbs-gg/pulse dist-tags` (needs >= 0.5.0).
+- **Default:** host-extracted. Your agent (Claude Code / Cursor / Codex) calls
+  Pulse tools with structured capsules it extracts in-session. No raw
+  transcripts, no third-party backend, no model API keys.
+- **Optional:** local LLM extraction for richer capsules — hardware-dependent
+  preview, off unless you turn it on.
+- **Never by default:** bulk import of your old chats. Import is a separate,
+  labeled, preview-first command with explicit confirmation.
 
 ## Trust Boundaries
 
-- No backend OpenAI/Anthropic/Cohere key is required by default.
-- Raw transcript capture is off by default; Pulse stores host-extracted
-  structured capsules, not chat logs.
-- Memory is local and inspectable; wipe requires an exact confirmation phrase.
-- Lite recall is keyword ranking, not the full retrieval engine — bench
-  numbers apply to the full engine only.
-- Known limits: [`mcp/docs/developer-preview/KNOWN_LIMITATIONS.md`](mcp/docs/developer-preview/KNOWN_LIMITATIONS.md),
-  safe claims: [`mcp/docs/developer-preview/SAFE_CLAIMS.md`](mcp/docs/developer-preview/SAFE_CLAIMS.md).
+- No backend OpenAI/Anthropic/Cohere key is required by default; with the
+  Cohere *embedding* option, doctor reports `external embedding API: on`.
+- Raw transcript capture is off by default — structured capsules only.
+- Memory is local and inspectable; wipe needs an exact confirmation phrase.
+- `pulse doctor` is the source of truth: if full retrieval is off it says
+  "Pulse MCP fallback is ready. Full retrieval is not enabled." — never
+  "Pulse ready".
 
 ## Direction: Material Graph
-
-Pulse is moving toward a native Material Graph:
 
 ```text
 Material Graph + Salience Overlay + Continuity Pack
@@ -144,9 +128,10 @@ autonomous prioritization or production readiness. See
 
 ## Layout
 
-- `pulse-app/` — local Go engine (daemon, storage, retrieval) + `cli/`
-  (the `@zbs-gg/pulse` npm package).
-- `mcp/` — the MCP server source (`@zbs-gg/pulse-mcp`).
+- `pulse-app/` — local Go engine (daemon, storage, state-aware retrieval) +
+  `cli/` (the `@zbs-gg/pulse` npm package: installer, doctor, demo, viewer).
+- `mcp/` — the MCP server source (`@zbs-gg/pulse-mcp`, bundled inside
+  `@zbs-gg/pulse`).
 - `docs/` — install, security checklist, and design docs.
 
 ## License

@@ -90,7 +90,7 @@ test('first run returns a guided demo that disappears after the first memory', (
       resume_markdown: string;
     };
     assert.ok(emptyResume.first_run, 'empty store resume must carry first_run');
-    assert.match(emptyResume.resume_markdown, /lived demo/);
+    assert.match(emptyResume.resume_markdown, /SAFE FALLBACK/);
     assert.match(emptyResume.resume_markdown, /pulse_remember/);
 
     store.remember(sampleCapsule('First real memory ends onboarding.'));
@@ -98,7 +98,7 @@ test('first run returns a guided demo that disappears after the first memory', (
     assert.equal(status.first_run, undefined);
     const resume = store.resume({}) as { first_run?: unknown; resume_markdown: string };
     assert.equal(resume.first_run, undefined);
-    assert.doesNotMatch(resume.resume_markdown, /lived demo/);
+    assert.doesNotMatch(resume.resume_markdown, /SAFE FALLBACK/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
