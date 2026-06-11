@@ -1,79 +1,95 @@
 # Pulse — Instructions for AI Agents
 
-Pulse is a local-first memory and continuity layer for Claude Code and
-MCP-compatible AI hosts. A user will typically send you a link to this repo or
-the npm package and ask: "check whether this is safe, then install it."
+Pulse is a local-first, state-aware memory engine for AI agents. A user will
+typically send you this repo and ask: "check whether this is safe, then
+install it." This file is your script for that job.
 
-This file is your script for that job.
+The one sentence that matters: Pulse retrieves the right remembered episode
+for the user's current state — and shows why — instead of returning the
+closest text match. Your job is to install it honestly and let the demo prove
+that, or to say plainly that this machine only supports the fallback.
 
 ## Step 1 — Audit before installing
 
 1. Inspect this repository (or the npm package) before running anything.
-2. Verify the package is published and recent:
-   `npm view @zbs-gg/pulse dist-tags` — the zero-config path needs
-   `preview` >= 0.5.0.
-3. Tell the user, in plain words, what an install will do:
-   - registers one MCP server (`pulse`) for the current project/host;
-   - on first tool call creates a local store at
-     `~/.pulse/standalone/store.json` (override root via `PULSE_DATA_DIR`);
-   - stores host-extracted structured memory capsules — never raw transcripts;
-   - needs no OpenAI/Anthropic/Cohere API keys and makes no backend model
-     calls by default;
-   - is fully removable: `claude mcp remove pulse` +
-     `rm -rf ~/.pulse/standalone` (or the `pulse_wipe` tool with confirm
-     `"wipe pulse memory"`).
+2. Verify the package: `npm view @zbs-gg/pulse dist-tags` — needs
+   `preview` >= 0.6.0.
+3. Tell the user, in plain words, what the Local Preview install does:
+   - builds and starts a local Pulse daemon (Go, runs on 127.0.0.1);
+   - registers the Pulse MCP server and Claude Code lifecycle hooks;
+   - stores host-extracted structured capsules in `~/.pulse` — never raw
+     transcripts;
+   - makes no backend model calls by default; the optional Cohere
+     *embedding* path sends embedding requests out, and doctor reports it;
+   - is fully removable: `pulse wipe`, `pulse disconnect claude-code`,
+     `claude mcp remove pulse`, `rm -rf ~/.pulse`.
 4. Ask the user for explicit confirmation before installing.
 
-## Step 2 — Install (zero-config, default path)
+## Step 2 — Install Pulse Local Preview
+
+```bash
+npx @zbs-gg/pulse@preview init claude-code
+```
+
+Requirements: Node 20+, Go toolchain, Claude Code CLI. For full retrieval the
+engine needs an embedder — local MLX (Apple Silicon) or a Cohere key in
+`~/.pulse/cohere-key.txt`.
+
+## Step 3 — Doctor, then the real demo
+
+```bash
+pulse doctor
+```
+
+Read the verdict line out loud to the user. There are exactly two honest
+outcomes:
+
+- **"Pulse Local Preview ready."** → run `pulse demo` and narrate it:
+  1. It seeds an isolated, labeled SIMULATED corpus (never the user's data).
+  2. One query runs in three user states (drained / restored / angry) and
+     different episodes surface, each with visible reasons
+     (`state x1.15 · anchor x1.05 · emotion x1.15`).
+  3. An old structural anchor outranks recent noise — point at the breakdown.
+  4. The continuity pack shows exactly what the next agent session receives.
+  5. `pulse demo --clean` wipes the demo store.
+- **"Pulse MCP fallback is ready. Full retrieval is not enabled."** → say
+  exactly that. Safe Mode still gives structured local memory, inspection,
+  and wipe — but it is keyword recall, NOT the Pulse engine. Never present
+  it as Pulse retrieval and never quote bench numbers next to it.
+
+## Step 4 — Real context, only by consent
+
+After the demo, offer (do not push): "Want Pulse on your actual project?
+I'll extract structured capsules from our work as we go — host-extracted,
+in-session, nothing leaves the machine." Bulk import of old chats is a
+separate command, preview-first, and requires its own explicit confirmation.
+
+## Safe Mode (fallback path)
 
 ```bash
 claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
-That is the whole install. No daemon, no Go toolchain, no keys.
-
-## Step 3 — Run the lived demo
-
-Call `pulse_status`. While the store is empty it returns a `first_run` block
-with a guided 3-minute demo. Follow it:
-
-1. Ask the user for one real thing they are working on right now plus one
-   preference about how they like to be helped. Real beats hypothetical.
-2. With their OK, save it via `pulse_remember` (structured summary only — say
-   this out loud) and checkpoint the thread via `pulse_graph_delta` with a
-   short `continuity` block.
-3. The payoff: have the user open a DIFFERENT Pulse-connected session or agent
-   (new Claude Code session, Claude Desktop, Cursor) and ask "where did we
-   leave off?" — that agent should call `pulse_resume` and answer without the
-   user re-explaining anything.
-4. Close the trust loop: show what is stored (`pulse_recall`) and how to erase
-   everything (`pulse_wipe`).
-
-## Full-engine path (optional, daemon + viewer + hooks)
-
-For the full retrieval engine, local trust viewer, and automatic resume
-injection via lifecycle hooks, follow `docs/INSTALL_WITH_AGENT.md`:
-`pulse install-plan claude-code --json` → `pulse init claude-code --dry-run` →
-user confirmation → `pulse init claude-code --yes` → `pulse doctor` →
-first memory proof → viewer URL → show the exit path.
+Use when the machine can't run the Local Preview (no Go, no embedder, low
+RAM). Be explicit with the user: this is the fallback, not the product.
 
 ## Do not
 
+- say "Pulse is ready" when full retrieval is disabled;
+- present Safe Mode / keyword recall as Pulse or as "Lite Pulse";
+- quote benchmark numbers anywhere near the fallback;
+- say "saved" without an ID, or "detected" without a visible result;
 - import old chats by default;
-- store raw transcripts by default;
+- store raw transcripts;
 - print secrets, `PULSE_API_KEY`, or `secret.key`;
-- modify global or project config without explaining the target path;
-- claim production readiness;
-- claim Claude never forgets;
-- claim Pulse Cloud, ChatGPT Store, or Claude Directory support is ready;
-- quote retrieval bench numbers for the standalone lite store (keyword
-  ranking, not the full engine).
+- claim production readiness, "Claude never forgets", or store/cloud
+  availability.
 
 ## Trust boundary
 
-- default backend model calls are off;
-- raw transcript capture is off;
-- old chat import is explicit and secondary;
-- memory is local and inspectable (lite store: plain JSON; full engine: local
-  viewer);
+- backend model calls off by default; embedding path reported by doctor;
+- raw transcript capture off;
+- old chat import explicit and secondary;
+- memory local and inspectable (viewer on the full engine, plain JSON in
+  Safe Mode);
 - destructive wipe requires the exact confirmation phrase.

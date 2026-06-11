@@ -1,61 +1,52 @@
 # Pulse
 
-> Pulse keeps the thread across AI chats: a local-first MCP memory and
-> continuity layer. What a user tells one agent, their other Pulse-connected
-> agents and sessions remember — as host-extracted structured capsules stored
-> locally, never raw transcripts, with no backend model API keys by default.
-> Developer preview; Claude Code-first; not production.
+> Pulse is a local-first, state-aware memory engine for AI agents: it
+> retrieves the right remembered episode for the user's current state — not
+> just the closest text match — shows why that memory surfaced, shows the
+> continuity pack the next agent receives, and wipes on one command.
+> Host-extracted structured capsules only, never raw transcripts, no backend
+> model API keys by default. Developer preview; Claude Code-first; not
+> production.
 
-Install (zero-config, one command, no daemon/keys):
-`claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp`
-Requires npm dist-tag `preview` >= 0.5.0 (`npm view @zbs-gg/pulse dist-tags`).
-First tool call creates `~/.pulse/standalone/store.json` and returns a
-`first_run` guided demo for the host agent. Tools: pulse_remember,
-pulse_recall, pulse_resume, pulse_graph_delta, pulse_status,
-pulse_context_query, pulse_forget, pulse_wipe. Uninstall:
-`claude mcp remove pulse` + `rm -rf ~/.pulse/standalone`.
+Primary install (Pulse Local Preview):
+`npx @zbs-gg/pulse@preview init claude-code` then `pulse doctor` then
+`pulse demo`. Requires Node 20+, Go toolchain, Claude Code CLI, and an
+embedder (local MLX on Apple Silicon, or a Cohere key — doctor reports which
+path is active). The demo seeds an isolated SIMULATED corpus and proves:
+same query in three user states returns different justified episodes
+(visible per-line reasons: state/anchor/emotion/date boosts), old anchors
+beat recent noise, and the next-agent continuity pack matches the evidence.
+`pulse demo --clean` erases the demo store. Doctor verdict is binary and
+honest: "Pulse Local Preview ready." or "Pulse MCP fallback is ready. Full
+retrieval is not enabled."
 
-Agent-first install: tell the user to copy the prompt at the top of README.md
-into their agent. The agent should audit README.md, AGENTS.md, and this file,
-verify npm, explain writes/risks, ask confirmation, install the zero-config MCP
-server, call pulse_status, save one approved memory, prove recall/resume, and
-show wipe.
-
-Harness compatibility:
-- Claude Code: primary supported path.
-- Claude Desktop / local MCP clients: compatible when stdio MCP server config
-  is available.
-- Cursor, Windsurf, Codex/OpenAI agent harnesses, Gemini CLI/Gemini agent
-  harnesses: MCP-compatible targets when they can run the same stdio command.
-- LangChain/CrewAI apps: developer integration target through MCP tools.
-- ChatGPT Store app, Claude Directory connector, Pulse Cloud: later, not ready
-  in this preview.
+Safe Mode (fallback, not the product):
+`claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp` — keyword-recall
+structured local store with inspect/wipe for machines that can't run the
+engine. No benchmark claims apply to this mode.
 
 ## Docs
 
 - [Agent install + safety instructions](AGENTS.md): the script an AI agent
-  should follow to audit, explain, install, and run the lived demo.
-- [README](README.md): product overview, install paths, trust boundaries.
-- [Known limitations](mcp/docs/developer-preview/KNOWN_LIMITATIONS.md): what
-  the preview does not do; lite store vs full engine.
-- [Safe claims](mcp/docs/developer-preview/SAFE_CLAIMS.md): allowed and
-  forbidden marketing claims.
-- [Uninstall and wipe](mcp/docs/developer-preview/UNINSTALL_AND_WIPE.md): exit
-  paths for both install modes.
-- [Full-engine agent install](docs/INSTALL_WITH_AGENT.md): daemon + viewer +
-  lifecycle hooks path.
+  follows to audit, explain, install, run doctor + the stateful demo, and
+  show the exit path.
+- [README](README.md): product overview, install matrix, trust boundaries.
+- [Known limitations](mcp/docs/developer-preview/KNOWN_LIMITATIONS.md)
+- [Safe claims](mcp/docs/developer-preview/SAFE_CLAIMS.md)
+- [Uninstall and wipe](mcp/docs/developer-preview/UNINSTALL_AND_WIPE.md)
 
 ## Packages
 
-- [@zbs-gg/pulse on npm](https://www.npmjs.com/package/@zbs-gg/pulse): the one
-  package — MCP server (`pulse mcp`) plus installer/CLI.
+- [@zbs-gg/pulse on npm](https://www.npmjs.com/package/@zbs-gg/pulse): the
+  one package — installer/CLI (init, doctor, demo, viewer) + MCP server
+  (`pulse mcp`).
 - [@zbs-gg/pulse-mcp on npm](https://www.npmjs.com/package/@zbs-gg/pulse-mcp):
   internal server component (low-level/dev artifact).
 
 ## Boundaries
 
 - Not production ready; developer preview for technical users.
-- Standalone lite recall is keyword ranking — retrieval bench numbers apply
-  only to the full local engine.
-- No automatic chat import; import is explicit, review-first, private by
-  default.
+- Bench numbers (e.g. stateful R@3 0.419 on Emo.Bench v3) apply to the full
+  engine only — never to Safe Mode keyword recall.
+- No automatic chat import; ingest is host-extracted by default and bulk
+  import is explicit, preview-first, opt-in.

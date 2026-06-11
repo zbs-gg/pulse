@@ -27,7 +27,7 @@ const PULSE_BASE_URL =
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path.
 const PULSE_DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const args = process.argv.slice(2);
 
 type EngineMode = 'auto' | 'daemon' | 'standalone';

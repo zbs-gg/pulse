@@ -35,24 +35,25 @@ const SCOPE_TO_RETENTION: Record<string, string | undefined> = {
   user: undefined,
 };
 const UPGRADE_HINT =
-  'Standalone lite engine. For the full Pulse retrieval engine (typed graph, emotional scoring, viewer), run: npx -y @zbs-gg/pulse@preview init claude-code';
+  'SAFE FALLBACK MODE: structured local memory with keyword recall — not the Pulse engine. For real Pulse (state-aware retrieval with visible reasons), run: npx -y @zbs-gg/pulse@preview init claude-code, then pulse doctor, then pulse demo. Never present this fallback as Pulse retrieval and never quote bench numbers next to it.';
 
 // Returned on every read tool while the store is empty. Written for the host
-// agent: the agent is the onboarding UI on the zero-config path, so the first
-// response after install carries a guided demo the agent can act out live.
+// agent. CRITICAL FRAMING: this mode is the safe fallback, not the product —
+// the agent must say so and route the user to the Local Preview demo.
 const FIRST_RUN = {
   welcome:
-    'Pulse is connected and this store is empty. Pulse keeps the thread: what the user tells one agent, their other Pulse-connected agents and sessions will remember.',
+    'Pulse SAFE FALLBACK mode is connected (structured local memory, keyword recall — not the state-aware Pulse engine). Tell the user this plainly. The real Pulse demo — same question, different user state, different remembered episode, with visible reasons — runs on the Local Preview: npx -y @zbs-gg/pulse@preview init claude-code, then pulse doctor, then pulse demo.',
   guided_demo: [
-    'Step 1 — ask the user for one real thing they are working on right now, plus one preference about how they like to be helped. Real beats hypothetical: the payoff lands only if it is their own context.',
-    'Step 2 — with their OK, save it: pulse_remember with a minimal capsule (one decision/project_state item + one preference item). Tell the user explicitly: structured summary only, no raw transcript, stored locally.',
-    'Step 3 — call pulse_graph_delta with a continuity block (summary of where this conversation stands, one open_loop for what is next).',
-    'Step 4 — the lived proof: ask the user to open a DIFFERENT session or agent connected to Pulse (new Claude Code session, Claude Desktop, Cursor) and ask it "where did we leave off?" — that agent should call pulse_resume and answer without the user re-explaining anything.',
+    'Step 1 — say what mode this is: safe fallback memory (keyword recall). Offer the real thing first: if the machine can run it, install the Pulse Local Preview (npx -y @zbs-gg/pulse@preview init claude-code) and run pulse doctor + pulse demo — that demo shows state-aware retrieval with per-line reasons on a clearly-labeled simulated corpus.',
+    'Step 2 — if the user stays on fallback: with their OK, save one real thing they are working on via pulse_remember (structured summary only, no raw transcript, stored locally) and checkpoint the thread via pulse_graph_delta with a continuity block.',
+    'Step 3 — the fallback proof (continuity, not retrieval quality): a DIFFERENT Pulse-connected session or agent asks "where did we leave off?" and pulse_resume answers without re-explaining.',
+    'Step 4 — close the trust loop: show what is stored (pulse_recall), how to erase everything (pulse_wipe with confirm "wipe pulse memory"), and repeat that retrieval quality claims apply only to the full engine.',
   ],
   trust: [
     'Show what is stored anytime: pulse_recall with their query.',
     'Erase everything anytime: pulse_wipe with confirm "wipe pulse memory".',
     'No model API keys, no backend LLM calls, no raw transcript capture.',
+    'This mode carries no benchmark claims — those belong to the full engine only.',
   ],
 } as const;
 
@@ -515,7 +516,7 @@ export class StandaloneStore {
         markdownParts.length,
         '## First run',
         [
-          'Nothing stored yet. Agent: run the 3-minute lived demo from the first_run block of this response.',
+          'Nothing stored yet — SAFE FALLBACK mode (keyword recall, not the Pulse engine). Agent: follow the first_run block of this response and say so plainly.',
           ...FIRST_RUN.guided_demo.map((step) => `- ${step}`),
         ].join('\n'),
       );
