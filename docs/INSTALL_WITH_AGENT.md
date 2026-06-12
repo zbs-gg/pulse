@@ -8,19 +8,30 @@ anything is written. The agent-facing script is [`AGENTS.md`](../AGENTS.md)
 ## Copyable prompt
 
 The maintained copy of this prompt lives in the repo root
-[README](../README.md#copy-this-to-your-agent). Short form:
+[README](../README.md#copy-this-message-to-your-ai-agent). Short form:
 
 ```text
-Please check whether it is safe to install Pulse:
+Hi. Please check whether it is safe to install Pulse:
 https://github.com/zbs-gg/pulse
-Read README.md, AGENTS.md, llms.txt (written for you). Verify
-npm view @zbs-gg/pulse dist-tags shows preview >= 0.6.0. Explain what an
-install writes and how to erase it. Ask my confirmation, then:
-npx @zbs-gg/pulse@preview init claude-code
-Run pulse doctor and tell me honestly which mode this machine gets; if full
-retrieval is on, run pulse demo and narrate the three states + reasons +
-continuity pack. Never present the fallback as the Pulse engine. No old-chat
-import, no raw transcripts, no secrets.
+
+Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
+Check: npm view @zbs-gg/pulse dist-tags
+Explain which harness path fits my setup, what Pulse writes, what it will not
+do by default, and how I can erase it. Ask my confirmation before installing.
+
+For Claude Code full local preview:
+  npx @zbs-gg/pulse@preview init claude-code
+  pulse doctor
+  pulse demo
+
+For other MCP-compatible hosts:
+  configure the host to run:
+  npx -y @zbs-gg/pulse@preview mcp
+  and say plainly that this is Safe Mode/fallback, not the full state-aware
+  Pulse engine.
+
+No old-chat import without separate confirmation. No raw transcripts. No
+secrets in output. Stop and explain if anything looks unsafe.
 ```
 
 Security checklist for the agent: [`SECURITY_INSTALL_CHECKLIST.md`](SECURITY_INSTALL_CHECKLIST.md).

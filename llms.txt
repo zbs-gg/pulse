@@ -1,12 +1,60 @@
 # Pulse
 
-> Pulse is a local-first, state-aware memory engine for AI agents: it
-> retrieves the right remembered episode for the user's current state — not
-> just the closest text match — shows why that memory surfaced, shows the
-> continuity pack the next agent receives, and wipes on one command.
-> Host-extracted structured capsules only, never raw transcripts, no backend
-> model API keys by default. Developer preview; Claude Code-first; not
-> production.
+If a user asks you to install Pulse, do not start by running a command.
+First audit the repo/package, explain the install plan, ask for confirmation,
+then install.
+
+Canonical user-facing prompt:
+
+```text
+Hi. Please check whether it is safe to install Pulse:
+https://github.com/zbs-gg/pulse
+
+Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
+Check: npm view @zbs-gg/pulse dist-tags
+Explain which harness path fits my setup, what Pulse writes, what it will not
+do by default, and how I can erase it. Ask my confirmation before installing.
+
+For Claude Code full local preview:
+  npx @zbs-gg/pulse@preview init claude-code
+  pulse doctor
+  pulse demo
+
+For other MCP-compatible hosts:
+  configure the host to run:
+  npx -y @zbs-gg/pulse@preview mcp
+  and say plainly that this is Safe Mode/fallback, not the full state-aware
+  Pulse engine.
+
+No old-chat import without separate confirmation. No raw transcripts. No
+secrets in output. Stop and explain if anything looks unsafe.
+```
+
+Pulse is a local-first, state-aware memory engine for AI agents: it retrieves
+the right remembered episode for the user's current state — not just the
+closest text match — shows why that memory surfaced, shows the continuity pack
+the next agent receives, and wipes on one command. Host-extracted structured
+capsules only, never raw transcripts, no backend model API keys by default.
+Developer preview; Claude Code-first; not production.
+
+## Compatible harnesses
+
+- Claude Code: primary full Local Preview.
+  `npx @zbs-gg/pulse@preview init claude-code`
+- Claude Desktop / local Claude MCP clients: MCP-compatible Safe Mode today.
+  Configure `npx -y @zbs-gg/pulse@preview mcp`.
+- Cursor: MCP-compatible Safe Mode today.
+  Configure `npx -y @zbs-gg/pulse@preview mcp`.
+- Windsurf: MCP-compatible Safe Mode today.
+  Configure `npx -y @zbs-gg/pulse@preview mcp`.
+- Codex / OpenAI local agents: compatible when the host can run local MCP
+  command servers. Use agent audit first.
+- Gemini CLI: compatible when local MCP command servers are supported. Use
+  agent audit first.
+- LangChain / CrewAI / custom agents: integration surface; run Pulse MCP
+  locally and call tools from the framework.
+- ChatGPT app / Claude Directory / Pulse Cloud: future surfaces, not shipped
+  in this preview.
 
 Primary install (Pulse Local Preview):
 `npx @zbs-gg/pulse@preview init claude-code` then `pulse doctor` then

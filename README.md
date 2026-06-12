@@ -1,5 +1,59 @@
 # Pulse
 
+## Copy this message to your AI agent
+
+Copy the whole message below into Claude Code, Codex, Cursor, Windsurf, or
+another AI agent that can inspect a repo and run terminal commands.
+
+```text
+Hi. Please check whether it is safe to install Pulse:
+https://github.com/zbs-gg/pulse
+
+Pulse is a local-first memory engine for AI agents. It stores structured
+memories, not raw transcripts. It should be wipeable and it should not require
+backend OpenAI, Anthropic, or Cohere keys by default.
+
+Please install it carefully:
+
+1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
+2. Check the npm package:
+   npm view @zbs-gg/pulse dist-tags
+   The preview tag should be 0.6.2 or newer for this README.
+3. Tell me which harness path fits my setup:
+   - Claude Code full local preview; or
+   - MCP/Safe Mode for Cursor, Windsurf, Claude Desktop/local MCP clients,
+     Codex/OpenAI agents, Gemini CLI, or another MCP-compatible host.
+4. Explain in plain English what Pulse will write, where memory is stored,
+   what does NOT happen by default, and how I can erase it.
+5. Ask me for confirmation before installing anything.
+6. After I confirm, install the best supported path.
+   For Claude Code full local preview:
+     npx @zbs-gg/pulse@preview init claude-code
+     pulse doctor
+     pulse demo
+   For MCP/Safe Mode:
+     configure the host to run:
+     npx -y @zbs-gg/pulse@preview mcp
+     then tell me plainly that this is the compatibility fallback, not the full
+     state-aware Pulse engine.
+7. Show me:
+   - whether backend model calls are off;
+   - whether raw transcript capture is off;
+   - what Pulse remembered;
+   - what my next agent/session will receive;
+   - the viewer URL if available;
+   - the wipe/disconnect commands.
+
+Important:
+- do not import old chats without separate confirmation;
+- do not store raw transcripts;
+- do not print secrets;
+- do not claim production readiness;
+- stop and explain if anything looks unsafe.
+```
+
+## What Pulse is
+
 Memory that knows what matters right now.
 
 Pulse is a state-aware memory engine for AI agents. It installs locally,
@@ -10,43 +64,29 @@ tell your next agent, and wipes on one command.
 Status: developer preview. Local-first, Claude Code-first. Not production,
 not a consumer app yet.
 
+If you are an agent asked to evaluate or install Pulse: read
+[`AGENTS.md`](AGENTS.md) and [`llms.txt`](llms.txt). They are written for you.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/pulse-demo.gif" alt="pulse demo: one question, three user states, three different memories — with the reason on every line" width="820">
 </p>
 
+## Compatible Harnesses
 
-## Copy This To Your Agent
+Pulse ships as one npm package: `@zbs-gg/pulse`. The MCP server is bundled
+inside it as `pulse mcp`. The older separate `@zbs-gg/pulse-mcp` package is
+legacy and should not be the default install path.
 
-```text
-Hi. Please check whether it is safe to install Pulse:
-https://github.com/zbs-gg/pulse
-
-Pulse is a local-first, state-aware memory engine for AI agents: structured
-memories, never raw transcripts, wipe always available.
-
-1. Read README.md, AGENTS.md, and llms.txt (they are written for you).
-2. Verify the npm package: npm view @zbs-gg/pulse dist-tags
-   (preview should be 0.6.0 or newer).
-3. Explain in plain words what an install writes and how to erase it.
-4. Ask me for confirmation.
-5. After confirmation, install the Local Preview:
-   npx @zbs-gg/pulse@preview init claude-code
-6. Run pulse doctor and tell me honestly which mode this machine gets.
-   If full retrieval is enabled, run pulse demo and walk me through what
-   it proves (same question, three user states, different memories, with
-   reasons; then the continuity pack the next agent receives).
-   If full retrieval is NOT enabled, say so plainly — safe fallback memory
-   still works, but do not present it as the Pulse engine.
-7. Show me the wipe path: pulse demo --clean, pulse wipe, claude mcp remove.
-
-Important: no old-chat import without separate confirmation; no raw
-transcripts; no secrets in output; stop and explain if anything looks unsafe.
-```
-
-## For AI Agents — Read This First
-
-If you are an agent asked to evaluate or install Pulse: read
-[`AGENTS.md`](AGENTS.md) and [`llms.txt`](llms.txt). They are written for you.
+| Harness | Current support | Recommended path |
+|---|---|---|
+| Claude Code | Primary target. Full Local Preview plus MCP/hooks/doctor/demo. | `npx @zbs-gg/pulse@preview init claude-code` |
+| Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. Full connector/store path is not shipped. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
+| Windsurf | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
+| Codex / OpenAI local agents | MCP-compatible when the host can run local MCP commands. Not a ChatGPT Store app. | Ask the agent to audit this repo and configure `npx -y @zbs-gg/pulse@preview mcp` |
+| Gemini CLI | MCP-compatible if the CLI/harness supports local MCP command servers. Not first-class installer yet. | Use the same MCP command after agent audit |
+| LangChain / CrewAI / custom agents | Integration surface, not a consumer installer. | Run Pulse MCP locally and call its tools from your framework |
+| ChatGPT app / Claude Directory / Pulse Cloud | Future distribution surfaces. | Not shipped in this preview |
 
 ## Install — Pulse Local Preview
 
