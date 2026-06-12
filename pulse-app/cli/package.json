@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
   "license": "MIT",
   "author": "Nikita Shilov",
