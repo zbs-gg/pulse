@@ -52,7 +52,8 @@ Usage:
   pulse doctor
   pulse doctor --json
   pulse connect claude-code [--remote-control]
-  pulse connect claude-chat --base <https-origin-or-mcp-url> [--open]
+  pulse connect chatgpt|claude-chat --base <https-origin-or-mcp-url> [--open]
+  pulse connect-smoke --base <https-origin> [--thread <id>] [--json]
   pulse disconnect claude-code
   pulse stop
   pulse remove claude-code
@@ -1419,11 +1420,11 @@ Viewer:            pulse viewer
 function normalizePublicOrigin(value) {
   const raw = value ?? process.env.PULSE_PUBLIC_ORIGIN ?? '';
   if (!raw) {
-    throw new Error('pulse connect claude-chat requires --base <https-origin-or-mcp-url> or PULSE_PUBLIC_ORIGIN');
+    throw new Error('pulse connect chatgpt|claude-chat requires --base <https-origin-or-mcp-url> or PULSE_PUBLIC_ORIGIN');
   }
   const url = new URL(raw);
   if (url.protocol !== 'https:') {
-    throw new Error('Claude Chat custom connectors require a public HTTPS origin');
+    throw new Error('Remote custom connectors require a public HTTPS origin');
   }
   url.search = '';
   url.hash = '';
@@ -1434,41 +1435,66 @@ function normalizePublicOrigin(value) {
   return url.toString().replace(/\/$/, '');
 }
 
-function connectClaudeChat() {
+const REMOTE_HOSTS = {
+  chatgpt: {
+    title: 'ChatGPT custom connector handoff',
+    ui: [
+      '1. Open ChatGPT -> Settings -> Connectors (developer mode).',
+      '2. Add a custom connector / MCP server.',
+      '3. Paste the Connector URL above.',
+      '4. Complete the auth flow ChatGPT shows you.',
+    ],
+    persist: 'The final install is a persistent ChatGPT account change.',
+    settingsURL: 'https://chatgpt.com/',
+    defaultThread: 'pulse-live-chatgpt-smoke',
+  },
+  'claude-chat': {
+    title: 'Claude Chat custom connector handoff',
+    ui: [
+      '1. Open Claude settings -> Connectors.',
+      '2. Add a custom connector.',
+      '3. Paste the Connector URL above.',
+      '4. Complete OAuth.',
+    ],
+    persist: 'The final install is a persistent Claude account/workspace change.',
+    settingsURL: 'https://claude.ai/settings/connectors',
+    defaultThread: 'pulse-live-claude-ui-smoke',
+  },
+};
+
+function connectRemoteHost(hostKey) {
+  const host = REMOTE_HOSTS[hostKey];
   const publicOrigin = normalizePublicOrigin(getArg('--base'));
   const connectorURL = `${publicOrigin}/mcp`;
-  const threadId = getArg('--thread') ?? 'pulse-live-claude-ui-smoke';
+  const threadId = getArg('--thread') ?? host.defaultThread;
 
   console.log(`
-[pulse] Claude Chat custom connector handoff
+[pulse] ${host.title}
 ──────────────────────────────────────────
 
 Connector URL:
   ${connectorURL}
 
-Preflight:
-  npx -p @zbs-gg/pulse-mcp pulse-mcp-claude-smoke -- \\
-    --base ${publicOrigin} \\
-    --thread ${threadId} \\
-    --json
+Preflight (runs the OAuth dev loop + status + graph delta + resume):
+  pulse connect-smoke --base ${publicOrigin} --thread ${threadId} --json
 
-Claude UI:
-  1. Open Claude settings -> Connectors.
-  2. Add a custom connector.
-  3. Paste the Connector URL above.
-  4. Complete OAuth.
+${hostKey === 'chatgpt' ? 'ChatGPT UI:' : 'Claude UI:'}
+${host.ui.map((line) => `  ${line}`).join('\n')}
 
 Important:
-  The final install is a persistent Claude account/workspace change.
-  Confirm it in the logged-in Claude UI only when you intentionally want Pulse connected.
+  ${host.persist}
+  Confirm it in the logged-in UI only when you intentionally want Pulse connected.
+  This is a developer-preview handoff to your own hosted endpoint — not a
+  store/directory listing.
 
 Proof prompt 1:
-  Use Pulse to save this thread decision: Pulse graph is owned by Pulse, but the current Claude harness extracts semantic deltas using the user's Claude subscription. Thread id: ${threadId}.
+  Use Pulse to save this decision: the demo ships doctor-gated — no demo
+  without full retrieval proven on this machine. Thread id: ${threadId}.
 
 Expected tool:
   pulse_graph_delta
 
-Proof prompt 2, in a fresh Claude chat:
+Proof prompt 2, in a fresh chat:
   Use Pulse to resume thread ${threadId}. What did we decide?
 
 Expected tool:
@@ -1476,8 +1502,14 @@ Expected tool:
 `);
 
   if (args.includes('--open')) {
-    spawnSync('open', ['https://claude.ai/settings/connectors'], { stdio: 'ignore' });
+    spawnSync('open', [host.settingsURL], { stdio: 'ignore' });
   }
+}
+
+function runConnectorSmoke(rest) {
+  const script = join(CLI_PACKAGE_ROOT, 'scripts', 'connector-smoke.mjs');
+  const result = spawnSync(process.execPath, [script, ...rest], { stdio: 'inherit' });
+  process.exitCode = result.status ?? 1;
 }
 
 function daemon(extraArgs) {
@@ -6397,11 +6429,16 @@ async function main() {
 	      await connectClaudeCode();
 	      return;
 	    }
-    if (target === 'claude-chat') {
-      connectClaudeChat();
+    if (target === 'chatgpt' || target === 'claude-chat') {
+      connectRemoteHost(target);
       return;
     }
-    throw new Error('v1 supports only: pulse connect claude-code or pulse connect claude-chat');
+    throw new Error('v1 supports: pulse connect claude-code | chatgpt | claude-chat');
+  }
+
+  if (command === 'connect-smoke') {
+    runConnectorSmoke(args.slice(1));
+    return;
   }
 
   if (command === 'disconnect') {

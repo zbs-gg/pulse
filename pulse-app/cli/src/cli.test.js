@@ -747,12 +747,32 @@ test('connect claude-chat dry run prints custom connector handoff without secret
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Claude Chat custom connector handoff/);
   assert.match(result.stdout, /https:\/\/pulse\.example\.com\/mcp/);
-  assert.match(result.stdout, /pulse-mcp-claude-smoke/);
+  assert.match(result.stdout, /pulse connect-smoke --base https:\/\/pulse\.example\.com/);
   assert.match(result.stdout, /pulse-live-claude-ui-smoke/);
   assert.match(result.stdout, /pulse_graph_delta/);
   assert.match(result.stdout, /pulse_resume/);
   assert.match(result.stdout, /persistent Claude account/);
+  assert.match(result.stdout, /not a\s+store\/directory listing/);
+  assert.doesNotMatch(result.stdout, /pulse-mcp/);
   assert.doesNotMatch(result.stdout, /PULSE_API_KEY|secret\.key|token=/i);
+});
+
+test('connect chatgpt dry run prints generic connector handoff via the one package', () => {
+  const { result } = run([
+    'connect',
+    'chatgpt',
+    '--base',
+    'https://pulse.example.com',
+    '--dry-run',
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ChatGPT custom connector handoff/);
+  assert.match(result.stdout, /https:\/\/pulse\.example\.com\/mcp/);
+  assert.match(result.stdout, /pulse connect-smoke --base/);
+  assert.match(result.stdout, /pulse-live-chatgpt-smoke/);
+  assert.match(result.stdout, /persistent ChatGPT account/);
+  assert.doesNotMatch(result.stdout, /pulse-mcp/);
 });
 
 test('connect claude-code writes local hook config and gitignore entry', () => {
