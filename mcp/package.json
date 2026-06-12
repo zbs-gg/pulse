@@ -1,7 +1,7 @@
 {
   "name": "@zbs-gg/pulse-mcp",
   "version": "0.4.1",
-  "description": "MCP server for Pulse host-extracted portable memory and continuity.",
+  "description": "Internal MCP server component of @zbs-gg/pulse. Not published \u2014 install @zbs-gg/pulse instead.",
   "license": "MIT",
   "author": "Nikita Shilov",
   "type": "module",
@@ -61,7 +61,5 @@
     "url": "https://github.com/zbs-gg/pulse/issues"
   },
   "homepage": "https://github.com/zbs-gg/pulse#readme",
-  "publishConfig": {
-    "access": "public"
-  }
+  "private": true
 }
