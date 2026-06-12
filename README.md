@@ -10,6 +10,11 @@ tell your next agent, and wipes on one command.
 Status: developer preview. Local-first, Claude Code-first. Not production,
 not a consumer app yet.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/pulse-demo.gif" alt="pulse demo: one question, three user states, three different memories — with the reason on every line" width="820">
+</p>
+
+
 ## Copy This To Your Agent
 
 ```text
@@ -68,6 +73,10 @@ never touched) and shows the three things generic memory tools don't:
 3. **What your next agent gets.** The continuity pack — decisions, open
    loops, do-not-repeat, emotional context — exactly as it will be injected
    into the next session.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/three-states.png" alt="same query in the drained state: burden episodes surface with state and emotion boosts visible" width="700">
+</p>
 
 Then: `pulse demo --clean` removes the whole demo store.
 
