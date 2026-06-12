@@ -12,6 +12,11 @@ plus the MCP server (`pulse mcp`, bundled prebuilt).
 
 Status: developer preview. Local-first, Claude Code-first. Not production.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/pulse-demo.gif" alt="pulse demo: one question, three user states, three different memories — with the reason on every line" width="820">
+</p>
+
+
 ## Install — Pulse Local Preview
 
 ```bash

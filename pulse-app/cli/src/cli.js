@@ -26,7 +26,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.6.1';
+const PREVIEW_VERSION = '0.6.2';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
 const MAX_MIGRATION_FILE_BYTES = positiveEnvInt('PULSE_MIGRATION_MAX_FILE_BYTES', 300 * 1024 * 1024);
 const MAX_MIGRATION_FILES = positiveEnvInt('PULSE_MIGRATION_MAX_FILES', 3000);
@@ -974,20 +974,7 @@ function shouldAnimatePulseConnect() {
 }
 
 async function showPulseConnectAnimation() {
-  if (!shouldAnimatePulseConnect()) {
-    return;
-  }
-  const frames = [
-    '[pulse]        .  :  o  ♡  o  :  .',
-    '[pulse]        .  :  o  ♥  o  :  .',
-    '[pulse]        .  :  O  ♥  O  :  .',
-    '[pulse]        .  :  o  ♥  o  :  .',
-  ];
-  for (const frame of frames) {
-    process.stdout.write(`\r${frame}`);
-    await sleep(120);
-  }
-  process.stdout.write('\n');
+  await pulseBreath({ cycles: 2 });
 }
 
 async function rememberInstallMemory(host = 'claude-code') {
@@ -1261,6 +1248,36 @@ function formatBreakdown(breakdown) {
   return parts.join(' · ');
 }
 
+
+// Micro animation: the pulse line breathes. Same motif as the install
+// banner ( .  :  o  \u2665  o  :  . ) \u2014 a heartbeat, not a loading screen.
+// Gated by shouldAnimatePulseConnect (TTY, no CI, --no-animate to skip).
+async function pulseBreath({ cycles = 2 } = {}) {
+  if (!shouldAnimatePulseConnect()) {
+    return;
+  }
+  const red = (t) => `\x1b[31m${t}\x1b[0m`;
+  const frames = [
+    `[pulse]        .   :   o   \u2661   o   :   .`,
+    `[pulse]        .  :  o  ${red('\u2665')}  o  :  .`,
+    `[pulse]       .  :  O  ${red('\u2665')}  O  :  .`,
+    `[pulse]        .  :  o  ${red('\u2665')}  o  :  .`,
+    `[pulse]         . : o ${red('\u2665')} o : .`,
+    `[pulse]        .  :  o  ${red('\u2665')}  o  :  .`,
+  ];
+  process.stdout.write('\x1b[?25l');
+  try {
+    for (let c = 0; c < cycles; c += 1) {
+      for (const frame of frames) {
+        process.stdout.write(`\r\x1b[2K${frame}`);
+        await sleep(110);
+      }
+    }
+  } finally {
+    process.stdout.write('\r\x1b[2K\x1b[?25h');
+  }
+}
+
 async function runStatefulDemo() {
   const corpus = demoCorpus();
   console.log(`
@@ -1270,6 +1287,7 @@ ${corpus.label}
 One question, three user states. Watch which memory surfaces — and why.
 `);
 
+  await pulseBreath();
   console.log('[pulse] Starting isolated demo instance...');
   const status = await startDemoDaemon();
   try {
