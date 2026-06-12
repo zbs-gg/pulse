@@ -40,8 +40,8 @@ engine. No benchmark claims apply to this mode.
 - [@zbs-gg/pulse on npm](https://www.npmjs.com/package/@zbs-gg/pulse): the
   one package — installer/CLI (init, doctor, demo, viewer) + MCP server
   (`pulse mcp`).
-- [@zbs-gg/pulse-mcp on npm](https://www.npmjs.com/package/@zbs-gg/pulse-mcp):
-  internal server component (low-level/dev artifact).
+- One package only: the MCP server is bundled inside @zbs-gg/pulse
+  (`pulse mcp`); the old @zbs-gg/pulse-mcp package is deprecated.
 
 ## Boundaries
 

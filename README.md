@@ -130,8 +130,8 @@ autonomous prioritization or production readiness. See
 
 - `pulse-app/` — local Go engine (daemon, storage, state-aware retrieval) +
   `cli/` (the `@zbs-gg/pulse` npm package: installer, doctor, demo, viewer).
-- `mcp/` — the MCP server source (`@zbs-gg/pulse-mcp`, bundled inside
-  `@zbs-gg/pulse`).
+- `mcp/` — the MCP server source (internal component, bundled prebuilt
+  inside `@zbs-gg/pulse`; not published separately).
 - `docs/` — install, security checklist, and design docs.
 
 ## License
