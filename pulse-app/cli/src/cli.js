@@ -1326,8 +1326,12 @@ Run \`pulse doctor\` to see the full picture. No fake demo will be shown.`);
     });
 
     console.log(`\nQUERY (same every time): "${corpus.query}"`);
+    // Human pacing: give each state block a beat on screen. --fast disables.
+    const paceMs = args.includes('--fast') ? 0 : 2200;
+    const pace = () => new Promise((resolve) => setTimeout(resolve, paceMs));
     const topSets = [];
     for (const state of corpus.states) {
+      await pace();
       const result = await demoFetch('/context/query', {
         body: {
           query: corpus.query,
@@ -1359,6 +1363,7 @@ Run \`pulse doctor\` to see the full picture. No fake demo will be shown.`);
         : '\n[pulse] Same question. Different state. Different memory — with the reason on every line.',
     );
 
+    await pace();
     const resume = await demoFetch('/continuity/resume', {
       body: {
         thread_id: corpus.thread_id,
