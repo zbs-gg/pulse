@@ -4,18 +4,26 @@ This is the technical install reference for the partner preview.
 
 It is technical. It is not the final consumer install.
 
-## Fastest Path: Zero-Config Standalone (@zbs-gg/pulse v0.5.0+)
+## The Path: Pulse Local Preview (v0.6.0+)
+
+```bash
+npx @zbs-gg/pulse@preview init claude-code
+pulse doctor
+pulse demo
+```
+
+Doctor's verdict is binary and honest; the demo runs only on the full engine.
+
+## Safe Mode (fallback for unsupported machines)
 
 ```bash
 claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 ```
 
-No Go toolchain, no daemon, no keys. The MCP server creates a standalone lite
-store at `~/.pulse/standalone/store.json` on the first tool call. Memory,
-recall, resume, graph deltas, status, forget, and wipe all work. The viewer,
-lifecycle hooks, and the full retrieval engine require the full path below;
-when a local daemon is later installed, the same MCP server prefers it
-automatically (`PULSE_MCP_MODE=auto` is the default).
+Structured local memory at `~/.pulse/standalone/store.json`, keyword recall,
+inspect/wipe. Not the product; no benchmark claims. When a local daemon is
+later installed the same MCP server prefers it automatically
+(`PULSE_MCP_MODE=auto`).
 
 ## Recommended Path: Install With Your Agent
 
