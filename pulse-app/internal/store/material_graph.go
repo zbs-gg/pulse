@@ -37,6 +37,7 @@ type MaterialGraphNode struct {
 	PrivacyTier    string                `json:"privacy_tier"`
 	Confidence     float64               `json:"confidence"`
 	Status         string                `json:"status"`
+	Scope          string                `json:"scope"`
 	Salience       MaterialGraphSalience `json:"salience,omitempty"`
 	ResumeEligible bool                  `json:"resume_eligible,omitempty"`
 }
@@ -51,6 +52,7 @@ type MaterialGraphEdge struct {
 	PrivacyTier  string   `json:"privacy_tier"`
 	Confidence   float64  `json:"confidence"`
 	Status       string   `json:"status"`
+	Scope        string   `json:"scope"`
 }
 
 type MaterialGraphSalience struct {
@@ -76,6 +78,12 @@ type materialGraphBuilder struct {
 	nodeSeen map[string]int
 	edgeSeen map[string]bool
 	limit    int
+	// scope marks rows added in the current phase. The checkpoint phase is
+	// genuinely thread-scoped; the stored-row phase reads GLOBAL top entities/
+	// relations/facts/events (no thread/project column exists on those tables),
+	// so they are labeled "global" to avoid presenting unrelated neighbors as
+	// focused thread context.
+	scope string
 }
 
 func (s *Store) MaterialGraph(q MaterialGraphQuery) (MaterialGraph, error) {
@@ -96,8 +104,10 @@ func (s *Store) MaterialGraph(q MaterialGraphQuery) (MaterialGraph, error) {
 		return MaterialGraph{}, err
 	}
 	if hasCheckpoint {
+		builder.scope = "thread"
 		builder.addCheckpoint(cp)
 	}
+	builder.scope = "global"
 	if err := s.addStoredMaterialGraphRows(builder, limit); err != nil {
 		return MaterialGraph{}, err
 	}
@@ -110,7 +120,15 @@ func newMaterialGraphBuilder(graph *MaterialGraph, limit int) *materialGraphBuil
 		nodeSeen: map[string]int{},
 		edgeSeen: map[string]bool{},
 		limit:    limit,
+		scope:    "global",
 	}
+}
+
+func (b *materialGraphBuilder) currentScope() string {
+	if b.scope == "" {
+		return "global"
+	}
+	return b.scope
 }
 
 func (b *materialGraphBuilder) addCheckpoint(cp ContinuityCheckpoint) {
@@ -294,12 +312,12 @@ func (b *materialGraphBuilder) addOwnershipBoundaryIfPresent(cp ContinuityCheckp
 			From:         "concept:people-graph",
 			To:           "project:pulse",
 			Kind:         "owned_by_layer",
-			Summary:      "People Graph ownership is assigned to Pulse in the reviewed continuity checkpoint.",
+			Summary:      "Hypothesis: People Graph likely belongs to Pulse (inferred from co-occurrence in the checkpoint text, not a reviewed semantic delta).",
 			SourceRefs:   sourceRefs,
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: "derived_hypothesis",
 			PrivacyTier:  "private",
 			Confidence:   confidence,
-			Status:       "reviewed",
+			Status:       "hypothesis",
 		})
 	}
 	if hasMaterialGraph && hasPulse {
@@ -307,12 +325,12 @@ func (b *materialGraphBuilder) addOwnershipBoundaryIfPresent(cp ContinuityCheckp
 			From:         "concept:material-graph",
 			To:           "project:pulse",
 			Kind:         "owned_by_layer",
-			Summary:      "Material Graph ownership is assigned to Pulse in the reviewed continuity checkpoint.",
+			Summary:      "Hypothesis: Material Graph likely belongs to Pulse (inferred from co-occurrence in the checkpoint text, not a reviewed semantic delta).",
 			SourceRefs:   sourceRefs,
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: "derived_hypothesis",
 			PrivacyTier:  "private",
 			Confidence:   confidence,
-			Status:       "reviewed",
+			Status:       "hypothesis",
 		})
 	}
 	if hasAtlas {
@@ -322,12 +340,12 @@ func (b *materialGraphBuilder) addOwnershipBoundaryIfPresent(cp ContinuityCheckp
 					From:         materialID("decision", decision),
 					To:           "project:atlas",
 					Kind:         "do_not_repeat_for",
-					Summary:      "The decision protects the boundary that Atlas must not own Pulse graph storage.",
+					Summary:      "Hypothesis: this reviewed decision likely protects the Atlas/Pulse ownership boundary (target inferred from co-occurrence).",
 					SourceRefs:   sourceRefs,
-					SourceStatus: "derived_from_reviewed_sources",
+					SourceStatus: "derived_hypothesis",
 					PrivacyTier:  "private",
 					Confidence:   confidence,
-					Status:       "reviewed",
+					Status:       "hypothesis",
 				})
 			}
 		}
@@ -337,18 +355,23 @@ func (b *materialGraphBuilder) addOwnershipBoundaryIfPresent(cp ContinuityCheckp
 					From:         materialID("constraint", warning),
 					To:           "project:atlas",
 					Kind:         "do_not_repeat_for",
-					Summary:      "The do-not-repeat warning protects the Atlas/Pulse ownership boundary.",
+					Summary:      "Hypothesis: this reviewed do-not-repeat warning likely protects the Atlas/Pulse ownership boundary (target inferred from co-occurrence).",
 					SourceRefs:   sourceRefs,
-					SourceStatus: "source_backed",
+					SourceStatus: "derived_hypothesis",
 					PrivacyTier:  "private",
 					Confidence:   confidence,
-					Status:       "reviewed",
+					Status:       "hypothesis",
 				})
 			}
 		}
 	}
 }
 
+// addDerivedNode records an ownership/domain inference produced by the
+// hardcoded Atlas/Pulse/people-graph/material-graph co-occurrence heuristic.
+// These come from substring matching in checkpoint text, NOT from a reviewed
+// semantic delta, so they are labeled honestly as hypotheses rather than
+// reviewed truth.
 func (b *materialGraphBuilder) addDerivedNode(id, kind, label, summary string, sourceRefs []string, confidence float64) {
 	b.addNode(MaterialGraphNode{
 		ID:           id,
@@ -356,11 +379,11 @@ func (b *materialGraphBuilder) addDerivedNode(id, kind, label, summary string, s
 		Label:        label,
 		Summary:      summary,
 		SourceRefs:   sourceRefs,
-		SourceStatus: "derived_from_reviewed_sources",
+		SourceStatus: "derived_hypothesis",
 		PrivacyTier:  "private",
 		Confidence:   confidence,
-		Status:       "reviewed",
-		Salience:     MaterialGraphSalience{Strategic: "high", Trust: "high"},
+		Status:       "hypothesis",
+		Salience:     MaterialGraphSalience{Strategic: "medium", Trust: "low"},
 	})
 }
 
@@ -404,10 +427,10 @@ func (s *Store) addMaterialEntityRows(b *materialGraphBuilder, limit int) error 
 			Label:        strings.TrimSpace(label),
 			Summary:      strings.TrimSpace(summary),
 			SourceRefs:   []string{fmt.Sprintf("pulse:entity:%d", id)},
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: "host_extracted",
 			PrivacyTier:  "private",
 			Confidence:   materialConfidence(salience),
-			Status:       "reviewed",
+			Status:       "host_extracted",
 			Salience:     materialSalienceFromScores(salience, emotionalWeight),
 		})
 	}
@@ -448,10 +471,10 @@ func (s *Store) addMaterialRelationRows(b *materialGraphBuilder, limit int) erro
 			Kind:         edgeKind,
 			Summary:      fmt.Sprintf("%s %s %s", strings.TrimSpace(fromLabel), humanizeRelationKind(edgeKind), strings.TrimSpace(toLabel)),
 			SourceRefs:   []string{fmt.Sprintf("pulse:relation:%d", id)},
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: "host_extracted",
 			PrivacyTier:  "private",
 			Confidence:   materialConfidence(strength),
-			Status:       "reviewed",
+			Status:       "host_extracted",
 		})
 	}
 	return rows.Err()
@@ -459,7 +482,7 @@ func (s *Store) addMaterialRelationRows(b *materialGraphBuilder, limit int) erro
 
 func (s *Store) addMaterialFactRows(b *materialGraphBuilder, limit int) error {
 	rows, err := s.db.Query(`
-		SELECT f.id, e.id, e.kind, e.canonical_name, f.text, f.confidence
+		SELECT f.id, e.id, e.kind, e.canonical_name, f.text, f.confidence, f.verified
 		  FROM facts f
 		  JOIN entities e ON e.id = f.entity_id
 		 WHERE NOT EXISTS (SELECT 1 FROM sensitive_actors sa WHERE sa.entity_id = e.id)
@@ -473,11 +496,23 @@ func (s *Store) addMaterialFactRows(b *materialGraphBuilder, limit int) error {
 		var factID, entityID int64
 		var entityKind, entityLabel, text string
 		var confidence float64
-		if err := rows.Scan(&factID, &entityID, &entityKind, &entityLabel, &text, &confidence); err != nil {
+		var verified int
+		if err := rows.Scan(&factID, &entityID, &entityKind, &entityLabel, &text, &confidence, &verified); err != nil {
 			return err
 		}
 		if !materialVisibleEntityLabel(entityKind, entityLabel) || !viewerHumanReadableLabel(text) {
 			continue
+		}
+		// Provenance is read from the real `verified` column: a fact the user
+		// confirmed is user_confirmed; an unverified host-extracted fact must
+		// not be presented as reviewed truth.
+		factSourceStatus := "host_extracted"
+		factStatus := "host_extracted"
+		factSummary := "Host-extracted claim attached to a graph entity."
+		if verified != 0 {
+			factSourceStatus = "user_confirmed"
+			factStatus = "user_confirmed"
+			factSummary = "User-confirmed claim attached to a graph entity."
 		}
 		claimID := materialID("claim", text)
 		sourceRefs := []string{fmt.Sprintf("pulse:fact:%d", factID)}
@@ -485,24 +520,24 @@ func (s *Store) addMaterialFactRows(b *materialGraphBuilder, limit int) error {
 			ID:           claimID,
 			Kind:         "claim",
 			Label:        strings.TrimSpace(text),
-			Summary:      "Source-backed claim attached to a graph entity.",
+			Summary:      factSummary,
 			SourceRefs:   sourceRefs,
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: factSourceStatus,
 			PrivacyTier:  "private",
 			Confidence:   materialConfidence(confidence),
-			Status:       "reviewed",
+			Status:       factStatus,
 			Salience:     MaterialGraphSalience{Strategic: "medium"},
 		}) {
 			b.addEdge(MaterialGraphEdge{
 				From:         claimID,
 				To:           materialEntityNodeID(entityKind, entityID, entityLabel),
 				Kind:         "mentions",
-				Summary:      "Claim is attached to the reviewed graph entity.",
+				Summary:      "Claim is attached to the graph entity.",
 				SourceRefs:   sourceRefs,
-				SourceStatus: "derived_from_reviewed_sources",
+				SourceStatus: factSourceStatus,
 				PrivacyTier:  "private",
 				Confidence:   materialConfidence(confidence),
-				Status:       "reviewed",
+				Status:       factStatus,
 			})
 		}
 	}
@@ -540,10 +575,10 @@ func (s *Store) addMaterialEventRows(b *materialGraphBuilder, limit int) error {
 			Label:        strings.TrimSpace(title),
 			Summary:      strings.TrimSpace(summary),
 			SourceRefs:   []string{fmt.Sprintf("pulse:event:%d", id)},
-			SourceStatus: "derived_from_reviewed_sources",
+			SourceStatus: "host_extracted",
 			PrivacyTier:  "private",
 			Confidence:   0.8,
-			Status:       "reviewed",
+			Status:       "host_extracted",
 			Salience:     materialSalienceFromScores(0.5, emotionalWeight),
 		})
 		_ = ts
@@ -570,6 +605,9 @@ func (b *materialGraphBuilder) addNode(node MaterialGraphNode) bool {
 	}
 	if node.Status == "" {
 		node.Status = "reviewed"
+	}
+	if node.Scope == "" {
+		node.Scope = b.currentScope()
 	}
 	node.Confidence = materialConfidence(node.Confidence)
 
@@ -611,6 +649,9 @@ func (b *materialGraphBuilder) addEdge(edge MaterialGraphEdge) bool {
 	}
 	if edge.Status == "" {
 		edge.Status = "reviewed"
+	}
+	if edge.Scope == "" {
+		edge.Scope = b.currentScope()
 	}
 	edge.Confidence = materialConfidence(edge.Confidence)
 	key := edge.From + "\x00" + edge.Kind + "\x00" + edge.To
