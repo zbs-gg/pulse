@@ -382,4 +382,4 @@ See `mcp/README.md`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available, see [`COMMERCIAL.md`](../COMMERCIAL.md).
