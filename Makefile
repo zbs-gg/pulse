@@ -77,7 +77,8 @@ verify: ## ONE gate: Go build+vet+gofmt+test (pulse-app/) + mcp test+build; appe
 	&& ( if [ -f $(MCP_DIR)/package.json ]; then \
 	       cd $(MCP_DIR) \
 	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
-	       && $(NPM) test --silent && $(NPM) run --silent build; \
+	       && $(NPM) test --silent && $(NPM) run --silent build \
+	       && $(NPM) run --silent smoke:standalone-negative; \
 	     else \
 	       echo "$(MCP_DIR)/package.json not found, skipping mcp checks"; \
 	     fi ) \
