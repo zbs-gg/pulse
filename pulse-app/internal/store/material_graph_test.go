@@ -49,7 +49,7 @@ func TestMaterialGraphProjectsAtlasPulseOwnershipDecision(t *testing.T) {
 		t.Fatalf("thread mismatch: %#v", graph.ThreadID)
 	}
 
-	requireMaterialNode(t, graph, "project:atlas")
+	atlas := requireMaterialNode(t, graph, "project:atlas")
 	requireMaterialNode(t, graph, "project:pulse")
 	requireMaterialNode(t, graph, "concept:people-graph")
 	decision := requireMaterialNodeContaining(t, graph, "decision", "Atlas must not own People Graph")
@@ -62,20 +62,40 @@ func TestMaterialGraphProjectsAtlasPulseOwnershipDecision(t *testing.T) {
 	if decision.Salience.Strategic != "high" || decision.Salience.Trust != "high" {
 		t.Fatalf("decision should carry strategic/trust salience: %#v", decision.Salience)
 	}
-	requireMaterialEdge(t, graph, "concept:people-graph", "project:pulse", "owned_by_layer")
+
+	// (a) Auto-derived ownership inferences come from substring co-occurrence in
+	// checkpoint text, not from a reviewed semantic delta. They must be labeled
+	// honestly as hypotheses, NOT presented as reviewed truth.
+	if atlas.Status != "hypothesis" {
+		t.Fatalf("auto-derived ownership node should be a hypothesis, got status=%q: %#v", atlas.Status, atlas)
+	}
+	if atlas.SourceStatus != "derived_hypothesis" {
+		t.Fatalf("auto-derived ownership node should declare derived_hypothesis, got %q: %#v", atlas.SourceStatus, atlas)
+	}
+	ownEdge := requireMaterialEdge(t, graph, "concept:people-graph", "project:pulse", "owned_by_layer")
+	if ownEdge.Status != "hypothesis" || ownEdge.SourceStatus != "derived_hypothesis" {
+		t.Fatalf("auto-derived ownership edge should be a hypothesis: %#v", ownEdge)
+	}
+	// The do_not_repeat edge originates from an actual reviewed do-not-repeat
+	// constraint node, so it stays source_backed (genuinely from the checkpoint).
 	requireMaterialEdge(t, graph, decision.ID, "project:atlas", "do_not_repeat_for")
 
+	// (c) Continuity nodes really do come from a reviewed checkpoint -> source_backed.
+	if decision.SourceStatus != "source_backed" || decision.Status != "reviewed" {
+		t.Fatalf("reviewed checkpoint decision should be source_backed/reviewed: %#v", decision)
+	}
+
 	for _, node := range graph.Nodes {
-		if node.SourceStatus != "source_backed" && node.SourceStatus != "derived_from_reviewed_sources" {
-			t.Fatalf("node should declare source status: %#v", node)
+		if !validMaterialSourceStatus(node.SourceStatus) {
+			t.Fatalf("node should declare honest source status: %#v", node)
 		}
 		if len(node.SourceRefs) == 0 {
 			t.Fatalf("node missing source refs: %#v", node)
 		}
 	}
 	for _, edge := range graph.Edges {
-		if edge.SourceStatus != "source_backed" && edge.SourceStatus != "derived_from_reviewed_sources" {
-			t.Fatalf("edge should declare source status: %#v", edge)
+		if !validMaterialSourceStatus(edge.SourceStatus) {
+			t.Fatalf("edge should declare honest source status: %#v", edge)
 		}
 		if len(edge.SourceRefs) == 0 {
 			t.Fatalf("edge missing source refs: %#v", edge)
@@ -199,6 +219,128 @@ func TestMaterialGraphExcludesHiddenEntities(t *testing.T) {
 	}
 	if strings.Contains(string(joined), "Noisy Person") {
 		t.Fatalf("hidden entity leaked into material graph: %s", joined)
+	}
+}
+
+func validMaterialSourceStatus(status string) bool {
+	switch status {
+	case "source_backed", "host_extracted", "user_confirmed", "derived_hypothesis":
+		return true
+	default:
+		return false
+	}
+}
+
+// (c) Stored graph rows come from the host-extraction path (verified=0 in the
+// DB), NOT from human review. They must NOT be stamped reviewed; they are
+// host_extracted unless a fact was actually verified by the user.
+func TestMaterialGraphStoredRowsAreHostExtractedNotReviewed(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	delta := validSemanticDelta()
+	delta.Nodes = []SemanticNode{{
+		ClientID:      "project:pulse-viewer",
+		Kind:          "project",
+		CanonicalName: "Pulse Viewer",
+		Summary:       "Focused local view of Pulse memory.",
+		Salience:      0.9,
+		PrivacyTier:   "normal",
+		Domain:        "real",
+	}}
+	delta.Edges = nil
+	delta.Facts = []SemanticFact{{
+		Node:        "project:pulse-viewer",
+		Text:        "Pulse Viewer renders the material graph locally.",
+		Confidence:  0.8,
+		PrivacyTier: "normal",
+		Domain:      "real",
+	}}
+	delta.Events = nil
+	delta.Continuity = nil
+
+	if _, err := s.SaveSemanticDelta(delta); err != nil {
+		t.Fatalf("SaveSemanticDelta: %v", err)
+	}
+
+	graph, err := s.MaterialGraph(MaterialGraphQuery{ThreadID: "pulse-distribution", Limit: 50})
+	if err != nil {
+		t.Fatalf("MaterialGraph: %v", err)
+	}
+
+	entity := requireMaterialNode(t, graph, "project:pulse-viewer")
+	if entity.SourceStatus != "host_extracted" {
+		t.Fatalf("host-extracted entity must be labeled host_extracted, got %q: %#v", entity.SourceStatus, entity)
+	}
+	if entity.Status == "reviewed" || entity.Status == "user_confirmed" {
+		t.Fatalf("host-extracted entity must not claim review: %#v", entity)
+	}
+
+	claim := requireMaterialNodeContaining(t, graph, "claim", "renders the material graph")
+	if claim.SourceStatus != "host_extracted" {
+		t.Fatalf("unverified fact must be host_extracted, got %q: %#v", claim.SourceStatus, claim)
+	}
+}
+
+// (b) A thread-scoped query selects a checkpoint by thread, but stored rows are
+// global (no thread/project column). They must be labeled global scope so a
+// focused thread graph does not silently present unrelated neighbors as
+// thread context.
+func TestMaterialGraphSeparatesThreadAndGlobalScope(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.SaveCheckpoint(ContinuityCheckpoint{
+		ThreadID:      "focused-thread",
+		SessionID:     "claude-code:focused-thread:test",
+		Host:          "claude-code",
+		ProjectID:     "garden",
+		Summary:       "Focused thread checkpoint.",
+		ActiveThreads: []string{"Focused thread"},
+		Decisions:     []string{"Ship the focused thread proof first."},
+		SourceRefs:    []string{"pulse:checkpoint:focused-thread"},
+		Confidence:    0.9,
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	delta := validSemanticDelta()
+	delta.Nodes = []SemanticNode{{
+		ClientID:      "project:unrelated-neighbor",
+		Kind:          "project",
+		CanonicalName: "Unrelated Neighbor",
+		Summary:       "A globally salient entity from a different thread.",
+		Salience:      0.95,
+		PrivacyTier:   "normal",
+		Domain:        "real",
+	}}
+	delta.Edges = nil
+	delta.Facts = nil
+	delta.Events = nil
+	delta.Continuity = nil
+	if _, err := s.SaveSemanticDelta(delta); err != nil {
+		t.Fatalf("SaveSemanticDelta: %v", err)
+	}
+
+	graph, err := s.MaterialGraph(MaterialGraphQuery{ThreadID: "focused-thread", Limit: 50})
+	if err != nil {
+		t.Fatalf("MaterialGraph: %v", err)
+	}
+
+	threadDecision := requireMaterialNodeContaining(t, graph, "decision", "Ship the focused thread proof")
+	if threadDecision.Scope != "thread" {
+		t.Fatalf("checkpoint-derived node should be thread-scoped, got %q: %#v", threadDecision.Scope, threadDecision)
+	}
+
+	globalNeighbor := requireMaterialNode(t, graph, "project:unrelated-neighbor")
+	if globalNeighbor.Scope != "global" {
+		t.Fatalf("stored global row should be global-scoped, got %q: %#v", globalNeighbor.Scope, globalNeighbor)
 	}
 }
 
