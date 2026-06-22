@@ -141,22 +141,40 @@ var parityChainTie = map[string]bool{"T28": true}
 // boost combine vs Python's float32 numpy + float64 boosts agree well within this.
 const parityScoreTol = 1e-5
 
+// goldenPath returns the golden fixture to load and whether it is the public
+// one. The PRIVATE golden (testdata/parity_golden.json) is generated from a
+// private evaluation corpus and is gitignored, so it is present only on a dev
+// machine that regenerated it. The PUBLIC golden (parity_golden_public.json) is
+// a small, fully synthetic, committed fixture produced by the SAME reference
+// engine (testdata/gen_parity_public.py) — it makes the Go==reference parity
+// gate runnable in a clean checkout / CI. We prefer the private golden when
+// present (richer, real corpus) and fall back to the public one.
+func goldenPath() (path string, public bool) {
+	priv := filepath.Join("testdata", "parity_golden.json")
+	if _, err := os.Stat(priv); err == nil {
+		return priv, false
+	}
+	return filepath.Join("testdata", "parity_golden_public.json"), true
+}
+
 func loadGolden(t *testing.T) goldenFile {
 	t.Helper()
-	path := filepath.Join("testdata", "parity_golden.json")
+	path, public := goldenPath()
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		// The golden is intentionally NOT committed: it is generated from a private
-		// evaluation corpus. Regenerate it locally with the reference dump script
-		// to run this gate.
-		t.Skip("parity golden absent (private, not committed) — regenerate locally to run this gate")
+		// Neither golden present — should not happen now that the public fixture
+		// is committed, but keep an honest skip rather than a confusing failure.
+		t.Skip("parity golden absent (neither private nor public fixture found)")
 	}
 	if err != nil {
 		t.Fatalf("read golden %s: %v", path, err)
 	}
+	if public {
+		t.Logf("parity gate running on PUBLIC synthetic fixture (%s) — Go==reference on fabricated data; private corpus golden not present", path)
+	}
 	var g goldenFile
 	if err := json.Unmarshal(raw, &g); err != nil {
-		t.Fatalf("parse golden: %v", err)
+		t.Fatalf("parse golden %s: %v", path, err)
 	}
 	if len(g.EventEmbeddings) == 0 || len(g.Tests) == 0 {
 		t.Fatalf("golden looks empty: %d embeddings, %d tests",
