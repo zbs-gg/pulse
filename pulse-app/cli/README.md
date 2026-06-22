@@ -105,7 +105,8 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
 
 ## Trust boundaries
 
-- Host-extracted structured capsules only — never raw transcripts.
+- Host-extracted structured capsules only — raw transcript capture is off by
+  default, and the store rejects transcript/secret/path-like content.
 - No backend model API keys by default; no backend LLM calls.
 - No old-chat import by default — ingest is explicit and consent-first.
 - Memory is local and inspectable; wipe requires an exact confirmation

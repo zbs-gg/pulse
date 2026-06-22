@@ -18,7 +18,7 @@ Please install it carefully:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check the npm package:
    npm view @zbs-gg/pulse dist-tags
-   The preview tag should be 0.6.2 or newer for this README.
+   The preview tag should be 0.6.3 or newer for this README.
 3. Tell me which harness path fits my setup:
    - Claude Code full local preview; or
    - MCP/Safe Mode for Cursor, Windsurf, Claude Desktop/local MCP clients,
@@ -88,6 +88,8 @@ legacy and should not be the default install path.
 | LangChain / CrewAI / custom agents | Integration surface, not a consumer installer. | Run Pulse MCP locally and call its tools from your framework |
 | ChatGPT app / Claude Directory / Pulse Cloud | Future distribution surfaces. | Not shipped in this preview |
 
+_"MCP-compatible" means protocol-level only. End-to-end install is verified on Claude Code; on the other hosts the MCP tools speak the protocol but the full install/onboarding is not E2E-tested yet._
+
 ## Install — Pulse Local Preview
 
 ```bash
@@ -141,9 +143,9 @@ claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp
 With no daemon and no embedder this runs a keyword-recall local store. It is
 honest about what it is: a compatibility/trust fallback so unsupported
 machines still get structured memory, inspection, and wipe. **Do not judge
-Pulse retrieval by this mode, and no benchmark claim applies to it.** The
-engine's bench numbers (stateful R@3 0.419 vs cosine_state 0.314 on Emo.Bench
-v3) are full-engine only.
+Pulse retrieval by this mode, and no benchmark claim applies to it.** Any
+benchmark numbers apply to the full engine only — they are reported in the
+paper/bench, not reproduced in this repository.
 
 ## Ingest — consent first
 
