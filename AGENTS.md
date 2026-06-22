@@ -17,8 +17,9 @@ that, or to say plainly that this machine only supports the fallback.
 3. Tell the user, in plain words, what the Local Preview install does:
    - builds and starts a local Pulse daemon (Go, runs on 127.0.0.1);
    - registers the Pulse MCP server and Claude Code lifecycle hooks;
-   - stores host-extracted structured capsules in `~/.pulse` — never raw
-     transcripts;
+   - stores host-extracted structured capsules in `~/.pulse`; raw transcript
+     capture is off by default (and the store rejects transcript/secret/path-like
+     content);
    - makes no backend model calls by default; the optional Cohere
      *embedding* path sends embedding requests out, and doctor reports it;
    - is fully removable: `pulse wipe`, `pulse disconnect claude-code`,

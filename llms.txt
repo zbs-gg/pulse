@@ -34,7 +34,8 @@ Pulse is a local-first, state-aware memory engine for AI agents: it retrieves
 the right remembered episode for the user's current state — not just the
 closest text match — shows why that memory surfaced, shows the continuity pack
 the next agent receives, and wipes on one command. Host-extracted structured
-capsules only, never raw transcripts, no backend model API keys by default.
+capsules only; raw transcript capture is off by default (the store rejects
+transcript/secret/path-like content); no backend model API keys by default.
 Developer preview; Claude Code-first; not production.
 
 ## Compatible harnesses
@@ -94,7 +95,7 @@ engine. No benchmark claims apply to this mode.
 ## Boundaries
 
 - Not production ready; developer preview for technical users.
-- Bench numbers (e.g. stateful R@3 0.419 on Emo.Bench v3) apply to the full
-  engine only — never to Safe Mode keyword recall.
+- Benchmark numbers apply to the full engine only — never to Safe Mode keyword
+  recall — and are reported in the paper/bench, not reproduced in this repository.
 - No automatic chat import; ingest is host-extracted by default and bulk
   import is explicit, preview-first, opt-in.

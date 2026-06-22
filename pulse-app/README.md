@@ -239,10 +239,10 @@ Local-auto continuity is a separate local mode for Claude Code/Codex-style
 hosts:
 
 ```
-SessionStart     → pulse_resume startup block
-UserPromptSubmit → pulse_observe redacted local hook observation
-PostToolUse      → pulse_observe redacted local hook observation
-Stop             → pulse_checkpoint local checkpoint
+Session start    → Pulse injects the resume block
+Each prompt      → Pulse observes a redacted, structured local signal
+After tool calls → Pulse observes a redacted, structured local signal
+Session end      → Pulse writes a local continuity checkpoint
 Viewer           → "what Pulse will tell Claude next time"
 ```
 
