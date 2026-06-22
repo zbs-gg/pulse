@@ -23,9 +23,10 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { validateCapsule, validateDelta } from './validation.js';
+
 const STORE_SCHEMA = 'pulse.standalone_store.v1';
 const CAPSULE_SCHEMA = 'pulse.memory_capsule.v1';
-const DELTA_SCHEMA = 'pulse.semantic_delta.v1';
 const PRIVACY_RANK: Record<string, number> = { normal: 0, sensitive: 1, private: 2 };
 // Mirrors the daemon's retentionFilter (internal/store/memory_capsule.go):
 // scope "user" means "everything", not a retention tier.
@@ -136,13 +137,6 @@ function asString(value: unknown, what: string): string {
   return value;
 }
 
-function stringList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '');
-}
-
 function dedupe(values: string[], cap = 12): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -242,47 +236,37 @@ export class StandaloneStore {
   }
 
   remember(input: unknown): { ok: true; ids: string[] } {
-    const capsule = asRecord(input, 'memory capsule');
-    if (capsule.schema !== CAPSULE_SCHEMA) {
-      throw new Error(`invalid memory capsule: schema must be ${CAPSULE_SCHEMA}`);
-    }
-    if (capsule.raw_input_included !== false) {
-      throw new Error('invalid memory capsule: raw_input_included must be false');
-    }
-    const source = asRecord(capsule.source, 'memory capsule source');
-    const host = asString(source.host, 'memory capsule source.host');
-    const scope = asString(source.conversation_scope, 'memory capsule source.conversation_scope');
-    const timestamp = asString(source.timestamp, 'memory capsule source.timestamp');
-    if (!Array.isArray(capsule.items) || capsule.items.length === 0) {
-      throw new Error('invalid memory capsule: items must be a non-empty array');
-    }
-    const capsuleItems: unknown[] = capsule.items;
+    // Full content-contract validation (enums, limits, secret/path/transcript
+    // rejection) BEFORE anything is persisted. See validation.ts — the JSON
+    // Schema in tools/list is advisory; this is the real gate. Mirrors the Go
+    // daemon's validateMemoryCapsule so Safe Mode can never store what the
+    // engine would reject.
+    const capsule = validateCapsule(input);
     return this.withLock(() => {
-    const store = this.loadUnlocked();
-    const now = new Date().toISOString();
-    const ids: string[] = [];
-    capsuleItems.forEach((entry, index) => {
-      const item = asRecord(entry, `memory capsule item ${index}`);
-      const id = newMemoryID(index);
-      store.items.push({
-        id,
-        schema: CAPSULE_SCHEMA,
-        source: { host, conversation_scope: scope, timestamp },
-        kind: asString(item.kind, `item ${index} kind`),
-        redacted_summary: asString(item.redacted_summary, `item ${index} redacted_summary`),
-        confidence: typeof item.confidence === 'number' ? item.confidence : 0.5,
-        evidence_hint: asString(item.evidence_hint, `item ${index} evidence_hint`),
-        privacy_tier: asString(item.privacy_tier, `item ${index} privacy_tier`),
-        retention: asString(item.retention, `item ${index} retention`),
-        tags: stringList(item.tags),
-        created_at: now,
-        raw_input_included: false,
+      const store = this.loadUnlocked();
+      const now = new Date().toISOString();
+      const ids: string[] = [];
+      capsule.items.forEach((item, index) => {
+        const id = newMemoryID(index);
+        store.items.push({
+          id,
+          schema: CAPSULE_SCHEMA,
+          source: { ...capsule.source },
+          kind: item.kind,
+          redacted_summary: item.redacted_summary,
+          confidence: item.confidence,
+          evidence_hint: item.evidence_hint,
+          privacy_tier: item.privacy_tier,
+          retention: item.retention,
+          tags: item.tags,
+          created_at: now,
+          raw_input_included: false,
+        });
+        ids.push(id);
       });
-      ids.push(id);
-    });
-    store.last_write = now;
-    this.persist(store);
-    return { ok: true, ids };
+      store.last_write = now;
+      this.persist(store);
+      return { ok: true, ids };
     });
   }
 
@@ -334,109 +318,92 @@ export class StandaloneStore {
   }
 
   graphDelta(input: unknown): Record<string, unknown> {
-    const delta = asRecord(input, 'semantic delta');
-    if (delta.schema !== DELTA_SCHEMA) {
-      throw new Error(`invalid semantic delta: schema must be ${DELTA_SCHEMA}`);
-    }
-    if (delta.raw_input_included !== false) {
-      throw new Error('invalid semantic delta: raw_input_included must be false');
-    }
-    const source = asRecord(delta.source, 'semantic delta source');
-    const host = asString(source.host, 'semantic delta source.host');
-    asString(source.conversation_scope, 'semantic delta source.conversation_scope');
-    asString(source.timestamp, 'semantic delta source.timestamp');
+    // Validate + normalize first: only whitelisted, contract-checked fields
+    // survive. Raw spreads of caller objects are gone, so arbitrary/raw-ish
+    // fields can never be persisted. Mirrors validateSemanticDelta in Go.
+    const delta = validateDelta(input);
     return this.withLock(() => {
-    const store = this.loadUnlocked();
-    const now = new Date().toISOString();
+      const store = this.loadUnlocked();
+      const now = new Date().toISOString();
 
-    let nodesUpserted = 0;
-    for (const entry of Array.isArray(delta.nodes) ? delta.nodes : []) {
-      const node = asRecord(entry, 'graph node');
-      const clientId = asString(node.client_id, 'graph node client_id');
-      const existing = store.graph.nodes.findIndex((n) => n.client_id === clientId);
-      const record = { ...node, last_seen: now };
-      if (existing >= 0) {
-        store.graph.nodes[existing] = { ...store.graph.nodes[existing], ...record };
-      } else {
-        store.graph.nodes.push({ ...record, first_seen: now });
+      let nodesUpserted = 0;
+      for (const node of delta.nodes) {
+        const existing = store.graph.nodes.findIndex((n) => n.client_id === node.client_id);
+        const record = { ...node, last_seen: now };
+        if (existing >= 0) {
+          store.graph.nodes[existing] = { ...store.graph.nodes[existing], ...record };
+        } else {
+          store.graph.nodes.push({ ...record, first_seen: now });
+        }
+        nodesUpserted += 1;
       }
-      nodesUpserted += 1;
-    }
 
-    let edgesUpserted = 0;
-    for (const entry of Array.isArray(delta.edges) ? delta.edges : []) {
-      const edge = asRecord(entry, 'graph edge');
-      const key = `${edge.from}|${edge.to}|${edge.kind}`;
-      const existing = store.graph.edges.findIndex(
-        (e) => `${e.from}|${e.to}|${e.kind}` === key,
-      );
-      const record = { ...edge, last_seen: now };
-      if (existing >= 0) {
-        store.graph.edges[existing] = { ...store.graph.edges[existing], ...record };
-      } else {
-        store.graph.edges.push({ ...record, first_seen: now });
+      let edgesUpserted = 0;
+      for (const edge of delta.edges) {
+        const key = `${edge.from}|${edge.to}|${edge.kind}`;
+        const existing = store.graph.edges.findIndex(
+          (e) => `${e.from}|${e.to}|${e.kind}` === key,
+        );
+        const record = { ...edge, last_seen: now };
+        if (existing >= 0) {
+          store.graph.edges[existing] = { ...store.graph.edges[existing], ...record };
+        } else {
+          store.graph.edges.push({ ...record, first_seen: now });
+        }
+        edgesUpserted += 1;
       }
-      edgesUpserted += 1;
-    }
 
-    let factsUpserted = 0;
-    for (const entry of Array.isArray(delta.facts) ? delta.facts : []) {
-      const fact = asRecord(entry, 'graph fact');
-      const exists = store.graph.facts.some(
-        (f) => f.node === fact.node && f.text === fact.text,
-      );
-      if (!exists) {
-        store.graph.facts.push({ ...fact, created_at: now });
+      let factsUpserted = 0;
+      for (const fact of delta.facts) {
+        const exists = store.graph.facts.some((f) => f.node === fact.node && f.text === fact.text);
+        if (!exists) {
+          store.graph.facts.push({ ...fact, created_at: now });
+        }
+        factsUpserted += 1;
       }
-      factsUpserted += 1;
-    }
 
-    const eventIds: number[] = [];
-    for (const entry of Array.isArray(delta.events) ? delta.events : []) {
-      const event = asRecord(entry, 'graph event');
-      const id = store.graph.next_event_id;
-      store.graph.next_event_id += 1;
-      store.graph.events.push({ ...event, id, created_at: now });
-      eventIds.push(id);
-    }
+      const eventIds: number[] = [];
+      for (const event of delta.events) {
+        const id = store.graph.next_event_id;
+        store.graph.next_event_id += 1;
+        store.graph.events.push({ ...event, id, created_at: now });
+        eventIds.push(id);
+      }
 
-    let checkpointSaved = false;
-    if (delta.continuity && typeof delta.continuity === 'object') {
-      const continuity = asRecord(delta.continuity, 'continuity block');
-      const threadId =
-        (typeof source.thread_id === 'string' && source.thread_id) ||
-        (typeof source.project_id === 'string' && source.project_id) ||
-        'default';
-      store.checkpoints.push({
-        id: store.checkpoints.length + 1,
-        thread_id: threadId,
-        session_id: typeof source.session_id === 'string' ? source.session_id : '',
-        host,
-        project_id: typeof source.project_id === 'string' ? source.project_id : '',
-        summary: asString(continuity.summary, 'continuity summary'),
-        decisions: stringList(continuity.decisions),
-        open_loops: stringList(continuity.open_loops),
-        do_not_repeat: stringList(continuity.do_not_repeat),
-        emotional_anchors: stringList(continuity.emotional_anchors),
-        state_signals: stringList(continuity.state_signals),
-        active_threads: stringList(continuity.active_threads),
-        review_insights: stringList(continuity.review_insights),
-        created_at: now,
-      });
-      checkpointSaved = true;
-    }
+      let checkpointSaved = false;
+      if (delta.continuity) {
+        const continuity = delta.continuity;
+        const threadId = delta.source.thread_id || delta.source.project_id || 'default';
+        store.checkpoints.push({
+          id: store.checkpoints.length + 1,
+          thread_id: threadId,
+          session_id: delta.source.session_id ?? '',
+          host: delta.source.host,
+          project_id: delta.source.project_id ?? '',
+          summary: continuity.summary,
+          decisions: continuity.decisions,
+          open_loops: continuity.open_loops,
+          do_not_repeat: continuity.do_not_repeat,
+          emotional_anchors: continuity.emotional_anchors,
+          state_signals: continuity.state_signals,
+          active_threads: continuity.active_threads,
+          review_insights: continuity.review_insights,
+          created_at: now,
+        });
+        checkpointSaved = true;
+      }
 
-    store.last_write = now;
-    this.persist(store);
-    return {
-      ok: true,
-      nodes_upserted: nodesUpserted,
-      edges_upserted: edgesUpserted,
-      facts_upserted: factsUpserted,
-      events_inserted: eventIds.length,
-      event_ids: eventIds,
-      checkpoint_saved: checkpointSaved,
-    };
+      store.last_write = now;
+      this.persist(store);
+      return {
+        ok: true,
+        nodes_upserted: nodesUpserted,
+        edges_upserted: edgesUpserted,
+        facts_upserted: factsUpserted,
+        events_inserted: eventIds.length,
+        event_ids: eventIds,
+        checkpoint_saved: checkpointSaved,
+      };
     });
   }
 
