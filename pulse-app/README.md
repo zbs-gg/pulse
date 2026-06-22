@@ -73,6 +73,15 @@ frozen Python reference: per-event scores match to float precision and the
 top-5 ordering matches on the reference test set. The boost constants and the
 conditional gating logic are frozen — see `internal/retrieve/v3boosts.go`.
 
+The parity gate runs in a clean checkout (and CI) against a small, fully
+synthetic public fixture committed under
+`internal/retrieve/testdata/parity_golden_public.json`, produced by the same
+reference engine via `testdata/gen_parity_public.py`. It exercises every boost
+term (emotion, state, anchor, date, chain expansion) and the v2_pure-collapse
+property on fabricated data — zero private corpus required. The richer private
+golden (real evaluation corpus) stays gitignored and is used only when present
+on a dev machine.
+
 Benchmark framing here is deliberately conservative: Pulse is built to be
 evaluated on public memory benchmarks (e.g. LongMemEval, LoCoMo). This
 repository ships the engine and its unit/parity tests, not any private

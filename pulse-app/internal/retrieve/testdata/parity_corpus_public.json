@@ -1,0 +1,149 @@
+{
+  "events": [
+    {
+      "id": 1,
+      "text": "shipped the v1 release after months of work, felt proud and complete",
+      "sentiment_label": "milestone",
+      "user_flag": true,
+      "days_ago": 120,
+      "emotion_tags": {
+        "joy": 0.8,
+        "anticipation": 0.4,
+        "trust": 0.3
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {
+        "hrv": 82,
+        "sleep_quality": 0.8,
+        "workout": true
+      }
+    },
+    {
+      "id": 2,
+      "text": "long overload week, anxious sleep and declining recovery, body worn down",
+      "sentiment_label": "burden",
+      "user_flag": false,
+      "days_ago": 5,
+      "emotion_tags": {
+        "sadness": 0.6,
+        "fear": 0.5
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {
+        "hrv": 48,
+        "sleep_quality": 0.3,
+        "stress_proxy": 0.7,
+        "hrv_trend": "declining_3d"
+      }
+    },
+    {
+      "id": 3,
+      "text": "calm morning, rested and steady, post-workout glow",
+      "sentiment_label": "repair",
+      "user_flag": false,
+      "days_ago": 2,
+      "emotion_tags": {
+        "joy": 0.5,
+        "trust": 0.6
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {
+        "hrv": 88,
+        "sleep_quality": 0.9,
+        "stress_proxy": 0.2,
+        "workout": true
+      }
+    },
+    {
+      "id": 4,
+      "text": "a quiet neutral note about the weather and groceries",
+      "sentiment_label": "neutral",
+      "user_flag": false,
+      "days_ago": 30,
+      "emotion_tags": {},
+      "predecessor_ids": [],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 5,
+      "text": "started the project, full of hope and anticipation for what it could become",
+      "sentiment_label": "origin",
+      "user_flag": true,
+      "days_ago": 200,
+      "emotion_tags": {
+        "anticipation": 0.7,
+        "joy": 0.4
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 6,
+      "text": "hit a hard wall mid-project, frustrated and stuck for days",
+      "sentiment_label": "wound",
+      "user_flag": false,
+      "days_ago": 150,
+      "emotion_tags": {
+        "anger": 0.6,
+        "sadness": 0.4
+      },
+      "predecessor_ids": [
+        5
+      ],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 7,
+      "text": "pushed through the wall and finally found a path forward, relieved",
+      "sentiment_label": "milestone",
+      "user_flag": false,
+      "days_ago": 130,
+      "emotion_tags": {
+        "joy": 0.6,
+        "trust": 0.5,
+        "surprise": 0.3
+      },
+      "predecessor_ids": [
+        6
+      ],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 8,
+      "text": "a recent small win this week, quietly satisfying",
+      "sentiment_label": "milestone",
+      "user_flag": false,
+      "days_ago": 3,
+      "emotion_tags": {
+        "joy": 0.5
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 9,
+      "text": "felt scared and anxious before the big talk, fear of failing publicly",
+      "sentiment_label": "burden",
+      "user_flag": false,
+      "days_ago": 20,
+      "emotion_tags": {
+        "fear": 0.8,
+        "sadness": 0.3
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {}
+    },
+    {
+      "id": 10,
+      "text": "old structural truth about how the system is meant to work, foundational",
+      "sentiment_label": "origin",
+      "user_flag": true,
+      "days_ago": 300,
+      "emotion_tags": {
+        "trust": 0.6
+      },
+      "predecessor_ids": [],
+      "biometric_snapshot": {}
+    }
+  ]
+}
