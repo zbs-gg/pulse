@@ -185,4 +185,7 @@ autonomous prioritization or production readiness. See
 
 ## License
 
-MIT for the npm packages (see per-package LICENSE files).
+**Author:** Nikita Shilov · **License:** [AGPL-3.0](./LICENSE) (open source).
+The AGPL network-copyleft applies to the engine and the npm packages (see the
+root and per-package `LICENSE` files). For proprietary / closed SaaS use without
+AGPL obligations, a commercial license is available — see [`COMMERCIAL.md`](./COMMERCIAL.md).

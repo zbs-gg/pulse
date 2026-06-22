@@ -2,7 +2,7 @@
   "name": "@zbs-gg/pulse-mcp",
   "version": "0.4.1",
   "description": "Internal MCP server component of @zbs-gg/pulse. Not published \u2014 install @zbs-gg/pulse instead.",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "author": "Nikita Shilov",
   "type": "module",
   "main": "dist/index.js",

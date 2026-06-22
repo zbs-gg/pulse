@@ -114,4 +114,4 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
 Docs, agent install script, and source: https://github.com/zbs-gg/pulse
 (see `AGENTS.md` — written for AI agents asked to vet this install).
 
-MIT.
+AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available (`COMMERCIAL.md`).
