@@ -84,6 +84,18 @@ type SemanticEvent struct {
 	Biometrics *SemanticBiometrics `json:"biometrics,omitempty"`
 	// Emotions is a Plutchik-10 vector (0..1) for emotion-alignment scoring.
 	Emotions map[string]float64 `json:"emotions,omitempty"`
+	// Claims are host-extracted subject/predicate/object facts carried by this
+	// event. Each becomes a bitemporal Assertion (auto-superseding the prior
+	// claim with the same subject+predicate), so a changed fact invalidates the
+	// stale one instead of silently coexisting. Optional.
+	Claims []SemanticClaim `json:"claims,omitempty"`
+}
+
+// SemanticClaim is a structured fact: "<subject> <predicate> <object>".
+type SemanticClaim struct {
+	Subject   string `json:"subject"`
+	Predicate string `json:"predicate"`
+	Object    string `json:"object"`
 }
 
 // SemanticBiometrics matches the bio snapshot JSON read by state-fit boosts.
@@ -165,6 +177,24 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.EventIDs = append(result.EventIDs, id)
 		result.EventsInserted++
+		// Record host-extracted claims as bitemporal assertions in the SAME
+		// transaction (atomic with the event), auto-superseding prior claims.
+		validFrom := now
+		if strings.TrimSpace(event.OccurredAt) != "" {
+			validFrom = strings.TrimSpace(event.OccurredAt)
+		}
+		for _, cl := range event.Claims {
+			if strings.TrimSpace(cl.Subject) == "" || strings.TrimSpace(cl.Predicate) == "" || strings.TrimSpace(cl.Object) == "" {
+				continue
+			}
+			if _, err := supersedeAssertionTx(tx, Assertion{
+				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
+				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
+				ExtractorVersion: "host-extracted", Scope: Scope{Type: "personal"},
+			}); err != nil {
+				return result, fmt.Errorf("record claim for event %q: %w", event.ClientID, err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return result, err
@@ -646,6 +676,20 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 		}
 		if bio.HRV != nil && (*bio.HRV < 0 || *bio.HRV > 300) {
 			return fmt.Errorf("events[%d].biometrics.hrv is out of range", i)
+		}
+	}
+	if len(event.Claims) > 20 {
+		return fmt.Errorf("events[%d].claims has too many items", i)
+	}
+	for j, cl := range event.Claims {
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].subject", i, j), cl.Subject, 200, true); err != nil {
+			return err
+		}
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].predicate", i, j), cl.Predicate, 120, true); err != nil {
+			return err
+		}
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].object", i, j), cl.Object, 400, true); err != nil {
+			return err
 		}
 	}
 	return nil

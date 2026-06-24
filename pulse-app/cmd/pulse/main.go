@@ -283,9 +283,10 @@ func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
 	expander := expanderFromEnv(dataDir)
 
 	engine := retrieve.New(retrieve.Config{
-		Store:    s,
-		Embedder: embedder,
-		Expander: expander,
+		Store:            s,
+		Embedder:         embedder,
+		Expander:         expander,
+		AssertionOverlay: os.Getenv("PULSE_ASSERTION_OVERLAY") == "1",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

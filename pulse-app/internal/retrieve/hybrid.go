@@ -76,6 +76,11 @@ type Engine struct {
 
 	embedModel    string
 	referenceTime time.Time
+
+	// assertionOverlay, when true, demotes a stale fact-event below its own
+	// correction in the final ranked list (supersession-aware). Default false:
+	// the list is untouched, so the frozen v3 path stays byte-identical.
+	assertionOverlay bool
 }
 
 // Config bundles the dependencies an Engine needs.
@@ -87,6 +92,9 @@ type Config struct {
 	// ReferenceTime — if set, days_ago is computed as
 	// (ReferenceTime - event.ts) / 24h. Defaults to time.Now() at Init().
 	ReferenceTime *time.Time
+	// AssertionOverlay enables supersession-aware demotion of stale fact-events
+	// in the final ranked list (post-scoring; never alters v3 scores/gating).
+	AssertionOverlay bool
 }
 
 // New builds an Engine with sensible defaults. Call Init() to load indexes.
@@ -114,6 +122,7 @@ func New(cfg Config) *Engine {
 		referenceTime:     ref,
 		parentToChild:     make(map[int64][]int64),
 		childToParent:     make(map[int64][]int64),
+		assertionOverlay:  cfg.AssertionOverlay,
 	}
 }
 
@@ -501,6 +510,13 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	var surfaceability SurfaceabilityAction
 	ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
 
+	// Supersession-aware demotion (default-off, post-scoring): if both a stale
+	// fact-event and its correction are present, the stale one is moved below
+	// the correction. Pure reorder — no v3 score/gating change.
+	if e.assertionOverlay {
+		ids = e.applyAssertionDemotion(ids)
+	}
+
 	return &RetrieveResponse{
 		EventIDs:             ids,
 		ModeUsed:             mode,
@@ -509,6 +525,46 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		SurfaceabilityAction: surfaceability,
 		ScoreBreakdowns:      breakdowns,
 	}, nil
+}
+
+// applyAssertionDemotion moves any stale fact-event below its own correction
+// when BOTH are present in ids (supersession-aware). Demote-only: it never
+// drops, adds, or rescoring an id. With no superseded pairs in the store (every
+// assertion-free corpus, including the v3 golden) it returns ids unchanged, so
+// the frozen empathic path is unaffected unless an actual superseded fact and
+// its replacement both surface.
+func (e *Engine) applyAssertionDemotion(ids []int64) []int64 {
+	if e.store == nil || len(ids) < 2 {
+		return ids
+	}
+	pairs, err := e.store.SupersededPairsForEvents(ids)
+	if err != nil || len(pairs) == 0 {
+		return ids
+	}
+	out := make([]int64, len(ids))
+	copy(out, ids)
+	indexOf := func(s []int64, v int64) int {
+		for i, x := range s {
+			if x == v {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, p := range pairs {
+		stale, cur := p[0], p[1]
+		si, ci := indexOf(out, stale), indexOf(out, cur)
+		if si < 0 || ci < 0 || si > ci {
+			continue // missing, or stale already below its correction
+		}
+		out = append(out[:si], out[si+1:]...) // remove stale
+		ci = indexOf(out, cur)
+		at := ci + 1
+		out = append(out, 0)
+		copy(out[at+1:], out[at:])
+		out[at] = stale // reinsert just after the correction
+	}
+	return out
 }
 
 func (e *Engine) embedQuery(ctx context.Context, q string) ([]float32, error) {

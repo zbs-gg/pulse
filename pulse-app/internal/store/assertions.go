@@ -112,6 +112,25 @@ func (s *Store) SaveAssertion(a Assertion) (int64, error) {
 // superseded, then inserts the new active assertion and links them. The prior
 // rows are never deleted — history stays queryable as-of.
 func (s *Store) SupersedeAssertion(a Assertion) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	newID, err := supersedeAssertionTx(tx, a)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newID, nil
+}
+
+// supersedeAssertionTx is SupersedeAssertion's body without its own
+// transaction, so callers (e.g. SaveSemanticDelta) can record a claim ATOMICALLY
+// in the same transaction as the producing event.
+func supersedeAssertionTx(tx *sql.Tx, a Assertion) (int64, error) {
 	a = withDerivedKey(a)
 	scope := a.Scope.normalized()
 	now := a.SystemFrom
@@ -122,13 +141,6 @@ func (s *Store) SupersedeAssertion(a Assertion) (int64, error) {
 	if strings.TrimSpace(validTo) == "" {
 		validTo = now
 	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
 	newID, err := insertAssertion(tx, a)
 	if err != nil {
 		return 0, err
@@ -143,10 +155,54 @@ func (s *Store) SupersedeAssertion(a Assertion) (int64, error) {
 		validTo, newID, a.ClaimKey, scope.Type, scope.ID, newID); err != nil {
 		return 0, fmt.Errorf("supersede prior assertions: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return newID, nil
+}
+
+// SupersededPairsForEvents returns (staleEventID, currentEventID) pairs where a
+// superseded assertion's source event and its replacement's source event are
+// BOTH among ids. The retrieval demotion overlay uses this to move a stale fact
+// below its own correction. Read-only; never mutates.
+func (s *Store) SupersededPairsForEvents(ids []int64) ([][2]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT a.source_event_ids, c.source_event_ids
+		  FROM assertions a
+		  JOIN assertions c ON a.superseded_by = c.id
+		 WHERE a.status = 'superseded'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	in := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		in[id] = true
+	}
+	var out [][2]int64
+	for rows.Next() {
+		var staleJSON, curJSON sql.NullString
+		if err := rows.Scan(&staleJSON, &curJSON); err != nil {
+			return nil, err
+		}
+		stale := firstEventID(staleJSON.String)
+		cur := firstEventID(curJSON.String)
+		if stale != 0 && cur != 0 && stale != cur && in[stale] && in[cur] {
+			out = append(out, [2]int64{stale, cur})
+		}
+	}
+	return out, rows.Err()
+}
+
+func firstEventID(jsonArr string) int64 {
+	if strings.TrimSpace(jsonArr) == "" {
+		return 0
+	}
+	var arr []int64
+	if err := json.Unmarshal([]byte(jsonArr), &arr); err != nil || len(arr) == 0 {
+		return 0
+	}
+	return arr[0]
 }
 
 // RetractAssertion records "we recorded it wrong": it closes the system
