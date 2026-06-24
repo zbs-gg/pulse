@@ -58,6 +58,10 @@ type Assertion struct {
 	Scope            Scope
 	CreatedAt        string
 
+	// CtxVec is the embedding of "<subject> <predicate> <object>", persisted in
+	// ctx_vec; claim resolution compares claims by meaning, not just key. Optional.
+	CtxVec []float32
+
 	// Subject is the human-readable subject used to build ClaimKey when
 	// ClaimKey is empty. Not stored directly; the entity ref carries identity.
 	Subject string
@@ -229,7 +233,7 @@ func (s *Store) CurrentAssertions(claimKey string, scope Scope) ([]Assertion, er
 		SELECT id, claim_key, subject_entity_id, predicate, object_text, object_entity_id,
 		       qualifiers, confidence, valid_from, valid_to, system_from, system_to,
 		       status, superseded_by, source_event_ids, extractor_version,
-		       scope_type, scope_id, visibility, created_at
+		       scope_type, scope_id, visibility, created_at, ctx_vec
 		  FROM assertions
 		 WHERE claim_key = ? AND scope_type = ? AND scope_id = ?
 		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
@@ -287,17 +291,26 @@ func insertAssertion(tx *sql.Tx, a Assertion) (int64, error) {
 		sourceEvents = string(raw)
 	}
 
+	var ctxVec any
+	if len(a.CtxVec) > 0 {
+		raw, err := json.Marshal(a.CtxVec)
+		if err != nil {
+			return 0, fmt.Errorf("marshal ctx_vec: %w", err)
+		}
+		ctxVec = string(raw)
+	}
+
 	res, err := tx.Exec(`
 		INSERT INTO assertions
 		  (claim_key, subject_entity_id, predicate, object_text, object_entity_id,
 		   qualifiers, confidence, valid_from, valid_to, system_from, system_to,
 		   status, superseded_by, source_event_ids, extractor_version,
-		   scope_type, scope_id, visibility, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+		   scope_type, scope_id, visibility, created_at, object_norm, ctx_vec)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ClaimKey, a.SubjectEntityID, a.Predicate, a.ObjectText, a.ObjectEntityID,
 		qualifiers, confidence, nullableString(a.ValidFrom), nullableString(a.ValidTo), now,
 		status, sourceEvents, nullableString(a.ExtractorVersion),
-		scope.Type, scope.ID, scope.Visibility, created)
+		scope.Type, scope.ID, scope.Visibility, created, normalizeObject(a.ObjectText), ctxVec)
 	if err != nil {
 		return 0, fmt.Errorf("insert assertion: %w", err)
 	}
@@ -316,14 +329,17 @@ func scanAssertions(rows *sql.Rows) ([]Assertion, error) {
 	for rows.Next() {
 		var a Assertion
 		var subj, objEnt, supBy sql.NullInt64
-		var qualifiers, validFrom, validTo, systemTo, sourceEvents, extractor sql.NullString
+		var qualifiers, validFrom, validTo, systemTo, sourceEvents, extractor, ctxVec sql.NullString
 		if err := rows.Scan(
 			&a.ID, &a.ClaimKey, &subj, &a.Predicate, &a.ObjectText, &objEnt,
 			&qualifiers, &a.Confidence, &validFrom, &validTo, &a.SystemFrom, &systemTo,
 			&a.Status, &supBy, &sourceEvents, &extractor,
-			&a.Scope.Type, &a.Scope.ID, &a.Scope.Visibility, &a.CreatedAt,
+			&a.Scope.Type, &a.Scope.ID, &a.Scope.Visibility, &a.CreatedAt, &ctxVec,
 		); err != nil {
 			return nil, err
+		}
+		if ctxVec.Valid && ctxVec.String != "" {
+			_ = json.Unmarshal([]byte(ctxVec.String), &a.CtxVec)
 		}
 		if subj.Valid {
 			v := subj.Int64

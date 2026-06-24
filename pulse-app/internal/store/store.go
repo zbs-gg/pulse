@@ -13,6 +13,11 @@ import (
 type Store struct {
 	db   *sql.DB
 	path string
+
+	// Claim-resolution config (default off). See claim_resolver.go.
+	claimMode      string                          // "off" | "shadow" | "on"
+	claimThreshold float64                         // cosine threshold for supersede
+	claimEmbed     func(string) ([]float32, error) // injected by the server when an embedder is wired
 }
 
 // DB returns the underlying *sql.DB for use by other packages.

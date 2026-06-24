@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -132,6 +133,10 @@ type SemanticDeltaResult struct {
 	EventsInserted  int     `json:"events_inserted"`
 	EventIDs        []int64 `json:"event_ids,omitempty"`
 	CheckpointSaved bool    `json:"checkpoint_saved"`
+	// Claim-resolution counts (0 when resolution is disabled).
+	ClaimsInserted   int `json:"claims_inserted,omitempty"`
+	ClaimsSuperseded int `json:"claims_superseded,omitempty"`
+	ClaimsSkipped    int `json:"claims_skipped,omitempty"`
 	// EventsIndexed reports whether freshly ingested events were embedded and
 	// are retrievable now (nil = no retrieval engine / no events in delta).
 	EventsIndexed *bool `json:"events_indexed,omitempty"`
@@ -170,6 +175,7 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.FactsUpserted++
 	}
+	var pendingClaims []Assertion // resolved AFTER commit (embedding is IO, not in-tx)
 	for _, event := range delta.Events {
 		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
 		if err != nil {
@@ -177,8 +183,6 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.EventIDs = append(result.EventIDs, id)
 		result.EventsInserted++
-		// Record host-extracted claims as bitemporal assertions in the SAME
-		// transaction (atomic with the event), auto-superseding prior claims.
 		validFrom := now
 		if strings.TrimSpace(event.OccurredAt) != "" {
 			validFrom = strings.TrimSpace(event.OccurredAt)
@@ -187,17 +191,37 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 			if strings.TrimSpace(cl.Subject) == "" || strings.TrimSpace(cl.Predicate) == "" || strings.TrimSpace(cl.Object) == "" {
 				continue
 			}
-			if _, err := supersedeAssertionTx(tx, Assertion{
+			pendingClaims = append(pendingClaims, Assertion{
 				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
 				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
 				ExtractorVersion: "host-extracted", Scope: Scope{Type: "personal"},
-			}); err != nil {
-				return result, fmt.Errorf("record claim for event %q: %w", event.ClientID, err)
-			}
+			})
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return result, err
+	}
+
+	// Claims become bitemporal assertions via the precision-first resolver, but
+	// only when claim resolution is enabled (default off = nothing written, so
+	// the facts/events path above is the entire behavior). Best-effort: a claim
+	// that fails to resolve must not fail the already-committed delta.
+	if s.claimResolutionEnabled() {
+		for _, a := range pendingClaims {
+			d, err := s.ResolveClaim(a)
+			if err != nil {
+				log.Printf("claim resolve failed (%s): %v", a.ClaimKey, err)
+				continue
+			}
+			switch d.Action {
+			case "supersede":
+				result.ClaimsSuperseded++
+			case "noop":
+				result.ClaimsSkipped++
+			default:
+				result.ClaimsInserted++
+			}
+		}
 	}
 
 	if delta.Continuity != nil {

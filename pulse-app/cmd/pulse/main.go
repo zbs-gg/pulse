@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -107,6 +108,24 @@ func run(dataDir, addr string) error {
 			DB:        s.DB(),
 			Retrieval: retrievalEngine,
 		})
+	}
+
+	// Claim resolution (default OFF). Enabled only when an embedder is wired and
+	// PULSE_CLAIM_RESOLUTION is shadow|on. Precision-first; never touches v3.
+	if retrievalEngine != nil && retrievalEngine.EmbedderReady() {
+		if mode := strings.TrimSpace(os.Getenv("PULSE_CLAIM_RESOLUTION")); mode == "shadow" || mode == "on" {
+			thr := 0.83
+			if v := strings.TrimSpace(os.Getenv("PULSE_CLAIM_COSINE_THRESHOLD")); v != "" {
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
+					thr = f
+				}
+			}
+			eng := retrievalEngine
+			s.EnableClaimResolution(mode, thr, func(t string) ([]float32, error) {
+				return eng.EmbedText(context.Background(), t)
+			})
+			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr)
+		}
 	}
 
 	// Apple Health snapshot provider. M0 = static fixture so demos and

@@ -567,6 +567,15 @@ func (e *Engine) applyAssertionDemotion(ids []int64) []int64 {
 	return out
 }
 
+// EmbedText embeds a single string with the wired embedder. Public so the store
+// can resolve claims by meaning. Returns nil,nil when no embedder is configured.
+func (e *Engine) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	if e.embedder == nil {
+		return nil, nil
+	}
+	return e.embedQuery(ctx, text)
+}
+
 func (e *Engine) embedQuery(ctx context.Context, q string) ([]float32, error) {
 	vecs, err := e.embedder.Embed(ctx, []string{q}, embed.TypeSearchQuery)
 	if err != nil {
