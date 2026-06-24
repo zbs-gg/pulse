@@ -245,6 +245,30 @@ func (s *Store) CurrentAssertions(claimKey string, scope Scope) ([]Assertion, er
 	return scanAssertions(rows)
 }
 
+// ActiveAssertionsInScope returns all currently-believed assertions in a scope
+// (across claim_keys), with ctx_vec — used by cross-key resolution to find a
+// fact phrased with a different subject. Capped for safety.
+func (s *Store) ActiveAssertionsInScope(scope Scope, limit int) ([]Assertion, error) {
+	scope = scope.normalized()
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`
+		SELECT id, claim_key, subject_entity_id, predicate, object_text, object_entity_id,
+		       qualifiers, confidence, valid_from, valid_to, system_from, system_to,
+		       status, superseded_by, source_event_ids, extractor_version,
+		       scope_type, scope_id, visibility, created_at, ctx_vec
+		  FROM assertions
+		 WHERE scope_type = ? AND scope_id = ?
+		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
+		 ORDER BY id DESC LIMIT ?`, scope.Type, scope.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAssertions(rows)
+}
+
 func insertAssertion(tx *sql.Tx, a Assertion) (int64, error) {
 	a = withDerivedKey(a)
 	if a.ClaimKey == "|" || a.ClaimKey == "" {

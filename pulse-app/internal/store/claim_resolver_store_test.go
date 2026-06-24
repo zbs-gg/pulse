@@ -66,6 +66,36 @@ func TestResolveClaim_CoffeePreferenceVsTime_KeepsBoth(t *testing.T) {
 	}
 }
 
+func TestResolveClaim_CrossKeyMergesDriftNotDifferentAttribute(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("on", 0.83, stubEmbed)
+	s.EnableCrossKey(0.75) // stub gives ~0.82 for same attribute, ~0.40 across attributes
+	personal := Scope{Type: "personal"}
+	// Same attribute, DIFFERENT subject phrasing (drift) — should merge cross-key.
+	s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "bali", Scope: personal})
+	d, _ := s.ResolveClaim(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "lisbon", Scope: personal})
+	if d.Action != "supersede" {
+		t.Fatalf("home drift (home base -> home) should cross-key merge, got %s (%s, cos %.2f)", d.Action, d.Reason, d.Cosine)
+	}
+	// A different attribute must NOT be swept in.
+	s.ResolveClaim(Assertion{Subject: "alex coffee", Predicate: "preference", ObjectText: "cortado", Scope: personal})
+	cur, _ := s.CurrentAssertions(MakeClaimKey("alex coffee", "preference"), personal)
+	if len(cur) != 1 || cur[0].ObjectText != "cortado" {
+		t.Fatalf("coffee preference must be untouched by cross-key, got %+v", cur)
+	}
+	// Home: only the current value remains active across both keys.
+	act, _ := s.ActiveAssertionsInScope(personal, 0)
+	homeActive := 0
+	for _, a := range act {
+		if a.ClaimKey == MakeClaimKey("alex home base", "is") || a.ClaimKey == MakeClaimKey("alex home", "is") {
+			homeActive++
+		}
+	}
+	if homeActive != 1 {
+		t.Fatalf("exactly one home assertion should stay active after cross-key merge, got %d", homeActive)
+	}
+}
+
 func TestResolveClaim_ShadowNeverSupersedes(t *testing.T) {
 	s := openTestStore(t)
 	s.EnableClaimResolution("shadow", 0.83, stubEmbed)

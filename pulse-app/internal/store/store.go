@@ -16,8 +16,10 @@ type Store struct {
 
 	// Claim-resolution config (default off). See claim_resolver.go.
 	claimMode      string                          // "off" | "shadow" | "on"
-	claimThreshold float64                         // cosine threshold for supersede
+	claimThreshold float64                         // cosine threshold for same-key supersede
 	claimEmbed     func(string) ([]float32, error) // injected by the server when an embedder is wired
+	claimXKey      bool                            // enable cross-key resolution (subject phrased differently)
+	claimXThresh   float64                         // higher cosine threshold for cross-key supersede
 }
 
 // DB returns the underlying *sql.DB for use by other packages.

@@ -22,6 +22,47 @@ func (s *Store) claimResolutionEnabled() bool {
 	return s.claimEmbed != nil && (s.claimMode == "shadow" || s.claimMode == "on")
 }
 
+// EnableCrossKey turns on cross-key resolution: a new claim can supersede an
+// existing one phrased with a DIFFERENT subject string, matched by context
+// embedding. Higher threshold than same-key (precision-first).
+func (s *Store) EnableCrossKey(threshold float64) {
+	s.claimXKey = true
+	if threshold <= 0 {
+		threshold = 0.90
+	}
+	s.claimXThresh = threshold
+}
+
+// crossKeyTarget finds an active in-scope assertion for the SAME attribute (same
+// predicate, different object) phrased with a different subject, by context
+// similarity. Returns its id+cosine if it clears the cross-key threshold, else 0.
+func (s *Store) crossKeyTarget(a Assertion, vec []float32) (int64, float64) {
+	cands, err := s.ActiveAssertionsInScope(a.Scope, 0)
+	if err != nil || len(vec) == 0 {
+		return 0, 0
+	}
+	inPred := normalizeClaimComponent(a.Predicate)
+	inObj := normalizeObject(a.ObjectText)
+	bestID := int64(0)
+	bestCos := s.claimXThresh
+	for _, c := range cands {
+		if c.ClaimKey == a.ClaimKey || normalizeClaimComponent(c.Predicate) != inPred {
+			continue
+		}
+		if normalizeObject(c.ObjectText) == inObj {
+			continue
+		}
+		if cos := cosine(vec, c.CtxVec); cos >= bestCos {
+			bestCos = cos
+			bestID = c.ID
+		}
+	}
+	if bestID == 0 {
+		return 0, 0
+	}
+	return bestID, bestCos
+}
+
 // ResolveClaim resolves an incoming claim against existing claims for the same
 // claim_key+scope and writes the result. Embedding happens here (outside any
 // delta transaction). Precision-first: a failed embed or low similarity falls
@@ -51,6 +92,13 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 		})
 	}
 	d := DecideClaim(a.Predicate, a.ObjectText, a.Scope, cc, s.claimThreshold)
+	// Cross-key fallback: no same-key update, but the same attribute may exist
+	// under a differently-phrased subject. High-threshold, precision-first.
+	if d.Action == "insert" && s.claimXKey {
+		if tid, cos := s.crossKeyTarget(a, vec); tid != 0 {
+			d = ClaimDecision{Action: "supersede", TargetID: tid, Cosine: cos, Reason: "cross-key match"}
+		}
+	}
 	if s.claimMode == "shadow" && d.Action == "supersede" {
 		d.Action = "insert"
 		d.Reason = "shadow: would supersede, inserting instead"

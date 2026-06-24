@@ -124,7 +124,17 @@ func run(dataDir, addr string) error {
 			s.EnableClaimResolution(mode, thr, func(t string) ([]float32, error) {
 				return eng.EmbedText(context.Background(), t)
 			})
-			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr)
+			xkey := os.Getenv("PULSE_CLAIM_XKEY") == "1"
+			if xkey {
+				xthr := 0.90
+				if v := strings.TrimSpace(os.Getenv("PULSE_CLAIM_XKEY_THRESHOLD")); v != "" {
+					if f, err := strconv.ParseFloat(v, 64); err == nil {
+						xthr = f
+					}
+				}
+				s.EnableCrossKey(xthr)
+			}
+			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr, "cross_key", xkey)
 		}
 	}
 
