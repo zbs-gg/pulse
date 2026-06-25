@@ -179,7 +179,8 @@ func (s *Store) SupersededPairsForEvents(ids []int64) ([][2]int64, error) {
 		SELECT a.source_event_ids, c.source_event_ids
 		  FROM assertions a
 		  JOIN assertions c ON a.superseded_by = c.id
-		 WHERE a.status = 'superseded'`)
+		 WHERE a.status = 'superseded'
+		 ORDER BY a.id`)
 	if err != nil {
 		return nil, err
 	}

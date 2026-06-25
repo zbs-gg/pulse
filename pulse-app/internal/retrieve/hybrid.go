@@ -541,28 +541,67 @@ func (e *Engine) applyAssertionDemotion(ids []int64) []int64 {
 	if err != nil || len(pairs) == 0 {
 		return ids
 	}
-	out := make([]int64, len(ids))
-	copy(out, ids)
-	indexOf := func(s []int64, v int64) int {
-		for i, x := range s {
-			if x == v {
-				return i
-			}
-		}
-		return -1
-	}
+	return demoteSupersededBelowCurrent(ids, pairs)
+}
+
+// demoteSupersededBelowCurrent deterministically places every stale event
+// immediately after the CURRENT leaf of its supersession chain (A→B→C ⇒ A,B sit
+// after C, never above it), while preserving the relative order of all UNRELATED
+// events. Pure and order-neutral: the result depends only on ids+pairs, not on
+// the row order pairs arrive in, and events touched by no pair keep their order.
+func demoteSupersededBelowCurrent(ids []int64, pairs [][2]int64) []int64 {
+	succ := make(map[int64]int64, len(pairs)) // stale -> immediate current
 	for _, p := range pairs {
-		stale, cur := p[0], p[1]
-		si, ci := indexOf(out, stale), indexOf(out, cur)
-		if si < 0 || ci < 0 || si > ci {
-			continue // missing, or stale already below its correction
+		succ[p[0]] = p[1]
+	}
+	if len(succ) == 0 {
+		return ids
+	}
+	pos := make(map[int64]int, len(ids))
+	for i, id := range ids {
+		pos[id] = i
+	}
+	terminal := func(x int64) int64 { // current leaf of x's chain (cycle-guarded)
+		seen := map[int64]bool{}
+		for {
+			n, ok := succ[x]
+			if !ok || seen[x] {
+				return x
+			}
+			seen[x] = true
+			x = n
 		}
-		out = append(out[:si], out[si+1:]...) // remove stale
-		ci = indexOf(out, cur)
-		at := ci + 1
-		out = append(out, 0)
-		copy(out[at+1:], out[at:])
-		out[at] = stale // reinsert just after the correction
+	}
+	// A stale event is "violating" only if its current leaf is present AND ranked
+	// above it. Already-below stales and unrelated events are left exactly in place
+	// (order-neutral); only violating stales move — down to just after their leaf.
+	violating := make(map[int64]bool)
+	for s := range succ {
+		sp, ok := pos[s]
+		if !ok {
+			continue
+		}
+		if lp, ok := pos[terminal(s)]; ok && sp < lp {
+			violating[s] = true
+		}
+	}
+	if len(violating) == 0 {
+		return ids
+	}
+	insertAfter := make(map[int64][]int64) // leaf -> its violating stales, in original order
+	reduced := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if violating[id] {
+			leaf := terminal(id)
+			insertAfter[leaf] = append(insertAfter[leaf], id)
+			continue
+		}
+		reduced = append(reduced, id)
+	}
+	out := make([]int64, 0, len(ids))
+	for _, id := range reduced {
+		out = append(out, id)
+		out = append(out, insertAfter[id]...)
 	}
 	return out
 }
