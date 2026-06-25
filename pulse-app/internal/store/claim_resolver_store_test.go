@@ -139,6 +139,40 @@ func TestResolveClaim_ShadowNeverSupersedes(t *testing.T) {
 	}
 }
 
+// Pro NO-GO #5: claims isolate by conversation_scope — the same-key fact in a
+// different scope must NOT be superseded (scope is no longer decorative).
+func TestSaveSemanticDelta_ScopeIsolatesByConversation(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("on", 0.83, stubEmbed)
+	mk := func(scope, obj string, cue bool) SemanticDelta {
+		return SemanticDelta{
+			Schema: SemanticDeltaSchema,
+			Source: SemanticDeltaSource{Host: "claude-code", ConversationScope: scope, Timestamp: "2026-05-01T09:00:00Z"},
+			Events: []SemanticEvent{{
+				ClientID: "ev:1", Title: "home note", Summary: "Alex home is " + obj + ".",
+				Confidence: 0.9, PrivacyTier: "normal", OccurredAt: "2026-05-01T09:00:00Z",
+				Claims: []SemanticClaim{{Subject: "alex home", Predicate: "is", Object: obj, ChangeCue: cue}},
+			}},
+		}
+	}
+	if _, err := s.SaveSemanticDelta(mk("project_context", "bali", false)); err != nil {
+		t.Fatalf("delta A: %v", err)
+	}
+	// Same claim_key, DIFFERENT conversation_scope, with a change-cue — must not merge.
+	if _, err := s.SaveSemanticDelta(mk("current_turn", "lisbon", true)); err != nil {
+		t.Fatalf("delta B: %v", err)
+	}
+	key := MakeClaimKey("alex home", "is")
+	a, _ := s.CurrentAssertions(key, Scope{Type: "personal", ID: "project_context"})
+	b, _ := s.CurrentAssertions(key, Scope{Type: "personal", ID: "current_turn"})
+	if len(a) != 1 || a[0].ObjectText != "bali" {
+		t.Fatalf("project_context scope should keep [bali], got %+v", a)
+	}
+	if len(b) != 1 || b[0].ObjectText != "lisbon" {
+		t.Fatalf("current_turn scope should keep [lisbon], got %+v", b)
+	}
+}
+
 func TestSaveSemanticDelta_ClaimResolutionOff_WritesNoAssertions(t *testing.T) {
 	s := openTestStore(t) // EnableClaimResolution NOT called => off
 	delta := SemanticDelta{

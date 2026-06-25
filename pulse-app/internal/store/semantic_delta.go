@@ -197,7 +197,12 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 			pendingClaims = append(pendingClaims, Assertion{
 				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
 				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
-				ExtractorVersion: "host-extracted", Scope: Scope{Type: "personal"},
+				ExtractorVersion: "host-extracted",
+				// Scope is no longer hard-coded: claims isolate by the delta's
+				// conversation_scope so a fact in one scope never supersedes the
+				// same-key fact in another (Pro NO-GO #5 — scope was decorative).
+				// (visibility/privacy_tier mapping is deferred to the FFB-tested pass.)
+				Scope:     Scope{Type: "personal", ID: strings.TrimSpace(delta.Source.ConversationScope)},
 				ChangeCue: cl.ChangeCue,
 			})
 		}
