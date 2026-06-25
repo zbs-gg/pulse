@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -195,6 +196,29 @@ func TestResolveClaim_ShadowRecordsDecisionLedger(t *testing.T) {
 	}
 	if cos < 0.83 {
 		t.Fatalf("recorded cosine should be the similarity that justified it, got %.3f", cos)
+	}
+}
+
+// Pro NO-GO #4 (CAS): if the supersede target was concurrently superseded, the
+// write is rejected and rolled back — never leaving two active currents.
+func TestSupersedeTargetTx_RejectsStaleTarget(t *testing.T) {
+	s := openTestStore(t)
+	p := Scope{Type: "personal"}
+	id, err := s.SaveAssertion(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "bali", Scope: p})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Simulate a concurrent winner: the target already moved off 'active'.
+	if _, err := s.DB().Exec("UPDATE assertions SET status='superseded' WHERE id=?", id); err != nil {
+		t.Fatalf("simulate race: %v", err)
+	}
+	_, err = s.supersedeTargetTx(id, Assertion{Subject: "alex home", Predicate: "is", ObjectText: "lisbon", Scope: p}, 0.9)
+	if !errors.Is(err, errStaleTarget) {
+		t.Fatalf("stale target must be rejected with errStaleTarget, got %v", err)
+	}
+	cur, _ := s.CurrentAssertions(MakeClaimKey("alex home", "is"), p)
+	if len(cur) != 0 {
+		t.Fatalf("rolled-back insert must leave no new current, got %+v", cur)
 	}
 }
 

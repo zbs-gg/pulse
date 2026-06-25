@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -75,7 +76,10 @@ func (s *Store) crossKeyTarget(a Assertion, vec []float32) (int64, float64) {
 // delta transaction). Precision-first: a failed embed or low similarity falls
 // back to insert (keep both) — never a wrong supersede.
 func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
-	a = withDerivedKey(a)
+	return s.resolveClaim(withDerivedKey(a), 0)
+}
+
+func (s *Store) resolveClaim(a Assertion, depth int) (ClaimDecision, error) {
 	if s.claimEmbed == nil {
 		_, err := s.SaveAssertion(a)
 		return ClaimDecision{Action: "insert", Reason: "resolution disabled"}, err
@@ -120,6 +124,9 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 		return d, nil
 	case "supersede":
 		_, err := s.supersedeTargetTx(d.TargetID, a, d.Cosine)
+		if errors.Is(err, errStaleTarget) && depth < 3 {
+			return s.resolveClaim(a, depth+1) // lost a race — re-resolve against current state
+		}
 		return d, err
 	default: // insert (d.ValidTo set => historical backfill insert, not current)
 		if d.ValidTo != "" {
@@ -167,18 +174,29 @@ func (s *Store) supersedeTargetTx(targetID int64, a Assertion, cos float64) (int
 	if validTo == "" {
 		validTo = nowRFC3339()
 	}
-	if _, err := tx.Exec(`
+	res, err := tx.Exec(`
 		UPDATE assertions
 		   SET status = 'superseded', valid_to = COALESCE(valid_to, ?),
 		       superseded_by = ?, resolution_cosine = ?
-		 WHERE id = ? AND status = 'active'`, validTo, newID, cos, targetID); err != nil {
+		 WHERE id = ? AND status = 'active'`, validTo, newID, cos, targetID)
+	if err != nil {
 		return 0, fmt.Errorf("supersede target %d: %w", targetID, err)
+	}
+	// CAS (NO-GO #4): the target must still be active. If a concurrent resolution
+	// already superseded it, 0 rows change — abort (rollback discards the insert
+	// too) so we never leave TWO active currents; the caller re-resolves.
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, errStaleTarget
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return newID, nil
 }
+
+// errStaleTarget: the supersede target was no longer active (lost a race). The
+// caller re-resolves against the now-current state instead of double-inserting.
+var errStaleTarget = errors.New("claim supersede target no longer active")
 
 // ClaimDecision is the outcome of resolving an incoming claim against the claims
 // already in the store for the same claim_key+scope. It is intentionally
