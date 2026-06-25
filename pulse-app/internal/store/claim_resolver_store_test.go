@@ -36,7 +36,7 @@ func TestResolveClaim_TrueUpdateSupersedes(t *testing.T) {
 	if d, err := s.ResolveClaim(Assertion{Subject: "alex reasoning effort", Predicate: "is", ObjectText: "medium", Scope: personal}); err != nil || d.Action != "insert" {
 		t.Fatalf("first effort claim: action=%s err=%v (want insert)", d.Action, err)
 	}
-	d, err := s.ResolveClaim(Assertion{Subject: "alex reasoning effort", Predicate: "is", ObjectText: "xhigh", Scope: personal})
+	d, err := s.ResolveClaim(Assertion{Subject: "alex reasoning effort", Predicate: "is", ObjectText: "xhigh", Scope: personal, ChangeCue: true})
 	if err != nil {
 		t.Fatalf("second effort claim err: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestResolveClaim_CrossKeyMergesDriftNotDifferentAttribute(t *testing.T) {
 	personal := Scope{Type: "personal"}
 	// Same attribute, DIFFERENT subject phrasing (drift) — should merge cross-key.
 	s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "bali", Scope: personal})
-	d, _ := s.ResolveClaim(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "lisbon", Scope: personal})
+	d, _ := s.ResolveClaim(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "lisbon", Scope: personal, ChangeCue: true})
 	if d.Action != "supersede" {
 		t.Fatalf("home drift (home base -> home) should cross-key merge, got %s (%s, cos %.2f)", d.Action, d.Reason, d.Cosine)
 	}
@@ -96,12 +96,44 @@ func TestResolveClaim_CrossKeyMergesDriftNotDifferentAttribute(t *testing.T) {
 	}
 }
 
+// Pro NO-GO #1: out-of-order backfill must NOT make an older fact current.
+func TestResolveClaim_BackfillDoesNotBecomeCurrent(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("on", 0.83, stubEmbed)
+	p := Scope{Type: "personal"}
+	s.ResolveClaim(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "lisbon", ValidFrom: "2026-06-01", Scope: p})
+	d, _ := s.ResolveClaim(Assertion{Subject: "alex home", Predicate: "is", ObjectText: "bali", ValidFrom: "2025-01-01", ChangeCue: true, Scope: p})
+	if d.Action == "supersede" {
+		t.Fatalf("backfilled OLDER fact must not supersede current, got %+v", d)
+	}
+	cur, _ := s.CurrentAssertions(MakeClaimKey("alex home", "is"), p)
+	if len(cur) != 1 || cur[0].ObjectText != "lisbon" {
+		t.Fatalf("current home must stay [lisbon] after backfill, got %+v", cur)
+	}
+}
+
+// Pro NO-GO #2: multi-valued slot (no change-cue) keeps both sibling facts.
+func TestResolveClaim_MultiValuedNoCueKeepsBoth(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("on", 0.83, stubEmbed)
+	p := Scope{Type: "personal"}
+	s.ResolveClaim(Assertion{Subject: "alex speaks", Predicate: "is", ObjectText: "russian", Scope: p})
+	d, _ := s.ResolveClaim(Assertion{Subject: "alex speaks", Predicate: "is", ObjectText: "english", Scope: p}) // no ChangeCue
+	if d.Action == "supersede" {
+		t.Fatalf("multi-valued sibling must not supersede, got %+v", d)
+	}
+	cur, _ := s.CurrentAssertions(MakeClaimKey("alex speaks", "is"), p)
+	if len(cur) != 2 {
+		t.Fatalf("both languages should stay current, got %d (%+v)", len(cur), cur)
+	}
+}
+
 func TestResolveClaim_ShadowNeverSupersedes(t *testing.T) {
 	s := openTestStore(t)
 	s.EnableClaimResolution("shadow", 0.83, stubEmbed)
 	personal := Scope{Type: "personal"}
 	s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "bali", Scope: personal})
-	d, _ := s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "lisbon", Scope: personal})
+	d, _ := s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "lisbon", Scope: personal, ChangeCue: true})
 	if d.Action == "supersede" {
 		t.Fatalf("shadow mode must never supersede, got %+v", d)
 	}

@@ -62,6 +62,11 @@ type Assertion struct {
 	// ctx_vec; claim resolution compares claims by meaning, not just key. Optional.
 	CtxVec []float32
 
+	// ChangeCue: the source statement signalled a change (now/changed/switched…).
+	// Required for supersession — without it a same-slot claim is kept as a
+	// sibling (multi-valued protection). Transient (a resolution input).
+	ChangeCue bool
+
 	// Subject is the human-readable subject used to build ClaimKey when
 	// ClaimKey is empty. Not stored directly; the entity ref carries identity.
 	Subject string

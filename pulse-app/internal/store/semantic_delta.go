@@ -97,6 +97,9 @@ type SemanticClaim struct {
 	Subject   string `json:"subject"`
 	Predicate string `json:"predicate"`
 	Object    string `json:"object"`
+	// ChangeCue: the statement signals this is an update (now/changed/switched).
+	// Required for the resolver to supersede a prior value (else kept as sibling).
+	ChangeCue bool `json:"change_cue,omitempty"`
 }
 
 // SemanticBiometrics matches the bio snapshot JSON read by state-fit boosts.
@@ -195,6 +198,7 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
 				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
 				ExtractorVersion: "host-extracted", Scope: Scope{Type: "personal"},
+				ChangeCue: cl.ChangeCue,
 			})
 		}
 	}

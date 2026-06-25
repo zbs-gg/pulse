@@ -88,10 +88,10 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 	for _, c := range cands {
 		cc = append(cc, ClaimCandidate{
 			ID: c.ID, Predicate: c.Predicate, ObjectNorm: c.ObjectText,
-			Scope: c.Scope, Cosine: cosine(vec, c.CtxVec),
+			ValidFrom: c.ValidFrom, Scope: c.Scope, Cosine: cosine(vec, c.CtxVec),
 		})
 	}
-	d := DecideClaim(a.Predicate, a.ObjectText, a.Scope, cc, s.claimThreshold)
+	d := DecideClaim(a.Predicate, a.ObjectText, a.ValidFrom, a.Scope, a.ChangeCue, cc, s.claimThreshold)
 	// Cross-key fallback: no same-key update, but the same attribute may exist
 	// under a differently-phrased subject. High-threshold, precision-first.
 	if d.Action == "insert" && s.claimXKey {
@@ -109,7 +109,10 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 	case "supersede":
 		_, err := s.supersedeTargetTx(d.TargetID, a, d.Cosine)
 		return d, err
-	default: // insert
+	default: // insert (d.ValidTo set => historical backfill insert, not current)
+		if d.ValidTo != "" {
+			a.ValidTo = d.ValidTo
+		}
 		_, err := s.SaveAssertion(a)
 		return d, err
 	}
@@ -155,6 +158,7 @@ type ClaimDecision struct {
 	Action   string  // "insert" | "supersede" | "noop"
 	TargetID int64   // candidate acted on (supersede/noop)
 	Cosine   float64 // similarity that justified the decision
+	ValidTo  string  // for a historical (backfill) insert: close the valid interval so it's not current
 	Reason   string
 }
 
@@ -164,18 +168,22 @@ type ClaimCandidate struct {
 	ID         int64
 	Predicate  string
 	ObjectNorm string
+	ValidFrom  string // event-time of the candidate (for the chronology guard)
 	Scope      Scope
 	Cosine     float64
 }
 
 // DecideClaim is the pure precision core. Guards (ALL required to supersede):
-//  1. predicate-match  — same normalized predicate (structurally true when
-//     candidates come from CurrentAssertions(claim_key), re-checked here).
+//  1. predicate-match  — same normalized predicate.
 //  2. same-scope       — never merge across scopes (personal/repo/...).
 //  3. object-differs   — identical normalized object => duplicate => noop.
-//  4. high-cosine      — context similarity >= threshold; below => insert (keep
-//     both), so two facts that merely collided on key are never overwritten.
-func DecideClaim(inPredicate, inObjectNorm string, inScope Scope, cands []ClaimCandidate, threshold float64) ClaimDecision {
+//  4. high-cosine      — context similarity >= threshold; below => keep both.
+//  5. change-cue       — the source must SIGNAL a change (now/changed/switched…).
+//     Without it the two are sibling facts of a multi-valued slot (speaks
+//     Russian + English, allergies, devices) — keep both, never overwrite.
+//  6. chronology       — a record with an OLDER valid_from than the current one
+//     is history (out-of-order backfill); it must not replace the current value.
+func DecideClaim(inPredicate, inObjectNorm, inValidFrom string, inScope Scope, changeCue bool, cands []ClaimCandidate, threshold float64) ClaimDecision {
 	inPred := normalizeClaimComponent(inPredicate)
 	inScopeN := inScope.normalized()
 	best := -1
@@ -202,7 +210,15 @@ func DecideClaim(inPredicate, inObjectNorm string, inScope Scope, cands []ClaimC
 	if c.Cosine < threshold { // guard 4
 		return ClaimDecision{Action: "insert", Cosine: c.Cosine, Reason: "cosine below threshold — keep both, never overwrite"}
 	}
-	return ClaimDecision{Action: "supersede", TargetID: c.ID, Cosine: c.Cosine, Reason: "same fact, changed value"}
+	if !changeCue { // guard 5 — multi-valued sibling protection
+		return ClaimDecision{Action: "insert", Cosine: c.Cosine, Reason: "no change-cue — sibling fact, keep both"}
+	}
+	if inValidFrom != "" && c.ValidFrom != "" && inValidFrom < c.ValidFrom { // guard 6 — backfill protection
+		// Slot the older fact into HISTORY (closed valid interval) so it is kept
+		// but never becomes current; the current value is untouched.
+		return ClaimDecision{Action: "insert", ValidTo: c.ValidFrom, Cosine: c.Cosine, Reason: "older valid_from — historical, not current"}
+	}
+	return ClaimDecision{Action: "supersede", TargetID: c.ID, Cosine: c.Cosine, Reason: "same slot, signalled change, newer"}
 }
 
 // normalizeObject mirrors normalizeClaimComponent so the object-differs guard is
