@@ -43,10 +43,17 @@ func (s *Store) crossKeyTarget(a Assertion, vec []float32) (int64, float64) {
 	}
 	inPred := normalizeClaimComponent(a.Predicate)
 	inObj := normalizeObject(a.ObjectText)
+	inVis := a.Scope.normalized().Visibility
 	bestID := int64(0)
 	bestCos := s.claimXThresh
 	for _, c := range cands {
 		if c.ClaimKey == a.ClaimKey || normalizeClaimComponent(c.Predicate) != inPred {
+			continue
+		}
+		if c.Scope.normalized().Visibility != inVis { // don't cross a visibility boundary
+			continue
+		}
+		if a.ValidFrom != "" && c.ValidFrom != "" && a.ValidFrom < c.ValidFrom { // chronology: older never supersedes
 			continue
 		}
 		if normalizeObject(c.ObjectText) == inObj {
@@ -93,10 +100,11 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 	}
 	d := DecideClaim(a.Predicate, a.ObjectText, a.ValidFrom, a.Scope, a.ChangeCue, cc, s.claimThreshold)
 	// Cross-key fallback: no same-key update, but the same attribute may exist
-	// under a differently-phrased subject. High-threshold, precision-first.
-	if d.Action == "insert" && s.claimXKey {
+	// under a differently-phrased subject. Precision-first: REQUIRES a change-cue
+	// (no blind cross-key merge); chronology + visibility enforced in crossKeyTarget.
+	if d.Action == "insert" && s.claimXKey && a.ChangeCue {
 		if tid, cos := s.crossKeyTarget(a, vec); tid != 0 {
-			d = ClaimDecision{Action: "supersede", TargetID: tid, Cosine: cos, Reason: "cross-key match"}
+			d = ClaimDecision{Action: "supersede", TargetID: tid, Cosine: cos, Reason: "cross-key match (change-cue)"}
 		}
 	}
 	if s.claimMode == "shadow" && d.Action == "supersede" {
