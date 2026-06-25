@@ -107,10 +107,14 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 			d = ClaimDecision{Action: "supersede", TargetID: tid, Cosine: cos, Reason: "cross-key match (change-cue)"}
 		}
 	}
+	proposed := d // the resolver's true decision, before shadow suppression
 	if s.claimMode == "shadow" && d.Action == "supersede" {
 		d.Action = "insert"
 		d.Reason = "shadow: would supersede, inserting instead"
 	}
+	// Decision ledger (NO-GO #8): record what was decided + whether it was applied.
+	// Best-effort: an audit-log failure must never break resolution.
+	s.recordClaimDecision(a, proposed, s.claimMode == "on" || proposed.Action != "supersede")
 	switch d.Action {
 	case "noop":
 		return d, nil
@@ -124,6 +128,26 @@ func (s *Store) ResolveClaim(a Assertion) (ClaimDecision, error) {
 		_, err := s.SaveAssertion(a)
 		return d, err
 	}
+}
+
+// recordClaimDecision appends the resolution decision to the audit ledger
+// (claim_decisions). Best-effort: errors are swallowed so the log can never
+// break a write. `applied` is false for a shadow-suppressed supersede.
+func (s *Store) recordClaimDecision(a Assertion, d ClaimDecision, applied bool) {
+	sc := a.Scope.normalized()
+	b2i := func(b bool) int {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	_, _ = s.db.Exec(`
+		INSERT INTO claim_decisions
+		  (claim_key, scope_type, scope_id, visibility, action, applied,
+		   target_id, cosine, change_cue, reason, decided_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ClaimKey, sc.Type, sc.ID, sc.Visibility, d.Action, b2i(applied),
+		d.TargetID, d.Cosine, b2i(a.ChangeCue), d.Reason, nowRFC3339())
 }
 
 // supersedeTargetTx closes a specific (already vetted) target assertion and

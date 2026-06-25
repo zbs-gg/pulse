@@ -173,6 +173,31 @@ func TestSaveSemanticDelta_ScopeIsolatesByConversation(t *testing.T) {
 	}
 }
 
+// Pro NO-GO #8: shadow mode must decide+LOG, not silently insert. The would-be
+// supersede is recorded in the decision ledger as NOT applied, with its cosine.
+func TestResolveClaim_ShadowRecordsDecisionLedger(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("shadow", 0.83, stubEmbed)
+	p := Scope{Type: "personal"}
+	s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "bali", Scope: p})
+	s.ResolveClaim(Assertion{Subject: "alex home base", Predicate: "is", ObjectText: "lisbon", Scope: p, ChangeCue: true})
+	var action string
+	var applied int
+	var cos float64
+	err := s.DB().QueryRow(`SELECT action, applied, cosine FROM claim_decisions
+		WHERE claim_key=? AND action='supersede' ORDER BY id DESC LIMIT 1`,
+		MakeClaimKey("alex home base", "is")).Scan(&action, &applied, &cos)
+	if err != nil {
+		t.Fatalf("expected a recorded would-be supersede decision: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("shadow supersede must be logged as NOT applied, got applied=%d", applied)
+	}
+	if cos < 0.83 {
+		t.Fatalf("recorded cosine should be the similarity that justified it, got %.3f", cos)
+	}
+}
+
 func TestSaveSemanticDelta_ClaimResolutionOff_WritesNoAssertions(t *testing.T) {
 	s := openTestStore(t) // EnableClaimResolution NOT called => off
 	delta := SemanticDelta{
