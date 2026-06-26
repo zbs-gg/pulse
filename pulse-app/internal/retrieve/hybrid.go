@@ -495,7 +495,10 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// hits events that don't share the original word but match known
 	// canon. Expansion failures are non-fatal — we keep the raw query.
 	ids := cosineIDs
-	if e.store != nil {
+	// Factual mode: PURE cosine ranking (no BM25/RRF fusion, no empathic
+	// surfaceability) — isolate the semantic ranker, like a dedicated fact store.
+	// Empathic/chain keep the full hybrid fusion + surfaceability.
+	if mode != ModeFactual && e.store != nil {
 		bm25Query := req.Query
 		if e.expander != nil {
 			if extras, err := e.expander.Expand(ctx, req.Query); err == nil && len(extras) > 0 {
@@ -508,7 +511,9 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		}
 	}
 	var surfaceability SurfaceabilityAction
-	ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+	if mode != ModeFactual {
+		ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+	}
 
 	// Supersession-aware demotion (default-off, post-scoring): if both a stale
 	// fact-event and its correction are present, the stale one is moved below
@@ -772,10 +777,32 @@ func nonIdentityPtr(v float64) *float64 {
 }
 
 // retrieveFactual — cosine on fact embeddings → unique parent event_ids.
+// retrieveFactualEvents ranks events by PLAIN cosine similarity to the query —
+// no v3 emotion/state/anchor boosts, no recency decay. This is the right ranker
+// for factual lookup ("what was the error code / email / occupation"): the
+// answer-event should win on semantic match alone, exactly like a dedicated
+// fact/vector store. Reuses e.eventVecs; does not touch scoreEventsV3 (the
+// frozen v3 empathic path).
+func (e *Engine) retrieveFactualEvents(qVec []float32, topK int) []int64 {
+	n := len(e.eventIDs)
+	if n == 0 {
+		return nil
+	}
+	scores := make([]float64, n)
+	for i := 0; i < n; i++ {
+		scores[i] = float64(dotF32(qVec, e.eventVecs[i]))
+	}
+	return topKIndicesToIDs(scores, e.eventIDs, topK)
+}
+
 func (e *Engine) retrieveFactual(qVec []float32, topK int) []int64 {
 	if len(e.factIDs) == 0 {
-		// No facts indexed — fall back to empathic so caller still gets results
-		return e.retrieveEmpathic(qVec, topK)
+		// No atomic_facts index (host-extracted mode never populates it) — do a
+		// CLEAN semantic ranking over EVENT embeddings instead of falling back to
+		// the empathic v3 ranker. Factual lookup wants plain cosine (what a fact
+		// store does); the empathic boosts/recency bury the answer. This reuses
+		// the already-loaded event vectors and never touches the frozen v3 path.
+		return e.retrieveFactualEvents(qVec, topK)
 	}
 	n := len(e.factIDs)
 	scores := make([]float64, n)
