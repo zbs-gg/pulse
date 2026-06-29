@@ -184,6 +184,13 @@ async function pulseFetch(path, options = {}) {
   if (secret) {
     headers['X-Pulse-Key'] = secret;
   }
+  // Remote (hosted) Pulse: send a bearer token. The reverse proxy validates it
+  // and injects the daemon's X-Pulse-Key internally, so the daemon secret never
+  // leaves the host. Lets the same hooks capture into the hosted store.
+  const remoteBearer = process.env.PULSE_REMOTE_BEARER;
+  if (remoteBearer) {
+    headers['Authorization'] = `Bearer ${remoteBearer}`;
+  }
   const controller = options.timeoutMs ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
   let response;

@@ -8,7 +8,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -867,6 +867,11 @@ async function startHttpMode(): Promise<void> {
   const devAuthCodes = new Map<string, DevOAuthCode>();
   const devAccessTokens = new Map<string, DevOAuthToken>();
   const devRefreshTokens = new Map<string, DevOAuthToken>();
+  // Persist OAuth tokens to disk so an mcp restart/redeploy does NOT log out
+  // connected clients (e.g. Claude.ai). Load non-expired tokens on start.
+  const oauthTokensFile = join(PULSE_DATA_DIR, 'oauth-tokens.json');
+  loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+  const persistOAuth = () => persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
   const allowUnauthenticated =
     process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1' ||
     args.includes('--allow-unauthenticated');
@@ -929,6 +934,7 @@ async function startHttpMode(): Promise<void> {
     if (oauthDevMode && path === '/token' && req.method === 'POST') {
       writeCors(res);
       await handleDevToken(req, res, devAuthCodes, devAccessTokens, devRefreshTokens);
+      persistOAuth();
       return;
     }
     if (!path.startsWith('/mcp')) {
@@ -1140,6 +1146,25 @@ function handleDevAuthorize(
     writeJSON(res, { error: 'invalid_request' }, 400);
     return;
   }
+  // PIN gate: when PULSE_OAUTH_PIN is set, the authorization code is only
+  // issued after the human enters the PIN. This keeps the public OAuth
+  // endpoint from auto-granting access to anyone who finds the URL.
+  const requiredPin = process.env.PULSE_OAUTH_PIN ?? '';
+  if (requiredPin) {
+    const givenPin = url.searchParams.get('pin') ?? '';
+    if (givenPin !== requiredPin) {
+      const esc = (s: string) => s.replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+      const carry = new URLSearchParams(url.search);
+      carry.delete('pin');
+      const hidden = [...carry.entries()]
+        .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
+      const wrong = url.searchParams.has('pin') ? '<p style="color:#c00">Wrong PIN</p>' : '';
+      res.writeHead(url.searchParams.has('pin') ? 401 : 200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pulse</title><body style="font-family:system-ui;max-width:360px;margin:18vh auto;padding:0 20px"><h2>Pulse — authorize</h2><p>Enter your PIN to connect this app to your memory.</p>${wrong}<form method="GET" action="/authorize">${hidden}<input name="pin" type="password" inputmode="numeric" placeholder="PIN" autofocus style="font-size:18px;padding:10px;width:100%;box-sizing:border-box"><button style="margin-top:14px;padding:10px 18px;font-size:16px">Authorize</button></form></body>`);
+      return;
+    }
+  }
   const code = `pulse_dev_code_${randomUUID()}`;
   codes.set(code, {
     clientId,
@@ -1221,6 +1246,46 @@ function writeDevTokenResponse(
     refresh_token: refreshToken,
     scope,
   });
+}
+
+function persistOAuthTokens(
+  file: string,
+  access: Map<string, DevOAuthToken>,
+  refresh: Map<string, DevOAuthToken>,
+): void {
+  try {
+    const now = Date.now();
+    const data = {
+      access: [...access.entries()].filter(([, t]) => t.expiresAt > now),
+      refresh: [...refresh.entries()].filter(([, t]) => t.expiresAt > now),
+    };
+    writeFileSync(file, JSON.stringify(data), { mode: 0o600 });
+  } catch {
+    // best-effort: never break the token response over a write failure
+  }
+}
+
+function loadOAuthTokens(
+  file: string,
+  access: Map<string, DevOAuthToken>,
+  refresh: Map<string, DevOAuthToken>,
+): void {
+  try {
+    if (!existsSync(file)) return;
+    const now = Date.now();
+    const data = JSON.parse(readFileSync(file, 'utf8')) as {
+      access?: [string, DevOAuthToken][];
+      refresh?: [string, DevOAuthToken][];
+    };
+    for (const [k, t] of data.access ?? []) {
+      if (t && t.expiresAt > now) access.set(k, t);
+    }
+    for (const [k, t] of data.refresh ?? []) {
+      if (t && t.expiresAt > now) refresh.set(k, t);
+    }
+  } catch {
+    // ignore a missing/corrupt token store
+  }
 }
 
 function pkceChallenge(verifier: string): string {
