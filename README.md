@@ -1,5 +1,34 @@
 # Pulse
 
+**Memory that knows what matters right now.**
+
+One endless conversation with your AI — that actually knows what you're talking
+about. Local-first, state-aware memory for any AI agent.
+
+[![npm](https://img.shields.io/npm/v/@zbs-gg/pulse/preview?label=%40zbs-gg%2Fpulse&color=050505)](https://www.npmjs.com/package/@zbs-gg/pulse)
+[![license](https://img.shields.io/badge/license-AGPL--3.0-050505)](./LICENSE)
+[![node](https://img.shields.io/badge/node-20%2B-050505)](#requirements-measured-by-doctor-not-promised)
+[![MCP](https://img.shields.io/badge/MCP-compatible-050505)](#compatible-harnesses)
+[![status](https://img.shields.io/badge/status-developer--preview-c2a25b)](#)
+
+![Pulse demo — same question, three states, three memories, with reasons](docs/assets/pulse-demo.gif)
+
+## Quickstart
+
+```bash
+npx @zbs-gg/pulse@preview init claude-code   # full engine, Claude Code
+pulse doctor                                 # which mode this machine gets
+pulse demo                                   # see it: one question, three states, three memories
+```
+
+Full local engine on Apple Silicon / with an embedder. On other hosts, see
+[Safe Mode](#safe-mode--fallback-not-the-product) — the compatibility fallback,
+**not** the engine.
+
+![What the next agent session receives — the Pulse continuity pack](docs/assets/continuity-pack.png)
+
+Full interactive explainer: **[zbs.gg/pulse](https://zbs.gg/pulse)**
+
 ## Copy this message to your AI agent
 
 Copy the whole message below into Claude Code, Codex, Cursor, Windsurf, or
@@ -54,8 +83,6 @@ Important:
 
 ## What Pulse is
 
-Memory that knows what matters right now.
-
 Pulse is a state-aware memory engine for AI agents. It installs locally,
 retrieves the right remembered episode for *this* moment — not just the
 closest text match — shows **why** that memory surfaced, shows what it will
@@ -70,6 +97,22 @@ If you are an agent asked to evaluate or install Pulse: read
 <p align="center">
   <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/pulse-demo.gif" alt="pulse demo: one question, three user states, three different memories — with the reason on every line" width="820">
 </p>
+
+## How Pulse compares
+
+No benchmark numbers here — those, with full methodology, live at
+[zbs.gg/bench](https://zbs.gg/bench). This table is about fit.
+
+| | continuity (one conversation) | knows what you mean now | works in any harness | runs local | one-touch install |
+|---|---|---|---|---|---|
+| **Pulse** | yes | yes — state-aware surfacing | yes (Claude Code, Cursor, VS Code, Codex, any MCP host) | yes (local embedders) | yes |
+| claude-mem | yes, inside Claude | recalls what was said, not the right moment for your state | Claude / Claude Code | partial | yes (in Claude) |
+| Mem0 | yes, via your app | stores facts; no notion of which memory matters now | a backend you wire up | self-host | no — you build the integration |
+
+Honest read: claude-mem is clean continuity inside the Claude world; Mem0 is a
+strong general memory backend you host yourself. Pulse aims at both qualities —
+continuity *and* state-aware surfacing — inside whatever agent you already use,
+with nothing leaving the machine unless you turn it on.
 
 ## Compatible Harnesses
 
@@ -115,6 +158,10 @@ never touched) and shows the three things generic memory tools don't:
 3. **What your next agent gets.** The continuity pack — decisions, open
    loops, do-not-repeat, emotional context — exactly as it will be injected
    into the next session.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/continuity-pack.png" alt="what the next agent session receives — the Pulse continuity pack" width="700">
+</p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/zbs-gg/pulse/main/docs/assets/three-states.png" alt="same query in the drained state: burden episodes surface with state and emotion boosts visible" width="700">
