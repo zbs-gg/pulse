@@ -13,7 +13,10 @@ import (
 
 const MemoryCapsuleSchema = "pulse.memory_capsule.v1"
 
-var safeTagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+// Unicode-aware: tags/slugs may be Cyrillic etc. (RU users). Still excludes
+// whitespace and path/secret-like content (the looksSensitiveOrPathLike guard
+// runs separately). \p{L}=letters, \p{N}=numbers in any script.
+var safeTagPattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._:-]{0,63}$`)
 
 type CapsuleSource struct {
 	Host              string `json:"host"`

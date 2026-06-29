@@ -79,3 +79,9 @@ elle-prompt-raw-response.json
 
 # Private: embeds owner real empathic corpus — regenerate locally, never commit
 internal/retrieve/testdata/parity_golden.json
+
+# CodeGraph local index + local agent/browser artifacts (do not commit)
+.codegraph/
+/.claude/
+.claude/settings.local.json
+.playwright-mcp/
