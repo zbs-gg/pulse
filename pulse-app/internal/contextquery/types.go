@@ -13,7 +13,10 @@ type ContextQueryRequest struct {
 	PrivacyFloor string              `json:"privacy_floor,omitempty"`
 	IncludeTrace bool                `json:"include_trace,omitempty"`
 	UserState    *retrieve.UserState `json:"user_state,omitempty"`
-	DomainHints  []string            `json:"domain_hints,omitempty"`
+	// GraphMode overrides the service default temporal entity-graph mode for this
+	// call ("" = use service default, "off"/"anchored"/"walk").
+	GraphMode   string   `json:"graph_mode,omitempty"`
+	DomainHints []string `json:"domain_hints,omitempty"`
 	// DomainsAllowed restricts facts/events to the listed domains
 	// (real | fiction_content | fiction_meta | meta_authorial). Empty/nil
 	// means no filter — caller is responsible for not conflating fiction

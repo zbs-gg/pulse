@@ -107,6 +107,11 @@ func run(dataDir, addr string) error {
 		contextQuery = contextquery.New(contextquery.ServiceConfig{
 			DB:        s.DB(),
 			Retrieval: retrievalEngine,
+			// Temporal entity-graph retrieval on the LIVE recall path. "anchored"
+			// is the validated control-safe win (entity-centric recall ↑, no
+			// control regression). Override per-request via graph_mode; set ""
+			// here to disable. "walk" stays opt-in (multi-hop unproven on real graph).
+			GraphMode: "anchored",
 		})
 	}
 

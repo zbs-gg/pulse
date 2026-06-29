@@ -16,15 +16,21 @@ type Retrieval interface {
 type ServiceConfig struct {
 	DB        *sql.DB
 	Retrieval Retrieval
+	// GraphMode wires temporal entity-graph retrieval into the LIVE recall path
+	// ("" = off, "anchored", "walk"). Set in cmd wiring. Per-request override via
+	// ContextQueryRequest.GraphMode. "anchored" is the validated control-safe win
+	// (entity-centric recall ↑, no control regression — see graph-bench reality check).
+	GraphMode string
 }
 
 type Service struct {
 	db        *sql.DB
 	retrieval Retrieval
+	graphMode string
 }
 
 func New(cfg ServiceConfig) *Service {
-	return &Service{db: cfg.DB, retrieval: cfg.Retrieval}
+	return &Service{db: cfg.DB, retrieval: cfg.Retrieval, graphMode: cfg.GraphMode}
 }
 
 func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextResult, error) {
@@ -47,11 +53,16 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 		topK = 5
 	}
 
+	graphMode := s.graphMode
+	if req.GraphMode != "" {
+		graphMode = req.GraphMode // per-request override
+	}
 	ret, err := s.retrieval.Retrieve(ctx, retrieve.RetrieveRequest{
 		Query:     query,
 		Mode:      retrieve.QueryMode(req.Mode),
 		TopK:      topK,
 		UserState: req.UserState,
+		GraphMode: graphMode,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("context query retrieve: %w", err)
