@@ -75,6 +75,7 @@ type ResumeQuery struct {
 }
 
 type ResumeSections struct {
+	HarnessActivity             []string `json:"harness_activity,omitempty"`
 	WhereWeLeftOff              []string `json:"where_we_left_off"`
 	ActiveDecisions             []string `json:"active_decisions"`
 	ActiveReviewedThreads       []string `json:"active_reviewed_threads,omitempty"`
@@ -382,6 +383,16 @@ func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
 		sections.SuggestedNextStep = []string{"Ask what changed since the last Pulse checkpoint, then continue from the current user request."}
 	}
 	sections.MaterialRefs = compactMaterialRefs(append(sections.MaterialRefs, materialRefsFromResumeSections(sections)...))
+
+	// Cross-harness digest ("what's cooking across your harnesses") — the
+	// new-empty-chat greeting. Honest per-host activity + a fun fact; empty when
+	// nothing has been captured (no fabrication).
+	sections.HarnessActivity = s.harnessActivity(3)
+	if len(sections.HarnessActivity) > 0 {
+		if ff, _ := s.viewerGraphFunFacts(1); len(ff) > 0 {
+			sections.HarnessActivity = append(sections.HarnessActivity, "🌱 "+ff[0])
+		}
+	}
 
 	markdown := renderResumeMarkdown(sections)
 	markdown = trimMarkdownToBudget(markdown, budget)
@@ -790,6 +801,68 @@ func (s *Store) viewerGraphEmotions(limit int) ([]string, error) {
 	}
 	defer rows.Close()
 	return scanEmotionRows(rows, limit)
+}
+
+// relAgo renders an RFC3339 timestamp as a coarse relative age (m/h/d ago).
+func relAgo(ts string) string {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts))
+	if err != nil {
+		return "?"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// harnessActivity summarizes recent per-harness activity for the resume digest
+// ("what's cooking across your harnesses"). Read-only over continuity_checkpoints
+// (host + summary + created_at). Honest empty-states; best-effort (errors → nil).
+func (s *Store) harnessActivity(limit int) []string {
+	rows, err := s.db.Query(`
+		SELECT host, COUNT(*) n, MAX(created_at) last
+		FROM continuity_checkpoints WHERE host != '' GROUP BY host ORDER BY last DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	type h struct {
+		host, last string
+		n          int
+	}
+	var hs []h
+	for rows.Next() {
+		var x h
+		if rows.Scan(&x.host, &x.n, &x.last) == nil {
+			hs = append(hs, x)
+		}
+	}
+	if len(hs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, x := range hs {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		var summary string
+		_ = s.db.QueryRow(`SELECT summary FROM continuity_checkpoints WHERE host=? ORDER BY created_at DESC LIMIT 1`, x.host).Scan(&summary)
+		summary = strings.TrimSpace(summary)
+		if r := []rune(summary); len(r) > 80 {
+			summary = string(r[:80]) + "…"
+		}
+		line := fmt.Sprintf("%s — last active %s, %d checkpoints", x.host, relAgo(x.last), x.n)
+		if summary != "" {
+			line += "; latest: " + summary
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
@@ -1406,6 +1479,9 @@ func validContinuityEvent(kind string) bool {
 func renderResumeMarkdown(sections ResumeSections) string {
 	var b strings.Builder
 	b.WriteString("# Pulse Resume\n")
+	if len(sections.HarnessActivity) > 0 {
+		writeResumeSection(&b, "Across your harnesses", sections.HarnessActivity)
+	}
 	writeResumeSection(&b, "Where we left off", sections.WhereWeLeftOff)
 	writeResumeSection(&b, "Active decisions", sections.ActiveDecisions)
 	writeResumeSection(&b, "Active reviewed threads", sections.ActiveReviewedThreads)
