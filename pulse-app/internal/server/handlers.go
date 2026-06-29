@@ -157,6 +157,9 @@ type retrieveRequest struct {
 	Mode      string              `json:"mode,omitempty"` // "auto" | "factual" | "empathic" | "chain"
 	TopK      int                 `json:"top_k,omitempty"`
 	UserState *retrieve.UserState `json:"user_state,omitempty"`
+	// GraphMode (default-OFF): "" | "anchored" | "walk" — temporal entity-graph
+	// retrieval as an extra RRF recall-injector. Omitted = unchanged behaviour.
+	GraphMode string `json:"graph_mode,omitempty"`
 }
 
 type retrieveResponse struct {
@@ -198,6 +201,7 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		Mode:      mode,
 		TopK:      req.TopK,
 		UserState: req.UserState,
+		GraphMode: req.GraphMode,
 	})
 	if err != nil {
 		slog.Error("retrieve failed", "err", err)

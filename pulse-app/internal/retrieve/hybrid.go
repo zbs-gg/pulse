@@ -412,6 +412,10 @@ type RetrieveRequest struct {
 	Mode      QueryMode  // ModeAuto = router decides
 	UserState *UserState // nullable
 	TopK      int        // default 5 if zero
+	// GraphMode enables temporal entity-graph retrieval as an EXTRA RRF input
+	// (graph-as-recall-injector). "" = OFF (default; behaviour unchanged).
+	// "anchored" = entity-anchored events; "walk" = + typed relation walk.
+	GraphMode string
 }
 
 // RetrieveResponse is the output: ranked event IDs + chosen mode + router trace.
@@ -506,8 +510,20 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 			}
 		}
 		bm25IDs, err := BM25Search(ctx, e.store.DB(), bm25Query, topK*2)
+		lists := [][]int64{cosineIDs}
 		if err == nil && len(bm25IDs) > 0 {
-			ids = RRFFuse([][]int64{cosineIDs, bm25IDs}, topK, 60)
+			lists = append(lists, bm25IDs)
+		}
+		// Graph-as-recall-injector: default-OFF extra RRF input (entity-anchored
+		// / typed relation walk). Salience ranking is preserved — graph only adds
+		// candidates the cosine/BM25 paths miss (multi-hop, entity-centric).
+		if req.GraphMode != "" {
+			if gids := e.retrieveGraphCandidates(ctx, req.Query, req.GraphMode, topK); len(gids) > 0 {
+				lists = append(lists, gids)
+			}
+		}
+		if len(lists) > 1 {
+			ids = RRFFuse(lists, topK, 60)
 		}
 	}
 	var surfaceability SurfaceabilityAction

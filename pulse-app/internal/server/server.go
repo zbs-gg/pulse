@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/graph/delta", s.handleGraphDelta)
 		r.Post("/graph/entity/hide", s.handleGraphEntityHide)
 		r.Post("/graph/entity/restore", s.handleGraphEntityRestore)
+		r.Get("/graph/export", s.handleGraphExport)
 		r.Post("/continuity/resume", s.handleContinuityResume)
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
