@@ -39,24 +39,25 @@ func (sc Scope) normalized() Scope {
 // split lets us tell "the world changed" (supersede) from "we recorded it
 // wrong" (retract).
 type Assertion struct {
-	ID               int64
-	ClaimKey         string // derived from subject+predicate when empty
-	SubjectEntityID  *int64
-	Predicate        string
-	ObjectText       string
-	ObjectEntityID   *int64
-	Qualifiers       map[string]any
-	Confidence       float64
-	ValidFrom        string
-	ValidTo          string
-	SystemFrom       string
-	SystemTo         string
-	Status           string
-	SupersededBy     *int64
-	SourceEventIDs   []int64
-	ExtractorVersion string
-	Scope            Scope
-	CreatedAt        string
+	ID                 int64
+	ClaimKey           string // derived from subject+predicate when empty
+	SubjectEntityID    *int64
+	Predicate          string
+	ObjectText         string
+	ObjectEntityID     *int64
+	Qualifiers         map[string]any
+	Confidence         float64
+	ConfidenceExplicit bool
+	ValidFrom          string
+	ValidTo            string
+	SystemFrom         string
+	SystemTo           string
+	Status             string
+	SupersededBy       *int64
+	SourceEventIDs     []int64
+	ExtractorVersion   string
+	Scope              Scope
+	CreatedAt          string
 
 	// Subject is the human-readable subject used to build ClaimKey when
 	// ClaimKey is empty. Not stored directly; the entity ref carries identity.
@@ -149,6 +150,53 @@ func (s *Store) SupersedeAssertion(a Assertion) (int64, error) {
 	return newID, nil
 }
 
+func upsertAssertionTx(tx *sql.Tx, a Assertion) (int64, bool, error) {
+	a = withDerivedKey(a)
+	scope := a.Scope.normalized()
+	var currentID int64
+	var currentObject string
+	err := tx.QueryRow(`
+		SELECT id, object_text
+		  FROM assertions
+		 WHERE claim_key = ? AND scope_type = ? AND scope_id = ?
+		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
+		 ORDER BY id DESC
+		 LIMIT 1`, a.ClaimKey, scope.Type, scope.ID).Scan(&currentID, &currentObject)
+	if err == sql.ErrNoRows {
+		id, err := insertAssertion(tx, a)
+		return id, err == nil, err
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("lookup current assertion: %w", err)
+	}
+	if strings.TrimSpace(currentObject) == strings.TrimSpace(a.ObjectText) {
+		return currentID, false, nil
+	}
+
+	newID, err := insertAssertion(tx, a)
+	if err != nil {
+		return 0, false, err
+	}
+	validTo := a.ValidFrom
+	if strings.TrimSpace(validTo) == "" {
+		validTo = a.SystemFrom
+	}
+	if strings.TrimSpace(validTo) == "" {
+		validTo = nowRFC3339()
+	}
+	if _, err := tx.Exec(`
+		UPDATE assertions
+		   SET status = 'superseded',
+		       valid_to = COALESCE(valid_to, ?),
+		       superseded_by = ?
+		 WHERE claim_key = ? AND scope_type = ? AND scope_id = ?
+		   AND status = 'active' AND id != ?`,
+		validTo, newID, a.ClaimKey, scope.Type, scope.ID, newID); err != nil {
+		return 0, false, fmt.Errorf("supersede prior assertions: %w", err)
+	}
+	return newID, true, nil
+}
+
 // RetractAssertion records "we recorded it wrong": it closes the system
 // (belief) interval and marks the row retracted. The valid (world) interval is
 // left untouched — we no longer believe it, but we don't claim the world
@@ -206,7 +254,7 @@ func insertAssertion(tx *sql.Tx, a Assertion) (int64, error) {
 		created = now
 	}
 	confidence := a.Confidence
-	if confidence == 0 {
+	if confidence == 0 && !a.ConfidenceExplicit {
 		confidence = 1.0
 	}
 	status := strings.TrimSpace(a.Status)

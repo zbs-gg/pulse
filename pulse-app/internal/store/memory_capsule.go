@@ -338,6 +338,32 @@ func (s *Store) WipeMemory() error {
 
 func wipeHostExtractedGraph(tx *sql.Tx) error {
 	if _, err := tx.Exec(`
+		UPDATE assertions
+		   SET superseded_by = NULL
+		 WHERE superseded_by IN (
+		       SELECT id FROM assertions
+		        WHERE extractor_version='pulse.semantic_delta.v1'
+		           OR subject_entity_id IN (
+		              SELECT id FROM entities WHERE scorer_version='host-extracted'
+		           )
+		           OR object_entity_id IN (
+		              SELECT id FROM entities WHERE scorer_version='host-extracted'
+		           )
+		 );`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM assertions
+		 WHERE extractor_version='pulse.semantic_delta.v1'
+		    OR subject_entity_id IN (
+		       SELECT id FROM entities WHERE scorer_version='host-extracted'
+		    )
+		    OR object_entity_id IN (
+		       SELECT id FROM entities WHERE scorer_version='host-extracted'
+		    );`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
 		DELETE FROM event_entities
 		 WHERE event_id IN (
 		       SELECT id FROM events WHERE scorer_version='host-extracted'

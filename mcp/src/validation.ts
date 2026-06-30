@@ -35,6 +35,8 @@ const ENTITY_KINDS = new Set([
   'person', 'place', 'project', 'org', 'product', 'community', 'skill', 'concept', 'thing', 'event_series',
 ]);
 const DOMAINS = new Set(['real', 'fiction_content', 'fiction_meta', 'meta_authorial']);
+const ASSERTION_SCOPE_TYPES = new Set(['personal', 'project', 'repo', 'agent', 'session']);
+const ASSERTION_VISIBILITY = new Set(['private', 'shared']);
 const PLUTCHIK = new Set([
   'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt',
 ]);
@@ -197,6 +199,13 @@ export interface CleanEdge {
 export interface CleanFact {
   node: string;
   text: string;
+  predicate: string;
+  object_text: string;
+  valid_from: string;
+  source_event_refs: string[];
+  scope_type: string;
+  scope_id: string;
+  visibility: string;
   confidence: number;
   privacy_tier: string;
   domain: string;
@@ -317,15 +326,78 @@ export function validateDelta(input: unknown): CleanDelta {
     return { from, to, kind: (edge.kind as string).trim(), summary, privacy_tier, strength };
   });
 
+  const eventRefs = new Set<string>();
+  eventsIn.forEach((entry, i) => {
+    const event = asRecord(entry, `events[${i}]`);
+    if (typeof event.client_id === 'string' && validRef(event.client_id)) {
+      const clientId = event.client_id.trim();
+      if (eventRefs.has(clientId)) fail(`events[${i}].client_id is duplicate`);
+      eventRefs.add(clientId);
+    }
+  });
+
   const facts: CleanFact[] = factsIn.map((entry, i) => {
     const fact = asRecord(entry, `facts[${i}]`);
     const node = typeof fact.node === 'string' ? fact.node.trim() : '';
     if (!refs.has(node)) fail(`facts[${i}].node references unknown node`);
     const text = safeText(`facts[${i}].text`, fact.text, 1200, true);
+    const hasStructuredAssertion =
+      (typeof fact.predicate === 'string' && fact.predicate.trim() !== '') ||
+      (typeof fact.object_text === 'string' && fact.object_text.trim() !== '');
+    const predicate = hasStructuredAssertion
+      ? safeText(`facts[${i}].predicate`, fact.predicate, 160, true)
+      : '';
+    const object_text = hasStructuredAssertion
+      ? safeText(`facts[${i}].object_text`, fact.object_text, 1200, true)
+      : '';
+    const valid_from =
+      fact.valid_from === undefined || fact.valid_from === null || fact.valid_from === ''
+        ? ''
+        : rfc3339(`facts[${i}].valid_from`, fact.valid_from);
+    const scope_type =
+      fact.scope_type === undefined || fact.scope_type === null || fact.scope_type === ''
+        ? ''
+        : inEnum(`facts[${i}].scope_type`, fact.scope_type, ASSERTION_SCOPE_TYPES);
+    const scope_id = safeText(`facts[${i}].scope_id`, fact.scope_id, 160, false);
+    if (scope_type === '' && scope_id !== '') {
+      fail(`facts[${i}].scope_type is required when scope_id is set`);
+    }
+    if (scope_type !== '' && scope_type !== 'personal' && scope_id === '') {
+      fail(`facts[${i}].scope_id is required for ${scope_type} scope`);
+    }
+    const sourceEventRefsIn =
+      fact.source_event_refs === undefined || fact.source_event_refs === null
+        ? []
+        : fact.source_event_refs;
+    if (!Array.isArray(sourceEventRefsIn)) fail(`facts[${i}].source_event_refs must be an array`);
+    if (sourceEventRefsIn.length > 20) fail(`facts[${i}].source_event_refs has too many items: max 20`);
+    const source_event_refs = sourceEventRefsIn.map((ref, j) => {
+      const r = typeof ref === 'string' ? ref.trim() : '';
+      if (!validRef(r)) fail(`facts[${i}].source_event_refs[${j}] is unsafe`);
+      if (!eventRefs.has(r)) fail(`facts[${i}].source_event_refs[${j}] references unknown event`);
+      return r;
+    });
+    const visibility =
+      fact.visibility === undefined || fact.visibility === null || fact.visibility === ''
+        ? ''
+        : inEnum(`facts[${i}].visibility`, fact.visibility, ASSERTION_VISIBILITY);
     const confidence = num01(`facts[${i}].confidence`, fact.confidence, 0);
     const privacy_tier = inEnum(`facts[${i}].privacy_tier`, fact.privacy_tier, PRIVACY);
     const domain = normalizeDomain(fact.domain);
-    return { node, text, confidence, privacy_tier, domain };
+    return {
+      node,
+      text,
+      predicate,
+      object_text,
+      valid_from,
+      source_event_refs,
+      scope_type,
+      scope_id,
+      visibility,
+      confidence,
+      privacy_tier,
+      domain,
+    };
   });
 
   const events: CleanEvent[] = eventsIn.map((entry, i) => {

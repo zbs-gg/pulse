@@ -76,6 +76,276 @@ func TestSaveSemanticDeltaMaterializesGraphAndContinuity(t *testing.T) {
 	}
 }
 
+func TestSaveSemanticDeltaAssimilatesStructuredFactsIntoAssertions(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	delta := validSemanticDelta()
+	delta.Source.ProjectID = "garden"
+	delta.Facts = []SemanticFact{{
+		Node:        "project:pulse",
+		Text:        "Pulse canonical memory store is local-first.",
+		Predicate:   "canonical memory store",
+		ObjectText:  "local-first Pulse store",
+		ValidFrom:   "2026-06-30T00:00:00Z",
+		Confidence:  0.91,
+		PrivacyTier: "private",
+		Domain:      "real",
+	}}
+
+	res, err := s.SaveSemanticDelta(delta)
+	if err != nil {
+		t.Fatalf("SaveSemanticDelta: %v", err)
+	}
+	if res.AssertionsUpserted != 1 {
+		t.Fatalf("expected one assertion upserted, got %#v", res)
+	}
+
+	key := MakeClaimKey("Pulse", "canonical memory store")
+	cur, err := s.CurrentAssertions(key, Scope{Type: "project", ID: "garden"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions: %v", err)
+	}
+	if len(cur) != 1 {
+		t.Fatalf("expected one current assertion, got %#v", cur)
+	}
+	got := cur[0]
+	if got.ObjectText != "local-first Pulse store" {
+		t.Fatalf("assertion object = %q", got.ObjectText)
+	}
+	if got.ValidFrom != "2026-06-30T00:00:00Z" {
+		t.Fatalf("assertion valid_from = %q", got.ValidFrom)
+	}
+	if got.Confidence != 0.91 {
+		t.Fatalf("assertion confidence = %v", got.Confidence)
+	}
+	if got.ExtractorVersion != SemanticDeltaSchema {
+		t.Fatalf("assertion extractor = %q", got.ExtractorVersion)
+	}
+	if got.Scope.Visibility != "private" {
+		t.Fatalf("assertion visibility = %q", got.Scope.Visibility)
+	}
+	if got.SubjectEntityID == nil {
+		t.Fatalf("assertion should keep subject entity id: %#v", got)
+	}
+	if len(got.SourceEventIDs) != 1 || len(res.EventIDs) != 1 || got.SourceEventIDs[0] != res.EventIDs[0] {
+		t.Fatalf("assertion source events = %#v, result events = %#v", got.SourceEventIDs, res.EventIDs)
+	}
+}
+
+func TestSaveSemanticDeltaSupersedesChangedStructuredAssertion(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	first := validSemanticDelta()
+	first.Source.ProjectID = "garden"
+	first.Facts = []SemanticFact{{
+		Node:        "project:pulse",
+		Text:        "Pulse canonical memory store is local.",
+		Predicate:   "canonical memory store",
+		ObjectText:  "local",
+		ValidFrom:   "2026-06-30T00:00:00Z",
+		Confidence:  0.8,
+		PrivacyTier: "private",
+		Domain:      "real",
+	}}
+	if _, err := s.SaveSemanticDelta(first); err != nil {
+		t.Fatalf("SaveSemanticDelta first: %v", err)
+	}
+
+	second := validSemanticDelta()
+	second.Source.ProjectID = "garden"
+	second.Source.Timestamp = "2026-07-01T00:00:00Z"
+	second.Events[0].ClientID = "event:pulse-store-hosted-decision"
+	second.Events[0].Title = "Pulse hosted store decision"
+	second.Facts = []SemanticFact{{
+		Node:        "project:pulse",
+		Text:        "Pulse canonical memory store is hosted for mobile clients.",
+		Predicate:   "canonical memory store",
+		ObjectText:  "hosted with authorization",
+		ValidFrom:   "2026-07-01T00:00:00Z",
+		Confidence:  0.87,
+		PrivacyTier: "private",
+		Domain:      "real",
+	}}
+	res, err := s.SaveSemanticDelta(second)
+	if err != nil {
+		t.Fatalf("SaveSemanticDelta second: %v", err)
+	}
+	if res.AssertionsUpserted != 1 {
+		t.Fatalf("expected one assertion upserted, got %#v", res)
+	}
+
+	key := MakeClaimKey("Pulse", "canonical memory store")
+	cur, err := s.CurrentAssertions(key, Scope{Type: "project", ID: "garden"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions: %v", err)
+	}
+	if len(cur) != 1 || cur[0].ObjectText != "hosted with authorization" {
+		t.Fatalf("expected hosted current assertion, got %#v", cur)
+	}
+
+	var superseded, active int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM assertions WHERE claim_key=? AND status='superseded'`, key).Scan(&superseded); err != nil {
+		t.Fatalf("count superseded: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM assertions WHERE claim_key=? AND status='active'`, key).Scan(&active); err != nil {
+		t.Fatalf("count active: %v", err)
+	}
+	if superseded != 1 || active != 1 {
+		t.Fatalf("expected one superseded and one active assertion, got superseded=%d active=%d", superseded, active)
+	}
+}
+
+func TestSaveSemanticDeltaRejectsNonPersonalAssertionScopeWithoutID(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	delta := validSemanticDelta()
+	delta.Source.ProjectID = "garden"
+	delta.Facts = []SemanticFact{{
+		Node:        "project:pulse",
+		Text:        "Pulse canonical memory store is local-first.",
+		Predicate:   "canonical memory store",
+		ObjectText:  "local-first Pulse store",
+		ScopeType:   "project",
+		Confidence:  0.91,
+		PrivacyTier: "private",
+		Domain:      "real",
+	}}
+
+	_, err = s.SaveSemanticDelta(delta)
+	if err == nil {
+		t.Fatal("expected project scope without scope_id to be rejected")
+	}
+	if !strings.Contains(err.Error(), "scope_id") {
+		t.Fatalf("expected scope_id error, got %v", err)
+	}
+}
+
+func TestSaveSemanticDeltaPreservesZeroConfidenceAssertion(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	delta := validSemanticDelta()
+	delta.Source.ProjectID = "garden"
+	delta.Facts = []SemanticFact{{
+		Node:        "project:pulse",
+		Text:        "Pulse canonical memory store is uncertain.",
+		Predicate:   "canonical memory store",
+		ObjectText:  "uncertain",
+		Confidence:  0,
+		PrivacyTier: "private",
+		Domain:      "real",
+	}}
+
+	if _, err := s.SaveSemanticDelta(delta); err != nil {
+		t.Fatalf("SaveSemanticDelta: %v", err)
+	}
+	key := MakeClaimKey("Pulse", "canonical memory store")
+	cur, err := s.CurrentAssertions(key, Scope{Type: "project", ID: "garden"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions: %v", err)
+	}
+	if len(cur) != 1 {
+		t.Fatalf("expected one current assertion, got %#v", cur)
+	}
+	if cur[0].Confidence != 0 {
+		t.Fatalf("expected zero confidence to stay zero, got %v", cur[0].Confidence)
+	}
+}
+
+func TestSaveSemanticDeltaLinksAssertionToDeclaredSourceEventsOnly(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	delta := validSemanticDelta()
+	delta.Source.ProjectID = "garden"
+	delta.Events = []SemanticEvent{
+		{
+			ClientID:    "event:vitaly-call",
+			Title:       "Vitaly call",
+			Summary:     "Vitaly reviewed the wedge.",
+			EntityRefs:  []string{"project:pulse"},
+			Confidence:  0.83,
+			PrivacyTier: "private",
+			Domain:      "real",
+		},
+		{
+			ClientID:    "event:material-graph-plan",
+			Title:       "Material Graph plan",
+			Summary:     "Pulse planned assertion-backed graph projection.",
+			EntityRefs:  []string{"project:pulse"},
+			Confidence:  0.88,
+			PrivacyTier: "private",
+			Domain:      "real",
+		},
+	}
+	delta.Facts = []SemanticFact{
+		{
+			Node:            "project:pulse",
+			Text:            "Vitaly rejected the emotional companion wedge.",
+			Predicate:       "review verdict",
+			ObjectText:      "needs wedge hardening",
+			SourceEventRefs: []string{"event:vitaly-call"},
+			Confidence:      0.82,
+			PrivacyTier:     "private",
+			Domain:          "real",
+		},
+		{
+			Node:            "project:pulse",
+			Text:            "Pulse should project assertions into Material Graph next.",
+			Predicate:       "next layer",
+			ObjectText:      "assertion-backed material graph",
+			SourceEventRefs: []string{"event:material-graph-plan"},
+			Confidence:      0.86,
+			PrivacyTier:     "private",
+			Domain:          "real",
+		},
+	}
+
+	res, err := s.SaveSemanticDelta(delta)
+	if err != nil {
+		t.Fatalf("SaveSemanticDelta: %v", err)
+	}
+	if len(res.EventIDs) != 2 {
+		t.Fatalf("expected two inserted events, got %#v", res.EventIDs)
+	}
+
+	reviewClaims, err := s.CurrentAssertions(MakeClaimKey("Pulse", "review verdict"), Scope{Type: "project", ID: "garden"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions review verdict: %v", err)
+	}
+	nextClaims, err := s.CurrentAssertions(MakeClaimKey("Pulse", "next layer"), Scope{Type: "project", ID: "garden"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions next layer: %v", err)
+	}
+	if len(reviewClaims) != 1 || len(nextClaims) != 1 {
+		t.Fatalf("expected one assertion per claim, got review=%#v next=%#v", reviewClaims, nextClaims)
+	}
+	if got := reviewClaims[0].SourceEventIDs; len(got) != 1 || got[0] != res.EventIDs[0] {
+		t.Fatalf("review claim source events = %#v, want only %#v", got, res.EventIDs[:1])
+	}
+	if got := nextClaims[0].SourceEventIDs; len(got) != 1 || got[0] != res.EventIDs[1] {
+		t.Fatalf("next claim source events = %#v, want only %#v", got, res.EventIDs[1:])
+	}
+}
+
 func TestSaveSemanticDeltaMergesPersonAliasesForViewer(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -435,6 +705,7 @@ func TestWipeMemoryRemovesHostExtractedSemanticGraph(t *testing.T) {
 		{"entities", `SELECT COUNT(*) FROM entities WHERE scorer_version='host-extracted'`},
 		{"relations", `SELECT COUNT(*) FROM relations`},
 		{"facts", `SELECT COUNT(*) FROM facts WHERE scorer_version='host-extracted' OR extractor_version='pulse.semantic_delta.v1'`},
+		{"assertions", `SELECT COUNT(*) FROM assertions WHERE extractor_version='pulse.semantic_delta.v1'`},
 		{"events", `SELECT COUNT(*) FROM events WHERE scorer_version='host-extracted'`},
 		{"checkpoints", `SELECT COUNT(*) FROM continuity_checkpoints`},
 	} {

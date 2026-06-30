@@ -55,11 +55,18 @@ type SemanticEdge struct {
 }
 
 type SemanticFact struct {
-	Node        string  `json:"node"`
-	Text        string  `json:"text"`
-	Confidence  float64 `json:"confidence"`
-	PrivacyTier string  `json:"privacy_tier"`
-	Domain      string  `json:"domain,omitempty"`
+	Node            string   `json:"node"`
+	Text            string   `json:"text"`
+	Predicate       string   `json:"predicate,omitempty"`
+	ObjectText      string   `json:"object_text,omitempty"`
+	ValidFrom       string   `json:"valid_from,omitempty"`
+	SourceEventRefs []string `json:"source_event_refs,omitempty"`
+	ScopeType       string   `json:"scope_type,omitempty"`
+	ScopeID         string   `json:"scope_id,omitempty"`
+	Visibility      string   `json:"visibility,omitempty"`
+	Confidence      float64  `json:"confidence"`
+	PrivacyTier     string   `json:"privacy_tier"`
+	Domain          string   `json:"domain,omitempty"`
 }
 
 type SemanticEvent struct {
@@ -113,13 +120,14 @@ type SemanticContinuity struct {
 }
 
 type SemanticDeltaResult struct {
-	OK              bool    `json:"ok"`
-	NodesUpserted   int     `json:"nodes_upserted"`
-	EdgesUpserted   int     `json:"edges_upserted"`
-	FactsUpserted   int     `json:"facts_upserted"`
-	EventsInserted  int     `json:"events_inserted"`
-	EventIDs        []int64 `json:"event_ids,omitempty"`
-	CheckpointSaved bool    `json:"checkpoint_saved"`
+	OK                 bool    `json:"ok"`
+	NodesUpserted      int     `json:"nodes_upserted"`
+	EdgesUpserted      int     `json:"edges_upserted"`
+	FactsUpserted      int     `json:"facts_upserted"`
+	AssertionsUpserted int     `json:"assertions_upserted,omitempty"`
+	EventsInserted     int     `json:"events_inserted"`
+	EventIDs           []int64 `json:"event_ids,omitempty"`
+	CheckpointSaved    bool    `json:"checkpoint_saved"`
 	// EventsIndexed reports whether freshly ingested events were embedded and
 	// are retrievable now (nil = no retrieval engine / no events in delta).
 	EventsIndexed *bool `json:"events_indexed,omitempty"`
@@ -138,12 +146,15 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 	defer tx.Rollback()
 
 	nodeIDs := make(map[string]int64, len(delta.Nodes))
+	nodeNames := make(map[string]string, len(delta.Nodes))
+	eventIDsByRef := make(map[string]int64, len(delta.Events))
 	for _, node := range delta.Nodes {
-		id, err := upsertSemanticNode(tx, node, now)
+		id, canonicalName, err := upsertSemanticNode(tx, node, now)
 		if err != nil {
 			return result, err
 		}
 		nodeIDs[node.ClientID] = id
+		nodeNames[node.ClientID] = canonicalName
 		result.NodesUpserted++
 	}
 	for _, edge := range delta.Edges {
@@ -152,19 +163,27 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.EdgesUpserted++
 	}
-	for _, fact := range delta.Facts {
-		if err := upsertSemanticFact(tx, nodeIDs, fact, now); err != nil {
-			return result, err
-		}
-		result.FactsUpserted++
-	}
 	for _, event := range delta.Events {
 		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
 		if err != nil {
 			return result, err
 		}
 		result.EventIDs = append(result.EventIDs, id)
+		eventIDsByRef[event.ClientID] = id
 		result.EventsInserted++
+	}
+	for _, fact := range delta.Facts {
+		if err := upsertSemanticFact(tx, nodeIDs, fact, now); err != nil {
+			return result, err
+		}
+		_, inserted, err := upsertSemanticAssertion(tx, nodeIDs, nodeNames, fact, now, eventIDsByRef, result.EventIDs, delta.Source)
+		if err != nil {
+			return result, err
+		}
+		if inserted {
+			result.AssertionsUpserted++
+		}
+		result.FactsUpserted++
 	}
 	if err := tx.Commit(); err != nil {
 		return result, err
@@ -201,7 +220,7 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 	return result, nil
 }
 
-func upsertSemanticNode(tx *sql.Tx, node SemanticNode, now string) (int64, error) {
+func upsertSemanticNode(tx *sql.Tx, node SemanticNode, now string) (int64, string, error) {
 	id, canonicalName, existingAliases, err := findSemanticEntity(tx, node)
 	if err == sql.ErrNoRows {
 		aliases, _ := json.Marshal(cleanSemanticAliases(node.CanonicalName, node.Aliases))
@@ -213,12 +232,13 @@ func upsertSemanticNode(tx *sql.Tx, node SemanticNode, now string) (int64, error
 			node.CanonicalName, node.Kind, string(aliases), now, now, node.Salience,
 			node.EmotionalWeight, "host-extracted", node.Summary, "pulse.semantic_delta.v1")
 		if err != nil {
-			return 0, fmt.Errorf("insert semantic node %q: %w", node.ClientID, err)
+			return 0, "", fmt.Errorf("insert semantic node %q: %w", node.ClientID, err)
 		}
-		return res.LastInsertId()
+		id, err := res.LastInsertId()
+		return id, node.CanonicalName, err
 	}
 	if err != nil {
-		return 0, fmt.Errorf("select semantic node %q: %w", node.ClientID, err)
+		return 0, "", fmt.Errorf("select semantic node %q: %w", node.ClientID, err)
 	}
 	mergedAliases := mergeSemanticAliases(canonicalName, existingAliases, append(node.Aliases, node.CanonicalName))
 	aliases, _ := json.Marshal(mergedAliases)
@@ -232,9 +252,9 @@ func upsertSemanticNode(tx *sql.Tx, node SemanticNode, now string) (int64, error
 		       scorer_version = 'host-extracted'
 		 WHERE id = ?`,
 		string(aliases), now, node.Salience, node.EmotionalWeight, node.Summary, id); err != nil {
-		return 0, fmt.Errorf("update semantic node %q: %w", node.ClientID, err)
+		return 0, "", fmt.Errorf("update semantic node %q: %w", node.ClientID, err)
 	}
-	return id, nil
+	return id, canonicalName, nil
 }
 
 func findSemanticEntity(tx *sql.Tx, node SemanticNode) (int64, string, []string, error) {
@@ -386,6 +406,91 @@ func upsertSemanticFact(tx *sql.Tx, ids map[string]int64, fact SemanticFact, now
 	return nil
 }
 
+func upsertSemanticAssertion(tx *sql.Tx, ids map[string]int64, names map[string]string, fact SemanticFact, now string, eventIDsByRef map[string]int64, allEventIDs []int64, source SemanticDeltaSource) (int64, bool, error) {
+	entityID, ok := ids[fact.Node]
+	if !ok {
+		return 0, false, fmt.Errorf("assertion fact.node references unknown node %q", fact.Node)
+	}
+	subject := strings.TrimSpace(names[fact.Node])
+	if subject == "" {
+		subject = strings.TrimSpace(fact.Node)
+	}
+	predicate, objectText := semanticAssertionParts(fact)
+	if predicate == "" || objectText == "" {
+		return 0, false, fmt.Errorf("assertion fact %q cannot form predicate/object", fact.Node)
+	}
+	return upsertAssertionTx(tx, Assertion{
+		Subject:            subject,
+		SubjectEntityID:    &entityID,
+		Predicate:          predicate,
+		ObjectText:         objectText,
+		Confidence:         fact.Confidence,
+		ConfidenceExplicit: true,
+		ValidFrom:          semanticAssertionValidFrom(fact, now),
+		SystemFrom:         now,
+		SourceEventIDs:     semanticAssertionSourceEventIDs(fact, eventIDsByRef, allEventIDs),
+		ExtractorVersion:   SemanticDeltaSchema,
+		Scope:              semanticAssertionScope(source, fact),
+	})
+}
+
+func semanticAssertionSourceEventIDs(fact SemanticFact, eventIDsByRef map[string]int64, allEventIDs []int64) []int64 {
+	if len(fact.SourceEventRefs) > 0 {
+		out := make([]int64, 0, len(fact.SourceEventRefs))
+		for _, ref := range fact.SourceEventRefs {
+			if id, ok := eventIDsByRef[strings.TrimSpace(ref)]; ok {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	if len(allEventIDs) == 1 {
+		return []int64{allEventIDs[0]}
+	}
+	return nil
+}
+
+func semanticAssertionParts(fact SemanticFact) (string, string) {
+	predicate := strings.TrimSpace(fact.Predicate)
+	objectText := strings.TrimSpace(fact.ObjectText)
+	if predicate == "" && objectText == "" {
+		return strings.TrimSpace(fact.Text), "true"
+	}
+	return predicate, objectText
+}
+
+func semanticAssertionValidFrom(fact SemanticFact, now string) string {
+	if strings.TrimSpace(fact.ValidFrom) != "" {
+		return strings.TrimSpace(fact.ValidFrom)
+	}
+	return now
+}
+
+func semanticAssertionScope(source SemanticDeltaSource, fact SemanticFact) Scope {
+	scope := Scope{
+		Type:       fact.ScopeType,
+		ID:         fact.ScopeID,
+		Visibility: fact.Visibility,
+	}.normalized()
+	if strings.TrimSpace(fact.ScopeType) == "" && strings.TrimSpace(fact.ScopeID) == "" {
+		switch {
+		case strings.TrimSpace(source.ProjectID) != "":
+			scope.Type = "project"
+			scope.ID = strings.TrimSpace(source.ProjectID)
+		case strings.TrimSpace(source.SessionID) != "":
+			scope.Type = "session"
+			scope.ID = strings.TrimSpace(source.SessionID)
+		default:
+			scope.Type = "personal"
+			scope.ID = ""
+		}
+	}
+	if strings.TrimSpace(fact.Visibility) == "" {
+		scope.Visibility = "private"
+	}
+	return scope
+}
+
 func insertSemanticEvent(tx *sql.Tx, ids map[string]int64, event SemanticEvent, now string) (int64, error) {
 	ts := now
 	if strings.TrimSpace(event.OccurredAt) != "" {
@@ -493,13 +598,18 @@ func validateSemanticDelta(delta SemanticDelta) error {
 			return err
 		}
 	}
-	for i, fact := range delta.Facts {
-		if err := validateSemanticFact(i, fact, refs); err != nil {
-			return err
-		}
-	}
+	eventRefs := map[string]bool{}
 	for i, event := range delta.Events {
 		if err := validateSemanticEvent(i, event, refs); err != nil {
+			return err
+		}
+		if eventRefs[event.ClientID] {
+			return fmt.Errorf("events[%d].client_id is duplicate", i)
+		}
+		eventRefs[event.ClientID] = true
+	}
+	for i, fact := range delta.Facts {
+		if err := validateSemanticFact(i, fact, refs, eventRefs); err != nil {
 			return err
 		}
 	}
@@ -566,12 +676,55 @@ func validateSemanticEdge(i int, edge SemanticEdge, refs map[string]bool) error 
 	return nil
 }
 
-func validateSemanticFact(i int, fact SemanticFact, refs map[string]bool) error {
+func validateSemanticFact(i int, fact SemanticFact, refs map[string]bool, eventRefs map[string]bool) error {
 	if !refs[fact.Node] {
 		return fmt.Errorf("facts[%d].node references unknown node", i)
 	}
 	if err := validateSemanticText(fmt.Sprintf("facts[%d].text", i), fact.Text, 1200, true); err != nil {
 		return err
+	}
+	hasStructuredAssertion := strings.TrimSpace(fact.Predicate) != "" || strings.TrimSpace(fact.ObjectText) != ""
+	if hasStructuredAssertion {
+		if err := validateSemanticText(fmt.Sprintf("facts[%d].predicate", i), fact.Predicate, 160, true); err != nil {
+			return err
+		}
+		if err := validateSemanticText(fmt.Sprintf("facts[%d].object_text", i), fact.ObjectText, 1200, true); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(fact.ValidFrom) != "" {
+		if _, err := time.Parse(time.RFC3339, strings.TrimSpace(fact.ValidFrom)); err != nil {
+			return fmt.Errorf("facts[%d].valid_from must be RFC3339", i)
+		}
+	}
+	if !validAssertionScopeType(fact.ScopeType) {
+		return fmt.Errorf("facts[%d].scope_type is unsupported", i)
+	}
+	if err := validateSemanticText(fmt.Sprintf("facts[%d].scope_id", i), fact.ScopeID, 160, false); err != nil {
+		return err
+	}
+	scopeType := strings.TrimSpace(fact.ScopeType)
+	scopeID := strings.TrimSpace(fact.ScopeID)
+	if scopeType == "" && scopeID != "" {
+		return fmt.Errorf("facts[%d].scope_type is required when scope_id is set", i)
+	}
+	if scopeType != "" && scopeType != "personal" && scopeID == "" {
+		return fmt.Errorf("facts[%d].scope_id is required for %s scope", i, scopeType)
+	}
+	if !validAssertionVisibility(fact.Visibility) {
+		return fmt.Errorf("facts[%d].visibility is unsupported", i)
+	}
+	if len(fact.SourceEventRefs) > 20 {
+		return fmt.Errorf("facts[%d].source_event_refs has too many items", i)
+	}
+	for j, ref := range fact.SourceEventRefs {
+		ref = strings.TrimSpace(ref)
+		if !validSemanticRef(ref) {
+			return fmt.Errorf("facts[%d].source_event_refs[%d] is unsafe", i, j)
+		}
+		if !eventRefs[ref] {
+			return fmt.Errorf("facts[%d].source_event_refs[%d] references unknown event", i, j)
+		}
 	}
 	if fact.Confidence < 0 || fact.Confidence > 1 {
 		return fmt.Errorf("facts[%d].confidence must be 0..1", i)
@@ -583,6 +736,24 @@ func validateSemanticFact(i int, fact SemanticFact, refs map[string]bool) error 
 		return fmt.Errorf("facts[%d].domain is unsupported", i)
 	}
 	return nil
+}
+
+func validAssertionScopeType(scopeType string) bool {
+	switch strings.TrimSpace(scopeType) {
+	case "", "personal", "project", "repo", "agent", "session":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAssertionVisibility(visibility string) bool {
+	switch strings.TrimSpace(visibility) {
+	case "", "private", "shared":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) error {

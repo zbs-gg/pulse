@@ -68,7 +68,8 @@ Forbidden use:
 | `pulse.semantic_delta.v1` | Host-extracted nodes, edges, facts, events, and continuity. | Closest current Material Graph write contract. | Node kinds are generic; source refs/status/salience are not first-class on every object. |
 | `entities` | Canonical graph nodes with aliases, salience, emotional weight, description. | Good physical node store. | Current kind set does not include all v0 material object kinds. |
 | `relations` | Entity-to-entity edges with kind, strength, context. | Good physical edge store. | No per-edge confidence, source refs, privacy tier, or review status columns. |
-| `facts` | Entity-scoped claims with confidence/provenance/domain. | Good for source-backed assertions. | Source refs are indirect; privacy tier is not preserved from semantic deltas. |
+| `facts` | Entity-scoped claims with confidence/provenance/domain. | Still useful as the legacy graph fact projection. | New structured claims should flow into first-class `assertions`; source refs remain indirect on legacy facts. |
+| `assertions` | Bitemporal, scoped claim identity store. | Canonical layer for stable claims, supersession, retraction, and future wiki projection. | Now populated from structured `semantic_delta.facts`; Material Graph and context-query reads still need assertion-backed projection. |
 | `events` / `event_entities` | Time-bearing events connected to graph entities. | Good place for proof, review, and emotional/state anchors attached to objects. | Emotion/status/source-ref semantics are under-specified for product use. |
 | `continuity_checkpoints` | Resume source for where we left off. | Already carries the Continuity Pack. | It stores strings, not references to material graph node IDs. |
 | `BuildResume` | Builds `pulse.continuity.v1` resume markdown and sections. | Correct product center: "what Pulse will tell Claude next". | Does not yet expose a Material Graph node/edge projection for resume evidence. |
@@ -95,6 +96,17 @@ semantic text rejects raw-looking transcript, secret, and path-like payloads.
 `BuildResume` reads checkpoints, observations, and recent memory capsules into
 a compact resume.
 
+3a. Structured facts now assimilate into assertions.
+
+`SaveSemanticDelta` writes `facts[]` into the legacy `facts` table and the
+first-class `assertions` table. Structured facts with `predicate/object_text`
+use `subject + predicate` as the stable claim key and supersede changed current
+values; unstructured facts become stable statement assertions with
+`object_text = "true"`. Assertion assimilation now requires explicit
+non-personal `scope_id`s, preserves semantic-delta confidence exactly, and links
+source events per fact through `source_event_refs` instead of attaching every
+event in the delta to every assertion.
+
 4. Active reviewed threads are already gated.
 
 `activeReviewInsights` filters review insights through `ActiveThreads`, and the
@@ -112,10 +124,10 @@ building the semantic delta.
 hide and restore graph entities via `/graph/entity/hide` and
 `/graph/entity/restore`.
 
-7. Wipe covers host-extracted memory and graph rows.
+7. Wipe covers host-extracted memory, assertions, and graph rows.
 
-`WipeMemory` deletes memory capsules, continuity rows, and host-extracted graph
-rows.
+`WipeMemory` deletes memory capsules, continuity rows, semantic-delta
+assertions, and host-extracted graph rows.
 
 ## Main Gaps
 

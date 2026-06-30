@@ -41,6 +41,7 @@ Pulse = Material Graph + Salience Overlay + Continuity Pack
 | MG-17 | Add Arena graph comparison export. | Not started | Arena compares entity/decision/open-loop/do-not-repeat extraction, source refs, confidence, and recall prose. |
 | MG-18 | Add persisted object correction workflow. | Not started | Nodes/edges can be confirmed, corrected, ignored, restored; status affects viewer, resume, and Arena output. |
 | MG-19 | Add ignored-import Material Graph E2E test. | Missing | A preview ignored entity goes through commit/import and is absent from Material Graph, viewer, and resume. |
+| MG-20 | Add assertion assimilation from semantic deltas. | Done for hardened runtime slice | Structured `facts[]` in `pulse.semantic_delta.v1` write first-class bitemporal assertions with strict non-personal scopes, exact confidence, per-fact source event ids, and supersession. Wiki remains a projection, not a store. |
 
 ## This Implementation Slice
 
@@ -81,6 +82,8 @@ Additional follow-up:
 - add source-ref drilldown affordances;
 - decide whether `SemanticNode.Kind` should be widened or kept generic with
   projection-only richer kinds.
+- surface assertion-backed claims in Material Graph and `/context/query`, then
+  add a human wiki export as a projection over assertions + graph.
 
 See `docs/PULSE_MATERIAL_GRAPH_PROSHA_POINT_AUDIT.md` for the point-by-point
 mapping from Prosha's review to completed, partial, and missing stories.

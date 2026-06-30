@@ -535,6 +535,38 @@ function createPulseMcpServer(): Server {
               properties: {
                 node: { type: 'string' },
                 text: { type: 'string', maxLength: 1200 },
+                predicate: {
+                  type: 'string',
+                  maxLength: 160,
+                  description:
+                    'Optional structured assertion predicate. If set, object_text must also be set; Pulse uses subject node + predicate as the stable claim key.',
+                },
+                object_text: {
+                  type: 'string',
+                  maxLength: 1200,
+                  description:
+                    'Optional structured assertion object/value. A later delta with the same subject+predicate and a different object supersedes the prior assertion.',
+                },
+                valid_from: {
+                  type: 'string',
+                  description: 'Optional RFC3339 valid-time for when this claim became true.',
+                },
+                source_event_refs: {
+                  type: 'array',
+                  maxItems: 20,
+                  items: { type: 'string' },
+                  description:
+                    'Optional semantic_delta event client_ids that prove this fact. If set, every ref must match an event in the same delta.',
+                },
+                scope_type: {
+                  type: 'string',
+                  enum: ['personal', 'project', 'repo', 'agent', 'session'],
+                },
+                scope_id: { type: 'string', maxLength: 160 },
+                visibility: {
+                  type: 'string',
+                  enum: ['private', 'shared'],
+                },
                 confidence: { type: 'number', minimum: 0, maximum: 1 },
                 privacy_tier: {
                   type: 'string',
