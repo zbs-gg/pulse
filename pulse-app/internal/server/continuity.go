@@ -180,6 +180,11 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
     .step b::before { content:attr(data-step); display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:999px; background:rgba(141,111,131,.12); color:#6f5d69; font-size:12px; }
     .step span { display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.35; }
     .resume-summary { margin-top:12px; padding:14px; border-radius:var(--radius); border:1px solid rgba(86,70,86,.12); background:rgba(255,255,255,.66); color:#453d47; font-size:15px; line-height:1.5; }
+    .harness-digest { margin-top:12px; padding:12px 14px; border-radius:var(--radius); border:1px solid rgba(86,70,86,.12); background:linear-gradient(135deg,rgba(247,215,209,.34),rgba(235,228,251,.30)); }
+    .harness-digest-title { font-weight:680; color:#5f4f5b; font-size:14px; margin-bottom:6px; }
+    .harness-digest-list { list-style:none; margin:0; padding:0; }
+    .harness-digest-list li { padding:4px 0; color:#453d47; font-size:14px; line-height:1.45; opacity:0; transform:translateY(6px); animation:harnessReveal .5s cubic-bezier(.22,.61,.36,1) forwards; }
+    @keyframes harnessReveal { to { opacity:1; transform:translateY(0); } }
     .raw-resume { margin-top:10px; border-radius:var(--radius); background:rgba(255,255,255,.46); border:1px solid rgba(86,70,86,.10); }
     .raw-resume summary { cursor:pointer; padding:11px 13px; color:#5f4f5b; font-weight:660; }
 	    .resume-card { margin:0 12px 12px; min-height:160px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:14px; border-radius:var(--radius); border:1px solid rgba(86,70,86,.12); background:rgba(255,255,255,.66); color:#453d47; }
@@ -301,6 +306,10 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
         <span class="label" id="resume-budget">bounded</span>
       </div>
       <div id="resume-summary" class="resume-summary">Pulse will tell Claude: No resume block yet. Start with one proof memory before importing archives.</div>
+      <div id="harness-digest-panel" class="harness-digest" hidden>
+        <div class="harness-digest-title">🌱 Across your harnesses</div>
+        <ul id="harness-digest" class="harness-digest-list"></ul>
+      </div>
       <details class="raw-resume">
         <summary>View raw resume block</summary>
         <pre id="resume" class="resume-card">No resume block yet.
@@ -636,6 +645,21 @@ function resumeSummary(data) {
   const decision = firstText(sections.active_decisions, "Import is optional and private by default.");
   return "Pulse will tell Claude: " + where + " " + decision;
 }
+function renderHarnessDigest(data) {
+  const items = asArray(data?.next_resume?.sections?.harness_activity);
+  const panel = document.getElementById("harness-digest-panel");
+  const ul = document.getElementById("harness-digest");
+  if (!panel || !ul) return;
+  ul.innerHTML = "";
+  if (items.length === 0) { panel.hidden = true; return; }
+  panel.hidden = false;
+  items.forEach((item, i) => {
+    const li = document.createElement("li");
+    li.textContent = String(item);
+    li.style.animationDelay = (i * 90) + "ms"; // staggered reveal
+    ul.appendChild(li);
+  });
+}
 function formatApproxTokens(value) {
   const n = Number(value || 0);
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -892,6 +916,7 @@ async function loadViewerData() {
     const estimate = data.next_resume?.token_estimate || 0;
     document.getElementById("resume").textContent = data.next_resume?.resume_markdown || "No resume block yet.\nStart a Claude Code session or import one small source.\nPulse will show the next resume block here before it is injected.";
     document.getElementById("resume-summary").textContent = resumeSummary(data);
+    renderHarnessDigest(data);
     document.getElementById("resume-budget").textContent = String(estimate) + " tokens";
     const economy = data.next_resume?.token_economy || {};
     document.getElementById("resume-token-economy").textContent = String(economy.resume_tokens || estimate) + " tokens";
