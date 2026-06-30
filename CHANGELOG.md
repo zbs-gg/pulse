@@ -2,7 +2,7 @@
 
 All notable changes to Pulse.
 
-## 2026-06-29
+## 0.6.5 — 2026-06-30
 
 ### Fixed
 - **Unicode-aware memory tags** — `safeTagPattern` now accepts `\p{L}\p{N}`,
