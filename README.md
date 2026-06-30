@@ -47,7 +47,7 @@ Please install it carefully:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check the npm package:
    npm view @zbs-gg/pulse dist-tags
-   The preview tag should be 0.6.5 or newer for this README.
+   The preview tag should be 0.6.6 or newer for this README.
 3. Tell me which harness path fits my setup:
    - Claude Code full local preview; or
    - MCP/Safe Mode for Cursor, Windsurf, Claude Desktop/local MCP clients,

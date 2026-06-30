@@ -276,7 +276,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.6.5');
+  assert.equal(plan.version, '0.6.6');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -334,7 +334,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.6.5');
+  assert.equal(report.version, '0.6.6');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
