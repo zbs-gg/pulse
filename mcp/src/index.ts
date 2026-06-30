@@ -151,6 +151,7 @@ interface ContextQueryBody {
   include_trace?: boolean;
   user_state?: Record<string, unknown>;
   domain_hints?: string[];
+  graph_mode?: 'off' | 'anchored' | 'walk';
 }
 
 interface ResumeBody {
@@ -411,6 +412,12 @@ function createPulseMcpServer(): Server {
           include_trace: { type: 'boolean' },
           user_state: { type: 'object', additionalProperties: true },
           domain_hints: { type: 'array', items: { type: 'string' } },
+          graph_mode: {
+            type: 'string',
+            enum: ['off', 'anchored', 'walk'],
+            description:
+              'Temporal entity-graph retrieval override. Default (server) = anchored. "walk" adds typed relation traversal (multi-hop).',
+          },
         },
         required: ['query'],
         additionalProperties: false,

@@ -76,6 +76,11 @@ type Engine struct {
 
 	embedModel    string
 	referenceTime time.Time
+
+	// assertionOverlay, when true, demotes a stale fact-event below its own
+	// correction in the final ranked list (supersession-aware). Default false:
+	// the list is untouched, so the frozen v3 path stays byte-identical.
+	assertionOverlay bool
 }
 
 // Config bundles the dependencies an Engine needs.
@@ -87,6 +92,9 @@ type Config struct {
 	// ReferenceTime — if set, days_ago is computed as
 	// (ReferenceTime - event.ts) / 24h. Defaults to time.Now() at Init().
 	ReferenceTime *time.Time
+	// AssertionOverlay enables supersession-aware demotion of stale fact-events
+	// in the final ranked list (post-scoring; never alters v3 scores/gating).
+	AssertionOverlay bool
 }
 
 // New builds an Engine with sensible defaults. Call Init() to load indexes.
@@ -114,6 +122,7 @@ func New(cfg Config) *Engine {
 		referenceTime:     ref,
 		parentToChild:     make(map[int64][]int64),
 		childToParent:     make(map[int64][]int64),
+		assertionOverlay:  cfg.AssertionOverlay,
 	}
 }
 
@@ -403,6 +412,10 @@ type RetrieveRequest struct {
 	Mode      QueryMode  // ModeAuto = router decides
 	UserState *UserState // nullable
 	TopK      int        // default 5 if zero
+	// GraphMode enables temporal entity-graph retrieval as an EXTRA RRF input
+	// (graph-as-recall-injector). "" = OFF (default; behaviour unchanged).
+	// "anchored" = entity-anchored events; "walk" = + typed relation walk.
+	GraphMode string
 }
 
 // RetrieveResponse is the output: ranked event IDs + chosen mode + router trace.
@@ -486,7 +499,10 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// hits events that don't share the original word but match known
 	// canon. Expansion failures are non-fatal — we keep the raw query.
 	ids := cosineIDs
-	if e.store != nil {
+	// Factual mode: PURE cosine ranking (no BM25/RRF fusion, no empathic
+	// surfaceability) — isolate the semantic ranker, like a dedicated fact store.
+	// Empathic/chain keep the full hybrid fusion + surfaceability.
+	if mode != ModeFactual && e.store != nil {
 		bm25Query := req.Query
 		if e.expander != nil {
 			if extras, err := e.expander.Expand(ctx, req.Query); err == nil && len(extras) > 0 {
@@ -494,12 +510,33 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 			}
 		}
 		bm25IDs, err := BM25Search(ctx, e.store.DB(), bm25Query, topK*2)
+		lists := [][]int64{cosineIDs}
 		if err == nil && len(bm25IDs) > 0 {
-			ids = RRFFuse([][]int64{cosineIDs, bm25IDs}, topK, 60)
+			lists = append(lists, bm25IDs)
+		}
+		// Graph-as-recall-injector: default-OFF extra RRF input (entity-anchored
+		// / typed relation walk). Salience ranking is preserved — graph only adds
+		// candidates the cosine/BM25 paths miss (multi-hop, entity-centric).
+		if req.GraphMode != "" {
+			if gids := e.retrieveGraphCandidates(ctx, req.Query, req.GraphMode, topK); len(gids) > 0 {
+				lists = append(lists, gids)
+			}
+		}
+		if len(lists) > 1 {
+			ids = RRFFuse(lists, topK, 60)
 		}
 	}
 	var surfaceability SurfaceabilityAction
-	ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+	if mode != ModeFactual {
+		ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+	}
+
+	// Supersession-aware demotion (default-off, post-scoring): if both a stale
+	// fact-event and its correction are present, the stale one is moved below
+	// the correction. Pure reorder — no v3 score/gating change.
+	if e.assertionOverlay {
+		ids = e.applyAssertionDemotion(ids)
+	}
 
 	return &RetrieveResponse{
 		EventIDs:             ids,
@@ -509,6 +546,94 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		SurfaceabilityAction: surfaceability,
 		ScoreBreakdowns:      breakdowns,
 	}, nil
+}
+
+// applyAssertionDemotion moves any stale fact-event below its own correction
+// when BOTH are present in ids (supersession-aware). Demote-only: it never
+// drops, adds, or rescoring an id. With no superseded pairs in the store (every
+// assertion-free corpus, including the v3 golden) it returns ids unchanged, so
+// the frozen empathic path is unaffected unless an actual superseded fact and
+// its replacement both surface.
+func (e *Engine) applyAssertionDemotion(ids []int64) []int64 {
+	if e.store == nil || len(ids) < 2 {
+		return ids
+	}
+	pairs, err := e.store.SupersededPairsForEvents(ids)
+	if err != nil || len(pairs) == 0 {
+		return ids
+	}
+	return demoteSupersededBelowCurrent(ids, pairs)
+}
+
+// demoteSupersededBelowCurrent deterministically places every stale event
+// immediately after the CURRENT leaf of its supersession chain (A→B→C ⇒ A,B sit
+// after C, never above it), while preserving the relative order of all UNRELATED
+// events. Pure and order-neutral: the result depends only on ids+pairs, not on
+// the row order pairs arrive in, and events touched by no pair keep their order.
+func demoteSupersededBelowCurrent(ids []int64, pairs [][2]int64) []int64 {
+	succ := make(map[int64]int64, len(pairs)) // stale -> immediate current
+	for _, p := range pairs {
+		succ[p[0]] = p[1]
+	}
+	if len(succ) == 0 {
+		return ids
+	}
+	pos := make(map[int64]int, len(ids))
+	for i, id := range ids {
+		pos[id] = i
+	}
+	terminal := func(x int64) int64 { // current leaf of x's chain (cycle-guarded)
+		seen := map[int64]bool{}
+		for {
+			n, ok := succ[x]
+			if !ok || seen[x] {
+				return x
+			}
+			seen[x] = true
+			x = n
+		}
+	}
+	// A stale event is "violating" only if its current leaf is present AND ranked
+	// above it. Already-below stales and unrelated events are left exactly in place
+	// (order-neutral); only violating stales move — down to just after their leaf.
+	violating := make(map[int64]bool)
+	for s := range succ {
+		sp, ok := pos[s]
+		if !ok {
+			continue
+		}
+		if lp, ok := pos[terminal(s)]; ok && sp < lp {
+			violating[s] = true
+		}
+	}
+	if len(violating) == 0 {
+		return ids
+	}
+	insertAfter := make(map[int64][]int64) // leaf -> its violating stales, in original order
+	reduced := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if violating[id] {
+			leaf := terminal(id)
+			insertAfter[leaf] = append(insertAfter[leaf], id)
+			continue
+		}
+		reduced = append(reduced, id)
+	}
+	out := make([]int64, 0, len(ids))
+	for _, id := range reduced {
+		out = append(out, id)
+		out = append(out, insertAfter[id]...)
+	}
+	return out
+}
+
+// EmbedText embeds a single string with the wired embedder. Public so the store
+// can resolve claims by meaning. Returns nil,nil when no embedder is configured.
+func (e *Engine) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	if e.embedder == nil {
+		return nil, nil
+	}
+	return e.embedQuery(ctx, text)
 }
 
 func (e *Engine) embedQuery(ctx context.Context, q string) ([]float32, error) {
@@ -668,10 +793,32 @@ func nonIdentityPtr(v float64) *float64 {
 }
 
 // retrieveFactual — cosine on fact embeddings → unique parent event_ids.
+// retrieveFactualEvents ranks events by PLAIN cosine similarity to the query —
+// no v3 emotion/state/anchor boosts, no recency decay. This is the right ranker
+// for factual lookup ("what was the error code / email / occupation"): the
+// answer-event should win on semantic match alone, exactly like a dedicated
+// fact/vector store. Reuses e.eventVecs; does not touch scoreEventsV3 (the
+// frozen v3 empathic path).
+func (e *Engine) retrieveFactualEvents(qVec []float32, topK int) []int64 {
+	n := len(e.eventIDs)
+	if n == 0 {
+		return nil
+	}
+	scores := make([]float64, n)
+	for i := 0; i < n; i++ {
+		scores[i] = float64(dotF32(qVec, e.eventVecs[i]))
+	}
+	return topKIndicesToIDs(scores, e.eventIDs, topK)
+}
+
 func (e *Engine) retrieveFactual(qVec []float32, topK int) []int64 {
 	if len(e.factIDs) == 0 {
-		// No facts indexed — fall back to empathic so caller still gets results
-		return e.retrieveEmpathic(qVec, topK)
+		// No atomic_facts index (host-extracted mode never populates it) — do a
+		// CLEAN semantic ranking over EVENT embeddings instead of falling back to
+		// the empathic v3 ranker. Factual lookup wants plain cosine (what a fact
+		// store does); the empathic boosts/recency bury the answer. This reuses
+		// the already-loaded event vectors and never touches the frozen v3 path.
+		return e.retrieveFactualEvents(qVec, topK)
 	}
 	n := len(e.factIDs)
 	scores := make([]float64, n)

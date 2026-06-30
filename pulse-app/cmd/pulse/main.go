@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -106,7 +107,40 @@ func run(dataDir, addr string) error {
 		contextQuery = contextquery.New(contextquery.ServiceConfig{
 			DB:        s.DB(),
 			Retrieval: retrievalEngine,
+			// Temporal entity-graph retrieval on the LIVE recall path. "anchored"
+			// is the validated control-safe win (entity-centric recall ↑, no
+			// control regression). Override per-request via graph_mode; set ""
+			// here to disable. "walk" stays opt-in (multi-hop unproven on real graph).
+			GraphMode: "anchored",
 		})
+	}
+
+	// Claim resolution (default OFF). Enabled only when an embedder is wired and
+	// PULSE_CLAIM_RESOLUTION is shadow|on. Precision-first; never touches v3.
+	if retrievalEngine != nil && retrievalEngine.EmbedderReady() {
+		if mode := strings.TrimSpace(os.Getenv("PULSE_CLAIM_RESOLUTION")); mode == "shadow" || mode == "on" {
+			thr := 0.83
+			if v := strings.TrimSpace(os.Getenv("PULSE_CLAIM_COSINE_THRESHOLD")); v != "" {
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
+					thr = f
+				}
+			}
+			eng := retrievalEngine
+			s.EnableClaimResolution(mode, thr, func(t string) ([]float32, error) {
+				return eng.EmbedText(context.Background(), t)
+			})
+			xkey := os.Getenv("PULSE_CLAIM_XKEY") == "1"
+			if xkey {
+				xthr := 0.90
+				if v := strings.TrimSpace(os.Getenv("PULSE_CLAIM_XKEY_THRESHOLD")); v != "" {
+					if f, err := strconv.ParseFloat(v, 64); err == nil {
+						xthr = f
+					}
+				}
+				s.EnableCrossKey(xthr)
+			}
+			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr, "cross_key", xkey)
+		}
 	}
 
 	// Apple Health snapshot provider. M0 = static fixture so demos and
@@ -283,9 +317,10 @@ func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
 	expander := expanderFromEnv(dataDir)
 
 	engine := retrieve.New(retrieve.Config{
-		Store:    s,
-		Embedder: embedder,
-		Expander: expander,
+		Store:            s,
+		Embedder:         embedder,
+		Expander:         expander,
+		AssertionOverlay: os.Getenv("PULSE_ASSERTION_OVERLAY") == "1",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

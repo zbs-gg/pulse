@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -84,6 +85,21 @@ type SemanticEvent struct {
 	Biometrics *SemanticBiometrics `json:"biometrics,omitempty"`
 	// Emotions is a Plutchik-10 vector (0..1) for emotion-alignment scoring.
 	Emotions map[string]float64 `json:"emotions,omitempty"`
+	// Claims are host-extracted subject/predicate/object facts carried by this
+	// event. Each becomes a bitemporal Assertion (auto-superseding the prior
+	// claim with the same subject+predicate), so a changed fact invalidates the
+	// stale one instead of silently coexisting. Optional.
+	Claims []SemanticClaim `json:"claims,omitempty"`
+}
+
+// SemanticClaim is a structured fact: "<subject> <predicate> <object>".
+type SemanticClaim struct {
+	Subject   string `json:"subject"`
+	Predicate string `json:"predicate"`
+	Object    string `json:"object"`
+	// ChangeCue: the statement signals this is an update (now/changed/switched).
+	// Required for the resolver to supersede a prior value (else kept as sibling).
+	ChangeCue bool `json:"change_cue,omitempty"`
 }
 
 // SemanticBiometrics matches the bio snapshot JSON read by state-fit boosts.
@@ -120,6 +136,10 @@ type SemanticDeltaResult struct {
 	EventsInserted  int     `json:"events_inserted"`
 	EventIDs        []int64 `json:"event_ids,omitempty"`
 	CheckpointSaved bool    `json:"checkpoint_saved"`
+	// Claim-resolution counts (0 when resolution is disabled).
+	ClaimsInserted   int `json:"claims_inserted,omitempty"`
+	ClaimsSuperseded int `json:"claims_superseded,omitempty"`
+	ClaimsSkipped    int `json:"claims_skipped,omitempty"`
 	// EventsIndexed reports whether freshly ingested events were embedded and
 	// are retrievable now (nil = no retrieval engine / no events in delta).
 	EventsIndexed *bool `json:"events_indexed,omitempty"`
@@ -158,6 +178,7 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.FactsUpserted++
 	}
+	var pendingClaims []Assertion // resolved AFTER commit (embedding is IO, not in-tx)
 	for _, event := range delta.Events {
 		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
 		if err != nil {
@@ -165,9 +186,51 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 		result.EventIDs = append(result.EventIDs, id)
 		result.EventsInserted++
+		validFrom := now
+		if strings.TrimSpace(event.OccurredAt) != "" {
+			validFrom = strings.TrimSpace(event.OccurredAt)
+		}
+		for _, cl := range event.Claims {
+			if strings.TrimSpace(cl.Subject) == "" || strings.TrimSpace(cl.Predicate) == "" || strings.TrimSpace(cl.Object) == "" {
+				continue
+			}
+			pendingClaims = append(pendingClaims, Assertion{
+				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
+				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
+				ExtractorVersion: "host-extracted",
+				// Scope is no longer hard-coded: claims isolate by the delta's
+				// conversation_scope so a fact in one scope never supersedes the
+				// same-key fact in another (Pro NO-GO #5 — scope was decorative).
+				// (visibility/privacy_tier mapping is deferred to the FFB-tested pass.)
+				Scope:     Scope{Type: "personal", ID: strings.TrimSpace(delta.Source.ConversationScope)},
+				ChangeCue: cl.ChangeCue,
+			})
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return result, err
+	}
+
+	// Claims become bitemporal assertions via the precision-first resolver, but
+	// only when claim resolution is enabled (default off = nothing written, so
+	// the facts/events path above is the entire behavior). Best-effort: a claim
+	// that fails to resolve must not fail the already-committed delta.
+	if s.claimResolutionEnabled() {
+		for _, a := range pendingClaims {
+			d, err := s.ResolveClaim(a)
+			if err != nil {
+				log.Printf("claim resolve failed (%s): %v", a.ClaimKey, err)
+				continue
+			}
+			switch d.Action {
+			case "supersede":
+				result.ClaimsSuperseded++
+			case "noop":
+				result.ClaimsSkipped++
+			default:
+				result.ClaimsInserted++
+			}
+		}
 	}
 
 	if delta.Continuity != nil {
@@ -646,6 +709,20 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 		}
 		if bio.HRV != nil && (*bio.HRV < 0 || *bio.HRV > 300) {
 			return fmt.Errorf("events[%d].biometrics.hrv is out of range", i)
+		}
+	}
+	if len(event.Claims) > 20 {
+		return fmt.Errorf("events[%d].claims has too many items", i)
+	}
+	for j, cl := range event.Claims {
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].subject", i, j), cl.Subject, 200, true); err != nil {
+			return err
+		}
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].predicate", i, j), cl.Predicate, 120, true); err != nil {
+			return err
+		}
+		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].object", i, j), cl.Object, 400, true); err != nil {
+			return err
 		}
 	}
 	return nil
