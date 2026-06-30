@@ -2,6 +2,26 @@
 
 All notable changes to Pulse.
 
+## 0.6.6 — 2026-06-30
+
+### Added
+- **Live factual retrieval** — factual-mode queries now rank by clean cosine over
+  event vectors instead of falling through to the empathic ranker, so direct
+  fact lookups surface the answer event. Bitemporal assertions + precision-first
+  claim resolution (change-cue + chronology guards) back supersession.
+- **Temporal entity-graph retrieval** — the entity graph now feeds retrieval as a
+  recall-injector. Default `anchored` on the live recall path (`/context/query`):
+  entity-centric recall is improved with no regression on direct/lexical queries.
+  `walk` (typed multi-hop relation traversal) is opt-in via `graph_mode`.
+- **Cross-harness digest** — a new "Across your harnesses" section at the top of
+  the session-start resume summarizes recent per-harness activity + a fun fact;
+  the daemon viewer renders it as an animated panel. Honest empty-states.
+- `GET /graph/export` (read-only graph JSON for the local graph editor).
+
+### Unchanged
+- v3 emotional scoring/gating constants are byte-identical (golden parity green).
+  No raw transcript capture; negative-smoke still rejects all 15 dangerous payloads.
+
 ## 0.6.5 — 2026-06-30
 
 ### Fixed
