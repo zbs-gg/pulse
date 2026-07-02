@@ -449,6 +449,19 @@ func (s *Service) subjectInScope(ctx context.Context, kind string, id int64, sco
 	if scope == "" {
 		return true
 	}
+	// Host-extracted / migrated memory (the default Pulse mode) writes graph
+	// content directly, with NO scope evidence. Such subjects are unrestricted —
+	// they are the user's own content — so they are visible. Only subjects that
+	// DO carry scope evidence are restricted to their scope(s) (e.g. an
+	// assistant-private observation stays out of a user-scope query).
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM evidence WHERE subject_kind=? AND subject_id=?`, kind, id).Scan(&total); err != nil {
+		return false
+	}
+	if total == 0 {
+		return true
+	}
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(1)

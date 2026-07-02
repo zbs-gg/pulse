@@ -278,7 +278,11 @@ VALUES (304, 11, 'Hidden fact on visible entity', 0.9, '2026-05-03T00:00:00Z', 2
 	}
 }
 
-func TestServiceQueryRequiresRelationScopedEvidence(t *testing.T) {
+// A relation with NO scope evidence is unrestricted host-extracted content and
+// is VISIBLE (the user's own graph memory — this is what the total==0 branch of
+// subjectInScope enables, so migrated memory is reachable). A relation whose
+// evidence is in ANOTHER scope stays hidden.
+func TestServiceQueryScopeVisibility_UnscopedVisibleOtherScopedHidden(t *testing.T) {
 	s := openContextTestStore(t)
 	defer s.Close()
 	seedContextGraph(t, s.DB())
@@ -286,11 +290,19 @@ func TestServiceQueryRequiresRelationScopedEvidence(t *testing.T) {
 INSERT INTO entities (id, canonical_name, kind, first_seen, last_seen, salience_score, emotional_weight)
 VALUES (13, 'Sam', 'person', '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 0.5, 0.4);
 INSERT INTO event_entities (event_id, entity_id) VALUES (101, 13);
+-- 603: no scope evidence at all -> unrestricted -> visible
 INSERT INTO relations (id, from_entity_id, to_entity_id, kind, strength, first_seen, last_seen, context)
-VALUES (603, 11, 13, 'unscoped_relation', 0.9, '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 'Both entities visible but relation itself has no scoped evidence');
+VALUES (603, 11, 13, 'unscoped_relation', 0.9, '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 'host-extracted / migrated: no scope evidence, visible');
+-- 604: evidence in the ASSISTANT scope -> restricted -> hidden from a user query
+INSERT INTO relations (id, from_entity_id, to_entity_id, kind, strength, first_seen, last_seen, context)
+VALUES (604, 11, 13, 'assistant_scoped_relation', 0.9, '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 'has assistant-scope evidence');
+INSERT INTO observations (id, source_kind, source_id, content_hash, version, scope, captured_at, observed_at, actors, content_text)
+VALUES (4, 'test', 'obs4', 'hash4', 1, 'assistant', '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', '[]', 'assistant-only relation');
+INSERT INTO evidence (id, subject_kind, subject_id, observation_id, weight, created_at)
+VALUES (204, 'relation', 604, 4, 1.0, '2026-05-03T00:00:00Z');
 `)
 	if err != nil {
-		t.Fatalf("seed relation: %v", err)
+		t.Fatalf("seed relations: %v", err)
 	}
 
 	svc := New(ServiceConfig{DB: s.DB(), Retrieval: fakeRetrieval{ids: []int64{101}, mode: "empathic"}})
@@ -298,10 +310,17 @@ VALUES (603, 11, 13, 'unscoped_relation', 0.9, '2026-05-03T00:00:00Z', '2026-05-
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+	var haveUnscoped bool
 	for _, rel := range got.Relations {
-		if rel.ID == 603 {
-			t.Fatalf("unscoped relation leaked: %#v", rel)
+		if rel.ID == 604 {
+			t.Fatalf("assistant-scoped relation leaked into user query: %#v", rel)
 		}
+		if rel.ID == 603 {
+			haveUnscoped = true
+		}
+	}
+	if !haveUnscoped {
+		t.Fatalf("unscoped (host-extracted) relation should be visible, got %#v", got.Relations)
 	}
 }
 
