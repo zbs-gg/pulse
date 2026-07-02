@@ -21,16 +21,22 @@ type ServiceConfig struct {
 	// ContextQueryRequest.GraphMode. "anchored" is the validated control-safe win
 	// (entity-centric recall ↑, no control regression — see graph-bench reality check).
 	GraphMode string
+	// DefaultDomains is applied when a request omits DomainsAllowed. Empty = no
+	// default filter. Set to ["real"] so real life and fiction (e.g. a book being
+	// written) do NOT mix by default — fiction surfaces only on explicit request.
+	DefaultDomains []string
 }
 
 type Service struct {
-	db        *sql.DB
-	retrieval Retrieval
-	graphMode string
+	db             *sql.DB
+	retrieval      Retrieval
+	graphMode      string
+	defaultDomains []string
 }
 
 func New(cfg ServiceConfig) *Service {
-	return &Service{db: cfg.DB, retrieval: cfg.Retrieval, graphMode: cfg.GraphMode}
+	return &Service{db: cfg.DB, retrieval: cfg.Retrieval, graphMode: cfg.GraphMode,
+		defaultDomains: cfg.DefaultDomains}
 }
 
 func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextResult, error) {
@@ -75,6 +81,12 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 		Scope:         scope,
 	}
 	allowedDomains := normalizeDomains(req.DomainsAllowed)
+	if allowedDomains == nil {
+		// No explicit domains → apply the service default (set to ["real"] in cmd
+		// wiring) so real life and fiction (e.g. a book being written) do NOT mix
+		// by default; fiction surfaces only when a caller explicitly asks for it.
+		allowedDomains = normalizeDomains(s.defaultDomains)
+	}
 	if req.IncludeTrace {
 		out.Trace = &ContextTrace{
 			Router: map[string]any{
