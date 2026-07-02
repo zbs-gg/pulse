@@ -112,6 +112,10 @@ func run(dataDir, addr string) error {
 			// control regression). Override per-request via graph_mode; set ""
 			// here to disable. "walk" stays opt-in (multi-hop unproven on real graph).
 			GraphMode: "anchored",
+			// Real life and fiction (e.g. a book being written) must not mix by
+			// default: context queries return real-domain memory unless the caller
+			// explicitly asks for fiction (book work).
+			DefaultDomains: []string{"real"},
 		})
 	}
 
