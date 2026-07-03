@@ -184,14 +184,23 @@ func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int
 	if len(terms) == 0 {
 		return []RecalledMemoryItem{}, nil
 	}
+	// Rank by relevance — how many of the query terms a capsule matches — not
+	// by recency. A fresh capsule matching one weak term must not outrank an
+	// older capsule matching every term; recency stays only as a tiebreak.
 	where := make([]string, 0, len(terms))
-	args := make([]any, 0, len(terms)+6)
+	score := make([]string, 0, len(terms))
+	likeArgs := make([]any, 0, len(terms))
 	for _, term := range terms {
 		where = append(where, "redacted_summary LIKE ?")
-		args = append(args, "%"+term+"%")
+		score = append(score, "(CASE WHEN redacted_summary LIKE ? THEN 1 ELSE 0 END)")
+		likeArgs = append(likeArgs, "%"+term+"%")
 	}
-	args = append(args, privacyArgs(ceiling)...)
-	args = append(args, retention, retention, limit)
+	args := make([]any, 0, len(terms)*2+3)
+	args = append(args, likeArgs...)             // WHERE (LIKE ? OR ...)
+	args = append(args, privacyArgs(ceiling)...) // privacy_tier IN (...)
+	args = append(args, retention, retention)    // retention filter
+	args = append(args, likeArgs...)             // ORDER BY term-coverage score
+	args = append(args, limit)
 
 	rows, err := s.db.Query(`
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
@@ -199,7 +208,7 @@ func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int
 		 WHERE (`+strings.Join(where, " OR ")+`)
 		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
 		   AND (? = '' OR retention = ?)
-		 ORDER BY created_at DESC
+		 ORDER BY (`+strings.Join(score, " + ")+`) DESC, created_at DESC
 		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
