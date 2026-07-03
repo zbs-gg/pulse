@@ -64,6 +64,54 @@ func TestRememberCapsuleStoresStrictItemsAndRecallFindsThem(t *testing.T) {
 	}
 }
 
+// A fresh capsule matching a single weak term must not outrank an older
+// capsule matching every query term. Recall ranks by term coverage, with
+// recency only as a tiebreak — not the other way around.
+func TestRecallRanksByTermCoverageNotRecency(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	insert := func(id, summary, createdAt string) {
+		t.Helper()
+		if _, err := s.db.Exec(`
+			INSERT INTO memory_capsules
+			  (id, schema_version, source_host, conversation_scope, source_timestamp,
+			   kind, redacted_summary, confidence, evidence_hint, privacy_tier,
+			   retention, tags, created_at)
+			VALUES (?, 'pulse.memory_capsule.v1', 'claude-code', 'current_turn', ?,
+			        'note', ?, 0.9, 'current_turn', 'normal', 'project', '[]', ?)`,
+			id, createdAt, summary, createdAt); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+
+	// Older, matches all three query terms.
+	insert("cap-relevant", "The kubernetes migration rollback plan was approved by the team.", "2026-06-01T09:00:00Z")
+	// Newer, matches only "kubernetes" — old recency-only ranking floated this to the top.
+	insert("cap-noise", "Weekly kubernetes cluster cost review for the finance team.", "2026-06-30T09:00:00Z")
+
+	// Terms are scattered so the exact-phrase primary path misses and the
+	// term-coverage fallback path runs.
+	items, err := s.RecallMemory(RecallMemoryQuery{
+		Query:          "rollback migration kubernetes",
+		Scope:          "project",
+		Limit:          5,
+		PrivacyCeiling: "normal",
+	})
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	if len(items) < 2 {
+		t.Fatalf("expected both capsules recalled, got %d: %#v", len(items), items)
+	}
+	if items[0].ID != "cap-relevant" {
+		t.Fatalf("term-coverage ranking broken: expected cap-relevant first, got %q (recency drowned relevance)", items[0].ID)
+	}
+}
+
 func TestRememberCapsuleRejectsRawOrTranscriptLikePayloads(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
