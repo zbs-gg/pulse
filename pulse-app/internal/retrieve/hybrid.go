@@ -626,7 +626,7 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// without user_state + tags.
 	if e.stateTagBoostEnabled {
 		var mults map[int64]float64
-		ids, mults = e.applyStateTagBoost(ids, req.UserState)
+		ids, mults = e.applyStateTagBoost(ids, req.UserState, req.Query)
 		for id, m := range mults {
 			if bd, ok := breakdowns[id]; ok {
 				bd.StateTagBoost = nonIdentityPtr(m)
