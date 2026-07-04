@@ -396,7 +396,7 @@ function createPulseMcpServer(): Server {
     {
       name: 'pulse_context_query',
       description:
-        'Local/dev tool: query Pulse for a typed pulse.context.v1 projection from the existing retrieval/graph engine. Use for agent context, not raw search dumps. Not store-safe for public connector builds until trace/user_state/privacy controls are narrowed.',
+        'Local/dev tool: query Pulse for a typed pulse.context.v1 projection from the existing retrieval/graph engine. Use for agent context, not raw search dumps. Optional user_state.context_flags (object of flag name → 0..1 weight, e.g. {"deadline_pressure": 0.9}; weights >= 0.5 are active) steers state-aware ranking: remembered items tagged "state:<flag>" are boosted while that flag is active, and items tagged "state:calm" when user_state is present with no active flag. Not store-safe for public connector builds until trace/user_state/privacy controls are narrowed.',
       inputSchema: {
         type: 'object',
         properties: {

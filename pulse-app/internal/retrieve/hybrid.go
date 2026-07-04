@@ -69,6 +69,10 @@ type Engine struct {
 	// Loaded for data availability ONLY — the scorer never reads it in this phase,
 	// so retrieval scores and Go==Python parity are untouched. Refreshed on Reload.
 	eventAccess []int64
+	// Event tags (migration 032, JSON array per event; nil = none). Additive
+	// slice read ONLY by the state-tag affinity post-step
+	// (state_tag_boost.go) — the frozen scorer never touches it.
+	eventTags [][]string
 
 	// Fact index.
 	factIDs      []int64
@@ -98,6 +102,12 @@ type Engine struct {
 	// PULSE_ACCESS_FREQ_BOOST env var; OFF by default ⇒ the post-scoring
 	// step never runs and the final ranking is byte-identical to today.
 	accessFreqBoostEnabled bool
+
+	// stateTagBoostEnabled gates the state-tag affinity re-rank (see
+	// state_tag_boost.go). Read once at New() from PULSE_STATE_TAG_BOOST;
+	// default ON — the post-scoring step is provably neutral without a
+	// user_state + state:* tag pair, and =off disables it entirely.
+	stateTagBoostEnabled bool
 }
 
 // Config bundles the dependencies an Engine needs.
@@ -143,6 +153,7 @@ func New(cfg Config) *Engine {
 		accessFreqEnabled: accessFreqFlag(),
 
 		accessFreqBoostEnabled: accessFreqBoostFlag(),
+		stateTagBoostEnabled:   stateTagBoostFlag(),
 	}
 }
 
@@ -262,7 +273,7 @@ SELECT
     COALESCE(em.anticipation, 0), COALESCE(em.surprise, 0),
     COALESCE(em.shame, 0), COALESCE(em.guilt, 0),
     COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, ''),
-    COALESCE(e.access_count, 0)
+    COALESCE(e.access_count, 0), COALESCE(e.tags, '')
 FROM events e
 JOIN event_embeddings ee ON ee.event_id = e.id
 LEFT JOIN event_emotions em ON em.event_id = e.id
@@ -283,6 +294,7 @@ ORDER BY e.id`
 	e.eventSentLabel = e.eventSentLabel[:0]
 	e.eventBio = e.eventBio[:0]
 	e.eventAccess = e.eventAccess[:0]
+	e.eventTags = e.eventTags[:0]
 
 	for rows.Next() {
 		var id int64
@@ -294,10 +306,11 @@ ORDER BY e.id`
 		var userFlag int
 		var sentLabel, bioJSON string
 		var accessCount int64
+		var tagsJSON string
 		if err := rows.Scan(&id, &tsStr, &title, &description, &vecJSON,
 			&em[0], &em[1], &em[2], &em[3], &em[4],
 			&em[5], &em[6], &em[7], &em[8], &em[9],
-			&userFlag, &sentLabel, &bioJSON, &accessCount); err != nil {
+			&userFlag, &sentLabel, &bioJSON, &accessCount, &tagsJSON); err != nil {
 			return err
 		}
 		var v []float32
@@ -314,6 +327,13 @@ ORDER BY e.id`
 		e.eventSentLabel = append(e.eventSentLabel, strings.ToLower(sentLabel))
 		e.eventBio = append(e.eventBio, parseBioSnapshot(bioJSON))
 		e.eventAccess = append(e.eventAccess, accessCount)
+		// Tags are best-effort: unparsable/empty JSON means "no tags" (nil),
+		// which keeps the state-tag post-step neutral for this event.
+		var tags []string
+		if tagsJSON != "" {
+			_ = json.Unmarshal([]byte(tagsJSON), &tags)
+		}
+		e.eventTags = append(e.eventTags, tags)
 	}
 	return rows.Err()
 }
@@ -478,6 +498,10 @@ type ScoreBreakdown struct {
 	// Phase B post-scoring re-rank multiplier (access_boost.go) and is set
 	// only when PULSE_ACCESS_FREQ_BOOST is on and the multiplier ≠ 1.0.
 	AccessFreqBoost *float64 `json:"access_freq_boost,omitempty"`
+	// StateTagBoost is NOT part of the frozen v3 score. It documents the
+	// state-tag affinity post-scoring re-rank multiplier (state_tag_boost.go)
+	// and is set only when the step fired and the multiplier ≠ 1.0.
+	StateTagBoost *float64 `json:"state_tag_boost,omitempty"`
 }
 
 // Retrieve dispatches the query to factual/empathic/chain mode.
@@ -586,6 +610,26 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		for id, m := range mults {
 			if bd, ok := breakdowns[id]; ok {
 				bd.AccessFreqBoost = nonIdentityPtr(m)
+				breakdowns[id] = bd
+			}
+		}
+	}
+
+	// State-tag affinity re-rank (default-on, post-scoring): events tagged
+	// state:<flag> move up when the request's user_state declares that flag
+	// active (see state_tag_boost.go). Placed AFTER fusion + surfaceability so
+	// it sees the complete final candidate list, and AFTER the access-freq
+	// nudge so the explicit user-state signal outranks the implicit frequency
+	// one; placed BEFORE assertion demotion so the supersession invariant
+	// (stale never above its correction) is enforced last. Pure reorder — no
+	// v3 score/gating change, no id added or dropped; provably neutral
+	// without user_state + tags.
+	if e.stateTagBoostEnabled {
+		var mults map[int64]float64
+		ids, mults = e.applyStateTagBoost(ids, req.UserState)
+		for id, m := range mults {
+			if bd, ok := breakdowns[id]; ok {
+				bd.StateTagBoost = nonIdentityPtr(m)
 				breakdowns[id] = bd
 			}
 		}

@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
@@ -46,6 +48,22 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "invalid memory capsule: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Make projected capsule events retrievable immediately: embed them as
+	// search documents and reload the in-memory index (same pattern as the
+	// /graph/delta handler). Best-effort — a failed embed must not fail the
+	// write; engine nil / embedder off ⇒ skip silently (the events exist and
+	// stay dark until an embedder is configured).
+	if s.cfg.Retrieval != nil && s.cfg.Retrieval.EmbedderReady() {
+		if docs, derr := s.cfg.Store.CapsuleEventDocs(ids); derr == nil && len(docs) > 0 {
+			indexDocs := make([]retrieve.IndexEventDoc, len(docs))
+			for i, d := range docs {
+				indexDocs[i] = retrieve.IndexEventDoc{EventID: d.EventID, Text: d.Text}
+			}
+			if err := s.cfg.Retrieval.EmbedAndIndexEvents(r.Context(), indexDocs); err != nil {
+				log.Printf("memory remember: index capsule events failed: %v", err)
+			}
+		}
 	}
 	writeJSON(w, rememberResponse{OK: true, IDs: ids})
 }
