@@ -74,6 +74,7 @@ Usage:
   pulse import --file <path>
   pulse delete --id <pulse:id>
   pulse wipe --confirm "wipe pulse memory"
+  pulse consolidate [--threshold 0.90] [--scope session|project|long_term] [--apply]
 
 Environment:
   PULSE_BASE_URL   ${DEFAULT_BASE_URL}
@@ -6527,6 +6528,30 @@ async function main() {
     }
     await pulseFetch('/memory/wipe', { body: { confirm: 'wipe pulse memory' } });
     console.log('[pulse] wiped host-extracted memory');
+    return;
+  }
+
+  if (command === 'consolidate') {
+    // Explicit, opt-in near-duplicate capsule fold (invalidate-not-delete).
+    // Default is a dry run — pass --apply to actually mark near-duplicates
+    // merged. Nothing is ever deleted; merged rows stay in the store.
+    const apply = args.includes('--apply');
+    const thresholdRaw = getArg('--threshold');
+    const body = { dry_run: !apply };
+    if (thresholdRaw !== undefined) {
+      const threshold = Number.parseFloat(thresholdRaw);
+      if (!Number.isFinite(threshold)) {
+        throw new Error('pulse consolidate --threshold expects a number (e.g. 0.90)');
+      }
+      body.threshold = threshold;
+    }
+    const scope = getArg('--scope');
+    if (scope !== undefined) body.scope = scope;
+    const result = await pulseFetch('/memory/consolidate', { body });
+    console.log(JSON.stringify(result, null, 2));
+    if (!apply) {
+      console.log('[pulse] dry run — re-run with --apply to fold near-duplicates');
+    }
     return;
   }
 

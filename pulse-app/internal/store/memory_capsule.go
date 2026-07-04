@@ -80,6 +80,12 @@ type MemoryExportedItem struct {
 	Tags             []string      `json:"tags,omitempty"`
 	CreatedAt        string        `json:"created_at"`
 	RawInputIncluded bool          `json:"raw_input_included"`
+	// Consolidation provenance (invalidate-not-delete). Default "active"; a
+	// merged near-duplicate carries status="merged" + MergedInto/MergedAt so the
+	// fold round-trips through export/import.
+	Status     string `json:"status,omitempty"`
+	MergedInto string `json:"merged_into,omitempty"`
+	MergedAt   string `json:"merged_at,omitempty"`
 }
 
 type MemoryStoreStatus struct {
@@ -150,6 +156,7 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
 		 WHERE redacted_summary LIKE ?
+		   AND status = 'active'
 		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
 		   AND (? = '' OR retention = ?)
 		 ORDER BY created_at DESC
@@ -206,6 +213,7 @@ func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
 		 WHERE (`+strings.Join(where, " OR ")+`)
+		   AND status = 'active'
 		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
 		   AND (? = '' OR retention = ?)
 		 ORDER BY (`+strings.Join(score, " + ")+`) DESC, created_at DESC
@@ -230,7 +238,7 @@ func (s *Store) ExportMemory() (MemoryExport, error) {
 	rows, err := s.db.Query(`
 		SELECT id, schema_version, source_host, conversation_scope, source_timestamp,
 		       kind, redacted_summary, confidence, evidence_hint, privacy_tier,
-		       retention, tags, created_at
+		       retention, tags, created_at, status, COALESCE(merged_into, ''), COALESCE(merged_at, '')
 		  FROM memory_capsules
 		 ORDER BY created_at ASC, id ASC`)
 	if err != nil {
@@ -250,6 +258,7 @@ func (s *Store) ExportMemory() (MemoryExport, error) {
 			&item.ID, &item.Schema, &item.Source.Host, &item.Source.ConversationScope,
 			&item.Source.Timestamp, &item.Kind, &item.RedactedSummary, &item.Confidence,
 			&item.EvidenceHint, &item.PrivacyTier, &item.Retention, &tags, &item.CreatedAt,
+			&item.Status, &item.MergedInto, &item.MergedAt,
 		); err != nil {
 			return MemoryExport{}, err
 		}
@@ -295,15 +304,27 @@ func (s *Store) ImportMemory(in MemoryExport) ([]string, error) {
 		if createdAt == "" {
 			createdAt = time.Now().UTC().Format(time.RFC3339)
 		}
+		status := item.Status
+		if status == "" {
+			status = "active"
+		}
+		var mergedInto, mergedAt any
+		if item.MergedInto != "" {
+			mergedInto = item.MergedInto
+		}
+		if item.MergedAt != "" {
+			mergedAt = item.MergedAt
+		}
 		if _, err := tx.Exec(`
 			INSERT OR REPLACE INTO memory_capsules
 			  (id, schema_version, source_host, conversation_scope, source_timestamp,
 			   kind, redacted_summary, confidence, evidence_hint, privacy_tier,
-			   retention, tags, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			   retention, tags, created_at, status, merged_into, merged_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			item.ID, item.Schema, item.Source.Host, item.Source.ConversationScope,
 			item.Source.Timestamp, item.Kind, item.RedactedSummary, item.Confidence,
 			item.EvidenceHint, item.PrivacyTier, item.Retention, string(tags), createdAt,
+			status, mergedInto, mergedAt,
 		); err != nil {
 			return nil, err
 		}

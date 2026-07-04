@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -137,6 +139,28 @@ func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMemoryConsolidate runs an explicit, opt-in near-duplicate capsule
+// consolidation pass (invalidate-not-delete). It is never on the write or
+// retrieve hot path; the client must call it deliberately. Default is a dry run
+// unless the body sets dry_run=false.
+func (s *Server) handleMemoryConsolidate(w http.ResponseWriter, r *http.Request) {
+	// Safe default: dry-run unless the caller explicitly sends {"dry_run": false}.
+	// An empty body (io.EOF) leaves DryRun=true, so a bodyless POST never mutates.
+	opt := store.ConsolidateOptions{DryRun: true}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&opt); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	result, err := s.cfg.Store.ConsolidateCapsules(opt)
+	if err != nil {
+		http.Error(w, "memory consolidate error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, result)
 }
 
 func (s *Server) handleMemoryWipe(w http.ResponseWriter, r *http.Request) {
