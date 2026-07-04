@@ -35,7 +35,7 @@ func assertSameOrder(t *testing.T, got, want []int64) {
 func TestStateTagBoost_NoUserStateIsIdentity(t *testing.T) {
 	e := stateTagEngine(map[int64][]string{2: {"state:deadline_pressure"}})
 	in := []int64{1, 2, 3}
-	out, mults := e.applyStateTagBoost(in, nil)
+	out, mults := e.applyStateTagBoost(in, nil, "")
 	assertSameOrder(t, out, in)
 	if mults != nil {
 		t.Fatalf("neutral pass must not report multipliers: %v", mults)
@@ -46,7 +46,7 @@ func TestStateTagBoost_UntaggedEventsAreIdentity(t *testing.T) {
 	e := stateTagEngine(nil) // no event carries any tag
 	in := []int64{1, 2, 3}
 	state := &UserState{ContextFlags: map[string]float64{"deadline_pressure": 0.9}}
-	out, mults := e.applyStateTagBoost(in, state)
+	out, mults := e.applyStateTagBoost(in, state, "")
 	assertSameOrder(t, out, in)
 	if mults != nil {
 		t.Fatalf("neutral pass must not report multipliers: %v", mults)
@@ -65,7 +65,7 @@ func TestStateTagBoost_NonMatchingAndInactiveFlagsAreIdentity(t *testing.T) {
 	// so calm DOES apply here. Use a genuinely active non-matching flag
 	// instead to assert full neutrality.
 	state := &UserState{ContextFlags: map[string]float64{"burnout": 0.9}}
-	out, mults := e.applyStateTagBoost(in, state)
+	out, mults := e.applyStateTagBoost(in, state, "")
 	assertSameOrder(t, out, in)
 	if mults != nil {
 		t.Fatalf("neutral pass must not report multipliers: %v", mults)
@@ -79,7 +79,7 @@ func TestStateTagBoost_ActiveFlagPicksMatchingTag(t *testing.T) {
 	})
 	in := []int64{1, 2, 3}
 	state := &UserState{ContextFlags: map[string]float64{"deadline_pressure": 0.9}}
-	out, mults := e.applyStateTagBoost(in, state)
+	out, mults := e.applyStateTagBoost(in, state, "")
 	assertSameOrder(t, out, []int64{2, 1, 3})
 	if m := mults[2]; m != stateTagBoostMult {
 		t.Fatalf("mult[2] = %v, want %v", m, stateTagBoostMult)
@@ -97,7 +97,7 @@ func TestStateTagBoost_CalmWinsWhenStatePresentAndNoActiveFlag(t *testing.T) {
 	in := []int64{1, 2, 3}
 	// user_state present, no active context flag (empty map) ⇒ calm affinity.
 	state := &UserState{ContextFlags: map[string]float64{}}
-	out, mults := e.applyStateTagBoost(in, state)
+	out, mults := e.applyStateTagBoost(in, state, "")
 	assertSameOrder(t, out, []int64{3, 1, 2})
 	if m := mults[3]; m != stateTagBoostMult {
 		t.Fatalf("mult[3] = %v, want %v", m, stateTagBoostMult)
@@ -275,4 +275,53 @@ func TestStateTagBoost_EvalShapedThreeStatesThreeWinners(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("expected 3 different top-1 winners across states, got %d", len(seen))
 	}
+}
+
+// The v1 positional multiplier could lift a match by at most 4 ranks; the
+// partition must bring an explicitly-labeled match to the front from ANY
+// depth. Would fail under the old ×1.15·ρ^rank mechanics.
+func TestStateTagBoost_PartitionLiftsMatchFromAnyDepth(t *testing.T) {
+	ids := []int64{1, 2, 3, 4, 5, 6, 7}
+	e := &Engine{eventIDs: ids}
+	for _, id := range ids {
+		if id == 7 {
+			e.eventTags = append(e.eventTags, []string{"state:deadline_pressure"})
+		} else {
+			e.eventTags = append(e.eventTags, nil)
+		}
+	}
+	state := &UserState{ContextFlags: map[string]float64{"deadline_pressure": 0.9}}
+	out, _ := e.applyStateTagBoost(ids, state, "")
+	assertSameOrder(t, out, []int64{7, 1, 2, 3, 4, 5, 6})
+}
+
+// Inside an active state group the lexical tie-break must prefer the item
+// whose text covers the query terms, prefix-tolerant (Russian inflections).
+func TestStateTagBoost_LexicalTieBreakInsideActiveGroup(t *testing.T) {
+	ids := []int64{1, 2, 3}
+	e := &Engine{eventIDs: ids}
+	tag := []string{"state:deadline_pressure"}
+	e.eventTags = [][]string{nil, tag, tag}
+	// e.eventTexts is stored lowercased; id 3 covers "релиз" (inflected), id 2
+	// is about an unrelated incident.
+	e.eventTexts = []string{"", "мажорный инцидент стабилизируй сначала", "срок горит не тащи в этот релиз лишнего"}
+	state := &UserState{ContextFlags: map[string]float64{"deadline_pressure": 0.9}}
+	out, _ := e.applyStateTagBoost(ids, state, "Как мне вести этот релиз?")
+	// Both 2 and 3 partition above 1; lexical coverage puts 3 first.
+	assertSameOrder(t, out, []int64{3, 2, 1})
+}
+
+// On the calm path the coherence tie-break must prefer the calm item most
+// similar to the frozen ranking's own top-1 (the thematic anchor).
+func TestStateTagBoost_CalmCoherenceTieBreakToAnchor(t *testing.T) {
+	ids := []int64{1, 2, 3}
+	e := &Engine{eventIDs: ids}
+	calm := []string{"state:calm"}
+	e.eventTags = [][]string{nil, calm, calm}
+	// Unit vectors: anchor = id 1; id 3 is aligned with the anchor, id 2 is
+	// orthogonal — coherence must put 3 first inside the calm group.
+	e.eventVecs = [][]float32{{1, 0}, {0, 1}, {1, 0}}
+	state := &UserState{ContextFlags: map[string]float64{}}
+	out, _ := e.applyStateTagBoost(ids, state, "")
+	assertSameOrder(t, out, []int64{3, 2, 1})
 }

@@ -1,10 +1,10 @@
 package retrieve
 
 import (
-	"math"
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // State-tag affinity boost — the state → which-item-wins channel.
@@ -31,19 +31,34 @@ import (
 //     → same: all multipliers 1.0, untouched;
 //   - flag off → the step never runs.
 //
-// When it does fire: an event tagged `state:<k>` gets ×1.15 when
-// context_flags[k] >= 0.5 (one boost max per event); an event tagged
-// `state:calm` gets ×1.15 only when user_state is PRESENT and NO context
-// flag is active. Re-ranked score_i = mult_i · ρ^rank_i with ρ=0.97, so a
-// boosted event can climb at most ⌊ln(1.15)/ln(1/0.97)⌋ = 4 positions. The
-// sort is stable with a strict (>) comparator, so an identical multiplier on
-// every candidate preserves the original order exactly.
+// When it does fire, the re-rank is a stable PARTITION with an in-group
+// tie-break, not a soft multiplier (a ×1.15-style positional boost measurably
+// under-delivered: a matching item sitting a few ranks down stayed buried
+// while the host had EXPLICITLY labeled it for the current state):
+//
+//  1. Partition: candidates whose state:* tag matches the current state (an
+//     event tagged `state:<k>` matches when context_flags[k] >= 0.5; an event
+//     tagged `state:calm` matches only when user_state is PRESENT and NO
+//     context flag is active) move, as a group, above all other candidates.
+//     The host's explicit "this memory is for that state" label dominates;
+//     everything else keeps the frozen ranking's relative order.
+//  2. Inside the matched group, when a specific flag is active: lexical
+//     tie-break — matched items are stably re-sorted by how many significant
+//     query terms (>=4 runes, prefix-tolerant) their text contains. Same
+//     principle as the store's keyword-recall term-coverage ranking.
+//  3. Inside the matched group, on the calm path (state present, no active
+//     flag): thematic-coherence tie-break — matched items are stably
+//     re-sorted by embedding similarity to the frozen ranking's OWN top-1
+//     (the anchor). Calm advice should be about the same topic the frozen
+//     ranking judged most relevant; a calm-tagged memory from an unrelated
+//     topic must not win just because it is calm-tagged.
+//
+// Both tie-breaks are stable: equal keys preserve the frozen order, and when
+// texts/vectors are unavailable the group keeps the frozen order untouched.
 const (
-	// stateTagBoostMult is the affinity multiplier for a state-tag match.
+	// stateTagBoostMult marks a state-tag match in the score-breakdown
+	// annotation (the re-rank itself is a partition, not a multiplication).
 	stateTagBoostMult = 1.15
-	// stateTagBoostRho is the positional-score decay for the re-rank
-	// (score at rank r is ρ^r before the multiplier).
-	stateTagBoostRho = 0.97
 	// stateTagActiveFloor is the context_flags value at which a flag counts
 	// as active.
 	stateTagActiveFloor = 0.5
@@ -53,6 +68,9 @@ const (
 	// stateTagCalmFlag is the special flag matched when user_state is present
 	// and no context flag is active.
 	stateTagCalmFlag = "calm"
+	// stateTagMinTermRunes is the minimum rune length of a significant query
+	// term for the lexical tie-break.
+	stateTagMinTermRunes = 4
 )
 
 // stateTagBoostFlag reports whether the state-tag affinity re-rank is enabled.
@@ -115,53 +133,128 @@ func stateTagMultiplier(tags []string, active map[string]bool, statePresent bool
 	return 1.0
 }
 
-// applyStateTagBoost re-ranks the final id list by state-tag affinity. Pure
-// reorder: the returned slice holds exactly the input ids (never drops, adds,
-// or rescores an id), and the second return value maps each id to its
-// multiplier for breakdown annotation (nil when the step was provably
-// neutral). Caller holds e.mu.RLock (eventIDs/eventTags reads).
-func (e *Engine) applyStateTagBoost(ids []int64, state *UserState) ([]int64, map[int64]float64) {
+// significantQueryTerms extracts lowercase letter/digit runs of at least
+// stateTagMinTermRunes runes — the same notion of "significant term" the
+// store's keyword recall uses — for the lexical tie-break.
+func significantQueryTerms(s string) []string {
+	var terms []string
+	var run []rune
+	flush := func() {
+		if len(run) >= stateTagMinTermRunes {
+			terms = append(terms, string(run))
+		}
+		run = run[:0]
+	}
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			run = append(run, r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return terms
+}
+
+// lexTermCoverage counts how many of the query terms appear in text,
+// prefix-tolerant in both directions so Russian/English inflections still
+// match ("задачам" ~ "задач", "release" ~ "releases"). text is expected
+// lowercased (e.eventTexts is stored lowercased).
+func lexTermCoverage(queryTerms []string, text string) int {
+	textTerms := significantQueryTerms(text)
+	n := 0
+	for _, q := range queryTerms {
+		for _, t := range textTerms {
+			if strings.HasPrefix(t, q) || strings.HasPrefix(q, t) {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// applyStateTagBoost re-ranks the final id list by state-tag affinity
+// (partition + in-group tie-break; see the file comment). Pure reorder: the
+// returned slice holds exactly the input ids (never drops, adds, or rescores
+// an id), and the second return value maps each id to its match marker for
+// breakdown annotation (nil when the step was provably neutral). Caller
+// holds e.mu.RLock (eventIDs/eventTags/eventTexts/eventVecs reads).
+func (e *Engine) applyStateTagBoost(ids []int64, state *UserState, query string) ([]int64, map[int64]float64) {
 	if state == nil || len(ids) < 2 || len(e.eventIDs) == 0 {
 		return ids, nil
 	}
-	tagsOf := make(map[int64][]string, len(e.eventIDs))
+	idxOf := make(map[int64]int, len(e.eventIDs))
 	for i, id := range e.eventIDs {
-		if i < len(e.eventTags) && len(e.eventTags[i]) > 0 {
-			tagsOf[id] = e.eventTags[i]
+		idxOf[id] = i
+	}
+	tagsOf := func(id int64) []string {
+		if i, ok := idxOf[id]; ok && i < len(e.eventTags) {
+			return e.eventTags[i]
+		}
+		return nil
+	}
+	anyTagged := false
+	for _, id := range ids {
+		if len(tagsOf(id)) > 0 {
+			anyTagged = true
+			break
 		}
 	}
-	if len(tagsOf) == 0 {
+	if !anyTagged {
 		return ids, nil
 	}
 	active := activeContextFlags(state)
+	matched := make([]int64, 0, len(ids))
+	rest := make([]int64, 0, len(ids))
 	mults := make(map[int64]float64, len(ids))
-	boosted := false
 	for _, id := range ids {
-		m := stateTagMultiplier(tagsOf[id], active, true)
+		m := stateTagMultiplier(tagsOf(id), active, true)
 		mults[id] = m
 		if m != 1.0 {
-			boosted = true
+			matched = append(matched, id)
+		} else {
+			rest = append(rest, id)
 		}
 	}
-	if !boosted {
-		// Absent signal ⇒ every multiplier is exactly 1.0 ⇒ order unchanged
-		// by construction. Return the input untouched.
+	if len(matched) == 0 {
+		// Absent signal ⇒ nothing matches ⇒ order unchanged by construction.
 		return ids, nil
 	}
-	scores := make([]float64, len(ids))
-	for rank, id := range ids {
-		scores[rank] = mults[id] * math.Pow(stateTagBoostRho, float64(rank))
+
+	if len(active) > 0 {
+		// Specific state: lexical tie-break inside the matched group.
+		if qterms := significantQueryTerms(query); len(qterms) > 0 {
+			coverage := make(map[int64]int, len(matched))
+			for _, id := range matched {
+				if i, ok := idxOf[id]; ok && i < len(e.eventTexts) {
+					coverage[id] = lexTermCoverage(qterms, e.eventTexts[i])
+				}
+			}
+			sort.SliceStable(matched, func(a, b int) bool {
+				return coverage[matched[a]] > coverage[matched[b]]
+			})
+		}
+	} else {
+		// Calm path: thematic-coherence tie-break to the frozen ranking's
+		// own top-1. Vectors are unit-normalized at index time, so the dot
+		// product is the cosine.
+		if ai, ok := idxOf[ids[0]]; ok && ai < len(e.eventVecs) && len(e.eventVecs[ai]) > 0 {
+			anchor := e.eventVecs[ai]
+			coherence := make(map[int64]float64, len(matched))
+			for _, id := range matched {
+				if i, ok := idxOf[id]; ok && i < len(e.eventVecs) && len(e.eventVecs[i]) == len(anchor) {
+					coherence[id] = float64(dotF32(anchor, e.eventVecs[i]))
+				}
+			}
+			sort.SliceStable(matched, func(a, b int) bool {
+				return coherence[matched[a]] > coherence[matched[b]]
+			})
+		}
 	}
-	idx := make([]int, len(ids))
-	for i := range idx {
-		idx[i] = i
-	}
-	// Stable + strict comparator: identical multipliers map onto strictly
-	// decreasing ρ^rank, so ties keep the original order.
-	sort.SliceStable(idx, func(a, b int) bool { return scores[idx[a]] > scores[idx[b]] })
-	out := make([]int64, len(ids))
-	for i, j := range idx {
-		out[i] = ids[j]
-	}
+
+	out := make([]int64, 0, len(ids))
+	out = append(out, matched...)
+	out = append(out, rest...)
 	return out, mults
 }
