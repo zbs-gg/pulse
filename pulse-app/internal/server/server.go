@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/memory/delete", s.handleMemoryDelete)
 		r.Delete("/memory/{id}", s.handleMemoryDelete)
 		r.Post("/memory/wipe", s.handleMemoryWipe)
+		r.Post("/memory/consolidate", s.handleMemoryConsolidate)
 		r.Post("/graph/delta", s.handleGraphDelta)
 		r.Post("/graph/entity/hide", s.handleGraphEntityHide)
 		r.Post("/graph/entity/restore", s.handleGraphEntityRestore)
