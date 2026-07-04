@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse-mcp",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Internal MCP server component of @zbs-gg/pulse. Not published \u2014 install @zbs-gg/pulse instead.",
   "license": "AGPL-3.0-only",
   "author": "Nikita Shilov",
