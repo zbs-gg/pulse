@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -249,6 +250,155 @@ func TestProcedureListMostRecentFirst(t *testing.T) {
 	}
 	if list[0].Name != "Third" || list[2].Name != "First" {
 		t.Fatalf("expected most-recent-first ordering, got %q..%q", list[0].Name, list[2].Name)
+	}
+}
+
+// TestUpsertProcedureRejectsUnsafeContent mirrors the negative-smoke style:
+// one dangerous payload per rejected class, each of which must error and
+// leave nothing behind in the store. Same guard classes as memory capsules
+// (validateMemoryCapsule): secrets, absolute paths, transcript-like content.
+func TestUpsertProcedureRejectsUnsafeContent(t *testing.T) {
+	s := openTestStore(t)
+	scope := Scope{Type: "personal"}
+
+	longHex := strings.Repeat("a1b2c3d4", 8) // 64 hex chars — IPC-secret shape
+	transcript := "user: hi\nassistant: hello\nuser: ok\nassistant: sure\nuser: bye\nassistant: later"
+
+	cases := []struct {
+		label string
+		p     Procedure
+	}{
+		{"sk- secret in steps_json", Procedure{Name: "Leaky", Scope: scope,
+			Steps: []any{map[string]any{"do": "export the key sk-abc123def456ghi789"}}}},
+		{"api_key in params_json", Procedure{Name: "Keyed", Scope: scope,
+			Params: map[string]any{"api_key": "supplied-at-runtime"}}},
+		{"X-Pulse-Key header in steps_json", Procedure{Name: "Header", Scope: scope,
+			Steps: []any{map[string]any{"do": "curl -H 'X-Pulse-Key: <value>' localhost"}}}},
+		{"long hex secret in params_json", Procedure{Name: "Hex", Scope: scope,
+			Params: map[string]any{"token": longHex}}},
+		{"absolute /Users path in steps_json", Procedure{Name: "MacPath", Scope: scope,
+			Steps: []any{map[string]any{"do": "read /Users/someone/notes.txt"}}}},
+		{"absolute /home path in params_json", Procedure{Name: "LinuxPath", Scope: scope,
+			Params: map[string]any{"dir": "/home/someone/project"}}},
+		{"transcript-like steps_json", Procedure{Name: "Chat", Scope: scope,
+			Steps: []any{transcript}}},
+		{"secret marker in name", Procedure{Name: "store sk-key somewhere", Scope: scope}},
+		{"path-like description", Procedure{Name: "Described", Scope: scope,
+			Description: "See /Users/someone/plan.md for details"}},
+	}
+	for _, tc := range cases {
+		if _, err := s.UpsertProcedure(tc.p); err == nil {
+			t.Errorf("%s: expected rejection, got nil error", tc.label)
+		}
+	}
+
+	list, err := s.ListProcedures(scope)
+	if err != nil {
+		t.Fatalf("list after rejections: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected empty store after rejections, got %d rows: %+v", len(list), list)
+	}
+
+	// Positive control: a clean procedure carrying a 40-char git commit SHA
+	// must still be accepted — the long-hex guard targets 32-byte secrets,
+	// not commit references.
+	sha := strings.Repeat("ab12", 10) // 40 hex chars
+	if _, err := s.UpsertProcedure(Procedure{
+		Name:  "Pin Release",
+		Scope: scope,
+		Steps: []any{map[string]any{"do": "check out commit " + sha}},
+	}); err != nil {
+		t.Fatalf("clean procedure with commit SHA rejected: %v", err)
+	}
+}
+
+// TestScanProcedureSurfacesCorruptJSON seeds corrupt rows directly (bypassing
+// UpsertProcedure) and expects reads to return an error instead of silently
+// dropping the payload.
+func TestScanProcedureSurfacesCorruptJSON(t *testing.T) {
+	s := openTestStore(t)
+
+	if _, err := s.db.Exec(`
+		INSERT INTO procedures
+		  (name, name_key, description, params_json, steps_json,
+		   scope_type, scope_id, created_at, updated_at)
+		VALUES ('Broken Params', 'brokenparams', '', '{not json', '[]',
+		        'personal', '', '2026-07-04T00:00:00Z', '2026-07-04T00:00:00Z')`); err != nil {
+		t.Fatalf("seed corrupt params row: %v", err)
+	}
+	if _, err := s.GetProcedure("Broken Params", Scope{Type: "personal"}); err == nil {
+		t.Fatal("expected corrupt params_json to surface an error from GetProcedure")
+	}
+
+	if _, err := s.db.Exec(`
+		INSERT INTO procedures
+		  (name, name_key, description, params_json, steps_json,
+		   scope_type, scope_id, created_at, updated_at)
+		VALUES ('Broken Steps', 'brokensteps', '', '{}', '[broken',
+		        'personal', '', '2026-07-04T00:00:00Z', '2026-07-04T00:00:00Z')`); err != nil {
+		t.Fatalf("seed corrupt steps row: %v", err)
+	}
+	if _, err := s.GetProcedure("Broken Steps", Scope{Type: "personal"}); err == nil {
+		t.Fatal("expected corrupt steps_json to surface an error from GetProcedure")
+	}
+
+	if _, err := s.ListProcedures(Scope{Type: "personal"}); err == nil {
+		t.Fatal("expected corrupt rows to surface an error from ListProcedures")
+	}
+}
+
+// TestUpsertProcedureConflictKeepsCreatedAt exercises the atomic
+// INSERT ... ON CONFLICT path: a re-learn must land on the same row, keep the
+// original created_at, take the new definition/updated_at, and never leave a
+// duplicate behind.
+func TestUpsertProcedureConflictKeepsCreatedAt(t *testing.T) {
+	s := openTestStore(t)
+	scope := Scope{Type: "project", ID: "garden"}
+
+	id1, err := s.UpsertProcedure(Procedure{
+		Name:      "Ship",
+		Scope:     scope,
+		CreatedAt: "2026-07-01T00:00:00Z",
+		UpdatedAt: "2026-07-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	id2, err := s.UpsertProcedure(Procedure{
+		Name:        "Ship",
+		Description: "v2",
+		Scope:       scope,
+		CreatedAt:   "2026-07-04T09:00:00Z",
+		UpdatedAt:   "2026-07-04T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("conflicting upsert: %v", err)
+	}
+	if id1 != id2 {
+		t.Fatalf("expected conflict to land on the same row, got %d then %d", id1, id2)
+	}
+
+	got, err := s.GetProcedure("Ship", scope)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.CreatedAt != "2026-07-01T00:00:00Z" {
+		t.Fatalf("expected created_at preserved across upsert, got %q", got.CreatedAt)
+	}
+	if got.UpdatedAt != "2026-07-04T09:00:00Z" {
+		t.Fatalf("expected updated_at replaced, got %q", got.UpdatedAt)
+	}
+	if got.Description != "v2" {
+		t.Fatalf("expected replaced definition, got %q", got.Description)
+	}
+
+	list, err := s.ListProcedures(scope)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected exactly 1 row after conflict upsert, got %d", len(list))
 	}
 }
 
