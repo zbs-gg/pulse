@@ -136,7 +136,7 @@ func TestRememberCapsuleProjectsNormalTierToLinkedTaggedEvent(t *testing.T) {
 	if len(docs) != 1 || docs[0].EventID != link.Int64 {
 		t.Fatalf("docs = %#v", docs)
 	}
-	if docs[0].Text != "decision\nCut scope to the committed checklist and ship the smallest safe release." {
+	if docs[0].Text != "Cut scope to the committed checklist and ship the smallest safe release." { // content only: kind is metadata, not embedded
 		t.Fatalf("doc text = %q", docs[0].Text)
 	}
 }
