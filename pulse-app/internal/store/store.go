@@ -21,6 +21,8 @@ type Store struct {
 	claimEmbed     func(string) ([]float32, error) // injected by the server when an embedder is wired
 	claimXKey      bool                            // enable cross-key resolution (subject phrased differently)
 	claimXThresh   float64                         // higher cosine threshold for cross-key supersede
+	claimPara      bool                            // enable paraphrase matching for brand-new claim_keys
+	claimParaThr   float64                         // cosine threshold for paraphrase match (default 0.90)
 }
 
 // DB returns the underlying *sql.DB for use by other packages.

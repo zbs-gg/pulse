@@ -34,6 +34,66 @@ func (s *Store) EnableCrossKey(threshold float64) {
 	s.claimXThresh = threshold
 }
 
+// EnableParaphraseClaims turns on paraphrase matching (PULSE_PARAPHRASE_CLAIMS):
+// when an incoming claim's claim_key has NO active exact match in its scope, the
+// nearest active claim by context embedding is treated as the same claim —
+// corroborated when the object is identical, superseded when it changed (still
+// change-cue-gated, like every other supersede path). Default threshold 0.90.
+func (s *Store) EnableParaphraseClaims(threshold float64) {
+	s.claimPara = true
+	if threshold <= 0 {
+		threshold = 0.90
+	}
+	s.claimParaThr = threshold
+}
+
+// paraphraseDecision resolves a claim whose claim_key is brand-new in its scope
+// against ALL active same-scope claims by embedding: a reworded restatement of
+// an existing claim ("alex lives in X" vs "alex home city is X") lands at high
+// cosine even though subject/predicate normalization gives it a different
+// claim_key. Precision guards mirror the rest of the resolver: never cross a
+// visibility boundary, identical object => corroborate (mention bump, no new
+// row), changed object => supersede ONLY with a change-cue and never with an
+// older valid_from. Returns ok=false when nothing clears the threshold — the
+// caller falls back to a plain insert (keep both, never a wrong merge).
+func (s *Store) paraphraseDecision(a Assertion, vec []float32) (ClaimDecision, bool) {
+	cands, err := s.ActiveAssertionsInScope(a.Scope, 0)
+	if err != nil || len(vec) == 0 {
+		return ClaimDecision{}, false
+	}
+	inVis := a.Scope.normalized().Visibility
+	best := -1
+	bestCos := s.claimParaThr
+	for i, c := range cands {
+		if c.ClaimKey == a.ClaimKey { // exact key is DecideClaim's job
+			continue
+		}
+		if c.Scope.normalized().Visibility != inVis { // don't cross a visibility boundary
+			continue
+		}
+		if cos := cosine(vec, c.CtxVec); cos >= bestCos {
+			bestCos = cos
+			best = i
+		}
+	}
+	if best < 0 {
+		return ClaimDecision{}, false
+	}
+	c := cands[best]
+	if normalizeObject(c.ObjectText) == normalizeObject(a.ObjectText) {
+		// Same claim, same value, different wording — a re-confirmation. Reuse the
+		// exact-match corroboration path (mention_count); nothing new is written.
+		return ClaimDecision{Action: "corroborate", TargetID: c.ID, Cosine: bestCos, Reason: "paraphrase match — same object, corroborate"}, true
+	}
+	if !a.ChangeCue { // sibling protection: no supersession without a change signal
+		return ClaimDecision{}, false
+	}
+	if a.ValidFrom != "" && c.ValidFrom != "" && a.ValidFrom < c.ValidFrom { // chronology: older never supersedes
+		return ClaimDecision{}, false
+	}
+	return ClaimDecision{Action: "supersede", TargetID: c.ID, Cosine: bestCos, Reason: "paraphrase match (change-cue)"}, true
+}
+
 // crossKeyTarget finds an active in-scope assertion for the SAME attribute (same
 // predicate, different object) phrased with a different subject, by context
 // similarity. Returns its id+cosine if it clears the cross-key threshold, else 0.
@@ -111,17 +171,30 @@ func (s *Store) resolveClaim(a Assertion, depth int) (ClaimDecision, error) {
 			d = ClaimDecision{Action: "supersede", TargetID: tid, Cosine: cos, Reason: "cross-key match (change-cue)"}
 		}
 	}
+	// Paraphrase fallback (PULSE_PARAPHRASE_CLAIMS, default off): the claim_key is
+	// brand-new in this scope (zero exact-key candidates), but the claim may be a
+	// REWORDED restatement of an active claim. Embedding-nearest match at >= 0.90.
+	if d.Action == "insert" && s.claimPara && len(cc) == 0 {
+		if pd, ok := s.paraphraseDecision(a, vec); ok {
+			d = pd
+		}
+	}
 	proposed := d // the resolver's true decision, before shadow suppression
-	if s.claimMode == "shadow" && d.Action == "supersede" {
+	if s.claimMode == "shadow" && (d.Action == "supersede" || d.Action == "corroborate") {
 		d.Action = "insert"
-		d.Reason = "shadow: would supersede, inserting instead"
+		d.Reason = "shadow: would " + proposed.Action + ", inserting instead"
 	}
 	// Decision ledger (NO-GO #8): record what was decided + whether it was applied.
 	// Best-effort: an audit-log failure must never break resolution.
-	s.recordClaimDecision(a, proposed, s.claimMode == "on" || proposed.Action != "supersede")
+	s.recordClaimDecision(a, proposed, s.claimMode == "on" ||
+		(proposed.Action != "supersede" && proposed.Action != "corroborate"))
 	switch d.Action {
 	case "noop":
 		return d, nil
+	case "corroborate":
+		// Re-confirmation of an existing active claim under different wording:
+		// bump the shared mention_count path; no new row, no supersede.
+		return d, bumpMention(s.db, d.TargetID, mentionTime(a))
 	case "supersede":
 		_, err := s.supersedeTargetTx(d.TargetID, a, d.Cosine)
 		if errors.Is(err, errStaleTarget) && depth < 3 {

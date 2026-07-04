@@ -143,7 +143,21 @@ func run(dataDir, addr string) error {
 				}
 				s.EnableCrossKey(xthr)
 			}
-			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr, "cross_key", xkey)
+			// Paraphrase claim matching (default OFF). A reworded restatement whose
+			// claim_key has no exact match corroborates/supersedes the embedding-
+			// nearest same-scope claim. Reuses the embedder wired above — no new
+			// network path, and a no-op whenever the embedder is unavailable.
+			paraphrase := os.Getenv("PULSE_PARAPHRASE_CLAIMS") == "1"
+			if paraphrase {
+				pthr := 0.90
+				if v := strings.TrimSpace(os.Getenv("PULSE_PARAPHRASE_THRESHOLD")); v != "" {
+					if f, err := strconv.ParseFloat(v, 64); err == nil {
+						pthr = f
+					}
+				}
+				s.EnableParaphraseClaims(pthr)
+			}
+			slog.Info("claim resolution enabled", "mode", mode, "threshold", thr, "cross_key", xkey, "paraphrase", paraphrase)
 		}
 	}
 
