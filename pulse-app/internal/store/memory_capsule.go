@@ -226,7 +226,9 @@ func (s *Store) CapsuleEventDocs(capsuleIDs []string) ([]CapsuleEventDoc, error)
 		if !eventID.Valid {
 			continue
 		}
-		docs = append(docs, CapsuleEventDoc{EventID: eventID.Int64, Text: kind + "\n" + summary})
+		// Embed ONLY the content: kind is metadata (its own column), and a
+		// constant kind prefix in every embedded doc skews content vectors.
+		docs = append(docs, CapsuleEventDoc{EventID: eventID.Int64, Text: summary})
 	}
 	return docs, nil
 }
@@ -285,7 +287,7 @@ func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
 		if _, err := tx.Exec(`UPDATE memory_capsules SET event_id=? WHERE id=?`, eid, p.id); err != nil {
 			return nil, fmt.Errorf("link capsule %s to event: %w", p.id, err)
 		}
-		docs = append(docs, CapsuleEventDoc{EventID: eid, Text: p.kind + "\n" + p.summary})
+		docs = append(docs, CapsuleEventDoc{EventID: eid, Text: p.summary})
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
