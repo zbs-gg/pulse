@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -86,6 +87,59 @@ func marshalSteps(steps []any) (string, error) {
 	return string(raw), nil
 }
 
+// Content guard. The rest of the store refuses transcript-like, secret-like,
+// and path-like payloads before they reach disk (validateMemoryCapsule,
+// validateSemanticText); procedures hold the same trust position, so every
+// text surface of a procedure passes the same shared matchers
+// (looksLikeTranscript / looksSensitiveOrPathLike in memory_capsule.go), plus
+// the credential shapes those matchers do not cover: the X-Pulse-Key IPC
+// header, /home/ absolute paths (the shared list already rejects /Users/),
+// and long hex runs shaped like the 32-byte IPC secret. The 48-char hex
+// threshold keeps 40-char git commit SHAs writable while rejecting 64-char
+// hex secrets.
+var procedureLongHexPattern = regexp.MustCompile(`[0-9a-fA-F]{48,}`)
+
+var procedureExtraSecretMarkers = []string{"x-pulse-key", "/home/"}
+
+func procedureContentUnsafe(value string) bool {
+	if looksLikeTranscript(value) || looksSensitiveOrPathLike(value) {
+		return true
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range procedureExtraSecretMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return procedureLongHexPattern.MatchString(value)
+}
+
+func validateProcedureText(field, value string) error {
+	if procedureContentUnsafe(value) {
+		return fmt.Errorf("%s contains transcript/secret/path-like content", field)
+	}
+	return nil
+}
+
+// validateProcedureContent checks the serialized JSON forms (paramsJSON,
+// stepsJSON), not the in-memory maps, so nested keys and values are covered
+// in exactly the shape that would hit disk.
+func validateProcedureContent(p Procedure, paramsJSON, stepsJSON string) error {
+	if err := validateProcedureText("procedure.name", p.Name); err != nil {
+		return err
+	}
+	if err := validateProcedureText("procedure.description", p.Description); err != nil {
+		return err
+	}
+	if err := validateProcedureText("procedure.params_json", paramsJSON); err != nil {
+		return err
+	}
+	if err := validateProcedureText("procedure.steps_json", stepsJSON); err != nil {
+		return err
+	}
+	return nil
+}
+
 // UpsertProcedure inserts a new procedure or replaces the existing one with
 // the same (name_key, scope). success_count is preserved across an upsert
 // unless the caller supplies a higher value. Returns the row id.
@@ -107,71 +161,44 @@ func (s *Store) UpsertProcedure(p Procedure) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := validateProcedureContent(p, paramsJSON, stepsJSON); err != nil {
+		return 0, err
+	}
 
 	now := strings.TrimSpace(p.UpdatedAt)
 	if now == "" {
 		now = nowRFC3339()
 	}
+	created := strings.TrimSpace(p.CreatedAt)
+	if created == "" {
+		created = now
+	}
 
-	tx, err := s.db.Begin()
+	// Atomic upsert against the idx_procedures_key unique index
+	// (name_key, scope_type, scope_id) — no SELECT-then-INSERT race. The
+	// conflict arm replaces the definition in place, leaves created_at
+	// intact, and preserves success_count unless the caller supplies a
+	// higher value.
+	var id int64
+	err = s.db.QueryRow(`
+		INSERT INTO procedures
+		  (name, name_key, description, params_json, steps_json,
+		   success_count, scope_type, scope_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(name_key, scope_type, scope_id) DO UPDATE SET
+		   name          = excluded.name,
+		   description   = excluded.description,
+		   params_json   = excluded.params_json,
+		   steps_json    = excluded.steps_json,
+		   success_count = MAX(procedures.success_count, excluded.success_count),
+		   updated_at    = excluded.updated_at
+		RETURNING id`,
+		p.Name, p.NameKey, p.Description, paramsJSON, stepsJSON,
+		p.SuccessCount, scopeType, scopeID, created, now).Scan(&id)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("upsert procedure: %w", err)
 	}
-	defer tx.Rollback()
-
-	var existingID int64
-	var existingCount int64
-	err = tx.QueryRow(`
-		SELECT id, success_count
-		  FROM procedures
-		 WHERE name_key = ? AND scope_type = ? AND scope_id = ?`,
-		p.NameKey, scopeType, scopeID).Scan(&existingID, &existingCount)
-	switch {
-	case err == sql.ErrNoRows:
-		created := strings.TrimSpace(p.CreatedAt)
-		if created == "" {
-			created = now
-		}
-		res, ierr := tx.Exec(`
-			INSERT INTO procedures
-			  (name, name_key, description, params_json, steps_json,
-			   success_count, scope_type, scope_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			p.Name, p.NameKey, p.Description, paramsJSON, stepsJSON,
-			p.SuccessCount, scopeType, scopeID, created, now)
-		if ierr != nil {
-			return 0, fmt.Errorf("insert procedure: %w", ierr)
-		}
-		id, ierr := res.LastInsertId()
-		if ierr != nil {
-			return 0, ierr
-		}
-		if cerr := tx.Commit(); cerr != nil {
-			return 0, cerr
-		}
-		return id, nil
-	case err != nil:
-		return 0, fmt.Errorf("lookup current procedure: %w", err)
-	}
-
-	// Existing row: replace definition in place, preserving success_count
-	// unless the caller supplies a higher value. created_at is left intact.
-	count := existingCount
-	if p.SuccessCount > count {
-		count = p.SuccessCount
-	}
-	if _, uerr := tx.Exec(`
-		UPDATE procedures
-		   SET name = ?, description = ?, params_json = ?, steps_json = ?,
-		       success_count = ?, updated_at = ?
-		 WHERE id = ?`,
-		p.Name, p.Description, paramsJSON, stepsJSON, count, now, existingID); uerr != nil {
-		return 0, fmt.Errorf("update procedure: %w", uerr)
-	}
-	if cerr := tx.Commit(); cerr != nil {
-		return 0, cerr
-	}
-	return existingID, nil
+	return id, nil
 }
 
 // GetProcedure returns the procedure for a normalized name within a scope, or
@@ -248,10 +275,14 @@ func scanProcedureRow(scan scanFunc) (*Procedure, error) {
 		return nil, err
 	}
 	if strings.TrimSpace(paramsJSON) != "" {
-		_ = json.Unmarshal([]byte(paramsJSON), &p.Params)
+		if err := json.Unmarshal([]byte(paramsJSON), &p.Params); err != nil {
+			return nil, fmt.Errorf("procedure %d: corrupt params_json: %w", p.ID, err)
+		}
 	}
 	if strings.TrimSpace(stepsJSON) != "" {
-		_ = json.Unmarshal([]byte(stepsJSON), &p.Steps)
+		if err := json.Unmarshal([]byte(stepsJSON), &p.Steps); err != nil {
+			return nil, fmt.Errorf("procedure %d: corrupt steps_json: %w", p.ID, err)
+		}
 	}
 	return &p, nil
 }
