@@ -92,6 +92,12 @@ type Engine struct {
 	// no counter writes happen and behavior is unchanged. Instrumentation only —
 	// the count never feeds the scorer in this phase.
 	accessFreqEnabled bool
+
+	// accessFreqBoostEnabled gates the Phase B access-frequency salience
+	// re-rank (see access_boost.go). Read once at New() from the separate
+	// PULSE_ACCESS_FREQ_BOOST env var; OFF by default ⇒ the post-scoring
+	// step never runs and the final ranking is byte-identical to today.
+	accessFreqBoostEnabled bool
 }
 
 // Config bundles the dependencies an Engine needs.
@@ -135,6 +141,8 @@ func New(cfg Config) *Engine {
 		childToParent:     make(map[int64][]int64),
 		assertionOverlay:  cfg.AssertionOverlay,
 		accessFreqEnabled: accessFreqFlag(),
+
+		accessFreqBoostEnabled: accessFreqBoostFlag(),
 	}
 }
 
@@ -466,6 +474,10 @@ type ScoreBreakdown struct {
 	StateBoost           *float64 `json:"state_boost,omitempty"`   // v3 boost_state (1 + γ·state_fit)
 	AnchorBoost          *float64 `json:"anchor_boost,omitempty"`  // v3 boost_anchor (1 + δ_a, anchors in top-N by base)
 	DateBoost            *float64 `json:"date_boost,omitempty"`    // v3 boost_date (1 + δ_d·date_proximity)
+	// AccessFreqBoost is NOT part of the frozen v3 score. It documents the
+	// Phase B post-scoring re-rank multiplier (access_boost.go) and is set
+	// only when PULSE_ACCESS_FREQ_BOOST is on and the multiplier ≠ 1.0.
+	AccessFreqBoost *float64 `json:"access_freq_boost,omitempty"`
 }
 
 // Retrieve dispatches the query to factual/empathic/chain mode.
@@ -557,6 +569,26 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	var surfaceability SurfaceabilityAction
 	if mode != ModeFactual {
 		ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+	}
+
+	// Access-frequency salience re-rank (Phase B, default-off, post-scoring):
+	// a mild, bounded reorder of the final id list by recall frequency (see
+	// access_boost.go). Placed AFTER fusion + surfaceability so it sees the
+	// complete final candidate list (graph-injected candidates included) and
+	// the fragile-state safety substitution keeps operating on the untouched
+	// frozen ranking; placed BEFORE assertion demotion so the supersession
+	// invariant (stale never above its correction) is enforced last and can
+	// never be undone by a frequently-recalled stale event. Pure reorder —
+	// no v3 score/gating change, no id added or dropped.
+	if e.accessFreqBoostEnabled {
+		var mults map[int64]float64
+		ids, mults = e.applyAccessFreqBoost(ids)
+		for id, m := range mults {
+			if bd, ok := breakdowns[id]; ok {
+				bd.AccessFreqBoost = nonIdentityPtr(m)
+				breakdowns[id] = bd
+			}
+		}
 	}
 
 	// Supersession-aware demotion (default-off, post-scoring): if both a stale
