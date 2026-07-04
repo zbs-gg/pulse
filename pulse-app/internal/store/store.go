@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -35,6 +36,30 @@ func (s *Store) DBPath() string {
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// IncrementAccessCounts bumps access_count and stamps last_accessed_at for the
+// given event ids (migration 028, Phase A instrumentation). It is keyed by id
+// ONLY — no content, transcript, or text is read or written — so it is not the
+// raw-content write path and leaves the daemon-never-sees-raw invariant intact.
+// A nil/empty slice is a no-op. Callers treat this as best-effort: a failed
+// counter write must never fail a retrieval.
+func (s *Store) IncrementAccessCounts(ids []int64, at time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, at.UTC().Format(time.RFC3339))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	q := fmt.Sprintf(
+		"UPDATE events SET access_count = access_count + 1, last_accessed_at = ? WHERE id IN (%s)",
+		strings.Join(placeholders, ","))
+	_, err := s.db.Exec(q, args...)
+	return err
 }
 
 // FeedSignal — proactive feed signal computed by pulse_consolidate.py.

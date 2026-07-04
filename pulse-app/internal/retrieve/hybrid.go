@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +65,10 @@ type Engine struct {
 	// biometric snapshot per event (nil bio = no biometric signal).
 	eventSentLabel []string
 	eventBio       []*bioSnapshot
+	// Access-frequency salience (migration 028, Phase A): per-event recall count.
+	// Loaded for data availability ONLY — the scorer never reads it in this phase,
+	// so retrieval scores and Go==Python parity are untouched. Refreshed on Reload.
+	eventAccess []int64
 
 	// Fact index.
 	factIDs      []int64
@@ -81,6 +86,12 @@ type Engine struct {
 	// correction in the final ranked list (supersession-aware). Default false:
 	// the list is untouched, so the frozen v3 path stays byte-identical.
 	assertionOverlay bool
+
+	// accessFreqEnabled gates the best-effort recall counter (migration 028).
+	// Read once at New() from the PULSE_ACCESS_FREQ env var; OFF by default, so
+	// no counter writes happen and behavior is unchanged. Instrumentation only —
+	// the count never feeds the scorer in this phase.
+	accessFreqEnabled bool
 }
 
 // Config bundles the dependencies an Engine needs.
@@ -123,6 +134,19 @@ func New(cfg Config) *Engine {
 		parentToChild:     make(map[int64][]int64),
 		childToParent:     make(map[int64][]int64),
 		assertionOverlay:  cfg.AssertionOverlay,
+		accessFreqEnabled: accessFreqFlag(),
+	}
+}
+
+// accessFreqFlag reports whether the best-effort recall counter (migration 028)
+// is enabled. OFF unless PULSE_ACCESS_FREQ is set to a truthy value ("1"/"true"/
+// "yes"/"on"). Default OFF ⇒ no counter writes ⇒ no behavior change.
+func accessFreqFlag() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PULSE_ACCESS_FREQ"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -229,7 +253,8 @@ SELECT
     COALESCE(em.fear, 0), COALESCE(em.trust, 0), COALESCE(em.disgust, 0),
     COALESCE(em.anticipation, 0), COALESCE(em.surprise, 0),
     COALESCE(em.shame, 0), COALESCE(em.guilt, 0),
-    COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, '')
+    COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, ''),
+    COALESCE(e.access_count, 0)
 FROM events e
 JOIN event_embeddings ee ON ee.event_id = e.id
 LEFT JOIN event_emotions em ON em.event_id = e.id
@@ -249,6 +274,7 @@ ORDER BY e.id`
 	e.eventEmo = e.eventEmo[:0]
 	e.eventSentLabel = e.eventSentLabel[:0]
 	e.eventBio = e.eventBio[:0]
+	e.eventAccess = e.eventAccess[:0]
 
 	for rows.Next() {
 		var id int64
@@ -259,10 +285,11 @@ ORDER BY e.id`
 		em := make([]float32, 10)
 		var userFlag int
 		var sentLabel, bioJSON string
+		var accessCount int64
 		if err := rows.Scan(&id, &tsStr, &title, &description, &vecJSON,
 			&em[0], &em[1], &em[2], &em[3], &em[4],
 			&em[5], &em[6], &em[7], &em[8], &em[9],
-			&userFlag, &sentLabel, &bioJSON); err != nil {
+			&userFlag, &sentLabel, &bioJSON, &accessCount); err != nil {
 			return err
 		}
 		var v []float32
@@ -278,6 +305,7 @@ ORDER BY e.id`
 		e.eventEmo = append(e.eventEmo, em)
 		e.eventSentLabel = append(e.eventSentLabel, strings.ToLower(sentLabel))
 		e.eventBio = append(e.eventBio, parseBioSnapshot(bioJSON))
+		e.eventAccess = append(e.eventAccess, accessCount)
 	}
 	return rows.Err()
 }
@@ -536,6 +564,17 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// the correction. Pure reorder — no v3 score/gating change.
 	if e.assertionOverlay {
 		ids = e.applyAssertionDemotion(ids)
+	}
+
+	// Access-frequency instrumentation (migration 028, Phase A). Best-effort and
+	// OFF by default: only when PULSE_ACCESS_FREQ is enabled do we bump a bare
+	// per-id counter on the events we just returned. Keyed by id ONLY — no
+	// content/transcript touched, so this is not the raw-content write path. A
+	// counter-write failure never fails the retrieval (error swallowed). Counts
+	// take effect on the next Reload, and the scorer never reads them in this
+	// phase, so scoring and Go==Python parity are untouched.
+	if e.accessFreqEnabled && e.store != nil && len(ids) > 0 {
+		_ = e.store.IncrementAccessCounts(ids, time.Now())
 	}
 
 	return &RetrieveResponse{
