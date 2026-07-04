@@ -65,7 +65,7 @@ type Engine struct {
 	// biometric snapshot per event (nil bio = no biometric signal).
 	eventSentLabel []string
 	eventBio       []*bioSnapshot
-	// Access-frequency salience (migration 028, Phase A): per-event recall count.
+	// Access-frequency salience (migration 029, Phase A): per-event recall count.
 	// Loaded for data availability ONLY — the scorer never reads it in this phase,
 	// so retrieval scores and Go==Python parity are untouched. Refreshed on Reload.
 	eventAccess []int64
@@ -87,7 +87,7 @@ type Engine struct {
 	// the list is untouched, so the frozen v3 path stays byte-identical.
 	assertionOverlay bool
 
-	// accessFreqEnabled gates the best-effort recall counter (migration 028).
+	// accessFreqEnabled gates the best-effort recall counter (migration 029).
 	// Read once at New() from the PULSE_ACCESS_FREQ env var; OFF by default, so
 	// no counter writes happen and behavior is unchanged. Instrumentation only —
 	// the count never feeds the scorer in this phase.
@@ -138,7 +138,7 @@ func New(cfg Config) *Engine {
 	}
 }
 
-// accessFreqFlag reports whether the best-effort recall counter (migration 028)
+// accessFreqFlag reports whether the best-effort recall counter (migration 029)
 // is enabled. OFF unless PULSE_ACCESS_FREQ is set to a truthy value ("1"/"true"/
 // "yes"/"on"). Default OFF ⇒ no counter writes ⇒ no behavior change.
 func accessFreqFlag() bool {
@@ -566,7 +566,7 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		ids = e.applyAssertionDemotion(ids)
 	}
 
-	// Access-frequency instrumentation (migration 028, Phase A). Best-effort and
+	// Access-frequency instrumentation (migration 029, Phase A). Best-effort and
 	// OFF by default: only when PULSE_ACCESS_FREQ is enabled do we bump a bare
 	// per-id counter on the events we just returned. Keyed by id ONLY — no
 	// content/transcript touched, so this is not the raw-content write path. A
