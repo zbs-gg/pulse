@@ -119,6 +119,29 @@ func run(dataDir, addr string) error {
 		})
 	}
 
+	// Capsule → event projection backfill (default ON; PULSE_CAPSULE_EVENTS=off
+	// disables). Idempotent: only capsules never projected (event_id IS NULL,
+	// privacy_tier='normal') gain a linked event. With an embedder wired the
+	// new events are embed-indexed immediately; otherwise they stay dark until
+	// an embedder is configured. Env wiring only — no billing / network-path
+	// change (the optional embed call uses the already-configured embedder).
+	if docs, err := s.BackfillCapsuleEvents(); err != nil {
+		slog.Warn("capsule event backfill failed", "error", err)
+	} else if len(docs) > 0 {
+		slog.Info("capsule events backfilled", "count", len(docs))
+		if retrievalEngine != nil && retrievalEngine.EmbedderReady() {
+			indexDocs := make([]retrieve.IndexEventDoc, len(docs))
+			for i, d := range docs {
+				indexDocs[i] = retrieve.IndexEventDoc{EventID: d.EventID, Text: d.Text}
+			}
+			backfillCtx, cancelBackfill := context.WithTimeout(context.Background(), 60*time.Second)
+			if err := retrievalEngine.EmbedAndIndexEvents(backfillCtx, indexDocs); err != nil {
+				slog.Warn("capsule event embed-index failed", "error", err)
+			}
+			cancelBackfill()
+		}
+	}
+
 	// Claim resolution (default OFF). Enabled only when an embedder is wired and
 	// PULSE_CLAIM_RESOLUTION is shadow|on. Precision-first; never touches v3.
 	if retrievalEngine != nil && retrievalEngine.EmbedderReady() {

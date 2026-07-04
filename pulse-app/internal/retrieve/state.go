@@ -27,6 +27,13 @@ type UserState struct {
 	VoiceRegister      string            `json:"voice_register,omitempty"`
 	RelationalBaseline map[string]any    `json:"relational_baseline,omitempty"`
 	ActiveTriggers     []TriggerSignal   `json:"active_triggers,omitempty"`
+
+	// ContextFlags carries host-declared situational flags (e.g.
+	// deadline_pressure, job_insecurity, burnout) with 0..1 weights; values
+	// >= 0.5 count as active. Read ONLY by the post-scoring state-tag
+	// affinity step (state_tag_boost.go) — no frozen v3 code reads it, and an
+	// absent/empty map is identity (old behavior byte-identical).
+	ContextFlags map[string]float64 `json:"context_flags,omitempty"`
 }
 
 type TriggerSignal struct {

@@ -1,7 +1,11 @@
 package contextquery
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
+
+	"github.com/nkkmnk/pulse/internal/retrieve"
 )
 
 func TestContextResultSchemaVersion(t *testing.T) {
@@ -441,5 +445,65 @@ VALUES (302, 11, 'Alice might be avoiding this through busyness', 0.4, '2026-05-
 	}
 	if len(got.Uncertainty) == 0 || got.Uncertainty[0].SubjectID != 302 {
 		t.Fatalf("uncertainty = %#v", got.Uncertainty)
+	}
+}
+
+// capturingRetrieval records the RetrieveRequest the service forwards, so the
+// user_state wire → engine plumbing can be asserted end to end.
+type capturingRetrieval struct {
+	last *retrieve.RetrieveRequest
+}
+
+func (c *capturingRetrieval) Retrieve(_ context.Context, req retrieve.RetrieveRequest) (*retrieve.RetrieveResponse, error) {
+	c.last = &req
+	return &retrieve.RetrieveResponse{
+		EventIDs:       []int64{101},
+		ModeUsed:       retrieve.ModeEmpathic,
+		RouterDecision: retrieve.RouteDecision{Mode: retrieve.ModeEmpathic, Confidence: 0.8, Classifier: "test"},
+	}, nil
+}
+
+// TestServiceQueryPassesUserStateContextFlagsIntact decodes a request the way
+// the HTTP handler does (raw JSON body) and asserts the full user_state —
+// including the additive context_flags channel — reaches
+// retrieve.RetrieveRequest.UserState without loss.
+func TestServiceQueryPassesUserStateContextFlagsIntact(t *testing.T) {
+	s := openContextTestStore(t)
+	defer s.Close()
+	seedContextGraph(t, s.DB())
+
+	body := []byte(`{
+		"query": "advice for the upcoming release",
+		"top_k": 3,
+		"user_state": {
+			"mood_vector": {"anticipation": 0.7},
+			"context_flags": {"deadline_pressure": 0.9, "burnout": 0.2}
+		}
+	}`)
+	var req ContextQueryRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+
+	capture := &capturingRetrieval{}
+	svc := New(ServiceConfig{DB: s.DB(), Retrieval: capture})
+	if _, err := svc.Query(t.Context(), req); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if capture.last == nil || capture.last.UserState == nil {
+		t.Fatalf("user_state did not reach retrieval: %#v", capture.last)
+	}
+	us := capture.last.UserState
+	if got := us.ContextFlags["deadline_pressure"]; got != 0.9 {
+		t.Fatalf("context_flags.deadline_pressure = %v, want 0.9", got)
+	}
+	if got := us.ContextFlags["burnout"]; got != 0.2 {
+		t.Fatalf("context_flags.burnout = %v, want 0.2", got)
+	}
+	if got := us.MoodVector["anticipation"]; got != 0.7 {
+		t.Fatalf("mood_vector.anticipation = %v, want 0.7", got)
+	}
+	if capture.last.Query != "advice for the upcoming release" || capture.last.TopK != 3 {
+		t.Fatalf("request fields lost: %#v", capture.last)
 	}
 }

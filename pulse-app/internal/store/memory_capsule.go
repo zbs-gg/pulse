@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -106,6 +107,7 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 
 	ids := make([]string, 0, len(capsule.Items))
 	createdAt := time.Now().UTC().Format(time.RFC3339)
+	projectEvents := capsuleEventsEnabled()
 	for i, item := range capsule.Items {
 		id, err := newMemoryID(i)
 		if err != nil {
@@ -115,15 +117,30 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("marshal tags: %w", err)
 		}
+		// Capsule → event projection (migration 032): 'normal' tier items also
+		// get a linked event row so the retrieval engine can surface them.
+		// Sensitive/private stay out of the graph (conservative privacy floor).
+		// The event copies ONLY the already-validated redacted_summary — the
+		// transcript/secret/path guards above have already run.
+		var eventID any
+		if projectEvents && item.PrivacyTier == "normal" {
+			eid, err := projectCapsuleEvent(tx, item.Kind, item.RedactedSummary,
+				capsule.Source.Timestamp, createdAt, item.Tags)
+			if err != nil {
+				return nil, err
+			}
+			eventID = eid
+		}
 		if _, err := tx.Exec(`
 			INSERT INTO memory_capsules
 			  (id, schema_version, source_host, conversation_scope, source_timestamp,
 			   kind, redacted_summary, confidence, evidence_hint, privacy_tier,
-			   retention, tags, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			   retention, tags, created_at, event_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, capsule.Schema, capsule.Source.Host, capsule.Source.ConversationScope,
 			capsule.Source.Timestamp, item.Kind, item.RedactedSummary, item.Confidence,
 			item.EvidenceHint, item.PrivacyTier, item.Retention, string(tags), createdAt,
+			eventID,
 		); err != nil {
 			return nil, fmt.Errorf("insert memory capsule: %w", err)
 		}
@@ -133,6 +150,147 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// capsuleEventsEnabled gates the capsule → event projection. Default ON —
+// remembered memory must be reachable by the engine (that is the shipped
+// promise). PULSE_CAPSULE_EVENTS=off (or 0/false/no) opts out.
+func capsuleEventsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PULSE_CAPSULE_EVENTS"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// projectCapsuleEvent inserts the event row a 'normal'-tier capsule item
+// projects to. scorer_version='host-extracted' keeps it on the existing wipe
+// path (WipeMemory → wipeHostExtractedGraph); tags feed ONLY the post-scoring
+// state-tag affinity step.
+//
+// provenance is 'interactive_memory', not 'capsule': events.provenance
+// carries a CHECK constraint (migration 014) whose value set cannot be
+// widened without rebuilding the events table, and a capsule remember IS
+// interactive host-extracted memory. The authoritative capsule-origin marker
+// is the memory_capsules.event_id link (migration 032).
+func projectCapsuleEvent(tx *sql.Tx, kind, summary, sourceTS, createdAt string, tags []string) (int64, error) {
+	ts := strings.TrimSpace(sourceTS)
+	if ts == "" {
+		ts = createdAt
+	}
+	var tagsJSON any
+	if len(tags) > 0 {
+		raw, err := json.Marshal(tags)
+		if err != nil {
+			return 0, fmt.Errorf("marshal event tags: %w", err)
+		}
+		tagsJSON = string(raw)
+	}
+	res, err := tx.Exec(`
+		INSERT INTO events
+		  (title, description, scorer_version, ts, provenance, domain, tags)
+		VALUES (?, ?, 'host-extracted', ?, 'interactive_memory', 'real', ?)`,
+		kind, summary, ts, tagsJSON)
+	if err != nil {
+		return 0, fmt.Errorf("insert capsule event: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// CapsuleEventDoc is one projected capsule event ready for embed-indexing
+// (same shape the /graph/delta handler feeds to EmbedAndIndexEvents; the
+// retrieve package cannot be imported here without a cycle).
+type CapsuleEventDoc struct {
+	EventID int64
+	Text    string
+}
+
+// CapsuleEventDocs returns the (event_id, text) docs for the given capsule
+// ids that were projected to events, so the caller can embed-index them.
+// Non-projected capsules (sensitive/private, or projection off) are skipped.
+func (s *Store) CapsuleEventDocs(capsuleIDs []string) ([]CapsuleEventDoc, error) {
+	docs := []CapsuleEventDoc{}
+	for _, id := range capsuleIDs {
+		var eventID sql.NullInt64
+		var kind, summary string
+		err := s.db.QueryRow(`
+			SELECT event_id, kind, redacted_summary
+			  FROM memory_capsules WHERE id=?`, id).Scan(&eventID, &kind, &summary)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !eventID.Valid {
+			continue
+		}
+		docs = append(docs, CapsuleEventDoc{EventID: eventID.Int64, Text: kind + "\n" + summary})
+	}
+	return docs, nil
+}
+
+// BackfillCapsuleEvents projects every not-yet-projected 'normal'-tier active
+// capsule into a linked event (idempotent: WHERE event_id IS NULL, so a second
+// run finds nothing). Called once at daemon startup. Returns the docs to
+// embed-index; no-op (nil, nil) when PULSE_CAPSULE_EVENTS is off.
+func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
+	if !capsuleEventsEnabled() {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT id, kind, redacted_summary, source_timestamp, created_at, tags
+		  FROM memory_capsules
+		 WHERE event_id IS NULL AND privacy_tier='normal' AND status='active'
+		 ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	type pending struct {
+		id, kind, summary, sourceTS, createdAt string
+		tags                                   []string
+	}
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		var tagsJSON string
+		if err := rows.Scan(&p.id, &p.kind, &p.summary, &p.sourceTS, &p.createdAt, &tagsJSON); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(tagsJSON), &p.tags)
+		todo = append(todo, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(todo) == 0 {
+		return nil, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	docs := make([]CapsuleEventDoc, 0, len(todo))
+	for _, p := range todo {
+		eid, err := projectCapsuleEvent(tx, p.kind, p.summary, p.sourceTS, p.createdAt, p.tags)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE memory_capsules SET event_id=? WHERE id=?`, eid, p.id); err != nil {
+			return nil, fmt.Errorf("link capsule %s to event: %w", p.id, err)
+		}
+		docs = append(docs, CapsuleEventDoc{EventID: eid, Text: p.kind + "\n" + p.summary})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) {
@@ -340,8 +498,24 @@ func (s *Store) DeleteMemory(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("id is required")
 	}
-	_, err := s.db.Exec(`DELETE FROM memory_capsules WHERE id=?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Forgetting a capsule must also remove its projected event copy —
+	// otherwise the engine keeps surfacing "forgotten" memory. The embedding
+	// row follows via the event_embeddings ON DELETE CASCADE FK.
+	if _, err := tx.Exec(`
+		DELETE FROM events
+		 WHERE id IN (SELECT event_id FROM memory_capsules
+		               WHERE id=? AND event_id IS NOT NULL)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM memory_capsules WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) WipeMemory() error {
