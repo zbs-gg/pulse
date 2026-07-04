@@ -185,6 +185,22 @@ func mentionTime(a Assertion) string {
 	return nowRFC3339()
 }
 
+// bumpMention is THE corroboration write: an existing claim was re-confirmed,
+// so its mention_count grows and last_mentioned_at moves. Shared by the
+// exact-key upsert path and the paraphrase resolver; runs on *sql.DB or *sql.Tx.
+func bumpMention(ex interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}, id int64, at string) error {
+	if _, err := ex.Exec(`
+		UPDATE assertions
+		   SET mention_count = mention_count + 1,
+		       last_mentioned_at = ?
+		 WHERE id = ?`, at, id); err != nil {
+		return fmt.Errorf("bump mention_count: %w", err)
+	}
+	return nil
+}
+
 // UpsertAssertion is the embedder-free claim-write path: it matches on the exact
 // claim_key+scope only. When the active claim already carries the same object it
 // is a corroboration — mention_count is bumped and inserted=false (no new row,
@@ -238,12 +254,8 @@ func upsertAssertionTx(tx *sql.Tx, a Assertion) (int64, bool, error) {
 		// Corroboration: the same claim was re-confirmed. Bump the mention count;
 		// do NOT insert a new row and do NOT supersede. inserted stays false so
 		// callers that count inserts/supersedes are unaffected.
-		if _, err := tx.Exec(`
-			UPDATE assertions
-			   SET mention_count = mention_count + 1,
-			       last_mentioned_at = ?
-			 WHERE id = ?`, mentionTime(a), currentID); err != nil {
-			return 0, false, fmt.Errorf("bump mention_count: %w", err)
+		if err := bumpMention(tx, currentID, mentionTime(a)); err != nil {
+			return 0, false, err
 		}
 		return currentID, false, nil
 	}

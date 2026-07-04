@@ -140,6 +140,9 @@ type SemanticDeltaResult struct {
 	ClaimsInserted   int `json:"claims_inserted,omitempty"`
 	ClaimsSuperseded int `json:"claims_superseded,omitempty"`
 	ClaimsSkipped    int `json:"claims_skipped,omitempty"`
+	// ClaimsCorroborated counts paraphrase re-confirmations (mention bumps).
+	// Always 0 unless PULSE_PARAPHRASE_CLAIMS is enabled.
+	ClaimsCorroborated int `json:"claims_corroborated,omitempty"`
 	// EventsIndexed reports whether freshly ingested events were embedded and
 	// are retrievable now (nil = no retrieval engine / no events in delta).
 	EventsIndexed *bool `json:"events_indexed,omitempty"`
@@ -227,6 +230,8 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 				result.ClaimsSuperseded++
 			case "noop":
 				result.ClaimsSkipped++
+			case "corroborate":
+				result.ClaimsCorroborated++
 			default:
 				result.ClaimsInserted++
 			}
