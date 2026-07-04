@@ -450,6 +450,53 @@ func TestWipeMemoryRemovesHostExtractedSemanticGraph(t *testing.T) {
 	}
 }
 
+// Part (b) red-line proof: the corroboration counter is additive scaffolding
+// (UpsertAssertion) and is deliberately NOT wired into the live SaveSemanticDelta
+// path. Re-confirming the same fact through the resolver hits its own duplicate
+// "noop" branch (ClaimsSkipped++) WITHOUT bumping mention_count — the counter
+// stays at the insert default of 1. This pins "nothing wired into live paths".
+func TestSaveSemanticDelta_MentionCountNotWiredIntoLivePath(t *testing.T) {
+	s := openTestStore(t)
+	s.EnableClaimResolution("on", 0.83, stubEmbed)
+	mk := func() SemanticDelta {
+		return SemanticDelta{
+			Schema: SemanticDeltaSchema,
+			Source: SemanticDeltaSource{Host: "claude-code", ConversationScope: "project_context", Timestamp: "2026-05-01T09:00:00Z"},
+			Events: []SemanticEvent{{
+				ClientID: "ev:1", Title: "effort note", Summary: "Alex reasoning effort is medium.",
+				Confidence: 0.9, PrivacyTier: "normal", OccurredAt: "2026-05-01T09:00:00Z",
+				Claims: []SemanticClaim{{Subject: "alex reasoning effort", Predicate: "is", Object: "medium"}},
+			}},
+		}
+	}
+	if r, err := s.SaveSemanticDelta(mk()); err != nil || r.ClaimsInserted != 1 {
+		t.Fatalf("first delta: inserted=%d err=%v (want 1 inserted)", r.ClaimsInserted, err)
+	}
+	// Same fact again: the resolver treats it as a duplicate (noop), not a bump.
+	r, err := s.SaveSemanticDelta(mk())
+	if err != nil {
+		t.Fatalf("second delta: %v", err)
+	}
+	if r.ClaimsSkipped != 1 {
+		t.Fatalf("re-confirmation should be a resolver noop (ClaimsSkipped=1), got %+v", r)
+	}
+
+	cur, err := s.CurrentAssertions(MakeClaimKey("alex reasoning effort", "is"), Scope{Type: "personal", ID: "project_context"})
+	if err != nil {
+		t.Fatalf("CurrentAssertions: %v", err)
+	}
+	if len(cur) != 1 {
+		t.Fatalf("expected exactly 1 active assertion, got %d (%+v)", len(cur), cur)
+	}
+	// The live path does NOT bump the counter: it is still the insert default.
+	if cur[0].MentionCount != 1 {
+		t.Fatalf("mention_count must stay 1 on the live path (not wired), got %d", cur[0].MentionCount)
+	}
+	if cur[0].LastMentionedAt != "" {
+		t.Fatalf("last_mentioned_at must stay unset on the live path, got %q", cur[0].LastMentionedAt)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if strings.Contains(item, want) {

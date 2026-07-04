@@ -58,6 +58,15 @@ type Assertion struct {
 	Scope            Scope
 	CreatedAt        string
 
+	// MentionCount is the corroboration counter: how many times this exact active
+	// claim (same claim_key+scope+object) has been re-confirmed. Defaults to 1 on
+	// insert (migration 030). Pure metadata surfaced on read — NOT read by
+	// scoreEventsV3 / v3boosts / state_fit.
+	MentionCount int64
+	// LastMentionedAt is the RFC3339 timestamp of the most recent corroboration.
+	// Empty (NULL) until the claim is re-confirmed at least once.
+	LastMentionedAt string
+
 	// CtxVec is the embedding of "<subject> <predicate> <object>", persisted in
 	// ctx_vec; claim resolution compares claims by meaning, not just key. Optional.
 	CtxVec []float32
@@ -167,6 +176,84 @@ func supersedeAssertionTx(tx *sql.Tx, a Assertion) (int64, error) {
 	return newID, nil
 }
 
+// mentionTime returns the timestamp to stamp on a corroboration bump: the
+// incoming assertion's SystemFrom when set, else now.
+func mentionTime(a Assertion) string {
+	if t := strings.TrimSpace(a.SystemFrom); t != "" {
+		return t
+	}
+	return nowRFC3339()
+}
+
+// UpsertAssertion is the embedder-free claim-write path: it matches on the exact
+// claim_key+scope only. When the active claim already carries the same object it
+// is a corroboration — mention_count is bumped and inserted=false (no new row,
+// no supersede). A different object supersedes the prior active claim(s). No
+// active claim => a fresh insert (inserted=true).
+//
+// This is additive corroboration scaffolding. It is deliberately NOT wired into
+// SaveSemanticDelta, which uses the precision-first embedding resolver
+// (ResolveClaim) for paraphrase-tolerant matching. mention_count is metadata
+// surfaced on read and is never routed into scoreEventsV3 / v3boosts / state_fit.
+func (s *Store) UpsertAssertion(a Assertion) (int64, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	id, inserted, err := upsertAssertionTx(tx, a)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return id, inserted, nil
+}
+
+// upsertAssertionTx resolves an incoming claim against the current active claim
+// for its exact claim_key+scope, inside the caller's transaction. Object
+// comparison mirrors the resolver's duplicate guard (normalizeObject), so case
+// and punctuation do not defeat corroboration.
+func upsertAssertionTx(tx *sql.Tx, a Assertion) (int64, bool, error) {
+	a = withDerivedKey(a)
+	scope := a.Scope.normalized()
+	var currentID int64
+	var currentObject string
+	err := tx.QueryRow(`
+		SELECT id, object_text
+		  FROM assertions
+		 WHERE claim_key = ? AND scope_type = ? AND scope_id = ?
+		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
+		 ORDER BY id DESC
+		 LIMIT 1`, a.ClaimKey, scope.Type, scope.ID).Scan(&currentID, &currentObject)
+	if err == sql.ErrNoRows {
+		id, err := insertAssertion(tx, a)
+		return id, err == nil, err
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("lookup current assertion: %w", err)
+	}
+	if normalizeObject(currentObject) == normalizeObject(a.ObjectText) {
+		// Corroboration: the same claim was re-confirmed. Bump the mention count;
+		// do NOT insert a new row and do NOT supersede. inserted stays false so
+		// callers that count inserts/supersedes are unaffected.
+		if _, err := tx.Exec(`
+			UPDATE assertions
+			   SET mention_count = mention_count + 1,
+			       last_mentioned_at = ?
+			 WHERE id = ?`, mentionTime(a), currentID); err != nil {
+			return 0, false, fmt.Errorf("bump mention_count: %w", err)
+		}
+		return currentID, false, nil
+	}
+	// The world changed: supersede the prior active claim(s) and insert the new
+	// one. The fresh row carries the default mention_count of 1 (a change is not a
+	// corroboration).
+	newID, err := supersedeAssertionTx(tx, a)
+	return newID, err == nil, err
+}
+
 // SupersededPairsForEvents returns (staleEventID, currentEventID) pairs where a
 // superseded assertion's source event and its replacement's source event are
 // BOTH among ids. The retrieval demotion overlay uses this to move a stale fact
@@ -239,7 +326,8 @@ func (s *Store) CurrentAssertions(claimKey string, scope Scope) ([]Assertion, er
 		SELECT id, claim_key, subject_entity_id, predicate, object_text, object_entity_id,
 		       qualifiers, confidence, valid_from, valid_to, system_from, system_to,
 		       status, superseded_by, source_event_ids, extractor_version,
-		       scope_type, scope_id, visibility, created_at, ctx_vec
+		       scope_type, scope_id, visibility, created_at, ctx_vec,
+		       mention_count, last_mentioned_at
 		  FROM assertions
 		 WHERE claim_key = ? AND scope_type = ? AND scope_id = ?
 		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
@@ -263,7 +351,8 @@ func (s *Store) ActiveAssertionsInScope(scope Scope, limit int) ([]Assertion, er
 		SELECT id, claim_key, subject_entity_id, predicate, object_text, object_entity_id,
 		       qualifiers, confidence, valid_from, valid_to, system_from, system_to,
 		       status, superseded_by, source_event_ids, extractor_version,
-		       scope_type, scope_id, visibility, created_at, ctx_vec
+		       scope_type, scope_id, visibility, created_at, ctx_vec,
+		       mention_count, last_mentioned_at
 		  FROM assertions
 		 WHERE scope_type = ? AND scope_id = ?
 		   AND status = 'active' AND system_to IS NULL AND valid_to IS NULL
@@ -359,15 +448,17 @@ func scanAssertions(rows *sql.Rows) ([]Assertion, error) {
 	for rows.Next() {
 		var a Assertion
 		var subj, objEnt, supBy sql.NullInt64
-		var qualifiers, validFrom, validTo, systemTo, sourceEvents, extractor, ctxVec sql.NullString
+		var qualifiers, validFrom, validTo, systemTo, sourceEvents, extractor, ctxVec, lastMentioned sql.NullString
 		if err := rows.Scan(
 			&a.ID, &a.ClaimKey, &subj, &a.Predicate, &a.ObjectText, &objEnt,
 			&qualifiers, &a.Confidence, &validFrom, &validTo, &a.SystemFrom, &systemTo,
 			&a.Status, &supBy, &sourceEvents, &extractor,
 			&a.Scope.Type, &a.Scope.ID, &a.Scope.Visibility, &a.CreatedAt, &ctxVec,
+			&a.MentionCount, &lastMentioned,
 		); err != nil {
 			return nil, err
 		}
+		a.LastMentionedAt = lastMentioned.String
 		if ctxVec.Valid && ctxVec.String != "" {
 			_ = json.Unmarshal([]byte(ctxVec.String), &a.CtxVec)
 		}
