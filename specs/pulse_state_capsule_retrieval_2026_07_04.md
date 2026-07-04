@@ -34,7 +34,7 @@ system with a `user_state` input, but scored 0/15 because of two wiring gaps:
   (conservative — sensitive/private stay out of the graph until a
   privacy-floor follow-up), also INSERT an event: `title` = capsule kind,
   `description` = redacted_summary, `ts` = source timestamp (fallback
-  created_at), `domain='real'`, `provenance='capsule'`, `tags` = capsule tags
+  created_at), `domain='real'`, `provenance='interactive_memory'` (migration 014 CHECK constraint disallows new values without a table rebuild; capsule origin stays authoritative via the memory_capsules.event_id link), `tags` = capsule tags
   JSON; store the new event id in `memory_capsules.event_id`.
 - `internal/server/memory.go` remember handler: after a successful store
   write, if the retrieval engine is present and ready, call
@@ -42,7 +42,7 @@ system with a `user_state` input, but scored 0/15 because of two wiring gaps:
   the `/graph/delta` handler — so capsules are retrievable immediately.
   Engine nil/embedder off ⇒ skip silently (events exist, dark until embedder).
 - `BackfillCapsuleEvents()` store method: idempotent
-  (`WHERE event_id IS NULL AND privacy_tier='normal'`), called once at daemon
+  (`WHERE event_id IS NULL AND privacy_tier='normal' AND status='active'` — merged-away capsules are not resurrected), called once at daemon
   startup (main.go) + embed-index the produced docs.
 - Opt-out env `PULSE_CAPSULE_EVENTS=off` (default ON — this is the product
   promise: remembered memory must be reachable by the engine; Nik explicitly
