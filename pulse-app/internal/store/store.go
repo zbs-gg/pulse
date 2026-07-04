@@ -39,7 +39,7 @@ func (s *Store) Close() error {
 }
 
 // IncrementAccessCounts bumps access_count and stamps last_accessed_at for the
-// given event ids (migration 028, Phase A instrumentation). It is keyed by id
+// given event ids (migration 029, Phase A instrumentation). It is keyed by id
 // ONLY — no content, transcript, or text is read or written — so it is not the
 // raw-content write path and leaves the daemon-never-sees-raw invariant intact.
 // A nil/empty slice is a no-op. Callers treat this as best-effort: a failed
