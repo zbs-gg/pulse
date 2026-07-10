@@ -92,7 +92,7 @@ boundary.
 ```mermaid
 flowchart LR
     subgraph Sources["Protected source systems"]
-        Calls["Calls and transcripts"]
+        Calls["Krisp: calls, transcripts, notes"]
         Chat["Team chat"]
         Docs["Original documents"]
     end
@@ -178,6 +178,46 @@ Pulse memory does not silently claim that the original source was deleted.
 Deleting an original source must mark derived Pulse items stale or remove them
 according to the pilot retention policy.
 
+For the first pilot, Krisp is the source system for calls. Krisp keeps the
+recording and full transcript; Pulse keeps the approved structured extraction
+and a Krisp meeting/document reference.
+
+### 4.4 Krisp connector boundary
+
+The first call connector uses Krisp's hosted MCP server:
+
+- endpoint: `https://mcp.krisp.ai/mcp`;
+- transport: Streamable HTTP only;
+- authentication: OAuth 2.0 Authorization Code with PKCE;
+- access: each connection is limited by the authenticated Krisp workspace
+  user's permissions;
+- supported read path: `search_meetings` returns meeting metadata, summaries,
+  key points, and action items; `get_document` can fetch the full meeting or
+  transcript by its 32-character document ID;
+- related tools may expose action items, activities, and upcoming meetings,
+  but they do not enter Pulse until a workflow explicitly needs them.
+
+The nucleus uses a user-selected pull through Krisp MCP. It must not sweep the
+workspace or import every historical meeting.
+
+After identity, scope, provenance, and deletion gates pass, Krisp's Webhook API
+may provide automatic events when a transcript, notes, or outline is created.
+The webhook receiver must:
+
+- authenticate the request using a secret header stored outside Git;
+- treat Krisp's unique event ID as an idempotency key;
+- accept only configured event types;
+- retain meeting ID, document ID, link, and event ID as source provenance;
+- avoid persisting the full webhook payload in Pulse or application logs;
+- publish only a structured candidate extraction after scope resolution;
+- require review when the meeting cannot be mapped safely to a project/team
+  scope;
+- keep Krisp as the source of record for the recording and transcript.
+
+Krisp-generated summaries and action items are source material, not trusted
+Pulse facts by default. They pass through the same extraction, confidence,
+scope, and correction rules as any other source.
+
 ## 5. Interfaces
 
 ### Required in the first vertical slice
@@ -186,8 +226,9 @@ according to the pilot retention policy.
    machines.
 2. **Onboarding command or guided flow** that establishes identity, role,
    project membership, allowed scopes, and the first approved workflow.
-3. **Selected meeting ingest** from a user-provided transcript or source
-   reference. No background bulk capture.
+3. **Selected Krisp meeting ingest** through Krisp MCP: search for a consented
+   meeting, fetch it by document ID, extract structured candidates in the host,
+   and retain Krisp provenance. No background bulk capture.
 4. **Viewer/admin surface** for memory inspection, source evidence, correction,
    scope change, access revocation, and deletion.
 5. **Repository workflow** for specs, evals, accepted procedures, and human
@@ -196,7 +237,7 @@ according to the pilot retention policy.
 ### Deferred until the nucleus works
 
 - automatic Telegram history capture;
-- automatic call recording or transcription;
+- automatic Krisp webhook ingest;
 - email, CRM, calendar, and cloud-drive connectors;
 - mobile consumer application;
 - self-service multi-tenant signup;
@@ -205,6 +246,9 @@ according to the pilot retention policy.
 
 Telegram can become the first conversational team interface after the MCP
 nucleus proves identity, scope, provenance, and deletion.
+
+Call recording and transcription are not Pulse implementation work in this
+pilot; Krisp already owns that job.
 
 ## 6. Team and access model
 
@@ -285,11 +329,13 @@ The first proof happens before automatic connectors or bulk import:
 1. Create the private pilot repository with no real memory content.
 2. Deploy one private central team environment controlled by the pilot owner.
 3. Onboard two humans and at least one separately identified agent per human.
-4. Add one selected, consented meeting through the explicit ingest path.
+4. Connect one pilot member to the official Krisp MCP endpoint through OAuth,
+   find one selected consented meeting with `search_meetings`, and fetch its
+   source document with `get_document`.
 5. Ask from two separate agent sessions: "What did we decide, what remains
    open, and what should I do next?"
 6. Return the same shared decisions, role-appropriate next actions, and visible
-   source references.
+   Krisp meeting/document references.
 7. Prove that a personal capsule is invisible to the other member.
 8. Correct one memory and prove that the correction supersedes the old claim.
 9. Delete one shared memory and prove it disappears from recall, context query,
@@ -314,6 +360,7 @@ The first proof happens before automatic connectors or bulk import:
   or dual-write.
 - No raw transcript, secret, credential, or local path enters the Pulse store
   or pilot Git repository.
+- Replaying the same Krisp webhook event does not create duplicate memories.
 
 ### Workflow outcomes
 
@@ -338,6 +385,12 @@ Quality and trust outrank token savings. A cheaper wrong result is a failure.
   missing permission without exposing the protected object.
 - **Connector/extraction failure:** quarantine the attempted ingest; publish no
   partial memory as trusted fact.
+- **Krisp authorization expiry:** stop Krisp reads, retain existing Pulse
+  provenance, and ask the affected user to re-authenticate. Never borrow
+  another member's OAuth token.
+- **Duplicate or reordered Krisp webhook:** deduplicate by event ID and source
+  document ID; do not create a second memory or silently regress a newer
+  reviewed extraction.
 - **Conflicting claims:** preserve both sources, mark the conflict, and require
   a reviewer or a defined supersession rule. Never silently choose the latest
   text.
@@ -359,6 +412,12 @@ Quality and trust outrank token savings. A cheaper wrong result is a failure.
   owner. Provider choice is deployment configuration, not product behavior.
 - Network access requires authenticated encrypted transport.
 - Secrets live in the deployment secret store, never in Git or memory.
+- Krisp access and refresh tokens are stored per authenticated user in the
+  encrypted credential store. They are never shared through the team repo or
+  copied into Pulse capsules.
+- Krisp is a cloud source system. Enabling the connector is explicit consent to
+  read selected meeting data from Krisp; the pilot must not describe this path
+  as no-egress or fully local.
 - Real sensitive data is not ingested until identity, scope isolation, audit,
   source inspection, correction, deletion, and revocation pass synthetic tests.
 - There is no implicit dual-write between local and remote Pulse stores.
@@ -372,8 +431,8 @@ Quality and trust outrank token savings. A cheaper wrong result is a failure.
   behavior.
 - **Pilot workspace owns:** team-specific roles, workflows, connectors, evals,
   artifacts, and operating rules.
-- **Source systems own:** raw recordings, original documents, and their native
-  retention/access rules.
+- **Source systems own:** Krisp recordings/transcripts, original documents, and
+  their native retention/access rules.
 - **Human reviewers own:** promotion of personal/project learning to team rules
   and admission of sanitized primitives into the Core backlog.
 
@@ -387,6 +446,7 @@ use the working Pulse name without deciding how the packaged offer is branded.
 - Automatic capture of every conversation.
 - Bulk import of historical chats by default.
 - Replacing Git, chat, document storage, CRM, or call-recording systems.
+- Building a new call recorder or transcription engine; Krisp supplies both.
 - Fully autonomous skill promotion or Core modification.
 - Fixing a business process that has never produced a valid result manually.
 - Multi-tenant billing, public signup, or enterprise compliance certification.
@@ -399,11 +459,13 @@ written review, implementation should be decomposed in this order:
 
 1. **Team identity, scopes, audit, and explicit remote mode.**
 2. **Two-member MCP nucleus with inspect/correct/delete proof.**
-3. **Selected meeting ingest with protected raw-source boundary.**
+3. **Selected Krisp meeting ingest through MCP with OAuth, provenance, and a
+   protected raw-source boundary.**
 4. **Meeting-to-offer workflow and eval ledger.**
 5. **Candidate procedure review and pilot-to-Core admission workflow.**
-6. **Telegram interface.**
-7. **Additional connectors and team expansion.**
+6. **Krisp webhook ingest with idempotency and review quarantine.**
+7. **Telegram interface.**
+8. **Additional connectors and team expansion.**
 
 Each increment receives its own approved spec, failing evals, implementation
 plan, verification, and rollback path.
@@ -420,3 +482,13 @@ The reviewer should reject this design if it:
 - lets a client-specific workaround enter Core without the admission gate;
 - starts with automatic channel capture before the two-member nucleus works;
 - optimizes cost while degrading accepted output quality.
+
+## 16. Verified Krisp integration facts
+
+Verified against Krisp's official documentation on 2026-07-10:
+
+- [Krisp MCP](https://help.krisp.ai/hc/en-us/articles/25396920405148-Krisp-MCP)
+- [Krisp MCP supported tools](https://help.krisp.ai/hc/en-us/articles/25416265429660-Krisp-MCP-Supported-tools)
+- [Krisp MCP client integration](https://help.krisp.ai/hc/en-us/articles/25416400191004-Krisp-MCP-Integrating-your-own-MCP-client)
+- [Krisp Webhook API](https://help.krisp.ai/hc/en-us/articles/24514911804316-Webhook-API)
+- [Krisp recording behavior](https://help.krisp.ai/hc/en-us/articles/11734566901788-Recording-your-meetings-with-Krisp)
