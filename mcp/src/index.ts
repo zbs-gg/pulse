@@ -21,6 +21,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { StandaloneStore } from './standalone.js';
+import {
+  assertTeamRemoteStaticConfig,
+  resolveRuntimeMode,
+  type RuntimeMode,
+} from './runtime-mode.js';
 
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
@@ -29,9 +34,23 @@ const PULSE_DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 
 const VERSION = '0.4.1';
 const args = process.argv.slice(2);
+const HTTP_REQUESTED = args.includes('--http');
+const RUNTIME_MODE = resolveRuntimeMode(process.env.PULSE_RUNTIME_MODE, HTTP_REQUESTED);
 
 type EngineMode = 'auto' | 'daemon' | 'standalone';
 const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
+if (RUNTIME_MODE === 'team-remote') {
+  assertTeamRemoteStaticConfig({
+    args,
+    authIssuer: trimTrailingSlash(process.env.PULSE_REMOTE_AUTH_ISSUER ?? ''),
+    daemonBaseURL: PULSE_BASE_URL,
+    engineMode: ENGINE_MODE,
+    env: process.env,
+    host: argValue('--host') ?? process.env.PULSE_MCP_HOST ?? '127.0.0.1',
+    nodeVersion: process.versions.node,
+    publicBaseURL: trimTrailingSlash(process.env.PULSE_REMOTE_PUBLIC_BASE_URL ?? ''),
+  });
+}
 // In auto mode the first daemon connection failure locks the process into the
 // standalone lite store; a daemon that answered once is never silently
 // downgraded, so one process never splits writes across two stores.
@@ -39,7 +58,7 @@ let resolvedEngine: 'daemon' | 'standalone' | null =
   ENGINE_MODE === 'auto' ? null : ENGINE_MODE;
 // Gate serializing tool calls while the engine is still unresolved.
 let firstCallGate: Promise<void> | null = null;
-const standaloneStore = new StandaloneStore(PULSE_DATA_DIR);
+let standaloneStore: StandaloneStore | null = null;
 
 function parseEngineMode(value: string | undefined): EngineMode {
   if (value === undefined || value === '' || value === 'auto') {
@@ -248,14 +267,19 @@ function redactStatusForMcp(value: unknown): unknown {
   return status;
 }
 
-function createPulseMcpServer(): Server {
+function createPulseMcpServer(runtimeMode: RuntimeMode = RUNTIME_MODE): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    if (runtimeMode === 'team-remote') {
+      const { TEAM_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
+      return { tools: TEAM_TOOL_DESCRIPTORS };
+    }
+    return {
+      tools: [
     {
       name: 'pulse_remember',
       description:
@@ -754,13 +778,21 @@ function createPulseMcpServer(): Server {
         additionalProperties: false,
       },
     },
-    ],
-  }));
+      ],
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
+      if (runtimeMode === 'team-remote') {
+        const { isTeamToolName, teamNotReadyResult } = await loadTeamRemoteContracts();
+        if (!isTeamToolName(name)) {
+          throw new Error(`Unknown team tool: ${name}`);
+        }
+        return teamNotReadyResult(name);
+      }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);
       }
@@ -820,9 +852,23 @@ function createPulseMcpServer(): Server {
   return server;
 }
 
+async function loadTeamRemoteContracts() {
+  // Keep the entire team-only branch lazy. U3 can add JWT/JWKS dependencies
+  // behind the same runtime boundary without raising Local Preview's Node floor.
+  return import('./team-contracts.js');
+}
+
 function standaloneResult(name: string, args: unknown) {
-  const out = standaloneStore.call(name, args);
+  const out = resolveStandaloneStore().call(name, args);
   return jsonText(name === 'pulse_status' ? redactStatusForMcp(out) : out);
+}
+
+function resolveStandaloneStore(): StandaloneStore {
+  if (RUNTIME_MODE === 'team-remote') {
+    throw new Error('team-remote cannot construct or use standalone storage');
+  }
+  standaloneStore ??= new StandaloneStore(PULSE_DATA_DIR);
+  return standaloneStore;
 }
 
 async function daemonToolCall(name: string, args: Record<string, unknown> | undefined) {
@@ -876,7 +922,7 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
 }
 
 async function main(): Promise<void> {
-  if (args.includes('--http')) {
+  if (RUNTIME_MODE !== 'local-stdio') {
     await startHttpMode();
     return;
   }
@@ -909,8 +955,14 @@ async function startHttpMode(): Promise<void> {
   // Persist OAuth tokens to disk so an mcp restart/redeploy does NOT log out
   // connected clients (e.g. Claude.ai). Load non-expired tokens on start.
   const oauthTokensFile = join(PULSE_DATA_DIR, 'oauth-tokens.json');
-  loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
-  const persistOAuth = () => persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+  if (RUNTIME_MODE === 'development-http') {
+    loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+  }
+  const persistOAuth = () => {
+    if (RUNTIME_MODE === 'development-http') {
+      persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+    }
+  };
   const allowUnauthenticated =
     process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1' ||
     args.includes('--allow-unauthenticated');
@@ -990,7 +1042,11 @@ async function startHttpMode(): Promise<void> {
     let parsedBody: unknown;
     if (oauthMode && req.method === 'POST') {
       parsedBody = await readRequestJSON(req);
-      if (callsProtectedTool(parsedBody) && !isAuthorized(req, bearer, devAccessTokens)) {
+      if (
+        RUNTIME_MODE !== 'team-remote' &&
+        callsProtectedTool(parsedBody) &&
+        !isAuthorized(req, bearer, devAccessTokens)
+      ) {
         writeOAuthChallenge(res, publicBaseURL);
         return;
       }
@@ -1006,7 +1062,7 @@ async function startHttpMode(): Promise<void> {
     }
     try {
       writeCors(res);
-      const requestServer = createPulseMcpServer();
+      const requestServer = createPulseMcpServer(RUNTIME_MODE);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
