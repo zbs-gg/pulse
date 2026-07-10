@@ -30,7 +30,8 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "jose": "6.2.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

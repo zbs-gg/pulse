@@ -51,8 +51,8 @@ export function assertTeamRemoteStaticConfig(config: TeamRemoteStaticConfig): vo
   if (engineMode !== 'daemon') {
     throw new Error('team-remote requires PULSE_MCP_MODE=daemon; auto and standalone are forbidden');
   }
-  requireHTTPS('PULSE_REMOTE_PUBLIC_BASE_URL', publicBaseURL);
-  requireHTTPS('PULSE_REMOTE_AUTH_ISSUER', authIssuer);
+  requireHTTPS('PULSE_REMOTE_PUBLIC_BASE_URL', publicBaseURL, true);
+  requireHTTPS('PULSE_REMOTE_AUTH_ISSUER', authIssuer, false);
   requireLoopbackURL('PULSE_BASE_URL', daemonBaseURL);
 
   if (!isNumericLoopbackHost(host)) {
@@ -95,14 +95,18 @@ function enabled(value: string | undefined): boolean {
   return normalized !== '' && normalized !== '0' && normalized !== 'false';
 }
 
-function requireHTTPS(name: string, value: string): void {
+function requireHTTPS(name: string, value: string, rootOnly: boolean): void {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
     throw new Error(`team-remote requires ${name} to be an HTTPS URL`);
   }
-  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
+  if (
+    value === '' || value !== value.trim() || url.protocol !== 'https:' ||
+    url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '' ||
+    (rootOnly && value !== url.origin)
+  ) {
     throw new Error(`team-remote requires ${name} to be an HTTPS URL without credentials`);
   }
 }
@@ -114,11 +118,12 @@ function requireLoopbackURL(name: string, value: string): void {
   } catch {
     throw new Error(`team-remote requires ${name} to be a numeric loopback HTTP(S) URL`);
   }
-  if (!['http:', 'https:'].includes(url.protocol) || !isNumericLoopbackHost(url.hostname)) {
+  if (
+    !['http:', 'https:'].includes(url.protocol) || !isNumericLoopbackHost(url.hostname) ||
+    url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '' ||
+    value !== url.origin
+  ) {
     throw new Error(`team-remote requires ${name} to be a numeric loopback HTTP(S) URL`);
-  }
-  if (url.username !== '' || url.password !== '') {
-    throw new Error(`team-remote refuses credentials embedded in ${name}`);
   }
 }
 

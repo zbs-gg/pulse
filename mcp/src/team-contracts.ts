@@ -51,6 +51,18 @@ const TEAM_TOOL_CONTRACTS = [
   },
 ] as const;
 
+export const TEAM_CAPABILITIES = [
+  'pulse:connect',
+  'pulse:status',
+  'pulse:read',
+  'pulse:write',
+  'pulse:audit',
+  'pulse:delete',
+] as const;
+
+export type TeamCapability = (typeof TEAM_CAPABILITIES)[number];
+export const TEAM_BASELINE_CAPABILITY: TeamCapability = 'pulse:connect';
+
 export type TeamToolName = (typeof TEAM_TOOL_CONTRACTS)[number]['name'];
 
 const TEAM_TOOL_NAME_SET = new Set<string>(TEAM_TOOL_CONTRACTS.map(({ name }) => name));
@@ -67,6 +79,41 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
 
 export function isTeamToolName(name: string): name is TeamToolName {
   return TEAM_TOOL_NAME_SET.has(name);
+}
+
+const TEAM_TOOL_CAPABILITY: Record<TeamToolName, TeamCapability> = {
+  pulse_team_status: 'pulse:status',
+  pulse_team_remember: 'pulse:write',
+  pulse_team_graph_delta: 'pulse:write',
+  pulse_team_recall: 'pulse:read',
+  pulse_team_context_query: 'pulse:read',
+  pulse_team_resume: 'pulse:read',
+  pulse_team_inspect: 'pulse:read',
+  pulse_team_audit: 'pulse:audit',
+  pulse_team_delete: 'pulse:delete',
+  pulse_team_delete_status: 'pulse:read',
+};
+
+export function requiredTeamCapabilities(message: unknown): TeamCapability[] {
+  if (Array.isArray(message)) {
+    return [...new Set(message.flatMap(requiredTeamCapabilities))].sort();
+  }
+  const required = new Set<TeamCapability>([TEAM_BASELINE_CAPABILITY]);
+  if (!message || typeof message !== 'object') {
+    return [...required];
+  }
+  const record = message as Record<string, unknown>;
+  if (record.method === 'tools/call') {
+    const params = record.params;
+    const name = params && typeof params === 'object'
+      ? (params as Record<string, unknown>).name
+      : undefined;
+    if (typeof name !== 'string' || !isTeamToolName(name)) {
+      throw new Error('Unknown team tool');
+    }
+    required.add(TEAM_TOOL_CAPABILITY[name]);
+  }
+  return [...required].sort();
 }
 
 export function teamNotReadyResult(name: TeamToolName) {
@@ -86,4 +133,3 @@ export function teamNotReadyResult(name: TeamToolName) {
     ],
   };
 }
-

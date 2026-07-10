@@ -8,9 +8,10 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -26,6 +27,7 @@ import {
   resolveRuntimeMode,
   type RuntimeMode,
 } from './runtime-mode.js';
+import type { GatewaySecurityEventInput, TeamPrincipalContext } from './principal-context.js';
 
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
@@ -42,7 +44,7 @@ const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
 if (RUNTIME_MODE === 'team-remote') {
   assertTeamRemoteStaticConfig({
     args,
-    authIssuer: trimTrailingSlash(process.env.PULSE_REMOTE_AUTH_ISSUER ?? ''),
+    authIssuer: process.env.PULSE_REMOTE_AUTH_ISSUER ?? '',
     daemonBaseURL: PULSE_BASE_URL,
     engineMode: ENGINE_MODE,
     env: process.env,
@@ -267,7 +269,10 @@ function redactStatusForMcp(value: unknown): unknown {
   return status;
 }
 
-function createPulseMcpServer(runtimeMode: RuntimeMode = RUNTIME_MODE): Server {
+export function createPulseMcpServer(
+  runtimeMode: RuntimeMode = RUNTIME_MODE,
+  teamContext?: Readonly<TeamPrincipalContext>,
+): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
     { capabilities: { tools: {} } },
@@ -275,6 +280,7 @@ function createPulseMcpServer(runtimeMode: RuntimeMode = RUNTIME_MODE): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     if (runtimeMode === 'team-remote') {
+      if (!teamContext) throw new Error('team request context is unavailable');
       const { TEAM_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
       return { tools: TEAM_TOOL_DESCRIPTORS };
     }
@@ -787,9 +793,10 @@ function createPulseMcpServer(runtimeMode: RuntimeMode = RUNTIME_MODE): Server {
 
     try {
       if (runtimeMode === 'team-remote') {
+        if (!teamContext) throw new Error('team request context is unavailable');
         const { isTeamToolName, teamNotReadyResult } = await loadTeamRemoteContracts();
         if (!isTeamToolName(name)) {
-          throw new Error(`Unknown team tool: ${name}`);
+          throw new Error('Unknown team tool');
         }
         return teamNotReadyResult(name);
       }
@@ -946,7 +953,9 @@ async function startHttpMode(): Promise<void> {
   const port = Number(argValue('--port') ?? process.env.PULSE_MCP_PORT ?? 8787);
   const bearer = process.env.PULSE_REMOTE_BEARER ?? '';
   const publicBaseURL = trimTrailingSlash(process.env.PULSE_REMOTE_PUBLIC_BASE_URL ?? '');
-  const authIssuer = trimTrailingSlash(process.env.PULSE_REMOTE_AUTH_ISSUER ?? '');
+  // OAuth issuer identifiers are exact identities. A trailing slash may be
+  // canonical and must survive metadata, JWT, and principal mapping unchanged.
+  const authIssuer = process.env.PULSE_REMOTE_AUTH_ISSUER ?? '';
   const oauthMode = publicBaseURL !== '' && authIssuer !== '';
   const oauthDevMode = oauthMode && process.env.PULSE_REMOTE_OAUTH_DEV === '1';
   const devAuthCodes = new Map<string, DevOAuthCode>();
@@ -967,6 +976,13 @@ async function startHttpMode(): Promise<void> {
     process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1' ||
     args.includes('--allow-unauthenticated');
   const publicBind = !isLoopbackHost(host);
+  const teamSecurity = RUNTIME_MODE === 'team-remote'
+    ? await loadTeamRemoteSecurity(publicBaseURL, authIssuer)
+    : undefined;
+  const teamAllowedOrigins = teamSecurity
+    ? parseTeamAllowedOrigins(publicBaseURL, process.env.PULSE_REMOTE_ALLOWED_ORIGINS)
+    : new Set<string>();
+  let teamRequestsInFlight = 0;
 
   if (oauthMode && (!isHTTPSURL(publicBaseURL) || !isHTTPSURL(authIssuer))) {
     throw new Error('OAuth HTTP MCP mode requires HTTPS public base and authorization issuer URLs');
@@ -980,22 +996,61 @@ async function startHttpMode(): Promise<void> {
     );
   }
 
-  const httpServer = createServer(async (req, res) => {
-    const path = requestPath(req, host);
-    if (path === '/health') {
-      writeCors(res);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
-        transport: 'streamable-http',
-        path: '/mcp',
-        auth: oauthMode ? 'oauth' : bearer ? 'bearer' : 'none',
-      }));
+  const httpServer = createServer({
+    maxHeaderSize: 16 * 1024,
+    headersTimeout: 10_000,
+    requestTimeout: 15_000,
+    keepAliveTimeout: 5_000,
+  }, async (req, res) => {
+    try {
+    const requestId = randomUUID();
+    const requestURL = parseRequestTarget(req.url);
+    const path = requestURL.pathname;
+    const requestOrigin = singleHeader(req.headers.origin);
+    if (teamSecurity && hasInvalidHostHeader(req)) {
+      res.setHeader('Connection', 'close');
+      writeJSON(res, { error: 'invalid_request' }, 400);
       return;
     }
-    if (oauthMode && isProtectedResourceMetadataPath(path)) {
-      writeCors(res);
-      writeJSON(res, protectedResourceMetadata(publicBaseURL, authIssuer));
+    if (teamSecurity && hasDuplicateHeader(req, 'origin')) {
+      recordTeamSecurityEvent(teamSecurity, {
+        eventType: 'authentication_denied', reasonCode: 'invalid_credential',
+        methodClass: 'other', requestId,
+      });
+      writeJSON(res, { error: 'origin_not_allowed' }, 403);
+      return;
+    }
+    if (teamSecurity && requestOrigin !== '' && !teamAllowedOrigins.has(requestOrigin)) {
+      recordTeamSecurityEvent(teamSecurity, {
+        eventType: 'authentication_denied', reasonCode: 'invalid_credential',
+        methodClass: 'other', requestId,
+      });
+      writeJSON(res, { error: 'origin_not_allowed' }, 403);
+      return;
+    }
+    if (req.method === 'GET' && path === '/health' && (!teamSecurity || requestURL.search === '')) {
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+      } else {
+        writeCors(res);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(teamSecurity ? { ok: true } : {
+          ok: true,
+          transport: 'streamable-http',
+          path: '/mcp',
+          auth: oauthMode ? 'oauth' : bearer ? 'bearer' : 'none',
+        }));
+      return;
+    }
+    if (req.method === 'GET' && oauthMode && isProtectedResourceMetadataPath(path) && (!teamSecurity || requestURL.search === '')) {
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, teamSecurity.metadata);
+      } else {
+        writeCors(res);
+        writeJSON(res, protectedResourceMetadata(publicBaseURL, authIssuer));
+      }
       return;
     }
     if (oauthDevMode && isAuthorizationServerMetadataPath(path)) {
@@ -1028,15 +1083,131 @@ async function startHttpMode(): Promise<void> {
       persistOAuth();
       return;
     }
-    if (!path.startsWith('/mcp')) {
+    if (path !== '/mcp' || (teamSecurity && requestURL.search !== '')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
       return;
     }
     if (req.method === 'OPTIONS') {
-      writeCors(res);
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+      } else {
+        writeCors(res);
+      }
       res.writeHead(204);
       res.end();
+      return;
+    }
+    if (teamSecurity) {
+      if (req.method !== 'POST' && req.method !== 'GET' && req.method !== 'DELETE') {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, { error: 'method_not_allowed' }, 405);
+        return;
+      }
+      if (teamRequestsInFlight >= 64) {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, { error: 'server_busy' }, 503);
+        return;
+      }
+      teamRequestsInFlight++;
+      let methodClass: 'read' | 'write' | 'delete' | 'other' = 'other';
+      try {
+        if (hasDuplicateHeader(req, 'authorization')) {
+          throw new teamSecurity.OAuthError('invalid_token');
+        }
+        // Baseline validation happens before reading or parsing the request body.
+        const identity = await teamSecurity.requestSecurity.authenticateBeforeBody(
+          req.headers.authorization,
+        );
+        if (req.method !== 'POST' && hasUnexpectedRequestBody(req)) {
+          res.setHeader('Connection', 'close');
+          writeTeamCors(res, requestOrigin);
+          writeJSON(res, { error: 'request_body_not_allowed' }, 400);
+          return;
+        }
+        const contentEncoding = singleHeader(req.headers['content-encoding']);
+        if (contentEncoding !== '' && contentEncoding.toLowerCase() !== 'identity') {
+          writeTeamCors(res, requestOrigin);
+          writeJSON(res, { error: 'content_encoding_not_supported' }, 415);
+          return;
+        }
+        let parsedBody: unknown;
+        let teamContext: Readonly<TeamPrincipalContext>;
+        if (req.method === 'POST') {
+          if (singleHeader(req.headers['content-type']).split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+            writeTeamCors(res, requestOrigin);
+            writeJSON(res, { error: 'content_type_not_supported' }, 415);
+            return;
+          }
+          parsedBody = await readRequestJSON(req, 1024 * 1024);
+          const required = teamSecurity.requiredCapabilities(parsedBody);
+          methodClass = methodClassForCapabilities(required);
+          teamContext = await teamSecurity.requestSecurity.resolveAfterBody({
+            authorization: req.headers.authorization,
+            baseline: identity,
+            body: parsedBody,
+            requestId,
+          });
+        } else {
+          teamContext = await teamSecurity.requestSecurity.resolveBaseline(identity, requestId);
+        }
+        writeTeamCors(res, requestOrigin);
+        await dispatchMcpRequest(req, res, parsedBody, teamContext);
+      } catch (error) {
+        if (terminateStartedResponse(res)) return;
+        writeTeamCors(res, requestOrigin);
+        if (teamSecurity.isOAuthError(error)) {
+          if (error.code === 'insufficient_scope') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authorization_denied', reasonCode: 'insufficient_scope', methodClass, requestId,
+            });
+          } else {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authentication_denied',
+              reasonCode: error.reasonCode === 'insufficient_scope' ? 'invalid_credential' : error.reasonCode,
+              methodClass,
+              requestId,
+            });
+          }
+          writeTeamOAuthChallenge(res, publicBaseURL, error);
+        } else if (teamSecurity.isPrincipalError(error)) {
+          if (error.code === 'principal_revoked') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'principal_revoked' }, 403);
+          } else if (error.code === 'principal_store_unavailable') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+          } else {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'principal_assertion_denied',
+              reasonCode: error.code === 'principal_replayed'
+                ? 'assertion_replayed'
+                : error.code === 'principal_binding_mismatch'
+                  ? 'assertion_binding_mismatch'
+                  : 'assertion_invalid',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+          }
+        } else if (error instanceof RequestBodyTooLargeError) {
+          writeJSON(res, { error: 'request_too_large' }, 413);
+        } else if (error instanceof SyntaxError || (error instanceof Error && /Unknown team tool/.test(error.message))) {
+          writeJSON(res, { error: 'invalid_request' }, 400);
+        } else {
+          recordTeamSecurityEvent(teamSecurity, {
+            eventType: 'audit_degraded', reasonCode: 'internal_failure', methodClass, requestId,
+          });
+          writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+        }
+      } finally {
+        teamRequestsInFlight--;
+      }
       return;
     }
     let parsedBody: unknown;
@@ -1062,15 +1233,7 @@ async function startHttpMode(): Promise<void> {
     }
     try {
       writeCors(res);
-      const requestServer = createPulseMcpServer(RUNTIME_MODE);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      await requestServer.connect(transport);
-      await transport.handleRequest(req, res, parsedBody);
-      res.on('close', () => {
-        void requestServer.close();
-      });
+      await dispatchMcpRequest(req, res, parsedBody);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
@@ -1082,7 +1245,15 @@ async function startHttpMode(): Promise<void> {
         id: null,
       }));
     }
+    } catch (error) {
+      terminateHttpRequest(res, error instanceof InvalidRequestTargetError ? 400 : 500);
+    }
   });
+  if (teamSecurity) {
+    httpServer.maxConnections = 128;
+    httpServer.maxHeadersCount = 64;
+    httpServer.maxRequestsPerSocket = 100;
+  }
 
   await new Promise<void>((resolve, reject) => {
     httpServer.once('error', reject);
@@ -1096,12 +1267,166 @@ async function startHttpMode(): Promise<void> {
     `[pulse-mcp v${VERSION}] Streamable HTTP listening on http://${host}:${actualPort}/mcp; backing Pulse: ${PULSE_BASE_URL}`,
   );
 
+  let shuttingDown = false;
   const shutdown = async () => {
-    httpServer.close(() => process.exit(0));
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    if (teamSecurity) {
+      await drainSecurityReporterForShutdown(teamSecurity.securityReporter, 2_000);
+    }
+    process.exit(0);
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 }
+
+async function dispatchMcpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  parsedBody: unknown,
+  teamContext?: Readonly<TeamPrincipalContext>,
+): Promise<void> {
+  const requestServer = createPulseMcpServer(RUNTIME_MODE, teamContext);
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    void Promise.allSettled([transport.close(), requestServer.close()]);
+  };
+  try {
+    await requestServer.connect(transport);
+    // Register before handleRequest: it may synchronously close the response.
+    res.once('close', cleanup);
+    await transport.handleRequest(req, res, parsedBody);
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function recordTeamSecurityEvent(
+  security: Awaited<ReturnType<typeof loadTeamRemoteSecurity>>,
+  event: GatewaySecurityEventInput,
+): void {
+  security.securityReporter.report(event);
+}
+
+function methodClassForCapabilities(capabilities: readonly string[]): 'read' | 'write' | 'delete' | 'other' {
+  if (capabilities.includes('pulse:delete')) return 'delete';
+  if (capabilities.includes('pulse:write')) return 'write';
+  if (capabilities.some((value) => value === 'pulse:read' || value === 'pulse:audit' || value === 'pulse:status')) return 'read';
+  return 'other';
+}
+
+async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string) {
+  const [{ OAuthResourceError, OAuthResourceVerifier, protectedResourceMetadata: teamMetadata }, principal, contracts] = await Promise.all([
+    import('./oauth-resource.js'),
+    import('./principal-context.js'),
+    import('./team-contracts.js'),
+  ]);
+  const required = (name: string): string => {
+    const value = process.env[name] ?? '';
+    if (value === '' || value !== value.trim()) {
+      throw new Error(`team-remote requires exact non-empty ${name}`);
+    }
+    return value;
+  };
+  const resource = `${publicBaseURL}/mcp`;
+  const verifier = new OAuthResourceVerifier({
+    issuer: authIssuer,
+    resource,
+    maxTokenLifetimeSeconds: parseBoundedEnvInt('PULSE_REMOTE_MAX_TOKEN_LIFETIME_SECONDS', 900, 1, 900),
+  });
+  const signer = principal.loadPrincipalSigner({
+    privateKeyFile: required('PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE'),
+    keyId: required('PULSE_TEAM_PRINCIPAL_SIGNING_KID'),
+    verifyKeyringFile: required('PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE'),
+    storeId: required('PULSE_TEAM_EXPECTED_STORE_ID'),
+    teamId: required('PULSE_TEAM_EXPECTED_TEAM_ID'),
+  });
+  const principalClient = new principal.TeamPrincipalClient({
+      daemonBaseURL: PULSE_BASE_URL,
+      signer,
+      apiKey: resolveApiKey,
+    });
+  const securityReporter = new principal.BoundedSecurityEventReporter(principalClient);
+  return {
+    verifier,
+    principalClient,
+    securityReporter,
+    requestSecurity: new principal.TeamRequestSecurity({ verifier, principalClient }),
+    requiredCapabilities: contracts.requiredTeamCapabilities,
+    metadata: teamMetadata(resource, authIssuer),
+    isOAuthError: (error: unknown): error is InstanceType<typeof OAuthResourceError> =>
+      error instanceof OAuthResourceError,
+    OAuthError: OAuthResourceError,
+    isPrincipalError: (error: unknown): error is InstanceType<typeof principal.PrincipalCheckError> =>
+      error instanceof principal.PrincipalCheckError,
+  };
+}
+
+function parseBoundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`team-remote ${name} is outside its allowed bound`);
+  }
+  return value;
+}
+
+function parseTeamAllowedOrigins(publicBaseURL: string, configured: string | undefined): Set<string> {
+  const values = configured?.split(',').map((value) => value.trim()).filter(Boolean) ?? [new URL(publicBaseURL).origin];
+  if (values.length < 1 || values.length > 16 || values.some((value) => value === '*' || new URL(value).origin !== value)) {
+    throw new Error('team-remote allowed origins must be exact URL origins');
+  }
+  return new Set(values);
+}
+
+function writeTeamCors(res: ServerResponse, origin: string): void {
+  if (origin !== '') {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+}
+
+function singleHeader(value: string | string[] | undefined): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function hasDuplicateHeader(req: IncomingMessage, name: string): boolean {
+  let count = 0;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index]?.toLowerCase() === name) count++;
+  }
+  return count > 1;
+}
+
+function writeTeamOAuthChallenge(
+  res: ServerResponse,
+  publicBaseURL: string,
+  error: { status: 401 | 403; code: string; requiredCapabilities: string[] },
+): void {
+  const metadataURL = `${publicBaseURL}/.well-known/oauth-protected-resource/mcp`;
+  const scope = error.requiredCapabilities.length > 0
+    ? `, scope="${error.requiredCapabilities.join(' ')}"`
+    : '';
+  res.writeHead(error.status, {
+    'Content-Type': 'application/json',
+    'WWW-Authenticate': `Bearer resource_metadata="${metadataURL}", error="${error.code}"${scope}`,
+  });
+  res.end(JSON.stringify({ error: error.code }));
+}
+
+class RequestBodyTooLargeError extends Error {}
+class InvalidRequestTargetError extends Error {}
 
 function writeCors(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', process.env.PULSE_REMOTE_CORS_ORIGIN ?? 'http://127.0.0.1');
@@ -1113,6 +1438,42 @@ function writeCors(res: ServerResponse): void {
 function writeJSON(res: ServerResponse, value: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(value));
+}
+
+function terminateHttpRequest(res: ServerResponse, status: 400 | 500): void {
+  if (terminateStartedResponse(res)) return;
+  try {
+    res.setHeader('Connection', 'close');
+    writeJSON(res, { error: status === 400 ? 'invalid_request' : 'internal_error' }, status);
+  } catch {
+    res.destroy();
+  }
+}
+
+export function terminateStartedResponse(res: ServerResponse): boolean {
+  if (!res.headersSent) return false;
+  res.destroy();
+  return true;
+}
+
+export async function drainSecurityReporterForShutdown(
+  reporter: { drain(): Promise<void> },
+  timeoutMs: number,
+  log: (message: string) => void = (message) => console.error(message),
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const completed = await Promise.race([
+      reporter.drain().then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (!completed) log('[pulse-mcp] team security audit degraded');
+    return completed;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function argValue(name: string): string | undefined {
@@ -1131,8 +1492,36 @@ function trimTrailingSlash(value: string): string {
   return value.trim().replace(/\/+$/, '');
 }
 
-function requestPath(req: IncomingMessage, fallbackHost: string): string {
-  return new URL(req.url ?? '/', `http://${req.headers.host ?? fallbackHost}`).pathname;
+function parseRequestTarget(rawTarget: string | undefined): URL {
+  const target = rawTarget ?? '/';
+  if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\') || /[\u0000-\u001f\u007f]/.test(target)) {
+    throw new InvalidRequestTargetError('invalid request target');
+  }
+  const parsed = new URL(target, 'http://127.0.0.1');
+  if (parsed.origin !== 'http://127.0.0.1' || parsed.hash !== '') {
+    throw new InvalidRequestTargetError('invalid request target');
+  }
+  return parsed;
+}
+
+function hasUnexpectedRequestBody(req: IncomingMessage): boolean {
+  if (hasDuplicateHeader(req, 'content-length') || hasDuplicateHeader(req, 'transfer-encoding')) return true;
+  if (singleHeader(req.headers['transfer-encoding']) !== '') return true;
+  const contentLength = singleHeader(req.headers['content-length']);
+  if (contentLength === '') return false;
+  return !/^\d+$/.test(contentLength) || Number(contentLength) !== 0;
+}
+
+function hasInvalidHostHeader(req: IncomingMessage): boolean {
+  if (hasDuplicateHeader(req, 'host')) return true;
+  const host = singleHeader(req.headers.host);
+  if (host === '' || host !== host.trim()) return true;
+  try {
+    const parsed = new URL(`http://${host}`);
+    return parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '';
+  } catch {
+    return true;
+  }
 }
 
 function isProtectedResourceMetadataPath(path: string): boolean {
@@ -1169,18 +1558,28 @@ function authorizationServerMetadata(publicBaseURL: string) {
   };
 }
 
-async function readRequestJSON(req: IncomingMessage): Promise<unknown> {
-  const text = await readRequestText(req);
+async function readRequestJSON(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<unknown> {
+  const text = await readRequestText(req, maxBytes);
   if (text === '') {
     return undefined;
   }
   return JSON.parse(text);
 }
 
-async function readRequestText(req: IncomingMessage): Promise<string> {
+async function readRequestText(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<string> {
+  const declared = Number(singleHeader(req.headers['content-length']));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new RequestBodyTooLargeError();
+  }
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > maxBytes) {
+      throw new RequestBodyTooLargeError();
+    }
+    chunks.push(bytes);
   }
   if (chunks.length === 0) {
     return '';
@@ -1408,8 +1807,19 @@ function writeOAuthChallenge(res: ServerResponse, publicBaseURL: string): void {
   }));
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('[pulse-mcp] fatal:', err);
-  process.exit(1);
-});
+const invokedAsEntrypoint = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
+  } catch {
+    return false;
+  }
+})();
+
+if (invokedAsEntrypoint) {
+  main().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('[pulse-mcp] fatal:', err);
+    process.exit(1);
+  });
+}

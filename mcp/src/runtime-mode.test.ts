@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -52,6 +53,15 @@ async function runHttp(options: RunOptions = {}): Promise<RunResult> {
   if (ownedDataDir) {
     spawnedTempDataDirs.push(ownedDataDir);
   }
+  const securityDir = ownedDataDir ?? mkdtempSync(join(tmpdir(), 'pulse-u1-security-'));
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const signingKeyFile = join(securityDir, 'principal.pk8.pem');
+  writeFileSync(signingKeyFile, privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 });
+  const publicJWK = createPublicKey(privateKey).export({ format: 'jwk' });
+  const keyringFile = join(securityDir, 'principal-keyring.json');
+  writeFileSync(keyringFile, JSON.stringify({
+    active: { kid: 'runtime-test-key', public_key: publicJWK.x }, previous: [],
+  }), { mode: 0o600 });
   const nodeArgs: string[] = [];
   if (options.nodeMajor !== undefined) {
     const patch = `Object.defineProperty(process.versions, 'node', { value: '${options.nodeMajor}.0.0' });`;
@@ -73,6 +83,11 @@ async function runHttp(options: RunOptions = {}): Promise<RunResult> {
       ...process.env,
       ...TEAM_BASELINE,
       PULSE_DATA_DIR: options.env?.PULSE_DATA_DIR ?? ownedDataDir,
+      PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE: signingKeyFile,
+      PULSE_TEAM_PRINCIPAL_SIGNING_KID: 'runtime-test-key',
+      PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE: keyringFile,
+      PULSE_TEAM_EXPECTED_STORE_ID: 'store_test',
+      PULSE_TEAM_EXPECTED_TEAM_ID: 'team_test',
       ...options.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -103,6 +118,8 @@ async function runHttp(options: RunOptions = {}): Promise<RunResult> {
     await stop(child);
     if (ownedDataDir) {
       rmSync(ownedDataDir, { recursive: true, force: true });
+    } else {
+      rmSync(securityDir, { recursive: true, force: true });
     }
   }
 }
@@ -166,6 +183,11 @@ test('team-remote static runtime truth table', async (t) => {
     {
       name: 'valid loopback preflight',
       expectedStart: true,
+    },
+    {
+      name: 'canonical issuer trailing slash is preserved',
+      expectedStart: true,
+      options: { env: { PULSE_REMOTE_AUTH_ISSUER: 'https://auth.example.com/tenant/' } },
     },
     {
       name: 'explicit team runtime selects HTTP without the legacy flag',
@@ -287,6 +309,30 @@ test('team-remote static runtime truth table', async (t) => {
       expectedStart: false,
       expectedError: /PULSE_REMOTE_AUTH_ISSUER.*HTTPS/,
       options: { env: { PULSE_REMOTE_AUTH_ISSUER: 'http://auth.example.com' } },
+    },
+    {
+      name: 'public base path prefix',
+      expectedStart: false,
+      expectedError: /PULSE_REMOTE_PUBLIC_BASE_URL.*HTTPS URL/,
+      options: { env: { PULSE_REMOTE_PUBLIC_BASE_URL: 'https://pulse.example.com/prefix' } },
+    },
+    {
+      name: 'public base query',
+      expectedStart: false,
+      expectedError: /PULSE_REMOTE_PUBLIC_BASE_URL.*HTTPS URL/,
+      options: { env: { PULSE_REMOTE_PUBLIC_BASE_URL: 'https://pulse.example.com?tenant=a' } },
+    },
+    {
+      name: 'daemon path prefix',
+      expectedStart: false,
+      expectedError: /PULSE_BASE_URL.*loopback/,
+      options: { env: { PULSE_BASE_URL: 'http://127.0.0.1:18789/prefix' } },
+    },
+    {
+      name: 'daemon query',
+      expectedStart: false,
+      expectedError: /PULSE_BASE_URL.*loopback/,
+      options: { env: { PULSE_BASE_URL: 'http://127.0.0.1:18789?tenant=a' } },
     },
     {
       name: 'public daemon address',

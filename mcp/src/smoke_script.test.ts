@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
-import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
 
 const ENTRYPOINT = new URL('./index.ts', import.meta.url);
+const HTTP_TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'pulse-smoke-http-'));
+after(() => rmSync(HTTP_TEST_DATA_DIR, { recursive: true, force: true }));
 const SMOKE_SCRIPT = new URL('../scripts/claude-connector-smoke.mjs', import.meta.url);
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -79,6 +84,7 @@ async function startHttpServer(pulseBaseURL: string) {
       PULSE_REMOTE_PUBLIC_BASE_URL: 'https://pulse.example.com',
       PULSE_REMOTE_AUTH_ISSUER: 'https://pulse.example.com',
       PULSE_REMOTE_OAUTH_DEV: '1',
+      PULSE_DATA_DIR: HTTP_TEST_DATA_DIR,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

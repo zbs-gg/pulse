@@ -31,3 +31,9 @@ test('package pins the supported MCP SDK v1 exactly', () => {
     '1.29.0',
   );
 });
+
+test('package pins jose v6 as a direct remote-only dependency', () => {
+  assert.equal(packageJSON.dependencies.jose, '6.2.2');
+  assert.equal(packageLock.packages[''].dependencies.jose, '6.2.2');
+  assert.equal(packageLock.packages['node_modules/jose'].version, '6.2.2');
+});
