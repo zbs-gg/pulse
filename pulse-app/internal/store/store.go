@@ -3,17 +3,22 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/nkkmnk/pulse/internal/teamauth"
 
 	_ "modernc.org/sqlite"
 )
 
 // Store wraps a *sql.DB. Use DB() to access the underlying handle.
 type Store struct {
-	db   *sql.DB
-	path string
+	db                    *sql.DB
+	path                  string
+	expectedBootstrapRoot *teamauth.BootstrapRoot
+	clock                 func() time.Time
 
 	// Claim-resolution config (default off). See claim_resolver.go.
 	claimMode      string                          // "off" | "shadow" | "on"
@@ -139,9 +144,35 @@ func (s *Store) RecentFeedSignals(limit int, markConsumed bool) ([]FeedSignal, e
 	return out, nil
 }
 
-// Open opens the SQLite database, enables WAL, runs migrations.
+// Open opens a local SQLite database. A marked team database must be opened
+// explicitly with OpenTeam so an old/local writer cannot silently proceed.
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)", path)
+	return openStore(path, false, TeamOpenOptions{})
+}
+
+type TeamOpenOptions struct {
+	ExpectedBootstrapRoot teamauth.BootstrapRoot
+	Clock                 func() time.Time
+}
+
+// OpenTeam opens a team-store candidate with the required FULL durability
+// profile. An empty database remains unmarked until BootstrapTeam succeeds.
+func OpenTeam(path string, options TeamOpenOptions) (*Store, error) {
+	if err := options.ExpectedBootstrapRoot.Validate(); err != nil {
+		return nil, fmt.Errorf("team expected bootstrap root: %w", err)
+	}
+	return openStore(path, true, options)
+}
+
+func openStore(path string, team bool, options TeamOpenOptions) (*Store, error) {
+	synchronous := "NORMAL"
+	if team {
+		synchronous = "FULL"
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(%s)", path, synchronous)
+	if team {
+		dsn += "&_txlock=immediate"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -150,9 +181,130 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	if !team {
+		marked, err := hasTeamMarker(db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("inspect team marker: %w", err)
+		}
+		if marked {
+			db.Close()
+			return nil, ErrTeamStoreRequiresTeamOpen
+		}
+	}
+	initialVersion, err := existingSchemaVersion(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("read initial schema version: %w", err)
+	}
+	initialCatalogBlank := false
+	if team && initialVersion == 0 {
+		initialCatalogBlank, err = bootstrapCatalogIsBlank(db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("inspect initial SQLite catalog: %w", err)
+		}
+	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db, path: path}, nil
+	clock := options.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	if team && initialVersion == 0 && initialCatalogBlank {
+		if _, err := db.Exec(`
+			INSERT OR IGNORE INTO team_bootstrap_candidates(singleton, created_by_version, created_at)
+			VALUES (1, 33, ?)`, clock().UTC().Format(time.RFC3339Nano)); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("record team bootstrap candidate: %w", err)
+		}
+	}
+	if !team {
+		marked, err := hasTeamMarker(db)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if marked {
+			db.Close()
+			return nil, ErrTeamStoreRequiresTeamOpen
+		}
+	}
+	store := &Store{db: db, path: path, clock: clock}
+	if team {
+		expected := options.ExpectedBootstrapRoot
+		store.expectedBootstrapRoot = &expected
+		var storedFingerprint string
+		err := db.QueryRow(`SELECT bootstrap_root_fingerprint FROM team_stores WHERE singleton = 1`).Scan(&storedFingerprint)
+		if err == nil {
+			expectedFingerprint, _ := expected.Fingerprint()
+			if storedFingerprint != expectedFingerprint {
+				db.Close()
+				return nil, ErrBootstrapRootMismatch
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			db.Close()
+			return nil, fmt.Errorf("verify team bootstrap root: %w", err)
+		}
+	}
+	return store, nil
+}
+
+func bootstrapCatalogIsBlank(db *sql.DB) (bool, error) {
+	rows, err := db.Query(`
+		SELECT type, name
+		  FROM sqlite_master
+		 WHERE type IN ('table', 'view', 'trigger', 'index')`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var objectType, name string
+		if err := rows.Scan(&objectType, &name); err != nil {
+			return false, err
+		}
+		if !strings.HasPrefix(name, "sqlite_") {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func existingSchemaVersion(db *sql.DB) (int, error) {
+	var exists int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'`).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if exists == 0 {
+		return 0, nil
+	}
+	var version int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_meta`).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func hasTeamMarker(db *sql.DB) (bool, error) {
+	var tableExists int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master
+		 WHERE type = 'table' AND name = 'team_stores'`).Scan(&tableExists); err != nil {
+		return false, err
+	}
+	if tableExists == 0 {
+		return false, nil
+	}
+	var markers int
+	if err := db.QueryRow(`SELECT count(*) FROM team_stores`).Scan(&markers); err != nil {
+		return false, err
+	}
+	return markers != 0, nil
 }

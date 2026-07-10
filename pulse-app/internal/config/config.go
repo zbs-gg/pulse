@@ -7,14 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
 type Config struct {
-	DataDir         string
-	IPCSecret       string // 32-byte hex, used as X-Pulse-Key header value
-	AnthropicAPIKey string
-	DBPath          string
-	Mode            string
+	DataDir             string
+	IPCSecret           string // 32-byte hex, used as X-Pulse-Key header value
+	AnthropicAPIKey     string
+	DBPath              string
+	Mode                string
+	TeamBootstrapRoot   *teamauth.BootstrapRoot
+	ExpectedTeamStoreID string
+	ExpectedTeamID      string
 }
 
 // Load reads config from dataDir. Generates secret.key if missing.
@@ -37,6 +42,85 @@ func Load(dataDir string) (*Config, error) {
 		Mode:            loadMode(dataDir),
 	}
 	return cfg, nil
+}
+
+// LoadTeam reads configuration for the authenticated team runtime.
+func LoadTeam(dataDir string) (*Config, error) {
+	cfg, err := Load(dataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	bootstrapRoot, err := loadTeamBootstrapRoot()
+	if err != nil {
+		return nil, err
+	}
+	expectedStoreID, expectedTeamID, err := loadExpectedTeamIdentity()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.TeamBootstrapRoot = bootstrapRoot
+	cfg.ExpectedTeamStoreID = expectedStoreID
+	cfg.ExpectedTeamID = expectedTeamID
+	return cfg, nil
+}
+
+func loadTeamBootstrapRoot() (*teamauth.BootstrapRoot, error) {
+	issuer, err := loadExactTeamValue("PULSE_TEAM_BOOTSTRAP_ISSUER")
+	if err != nil {
+		return nil, err
+	}
+	subject, err := loadExactTeamValue("PULSE_TEAM_BOOTSTRAP_SUBJECT")
+	if err != nil {
+		return nil, err
+	}
+	adminClientID, err := loadExactTeamValue("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID")
+	if err != nil {
+		return nil, err
+	}
+
+	root := teamauth.BootstrapRoot{
+		Issuer:        issuer,
+		Subject:       subject,
+		AdminClientID: adminClientID,
+	}
+	set := 0
+	for _, value := range []string{root.Issuer, root.Subject, root.AdminClientID} {
+		if value != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return nil, nil
+	}
+	if set != 3 {
+		return nil, fmt.Errorf("team bootstrap root must set issuer, subject, and admin client binding together")
+	}
+	return &root, nil
+}
+
+func loadExpectedTeamIdentity() (string, string, error) {
+	storeID, err := loadExactTeamValue("PULSE_TEAM_EXPECTED_STORE_ID")
+	if err != nil {
+		return "", "", err
+	}
+	teamID, err := loadExactTeamValue("PULSE_TEAM_EXPECTED_TEAM_ID")
+	if err != nil {
+		return "", "", err
+	}
+	if (storeID == "") != (teamID == "") {
+		return "", "", fmt.Errorf("expected team store ID and team ID must be set together")
+	}
+	return storeID, teamID, nil
+}
+
+func loadExactTeamValue(name string) (string, error) {
+	value := os.Getenv(name)
+	if strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("%s must not contain surrounding whitespace", name)
+	}
+	return value, nil
 }
 
 func loadMode(dataDir string) string {
