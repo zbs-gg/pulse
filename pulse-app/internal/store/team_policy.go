@@ -1009,14 +1009,7 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		}
 		return ErrTeamPolicyNotReady
 	}
-	graphQuery, ok := q.(teamGraphIntegrityQueryer)
-	if !ok {
-		return ErrTeamPolicyNotReady
-	}
-	if err := validateTeamGraphIngressDescriptorIntegrity(ctx, graphQuery, policy); err != nil {
-		return err
-	}
-	return validateTeamSemanticProjectionMaterializationIntegrity(ctx, graphQuery)
+	return nil
 }
 
 type teamGraphIntegrityQueryer interface {

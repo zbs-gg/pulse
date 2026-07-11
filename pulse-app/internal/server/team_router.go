@@ -75,6 +75,9 @@ func NewTeam(cfg TeamServerConfig) (*TeamServer, error) {
 	if _, err := s.CheckReadiness(ctx); err != nil {
 		return nil, fmt.Errorf("team server: readiness: %w", err)
 	}
+	if err := cfg.Store.AuditTeamSemanticIntegrity(ctx); err != nil {
+		return nil, fmt.Errorf("team server: semantic integrity audit: %w", err)
+	}
 	return s, nil
 }
 

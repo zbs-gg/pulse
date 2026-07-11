@@ -6,6 +6,33 @@ import (
 	"errors"
 )
 
+// AuditTeamSemanticIntegrity performs the exhaustive content-bearing graph,
+// intent, projection, contribution, and vector audit. It is intentionally not
+// part of per-request policy readiness: callers run it at startup, from doctor,
+// or in a background audit loop, while request readiness remains bounded to
+// identity, schema, policy epochs, SQL invariants, and the active writer lease.
+func (s *Store) AuditTeamSemanticIntegrity(ctx context.Context) error {
+	if _, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{}); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	policy, err := readTeamPolicyState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := validateTeamGraphIngressDescriptorIntegrity(ctx, tx, policy); err != nil {
+		return err
+	}
+	if err := validateTeamSemanticProjectionMaterializationIntegrity(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func validateTeamSemanticProjectionMaterializationIntegrity(
 	ctx context.Context,
 	q teamGraphIntegrityQueryer,

@@ -496,10 +496,10 @@ func TestTeamSemanticEmbeddingProjectionRefusesStaleAndCorruptState(t *testing.T
 		); !errors.Is(err, ErrConcealedNotFound) {
 			t.Fatalf("corrupt ready replay = %v, want concealed", err)
 		}
-		if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
-			context.Background(), policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
+		if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
+			context.Background(),
 		); !errors.Is(err, ErrTeamPolicyNotReady) {
-			t.Fatalf("readiness after embedding deletion = %v, want not ready", err)
+			t.Fatalf("semantic audit after embedding deletion = %v, want not ready", err)
 		}
 	})
 
@@ -526,10 +526,10 @@ func TestTeamSemanticEmbeddingProjectionRefusesStaleAndCorruptState(t *testing.T
 		); !errors.Is(err, ErrConcealedNotFound) {
 			t.Fatalf("ready replay without contribution = %v, want concealed", err)
 		}
-		if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
-			context.Background(), policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
+		if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
+			context.Background(),
 		); !errors.Is(err, ErrTeamPolicyNotReady) {
-			t.Fatalf("readiness without contribution = %v, want not ready", err)
+			t.Fatalf("semantic audit without contribution = %v, want not ready", err)
 		}
 	})
 }
@@ -562,6 +562,48 @@ func TestTeamSemanticEmbeddingProjectionAcceptsMaximumBatchAndDimensions(t *test
 	}
 	if rows != maxProjectionOutputs {
 		t.Fatalf("maximum materializations = %d, want %d", rows, maxProjectionOutputs)
+	}
+}
+
+func TestTeamRequestReadinessDefersExhaustiveSemanticPayloadAudit(t *testing.T) {
+	fixture := newTeamSemanticProjectionFixture(t)
+	defer fixture.graph.object.store.Close()
+	claim := fixture.claim(t, fixture.root.ObjectID, "embedding")
+	request := teamSemanticEmbeddingRequest(t, fixture, claim, 2)
+	if _, err := fixture.graph.object.store.CompleteTeamSemanticEmbeddingProjection(
+		context.Background(), request,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.graph.object.store.DB().Exec(`
+		DROP TRIGGER team_semantic_embeddings_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.graph.object.store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.graph.object.store.DB().Exec(`
+		UPDATE team_semantic_embeddings SET vector_json = 'not-json'
+		 WHERE intent_id = (SELECT intent_id FROM team_semantic_materializations WHERE job_id = ? LIMIT 1)`,
+		claim.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.graph.object.store.DB().Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Protected-request readiness is intentionally metadata-bounded. Startup,
+	// doctor, and background audit own exhaustive payload/vector verification.
+	if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
+		context.Background(),
+		policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
+	); err != nil {
+		t.Fatalf("bounded request readiness scanned semantic payloads: %v", err)
+	}
+	if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
+		context.Background(),
+	); !errors.Is(err, ErrTeamPolicyNotReady) {
+		t.Fatalf("explicit semantic audit = %v, want not ready", err)
 	}
 }
 

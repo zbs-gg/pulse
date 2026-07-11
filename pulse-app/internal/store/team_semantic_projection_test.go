@@ -397,6 +397,9 @@ func TestTombstonedSemanticMaterializationsDoNotBlockReadinessBeforeCleanup(t *t
 	); err != nil {
 		t.Fatalf("tombstoned rows blocked readiness before cleanup: %v", err)
 	}
+	if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(context.Background()); err != nil {
+		t.Fatalf("tombstoned rows blocked explicit semantic audit before cleanup: %v", err)
+	}
 }
 
 func TestTeamStructuredProjectionConcealsMissingSpuriousAndCorruptIntents(t *testing.T) {
@@ -484,11 +487,10 @@ func TestReadyStructuredProjectionRequiresExactSpecialRowsForReplayAndReadiness(
 	if _, err := fixture.graph.object.store.CompleteTeamClaimProjection(context.Background(), request); !errors.Is(err, ErrConcealedNotFound) {
 		t.Fatalf("ready replay after special-row deletion = %v, want concealed", err)
 	}
-	if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
+	if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
 		context.Background(),
-		policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
 	); !errors.Is(err, ErrTeamPolicyNotReady) {
-		t.Fatalf("readiness after special-row deletion = %v, want not ready", err)
+		t.Fatalf("semantic audit after special-row deletion = %v, want not ready", err)
 	}
 }
 
@@ -512,11 +514,10 @@ func TestReadyStructuredProjectionRequiresExactContributionForReplayAndReadiness
 	); !errors.Is(err, ErrConcealedNotFound) {
 		t.Fatalf("ready replay after contribution deletion = %v, want concealed", err)
 	}
-	if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
+	if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
 		context.Background(),
-		policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
 	); !errors.Is(err, ErrTeamPolicyNotReady) {
-		t.Fatalf("readiness after contribution deletion = %v, want not ready", err)
+		t.Fatalf("semantic audit after contribution deletion = %v, want not ready", err)
 	}
 }
 
@@ -540,11 +541,10 @@ func TestReadyStructuredProjectionRejectsCorruptCommonDigestOnReplayAndReadiness
 	); !errors.Is(err, ErrConcealedNotFound) {
 		t.Fatalf("ready replay after common corruption = %v, want concealed", err)
 	}
-	if _, err := fixture.graph.object.store.CheckTeamPolicyReadiness(
+	if err := fixture.graph.object.store.AuditTeamSemanticIntegrity(
 		context.Background(),
-		policyReadinessOptions(fixture.graph.object.bootstrap, fixture.graph.object.lease),
 	); !errors.Is(err, ErrTeamPolicyNotReady) {
-		t.Fatalf("readiness after common corruption = %v, want not ready", err)
+		t.Fatalf("semantic audit after common corruption = %v, want not ready", err)
 	}
 }
 

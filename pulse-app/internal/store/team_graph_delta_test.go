@@ -491,10 +491,10 @@ func TestPolicyReadinessRejectsBrokenTeamGraphIngress(t *testing.T) {
 			defer fixture.object.store.Close()
 			result := storeFixtureTeamGraph(t, fixture, fixture.write)
 			test.corrupt(t, fixture.object.store, result.ObjectID)
-			if _, err := fixture.object.store.CheckTeamPolicyReadiness(
-				context.Background(), policyReadinessOptions(fixture.object.bootstrap, fixture.object.lease),
+			if err := fixture.object.store.AuditTeamSemanticIntegrity(
+				context.Background(),
 			); !errors.Is(err, ErrTeamPolicyNotReady) {
-				t.Fatalf("readiness error = %v, want %v", err, ErrTeamPolicyNotReady)
+				t.Fatalf("semantic audit error = %v, want %v", err, ErrTeamPolicyNotReady)
 			}
 		})
 	}
