@@ -120,6 +120,7 @@ func (s *TeamServer) Handler() http.Handler {
 		protected.Use(s.readinessMiddleware)
 		RegisterPrincipalCheckRoute(protected, s.cfg.PrincipalVerifier)
 		RegisterSecurityEventRoute(protected, s.securityEventHandler)
+		protected.Post(TeamMemoryRememberRoutePath, s.handleTeamMemoryRemember)
 	})
 	return r
 }
