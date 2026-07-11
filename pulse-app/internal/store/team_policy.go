@@ -1013,7 +1013,10 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 	if !ok {
 		return ErrTeamPolicyNotReady
 	}
-	return validateTeamGraphIngressDescriptorIntegrity(ctx, graphQuery, policy)
+	if err := validateTeamGraphIngressDescriptorIntegrity(ctx, graphQuery, policy); err != nil {
+		return err
+	}
+	return validateTeamSemanticProjectionMaterializationIntegrity(ctx, graphQuery)
 }
 
 type teamGraphIntegrityQueryer interface {
@@ -1114,9 +1117,23 @@ func validateOneTeamGraphIngressDescriptorSet(
 	q teamGraphIntegrityQueryer,
 	root teamGraphIntegrityRoot,
 ) error {
+	_, err := loadValidatedTeamGraphIngressDescriptorSet(ctx, q, root)
+	return err
+}
+
+// loadValidatedTeamGraphIngressDescriptorSet is the single reconstruction
+// boundary shared by readiness and semantic projection workers. It derives
+// the original sealed permit from durable attribution, re-canonicalizes the
+// stored body, and checks the exact intent and job sets before returning any
+// content to a projector.
+func loadValidatedTeamGraphIngressDescriptorSet(
+	ctx context.Context,
+	q teamGraphIntegrityQueryer,
+	root teamGraphIntegrityRoot,
+) (normalizedTeamGraphDeltaWrite, error) {
 	write, err := decodeCanonicalTeamGraphReadinessBody([]byte(root.canonicalJSON))
 	if err != nil {
-		return ErrTeamPolicyNotReady
+		return normalizedTeamGraphDeltaWrite{}, ErrTeamPolicyNotReady
 	}
 	write.IdempotencyKey = "readiness-placeholder"
 
@@ -1138,20 +1155,20 @@ func validateOneTeamGraphIngressDescriptorSet(
 		&principalKind, &humanPrincipalID, &idempotencyRows,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrTeamPolicyNotReady
+		return normalizedTeamGraphDeltaWrite{}, ErrTeamPolicyNotReady
 	}
 	if err != nil {
-		return err
+		return normalizedTeamGraphDeltaWrite{}, err
 	}
 	if idempotencyRows != 1 || actorID != root.authorID || !lowerHexDigest(clientKey) ||
 		!lowerHexDigest(idempotencyKeyHash) {
-		return ErrTeamPolicyNotReady
+		return normalizedTeamGraphDeltaWrite{}, ErrTeamPolicyNotReady
 	}
 	kind := teamauth.PrincipalKind(principalKind)
 	if (kind != teamauth.PrincipalAgent && kind != teamauth.PrincipalService) ||
 		(kind == teamauth.PrincipalAgent && humanPrincipalID == "") ||
 		(kind == teamauth.PrincipalService && humanPrincipalID != "") {
-		return ErrTeamPolicyNotReady
+		return normalizedTeamGraphDeltaWrite{}, ErrTeamPolicyNotReady
 	}
 
 	var requestedScope *teamauth.CanonicalScope
@@ -1185,12 +1202,15 @@ func validateOneTeamGraphIngressDescriptorSet(
 		normalized.body.PrivacyTier != root.privacyTier ||
 		normalized.body.Retention != root.retention ||
 		!teamGraphReadinessExpiryMatches(root, normalized.expiresAt) {
-		return ErrTeamPolicyNotReady
+		return normalizedTeamGraphDeltaWrite{}, ErrTeamPolicyNotReady
 	}
 	if err := validateTeamGraphIntentRows(ctx, q, root, normalized.intentDescriptors); err != nil {
-		return err
+		return normalizedTeamGraphDeltaWrite{}, err
 	}
-	return validateTeamGraphJobRows(ctx, q, root, normalized.projectionKinds)
+	if err := validateTeamGraphJobRows(ctx, q, root, normalized.projectionKinds); err != nil {
+		return normalizedTeamGraphDeltaWrite{}, err
+	}
+	return normalized, nil
 }
 
 func teamGraphActiveContextToAuth(teamID string, active TeamGraphActiveContext) teamauth.ActiveContext {

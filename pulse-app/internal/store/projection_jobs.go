@@ -114,6 +114,11 @@ type teamProjectionContentWriter interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	InsertTeamMemoryEvent(context.Context, teamMemoryEventMaterialization) error
 	InsertTeamMemoryEmbedding(context.Context, teamMemoryEmbeddingMaterialization) error
+	InsertTeamSemanticMaterializations(context.Context, []teamSemanticMaterialization) error
+	InsertTeamSemanticEmbedding(context.Context, teamSemanticEmbeddingMaterialization) error
+	InsertTeamGraphMaterialization(context.Context, teamGraphMaterialization) error
+	InsertTeamAssertionMaterialization(context.Context, teamAssertionMaterialization) error
+	InsertTeamContinuityMaterialization(context.Context, teamContinuityMaterialization) error
 }
 
 type teamProjectionCompletionContext struct {
@@ -133,10 +138,15 @@ type teamProjectionCompletionExtension func(
 ) error
 
 type restrictedProjectionContentWriter struct {
-	execContext               func(context.Context, string, ...any) (sql.Result, error)
-	queryRowContext           func(context.Context, string, ...any) *sql.Row
-	insertTeamMemoryEvent     func(context.Context, teamMemoryEventMaterialization) error
-	insertTeamMemoryEmbedding func(context.Context, teamMemoryEmbeddingMaterialization) error
+	execContext                         func(context.Context, string, ...any) (sql.Result, error)
+	queryRowContext                     func(context.Context, string, ...any) *sql.Row
+	insertTeamMemoryEvent               func(context.Context, teamMemoryEventMaterialization) error
+	insertTeamMemoryEmbedding           func(context.Context, teamMemoryEmbeddingMaterialization) error
+	insertTeamSemanticMaterializations  func(context.Context, []teamSemanticMaterialization) error
+	insertTeamSemanticEmbedding         func(context.Context, teamSemanticEmbeddingMaterialization) error
+	insertTeamGraphMaterialization      func(context.Context, teamGraphMaterialization) error
+	insertTeamAssertionMaterialization  func(context.Context, teamAssertionMaterialization) error
+	insertTeamContinuityMaterialization func(context.Context, teamContinuityMaterialization) error
 }
 
 func (writer *restrictedProjectionContentWriter) ExecContext(ctx context.Context, statement string, args ...any) (sql.Result, error) {
@@ -159,6 +169,41 @@ func (writer *restrictedProjectionContentWriter) InsertTeamMemoryEmbedding(
 	materialization teamMemoryEmbeddingMaterialization,
 ) error {
 	return writer.insertTeamMemoryEmbedding(ctx, materialization)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamSemanticMaterializations(
+	ctx context.Context,
+	materializations []teamSemanticMaterialization,
+) error {
+	return writer.insertTeamSemanticMaterializations(ctx, materializations)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamSemanticEmbedding(
+	ctx context.Context,
+	materialization teamSemanticEmbeddingMaterialization,
+) error {
+	return writer.insertTeamSemanticEmbedding(ctx, materialization)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamGraphMaterialization(
+	ctx context.Context,
+	materialization teamGraphMaterialization,
+) error {
+	return writer.insertTeamGraphMaterialization(ctx, materialization)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamAssertionMaterialization(
+	ctx context.Context,
+	materialization teamAssertionMaterialization,
+) error {
+	return writer.insertTeamAssertionMaterialization(ctx, materialization)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamContinuityMaterialization(
+	ctx context.Context,
+	materialization teamContinuityMaterialization,
+) error {
+	return writer.insertTeamContinuityMaterialization(ctx, materialization)
 }
 
 type TeamProjectionCancellationRequest struct {
@@ -455,6 +500,56 @@ func (s *Store) completeTeamProjectionJobWithExtension(
 			},
 			insertTeamMemoryEmbedding: func(ctx context.Context, materialization teamMemoryEmbeddingMaterialization) error {
 				err := insertTeamMemoryEmbeddingTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamSemanticMaterializations: func(
+				ctx context.Context,
+				materializations []teamSemanticMaterialization,
+			) error {
+				err := insertTeamSemanticMaterializationsTx(ctx, tx, job, materializations, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamSemanticEmbedding: func(
+				ctx context.Context,
+				materialization teamSemanticEmbeddingMaterialization,
+			) error {
+				err := insertTeamSemanticEmbeddingTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamGraphMaterialization: func(
+				ctx context.Context,
+				materialization teamGraphMaterialization,
+			) error {
+				err := insertTeamGraphMaterializationTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamAssertionMaterialization: func(
+				ctx context.Context,
+				materialization teamAssertionMaterialization,
+			) error {
+				err := insertTeamAssertionMaterializationTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamContinuityMaterialization: func(
+				ctx context.Context,
+				materialization teamContinuityMaterialization,
+			) error {
+				err := insertTeamContinuityMaterializationTx(ctx, tx, job, materialization, now)
 				if err == nil {
 					successfulMutations++
 				}
