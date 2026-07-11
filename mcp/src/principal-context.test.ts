@@ -21,11 +21,13 @@ import {
   SECURITY_EVENT_ASSERTION_VERSION,
   SecurityEventRateLimitedError,
   stablePrincipalCheckBody,
+  TEAM_GRAPH_DELTA_PATH,
   TEAM_MEMORY_REMEMBER_PATH,
   TeamPrincipalClient,
   type TeamPrincipalContext,
 } from './principal-context.js';
 import {
+  canonicalTeamGraphDeltaBody,
   canonicalTeamRememberBody,
   TeamContractError,
   TeamDomainError,
@@ -188,6 +190,44 @@ test('domain write reuses pulse.principal.v1 and binds the canonical body withou
   }
 });
 
+test('domain signer admits only exact memory and graph mutation paths', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW, randomId: () => 'graph-domain-jti',
+  });
+  const graphBody = canonicalTeamGraphDeltaBody(teamGraphDeltaInput());
+  const common = {
+    requestId: 'graph-domain-request', method: 'POST', body: graphBody.bytes,
+    oauthIssuer: 'https://auth.example.com', oauthSubject: 'human-subject-1',
+    oauthClientId: 'agent-client-a', capabilities: ['pulse:connect', 'pulse:write'] as const,
+  };
+  const assertion = await signer.signDomainRequest({ ...common, path: TEAM_GRAPH_DELTA_PATH });
+  const verified = await jwtVerify(assertion, keys.publicKey, {
+    issuer: PRINCIPAL_ASSERTION_ISSUER, audience: PRINCIPAL_ASSERTION_AUDIENCE,
+    algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+  });
+  assert.equal(verified.payload.path, TEAM_GRAPH_DELTA_PATH);
+  assert.equal(verified.payload.body_sha256, createHash('sha256').update(graphBody.bytes).digest('hex'));
+  assert.notEqual(
+    verified.payload.body_sha256,
+    createHash('sha256').update(Buffer.concat([graphBody.bytes, Buffer.from(' ')])).digest('hex'),
+  );
+
+  for (const [method, path] of [
+    ['GET', TEAM_GRAPH_DELTA_PATH],
+    ['POST', `${TEAM_GRAPH_DELTA_PATH}/`],
+    ['POST', '/team/v1/graph/other'],
+    ['POST', '/graph/delta'],
+    ['POST', '/team/v1/memory'],
+  ] as const) {
+    await assert.rejects(
+      signer.signDomainRequest({ ...common, method, path }),
+      /request binding/i,
+    );
+  }
+});
+
 function teamRememberInput() {
   return {
     schema: 'pulse.team.memory.v1',
@@ -203,6 +243,42 @@ function teamRememberInput() {
     privacy_tier: 'normal',
     retention: 'project',
     idempotency_key: 'remember-domain-001',
+  };
+}
+
+function teamGraphDeltaInput() {
+  return {
+    schema: 'pulse.team.graph_delta.v1',
+    source: {
+      host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-11T12:00:00+07:00',
+    },
+    nodes: [{
+      client_id: 'person:alex', kind: 'person', canonical_name: 'Alex',
+      aliases: ['Alexander'], salience: 0.8, emotional_weight: 0.2, domain: 'real',
+    }],
+    edges: [],
+    facts: [{
+      node: 'person:alex', text: 'Alex is based in Lisbon.', predicate: 'home_base',
+      object_text: 'Lisbon', change_cue: true, source_event_refs: ['event:moved'],
+      confidence: 0.9, domain: 'real',
+    }],
+    events: [{
+      client_id: 'event:moved', title: 'Alex moved',
+      summary: 'Alex changed home base to Lisbon.', entity_refs: ['person:alex'],
+      confidence: 0.9, domain: 'real', anchor: false,
+    }],
+    continuity: {
+      thread_id: 'pulse-pilot', session_id: 'session-2026-07-11',
+      summary: 'Stopped after agreeing on scoped graph storage.',
+      decisions: [], open_loops: [], do_not_repeat: [], emotional_anchors: [],
+      state_signals: [], active_threads: [], review_insights: [],
+    },
+    raw_input_included: false,
+    active_context: { project_id: 'project-pulse', session_id: 'session-2026-07-11' },
+    target_scope: { type: 'project', id: 'project-pulse' },
+    privacy_tier: 'normal',
+    retention: 'project',
+    idempotency_key: 'graph-domain-001',
   };
 }
 
@@ -239,6 +315,23 @@ function storedTeamMemoryResult() {
       { kind: 'embedding', job_id: 'team_job_embedding', state: 'pending' },
       { kind: 'event', job_id: 'team_job_event', state: 'pending' },
     ],
+    fully_projected: false,
+    replayed: false,
+    fallback: false,
+  };
+}
+
+function storedTeamGraphDeltaResult() {
+  const projectionKinds = canonicalTeamGraphDeltaBody(teamGraphDeltaInput()).projectionKinds;
+  return {
+    schema: 'pulse.team.graph_delta_result.v1',
+    object_id: 'team_graph_object_001',
+    audit_event_id: 'team_graph_audit_001',
+    status: 'stored',
+    projection_state: 'pending',
+    projection_jobs: projectionKinds.map((kind) => ({
+      kind, job_id: `team_graph_job_${kind}`, state: 'pending',
+    })),
     fully_projected: false,
     replayed: false,
     fallback: false,
@@ -289,6 +382,148 @@ test('bound team domain sends one canonical loopback request with no bearer or i
   for (const forbidden of ['authorization', 'principal_id', 'human_principal_id', 'membership_role']) {
     assert.equal(forbidden in verified.payload, false, forbidden);
   }
+});
+
+test('bound team graph delta signs and sends one exact canonical loopback request', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW, randomId: () => 'graph-jti',
+  });
+  const requests: Array<{ url: string; headers: Headers; body: string }> = [];
+  const client = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async (input, init) => {
+      requests.push({ url: input.toString(), headers: new Headers(init?.headers), body: String(init?.body) });
+      return Response.json(storedTeamGraphDeltaResult());
+    },
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:write'] as const,
+  };
+  const domain = client.bindDomain(identity, writePrincipalContext());
+  const result = await domain.graphDelta(teamGraphDeltaInput());
+  assert.deepEqual(result, storedTeamGraphDeltaResult());
+  assert.equal(requests.length, 1, 'graph write must not retry or fall back to another store');
+  assert.equal(requests[0].url, `http://127.0.0.1:18789${TEAM_GRAPH_DELTA_PATH}`);
+  const canonical = canonicalTeamGraphDeltaBody(teamGraphDeltaInput());
+  assert.equal(requests[0].body, canonical.text);
+  assert.deepEqual([...requests[0].headers.keys()].sort(), [
+    'content-type', 'x-pulse-key', 'x-pulse-principal', 'x-pulse-request-id',
+  ]);
+  assert.equal(requests[0].headers.has('authorization'), false);
+  const verified = await jwtVerify(requests[0].headers.get('x-pulse-principal') ?? '', keys.publicKey, {
+    issuer: PRINCIPAL_ASSERTION_ISSUER, audience: PRINCIPAL_ASSERTION_AUDIENCE,
+    algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+  });
+  assert.equal(verified.payload.path, TEAM_GRAPH_DELTA_PATH);
+  assert.equal(verified.payload.body_sha256, createHash('sha256').update(requests[0].body).digest('hex'));
+  assert.equal(verified.payload.oauth_issuer, identity.issuer);
+  assert.equal(verified.payload.oauth_subject, identity.subject);
+  assert.equal(verified.payload.oauth_client_id, identity.clientId);
+  for (const forbidden of [
+    'authorization', 'principal_id', 'human_principal_id', 'agent_binding_id',
+    'membership_id', 'membership_role', 'team_auth_epoch',
+  ]) {
+    assert.equal(forbidden in verified.payload, false, forbidden);
+  }
+});
+
+test('graph domain errors are operation-specific and malformed responses fail closed', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW,
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:write'] as const,
+  };
+  for (const [status, body, expected] of [
+    [400, { error: 'invalid_team_graph_delta', fallback: false }, 'invalid_team_graph_delta'],
+    [401, { error: 'principal_request_mismatch', fallback: false }, 'principal_request_mismatch'],
+    [403, { error: 'principal_revoked', fallback: false }, 'principal_revoked'],
+    [403, { error: 'policy_denied', fallback: false }, 'policy_denied'],
+    [404, { error: 'not_found', fallback: false }, 'not_found'],
+    [409, { error: 'idempotency_conflict', fallback: false }, 'idempotency_conflict'],
+    [409, { error: 'authorization_stale', fallback: false }, 'authorization_stale'],
+    [503, { error: 'shared_memory_unavailable', fallback: false }, 'shared_memory_unavailable'],
+  ] as const) {
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+      fetch: async () => Response.json(body, { status }),
+    }).bindDomain(identity, writePrincipalContext());
+    await assert.rejects(
+      domain.graphDelta(teamGraphDeltaInput()),
+      (error: unknown) => error instanceof TeamDomainError && error.code === expected,
+    );
+  }
+
+  const crossOperationCases = [
+    {
+      call: (domain: ReturnType<TeamPrincipalClient['bindDomain']>) => domain.remember(teamRememberInput()),
+      body: { error: 'invalid_team_graph_delta', fallback: false },
+    },
+    {
+      call: (domain: ReturnType<TeamPrincipalClient['bindDomain']>) => domain.graphDelta(teamGraphDeltaInput()),
+      body: { error: 'invalid_team_memory', fallback: false },
+    },
+  ];
+  for (const testCase of crossOperationCases) {
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+      fetch: async () => Response.json(testCase.body, { status: 400 }),
+    }).bindDomain(identity, writePrincipalContext());
+    await assert.rejects(
+      testCase.call(domain),
+      (error: unknown) => error instanceof TeamDomainError && error.code === 'shared_memory_unavailable',
+    );
+  }
+
+  const malformedResults = [
+    { ...storedTeamGraphDeltaResult(), internal_detail: 'nope' },
+    {
+      ...storedTeamGraphDeltaResult(),
+      projection_jobs: [...storedTeamGraphDeltaResult().projection_jobs].reverse(),
+    },
+    {
+      ...storedTeamGraphDeltaResult(),
+      projection_jobs: storedTeamGraphDeltaResult().projection_jobs.slice(1),
+    },
+  ];
+  for (const response of malformedResults) {
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+      fetch: async () => Response.json(response),
+    }).bindDomain(identity, writePrincipalContext());
+    await assert.rejects(
+      domain.graphDelta(teamGraphDeltaInput()),
+      (error: unknown) => error instanceof TeamDomainError && error.code === 'shared_memory_unavailable',
+    );
+  }
+
+  let calls = 0;
+  const unavailable = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async () => { calls++; throw new Error('synthetic response loss'); },
+  }).bindDomain(identity, writePrincipalContext());
+  await assert.rejects(
+    unavailable.graphDelta(teamGraphDeltaInput()),
+    (error: unknown) => error instanceof TeamDomainError && error.code === 'shared_memory_unavailable',
+  );
+  assert.equal(calls, 1, 'response loss must not trigger a local or memory fallback');
+
+  calls = 0;
+  const invalid = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async () => { calls++; return Response.json(storedTeamGraphDeltaResult()); },
+  }).bindDomain(identity, writePrincipalContext());
+  await assert.rejects(
+    invalid.graphDelta({ ...teamGraphDeltaInput(), raw_input_included: true }),
+    TeamContractError,
+  );
+  assert.equal(calls, 0, 'invalid graph input must fail before signing or transport');
 });
 
 test('team domain preserves allowlisted errors and collapses malformed or unavailable responses', async () => {

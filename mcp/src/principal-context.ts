@@ -18,13 +18,16 @@ import { SignJWT } from 'jose';
 
 import { OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
 import {
+  canonicalTeamGraphDeltaBody,
   canonicalTeamRememberBody,
   requiredTeamCapabilities,
   TEAM_CAPABILITIES,
   TeamDomainError,
+  validateTeamGraphDeltaResult,
   validateTeamRememberResult,
   type TeamCapability,
   type TeamDomainErrorCode,
+  type TeamGraphDeltaResult,
   type TeamRememberResult,
 } from './team-contracts.js';
 
@@ -33,6 +36,11 @@ export const PRINCIPAL_ASSERTION_AUDIENCE = 'pulse-team-daemon';
 const PRINCIPAL_ASSERTION_VERSION = 'pulse.principal.v1';
 export const SECURITY_EVENT_ASSERTION_VERSION = 'pulse.security_event.v1';
 export const TEAM_MEMORY_REMEMBER_PATH = '/team/v1/memory/remember';
+export const TEAM_GRAPH_DELTA_PATH = '/team/v1/graph/delta';
+const TEAM_DOMAIN_MUTATION_PATHS = new Set([
+  TEAM_MEMORY_REMEMBER_PATH,
+  TEAM_GRAPH_DELTA_PATH,
+]);
 const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_KEYRING_BYTES = 32 * 1024;
 const MAX_PREVIOUS_KEYS = 4;
@@ -80,6 +88,7 @@ export interface TeamPrincipalClientOptions {
 
 export interface BoundTeamDomain {
   remember(input: unknown): Promise<TeamRememberResult>;
+  graphDelta(input: unknown): Promise<TeamGraphDeltaResult>;
 }
 
 export interface TeamPrincipalContext {
@@ -266,6 +275,7 @@ export class TeamPrincipalClient {
   private readonly principalEndpoint: string;
   private readonly securityEventEndpoint: string;
   private readonly teamMemoryEndpoint: string;
+  private readonly teamGraphEndpoint: string;
   private readonly signer: PrincipalSigner;
   private readonly apiKey: () => string;
   private readonly fetcher: typeof fetch;
@@ -275,6 +285,7 @@ export class TeamPrincipalClient {
     this.principalEndpoint = teamDaemonEndpoint(options.daemonBaseURL, '/team/v1/principal/check');
     this.securityEventEndpoint = teamDaemonEndpoint(options.daemonBaseURL, '/team/v1/security-events');
     this.teamMemoryEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_MEMORY_REMEMBER_PATH);
+    this.teamGraphEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_GRAPH_DELTA_PATH);
     this.signer = options.signer;
     this.apiKey = options.apiKey;
     this.fetcher = options.fetch ?? fetch;
@@ -305,6 +316,7 @@ export class TeamPrincipalClient {
     const requestId = requireOpaqueValue(context.request_id, 'request ID');
     return Object.freeze({
       remember: (input: unknown) => this.remember(boundIdentity, requestId, input),
+      graphDelta: (input: unknown) => this.graphDelta(boundIdentity, requestId, input),
     });
   }
 
@@ -470,11 +482,74 @@ export class TeamPrincipalClient {
       throw new TeamDomainError('shared_memory_unavailable');
     }
     if (response.status !== 200) {
-      const code = exactTeamDomainError(response.status, value);
+      const code = exactTeamDomainError(response.status, value, 'memory');
       throw new TeamDomainError(code ?? 'shared_memory_unavailable');
     }
     try {
       return validateTeamRememberResult(value, body.value.items.length);
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+  }
+
+  private async graphDelta(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamGraphDeltaResult> {
+    const body = canonicalTeamGraphDeltaBody(input);
+    let assertion: string;
+    try {
+      assertion = await this.signer.signDomainRequest({
+        requestId,
+        method: 'POST',
+        path: TEAM_GRAPH_DELTA_PATH,
+        body: body.bytes,
+        oauthIssuer: identity.issuer,
+        oauthSubject: identity.subject,
+        oauthClientId: identity.clientId,
+        capabilities: identity.capabilities,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    const ipcKey = this.apiKey();
+    if (ipcKey === '' || Buffer.byteLength(ipcKey, 'utf8') > 512) {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let response: Response;
+    try {
+      response = await this.fetcher(this.teamGraphEndpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Pulse-Key': ipcKey,
+          'X-Pulse-Principal': assertion,
+          'X-Pulse-Request-ID': requestId,
+        },
+        body: body.text,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (!isJSONResponse(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let value: unknown;
+    try {
+      value = await readBoundedJSONResponse(response, response.status === 200 ? 16 * 1024 : 4 * 1024);
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (response.status !== 200) {
+      const code = exactTeamDomainError(response.status, value, 'graph_delta');
+      throw new TeamDomainError(code ?? 'shared_memory_unavailable');
+    }
+    try {
+      return validateTeamGraphDeltaResult(value, body.projectionKinds);
     } catch {
       throw new TeamDomainError('shared_memory_unavailable');
     }
@@ -512,7 +587,7 @@ export class PrincipalSigner {
   }
 
   async signDomainRequest(input: PrincipalCheckInput): Promise<string> {
-    if (input.method !== 'POST' || input.path !== TEAM_MEMORY_REMEMBER_PATH) {
+    if (input.method !== 'POST' || !TEAM_DOMAIN_MUTATION_PATHS.has(input.path)) {
       throw new Error('principal assertion request binding is invalid');
     }
     return this.signPrincipalRequest(input);
@@ -692,12 +767,16 @@ function isJSONResponse(response: Response): boolean {
   return response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
 }
 
-function exactTeamDomainError(status: number, value: unknown): TeamDomainErrorCode | undefined {
+function exactTeamDomainError(
+  status: number,
+  value: unknown,
+  operation: 'memory' | 'graph_delta',
+): TeamDomainErrorCode | undefined {
   if (!isExactRecord(value, ['error', 'fallback']) || value.fallback !== false || typeof value.error !== 'string') {
     return undefined;
   }
   const allowed: Partial<Record<number, readonly TeamDomainErrorCode[]>> = {
-    400: ['invalid_team_memory'],
+    400: [operation === 'memory' ? 'invalid_team_memory' : 'invalid_team_graph_delta'],
     401: ['invalid_principal', 'principal_request_mismatch', 'principal_replay'],
     403: ['principal_revoked', 'policy_denied'],
     404: ['not_found'],
