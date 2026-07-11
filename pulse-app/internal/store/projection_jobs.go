@@ -373,6 +373,12 @@ func (s *Store) completeTeamProjectionJobWithExtension(
 		if !matches {
 			return TeamProjectionCompletionResult{}, ErrConcealedNotFound
 		}
+		if err := s.RecheckTeamWriterLeaseTx(ctx, tx, request.WriterID, request.WriterToken); err != nil {
+			return TeamProjectionCompletionResult{}, err
+		}
+		if !projectionRootActiveAt(job, s.clock().UTC()) {
+			return TeamProjectionCompletionResult{}, ErrConcealedNotFound
+		}
 		return TeamProjectionCompletionResult{
 			JobID: job.JobID, State: "ready", AlreadyReady: true, OutputObjectIDs: outputIDs,
 		}, nil
