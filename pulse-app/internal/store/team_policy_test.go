@@ -14,23 +14,26 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
-func TestMigrations034Through036InstallPolicyMemoryAndGraphDeltaIngress(t *testing.T) {
-	if teamauth.SchemaVersion != 36 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 36", teamauth.SchemaVersion)
+func TestMigrations034Through037InstallTeamObjectAndSemanticSchema(t *testing.T) {
+	if teamauth.SchemaVersion != 37 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 37", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 36 || latest.Name != "036_team_graph_delta.sql" {
-		t.Fatalf("latest migration = %+v, want 036_team_graph_delta.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 37 || latest.Name != "037_team_semantic_materializations.sql" {
+		t.Fatalf("latest migration = %+v, want 037_team_semantic_materializations.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
 	defer s.Close()
 	wantTables := []string{
+		"team_assertion_materializations",
 		"team_audit_event_order",
+		"team_continuity_materializations",
 		"team_graph_delta_inputs",
+		"team_graph_materializations",
 		"team_idempotency_records",
 		"team_memory_capsules",
 		"team_memory_embeddings",
@@ -41,6 +44,8 @@ func TestMigrations034Through036InstallPolicyMemoryAndGraphDeltaIngress(t *testi
 		"team_policy_metadata",
 		"team_projection_jobs",
 		"team_projection_outputs",
+		"team_semantic_embeddings",
+		"team_semantic_materializations",
 		"team_semantic_projection_intents",
 		"team_service_object_grants",
 		"team_writer_leases",
@@ -55,6 +60,9 @@ func TestMigrations034Through036InstallPolicyMemoryAndGraphDeltaIngress(t *testi
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',
 			'team_projection_outputs', 'team_semantic_projection_intents',
+			'team_semantic_materializations', 'team_graph_materializations',
+			'team_assertion_materializations', 'team_continuity_materializations',
+			'team_semantic_embeddings',
 			'team_service_object_grants', 'team_writer_leases')
 		 ORDER BY name`)
 	if err != nil {
