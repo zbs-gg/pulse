@@ -528,8 +528,23 @@ function teamRecord(
   return record;
 }
 
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xDC00 || next > 0xDFFF) return false;
+      index++;
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function teamString(field: string, value: unknown, minimum: number, maximum: number): string {
   if (typeof value !== 'string') failTeamContract(`${field} must be a string`);
+  if (!isWellFormedUnicode(value)) failTeamContract(`${field} must contain well-formed Unicode`);
   const clean = value.trim();
   const length = Array.from(clean).length;
   if (length < minimum || length > maximum) {

@@ -540,6 +540,18 @@ test('team graph rejects omitted/null required scalars and unsafe content', () =
   }
 });
 
+test('team contracts reject ill-formed Unicode before producing canonical bytes', () => {
+  for (const malformed of ['broken\uD800text', 'broken\uDC00text']) {
+    const graph = baseTeamGraphDelta();
+    graph.events[0].summary = malformed;
+    assertTeamGraphRejected(graph, /unicode|surrogate|well-formed/i);
+
+    const memory = baseTeamRemember();
+    memory.items[0].redacted_summary = malformed;
+    assertTeamRememberRejected(memory, /unicode|surrogate|well-formed/i);
+  }
+});
+
 test('team graph canonical body is exact, bounded, and carries the conditional job set', () => {
   const canonical = canonicalTeamGraphDeltaBody(baseTeamGraphDelta());
   assert.deepEqual(canonical.value, validateTeamGraphDeltaInput(baseTeamGraphDelta()));
