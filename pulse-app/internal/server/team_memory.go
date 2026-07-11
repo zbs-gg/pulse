@@ -160,7 +160,7 @@ func (v *PrincipalVerifier) validateDomainClaims(claims principalAssertionClaims
 	if claims.Version != principalAssertionVersion || claims.Issuer != principalAssertionIssuer || claims.Audience != principalAssertionAudience ||
 		claims.GrantKind != "registered" || !safeOpaque(claims.JTI, 128) || len(claims.RequestID) < 8 || !safeOpaque(claims.RequestID, 64) ||
 		!exactIdentity(claims.OAuthIssuer, 512) || !exactIdentity(claims.OAuthSubject, 512) || !exactIdentity(claims.OAuthClientID, 512) ||
-		claims.Method != http.MethodPost || claims.Path != TeamMemoryRememberRoutePath ||
+		claims.Method != http.MethodPost || !isExactTeamDomainMutationPath(claims.Path) ||
 		len(claims.BodySHA256) != 64 || strings.ToLower(claims.BodySHA256) != claims.BodySHA256 ||
 		claims.ExpiresAt < now-principalAssertionClockSkewSecs || claims.NotBefore > now+principalAssertionClockSkewSecs ||
 		claims.IssuedAt <= 0 || claims.NotBefore <= 0 || claims.ExpiresAt <= 0 || claims.IssuedAt > now+principalAssertionClockSkewSecs ||
@@ -172,6 +172,15 @@ func (v *PrincipalVerifier) validateDomainClaims(claims principalAssertionClaims
 		return ErrPrincipalInvalid
 	}
 	return nil
+}
+
+func isExactTeamDomainMutationPath(path string) bool {
+	switch path {
+	case TeamMemoryRememberRoutePath, TeamGraphDeltaRoutePath:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *TeamServer) handleTeamMemoryRemember(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +217,7 @@ func (s *TeamServer) handleTeamMemoryRemember(w http.ResponseWriter, r *http.Req
 		r.Context(), assertions[0], requestIDs[0], r.Method, r.URL.EscapedPath(), raw,
 	)
 	if err != nil {
-		writeTeamMemoryPrincipalError(w, err)
+		writeTeamDomainPrincipalError(w, err)
 		return
 	}
 
@@ -394,7 +403,7 @@ func cloneTeamMemoryTarget(target *store.TeamMemoryTarget) *store.TeamMemoryTarg
 	return &clone
 }
 
-func writeTeamMemoryPrincipalError(w http.ResponseWriter, err error) {
+func writeTeamDomainPrincipalError(w http.ResponseWriter, err error) {
 	status, code := http.StatusUnauthorized, teamMemoryErrorInvalidPrincipal
 	switch {
 	case errors.Is(err, ErrPrincipalRequestMismatch):

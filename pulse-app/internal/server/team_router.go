@@ -121,6 +121,7 @@ func (s *TeamServer) Handler() http.Handler {
 		RegisterPrincipalCheckRoute(protected, s.cfg.PrincipalVerifier)
 		RegisterSecurityEventRoute(protected, s.securityEventHandler)
 		protected.Post(TeamMemoryRememberRoutePath, s.handleTeamMemoryRemember)
+		protected.Post(TeamGraphDeltaRoutePath, s.handleTeamGraphDelta)
 	})
 	return r
 }

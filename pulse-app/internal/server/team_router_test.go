@@ -90,7 +90,7 @@ func TestTeamRouterIsExactAllowlistAndLocalHandlerIsUnchanged(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{PrincipalCheckRoutePath, SecurityEventRoutePath} {
+	for _, path := range []string{PrincipalCheckRoutePath, SecurityEventRoutePath, TeamGraphDeltaRoutePath} {
 		response := serveTeamRequest(handler, http.MethodPost, path, testTeamIPCSecret, "127.0.0.1:41000", []byte(`{}`))
 		if response.Code == http.StatusNotFound {
 			t.Errorf("versioned team route %s was not registered", path)
