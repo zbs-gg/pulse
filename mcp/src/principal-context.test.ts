@@ -21,8 +21,15 @@ import {
   SECURITY_EVENT_ASSERTION_VERSION,
   SecurityEventRateLimitedError,
   stablePrincipalCheckBody,
+  TEAM_MEMORY_REMEMBER_PATH,
   TeamPrincipalClient,
+  type TeamPrincipalContext,
 } from './principal-context.js';
+import {
+  canonicalTeamRememberBody,
+  TeamContractError,
+  TeamDomainError,
+} from './team-contracts.js';
 
 const NOW = 1_789_000_000;
 
@@ -106,6 +113,238 @@ test('signs the exact request-local pulse.principal.v1 claim contract', async ()
     capabilities: ['pulse:connect', 'pulse:read'],
   });
   assert.equal('v' in verified.payload, false);
+});
+
+test('domain write reuses pulse.principal.v1 and binds the canonical body without internal authority', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath,
+    keyId: 'gateway-key-1',
+    verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test',
+    teamId: 'team_test',
+    now: () => NOW,
+    randomId: () => 'domain-jti',
+  });
+  const body = canonicalTeamRememberBody({
+    schema: 'pulse.team.memory.v1',
+    source: {
+      host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-11T05:00:00Z',
+    },
+    items: [{
+      kind: 'decision', redacted_summary: 'Use the remote team store.', confidence: 1,
+      evidence_hint: 'user_confirmed', tags: ['pilot'],
+    }],
+    raw_input_included: false,
+    active_context: { project_id: 'project-pulse' },
+    privacy_tier: 'normal',
+    retention: 'project',
+    idempotency_key: 'remember-domain-001',
+  });
+  const assertion = await signer.signDomainRequest({
+    requestId: 'domain-request-001',
+    method: 'POST',
+    path: '/team/v1/memory/remember',
+    body: body.bytes,
+    oauthIssuer: 'https://auth.example.com',
+    oauthSubject: 'human-subject-1',
+    oauthClientId: 'agent-client-a',
+    capabilities: ['pulse:write', 'pulse:connect'],
+  });
+  assert.deepEqual(decodeProtectedHeader(assertion), {
+    alg: 'EdDSA', kid: 'gateway-key-1', typ: 'pulse.principal.v1',
+  });
+  const verified = await jwtVerify(assertion, keys.publicKey, {
+    issuer: PRINCIPAL_ASSERTION_ISSUER,
+    audience: PRINCIPAL_ASSERTION_AUDIENCE,
+    algorithms: ['EdDSA'],
+    currentDate: new Date(NOW * 1000),
+  });
+  assert.deepEqual(verified.payload, {
+    version: 'pulse.principal.v1',
+    request_id: 'domain-request-001',
+    method: 'POST',
+    path: '/team/v1/memory/remember',
+    body_sha256: createHash('sha256').update(body.bytes).digest('hex'),
+    store_id: 'store_test',
+    team_id: 'team_test',
+    oauth_issuer: 'https://auth.example.com',
+    oauth_subject: 'human-subject-1',
+    oauth_client_id: 'agent-client-a',
+    grant_kind: 'registered',
+    capabilities: ['pulse:connect', 'pulse:write'],
+    iss: PRINCIPAL_ASSERTION_ISSUER,
+    aud: PRINCIPAL_ASSERTION_AUDIENCE,
+    iat: NOW,
+    nbf: NOW - 1,
+    exp: NOW + 30,
+    jti: 'domain-jti',
+  });
+  for (const forbidden of [
+    'authorization', 'principal_id', 'human_principal_id', 'agent_binding_id',
+    'membership_id', 'membership_role', 'team_auth_epoch',
+  ]) {
+    assert.equal(forbidden in verified.payload, false, forbidden);
+  }
+});
+
+function teamRememberInput() {
+  return {
+    schema: 'pulse.team.memory.v1',
+    source: {
+      host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-11T12:00:00+07:00',
+    },
+    items: [{
+      kind: 'decision', redacted_summary: 'Use the remote team store.', confidence: 1,
+      evidence_hint: 'user_confirmed', tags: ['pilot'],
+    }],
+    raw_input_included: false,
+    active_context: { project_id: 'project-pulse' },
+    privacy_tier: 'normal',
+    retention: 'project',
+    idempotency_key: 'remember-domain-001',
+  };
+}
+
+function writePrincipalContext(): Readonly<TeamPrincipalContext> {
+  return Object.freeze({
+    version: 'pulse.team.principal_context.v1',
+    request_id: 'domain-request-001',
+    store_id: 'store_test',
+    team_id: 'team_test',
+    principal_id: 'principal-agent-a',
+    principal_kind: 'agent',
+    oauth_client_key: 'a'.repeat(64),
+    human_principal_id: 'human-a',
+    agent_binding_id: 'binding-a',
+    membership_id: 'membership-a',
+    membership_role: 'member',
+    team_auth_epoch: 2,
+    principal_auth_epoch: 1,
+    binding_auth_epoch: 1,
+    membership_auth_epoch: 1,
+    capabilities: ['pulse:connect', 'pulse:write'],
+  });
+}
+
+function storedTeamMemoryResult() {
+  return {
+    schema: 'pulse.team.memory_result.v1',
+    object_id: 'team_object_001',
+    audit_event_id: 'team_audit_001',
+    capsule_ids: ['team_capsule_001'],
+    status: 'stored',
+    projection_state: 'pending',
+    projection_jobs: [
+      { kind: 'embedding', job_id: 'team_job_embedding', state: 'pending' },
+      { kind: 'event', job_id: 'team_job_event', state: 'pending' },
+    ],
+    fully_projected: false,
+    replayed: false,
+    fallback: false,
+  };
+}
+
+test('bound team domain sends one canonical loopback request with no bearer or internal principal claims', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW, randomId: () => 'remember-jti',
+  });
+  const requests: Array<{ url: string; headers: Headers; body: string }> = [];
+  const client = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async (input, init) => {
+      requests.push({ url: input.toString(), headers: new Headers(init?.headers), body: String(init?.body) });
+      return Response.json(storedTeamMemoryResult());
+    },
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:write'] as const,
+  };
+  const domain = client.bindDomain(identity, writePrincipalContext());
+  const result = await domain.remember(teamRememberInput());
+  assert.deepEqual(result, storedTeamMemoryResult());
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, `http://127.0.0.1:18789${TEAM_MEMORY_REMEMBER_PATH}`);
+  const canonical = canonicalTeamRememberBody(teamRememberInput());
+  assert.equal(requests[0].body, canonical.text);
+  assert.deepEqual([...requests[0].headers.keys()].sort(), [
+    'content-type', 'x-pulse-key', 'x-pulse-principal', 'x-pulse-request-id',
+  ]);
+  assert.equal(requests[0].headers.get('content-type'), 'application/json');
+  assert.equal(requests[0].headers.get('x-pulse-key'), 'ipc-secret');
+  assert.equal(requests[0].headers.get('x-pulse-request-id'), 'domain-request-001');
+  assert.equal(requests[0].headers.has('authorization'), false);
+  const verified = await jwtVerify(requests[0].headers.get('x-pulse-principal') ?? '', keys.publicKey, {
+    issuer: PRINCIPAL_ASSERTION_ISSUER, audience: PRINCIPAL_ASSERTION_AUDIENCE,
+    algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+  });
+  assert.equal(verified.payload.path, TEAM_MEMORY_REMEMBER_PATH);
+  assert.equal(verified.payload.body_sha256, createHash('sha256').update(requests[0].body).digest('hex'));
+  assert.equal(verified.payload.oauth_issuer, identity.issuer);
+  assert.equal(verified.payload.oauth_subject, identity.subject);
+  assert.equal(verified.payload.oauth_client_id, identity.clientId);
+  for (const forbidden of ['authorization', 'principal_id', 'human_principal_id', 'membership_role']) {
+    assert.equal(forbidden in verified.payload, false, forbidden);
+  }
+});
+
+test('team domain preserves allowlisted errors and collapses malformed or unavailable responses', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW,
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:write'] as const,
+  };
+  for (const [status, body, expected] of [
+    [400, { error: 'invalid_team_memory', fallback: false }, 'invalid_team_memory'],
+    [401, { error: 'principal_request_mismatch', fallback: false }, 'principal_request_mismatch'],
+    [403, { error: 'principal_revoked', fallback: false }, 'principal_revoked'],
+    [403, { error: 'policy_denied', fallback: false }, 'policy_denied'],
+    [404, { error: 'not_found', fallback: false }, 'not_found'],
+    [409, { error: 'idempotency_conflict', fallback: false }, 'idempotency_conflict'],
+    [409, { error: 'authorization_stale', fallback: false }, 'authorization_stale'],
+    [503, { error: 'shared_memory_unavailable', fallback: false }, 'shared_memory_unavailable'],
+  ] as const) {
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+      fetch: async () => Response.json(body, { status }),
+    }).bindDomain(identity, writePrincipalContext());
+    await assert.rejects(
+      domain.remember(teamRememberInput()),
+      (error: unknown) => error instanceof TeamDomainError && error.code === expected,
+    );
+  }
+
+  for (const fetcher of [
+    async () => { throw new Error('synthetic outage'); },
+    async () => Response.json({ ...storedTeamMemoryResult(), internal_detail: 'nope' }),
+    async () => Response.json({ error: 'policy_denied', fallback: false, target: 'secret' }, { status: 403 }),
+  ]) {
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret', fetch: fetcher,
+    }).bindDomain(identity, writePrincipalContext());
+    await assert.rejects(
+      domain.remember(teamRememberInput()),
+      (error: unknown) => error instanceof TeamDomainError && error.code === 'shared_memory_unavailable',
+    );
+  }
+
+  let called = false;
+  const invalidDomain = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async () => { called = true; return Response.json(storedTeamMemoryResult()); },
+  }).bindDomain(identity, writePrincipalContext());
+  await assert.rejects(
+    invalidDomain.remember({ ...teamRememberInput(), raw_input_included: true }),
+    TeamContractError,
+  );
+  assert.equal(called, false);
 });
 
 test('principal check preserves only allowlisted bounded Go denial codes', async () => {

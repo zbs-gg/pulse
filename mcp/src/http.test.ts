@@ -11,7 +11,7 @@ import { after, test } from 'node:test';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { exportJWK, SignJWT } from 'jose';
+import { exportJWK, jwtVerify, SignJWT } from 'jose';
 
 import { OAuthResourceVerifier } from './oauth-resource.js';
 import {
@@ -337,13 +337,26 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
     teamId: 'team_test',
     now: () => now,
   });
-  const daemonRequests: Array<{ headers: Headers; body: string }> = [];
+  const daemonRequests: Array<{ url: string; headers: Headers; body: string }> = [];
   const principalClient = new TeamPrincipalClient({
     daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-key',
-    fetch: async (_input, init) => {
+    fetch: async (input, init) => {
+      const url = input.toString();
       const body = String(init?.body);
       const headers = new Headers(init?.headers);
-      daemonRequests.push({ headers, body });
+      daemonRequests.push({ url, headers, body });
+      if (url.endsWith('/team/v1/memory/remember')) {
+        return Response.json({
+          schema: 'pulse.team.memory_result.v1', object_id: 'team_object_001',
+          audit_event_id: 'team_audit_001', capsule_ids: ['team_capsule_001'],
+          status: 'stored', projection_state: 'pending',
+          projection_jobs: [
+            { kind: 'embedding', job_id: 'team_job_embedding', state: 'pending' },
+            { kind: 'event', job_id: 'team_job_event', state: 'pending' },
+          ],
+          fully_projected: false, replayed: false, fallback: false,
+        });
+      }
       const parsed = JSON.parse(body);
       return Response.json({
         version: 'pulse.team.principal_context.v1', request_id: headers.get('x-pulse-request-id'),
@@ -363,7 +376,7 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
   const dispatched: string[] = [];
   try {
     await Promise.all([
-      ['human-a', 'client-a', 'pulse:connect pulse:read', 'pulse_team_recall'],
+      ['human-a', 'client-a', 'pulse:connect pulse:write', 'pulse_team_remember'],
       ['human-b', 'client-b', 'pulse:connect pulse:write', 'pulse_team_remember'],
     ].map(async ([subject, clientId, scope, tool], index) => {
       const authorization = `Bearer ${await makeToken(subject, clientId, scope)}`;
@@ -374,14 +387,56 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
         requestId: `request-${index}`,
       });
       dispatched.push(`${context.principal_id}:${context.capabilities.join(',')}`);
+      if (tool === 'pulse_team_remember') {
+        const stored = await principalClient.bindDomain(baseline, context).remember({
+          schema: 'pulse.team.memory.v1',
+          source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-11T05:00:00Z' },
+          items: [{
+            kind: 'decision', redacted_summary: `Use the team store for ${clientId}.`, confidence: 1,
+            evidence_hint: 'user_confirmed', tags: ['pilot'],
+          }],
+          raw_input_included: false,
+          active_context: { project_id: 'project-pulse' },
+          privacy_tier: 'normal', retention: 'project', idempotency_key: `remember-${clientId}`,
+        });
+        assert.equal(stored.object_id, 'team_object_001');
+      }
     }));
     assert.deepEqual(dispatched.sort(), [
-      'principal-client-a:pulse:connect,pulse:read',
+      'principal-client-a:pulse:connect,pulse:write',
       'principal-client-b:pulse:connect,pulse:write',
     ]);
-    assert.equal(daemonRequests.length, 2);
+    assert.equal(daemonRequests.length, 4);
     assert.ok(daemonRequests.every(({ headers }) => !headers.has('authorization')));
     assert.ok(daemonRequests.every(({ body }) => !body.includes('Bearer ')));
+    const memoryRequests = daemonRequests.filter(({ url }) => url.endsWith('/team/v1/memory/remember'));
+    assert.equal(memoryRequests.length, 2);
+    const domainJtis = new Set<string>();
+    for (const memoryRequest of memoryRequests) {
+      const parsed = JSON.parse(memoryRequest.body);
+      assert.equal(parsed.schema, 'pulse.team.memory.v1');
+      assert.deepEqual([...memoryRequest.headers.keys()].sort(), [
+        'content-type', 'x-pulse-key', 'x-pulse-principal', 'x-pulse-request-id',
+      ]);
+      const domainAssertion = await jwtVerify(
+        memoryRequest.headers.get('x-pulse-principal') ?? '', createPublicKey(gatewayPrivate), {
+        issuer: 'pulse-team-gateway', audience: 'pulse-team-daemon', algorithms: ['EdDSA'],
+        currentDate: new Date(now * 1000),
+        },
+      );
+      const clientId = String(domainAssertion.payload.oauth_client_id);
+      assert.equal(domainAssertion.payload.path, '/team/v1/memory/remember');
+      assert.equal(domainAssertion.payload.oauth_subject, clientId === 'client-a' ? 'human-a' : 'human-b');
+      assert.equal(parsed.idempotency_key, `remember-${clientId}`);
+      assert.equal(domainAssertion.payload.request_id, memoryRequest.headers.get('x-pulse-request-id'));
+      assert.equal(
+        domainAssertion.payload.body_sha256,
+        createHash('sha256').update(memoryRequest.body).digest('hex'),
+      );
+      assert.equal('principal_id' in domainAssertion.payload, false);
+      domainJtis.add(String(domainAssertion.payload.jti));
+    }
+    assert.equal(domainJtis.size, 2, 'concurrent domain calls require fresh request-local JTIs');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

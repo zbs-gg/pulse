@@ -18,15 +18,21 @@ import { SignJWT } from 'jose';
 
 import { OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
 import {
+  canonicalTeamRememberBody,
   requiredTeamCapabilities,
   TEAM_CAPABILITIES,
+  TeamDomainError,
+  validateTeamRememberResult,
   type TeamCapability,
+  type TeamDomainErrorCode,
+  type TeamRememberResult,
 } from './team-contracts.js';
 
 export const PRINCIPAL_ASSERTION_ISSUER = 'pulse-team-gateway';
 export const PRINCIPAL_ASSERTION_AUDIENCE = 'pulse-team-daemon';
 const PRINCIPAL_ASSERTION_VERSION = 'pulse.principal.v1';
 export const SECURITY_EVENT_ASSERTION_VERSION = 'pulse.security_event.v1';
+export const TEAM_MEMORY_REMEMBER_PATH = '/team/v1/memory/remember';
 const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_KEYRING_BYTES = 32 * 1024;
 const MAX_PREVIOUS_KEYS = 4;
@@ -70,6 +76,10 @@ export interface TeamPrincipalClientOptions {
   apiKey: () => string;
   fetch?: typeof fetch;
   timeoutMs?: number;
+}
+
+export interface BoundTeamDomain {
+  remember(input: unknown): Promise<TeamRememberResult>;
 }
 
 export interface TeamPrincipalContext {
@@ -249,6 +259,7 @@ export class TeamRequestSecurity {
 export class TeamPrincipalClient {
   private readonly principalEndpoint: string;
   private readonly securityEventEndpoint: string;
+  private readonly teamMemoryEndpoint: string;
   private readonly signer: PrincipalSigner;
   private readonly apiKey: () => string;
   private readonly fetcher: typeof fetch;
@@ -257,6 +268,7 @@ export class TeamPrincipalClient {
   constructor(options: TeamPrincipalClientOptions) {
     this.principalEndpoint = teamDaemonEndpoint(options.daemonBaseURL, '/team/v1/principal/check');
     this.securityEventEndpoint = teamDaemonEndpoint(options.daemonBaseURL, '/team/v1/security-events');
+    this.teamMemoryEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_MEMORY_REMEMBER_PATH);
     this.signer = options.signer;
     this.apiKey = options.apiKey;
     this.fetcher = options.fetch ?? fetch;
@@ -264,6 +276,30 @@ export class TeamPrincipalClient {
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 5_000) {
       throw new Error('principal check timeout is invalid');
     }
+  }
+
+  bindDomain(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    context: Readonly<TeamPrincipalContext>,
+  ): Readonly<BoundTeamDomain> {
+    const capabilities = sortedCapabilities(identity.capabilities);
+    if (
+      context.store_id !== this.signer.storeId || context.team_id !== this.signer.teamId ||
+      JSON.stringify(sortedCapabilities(context.capabilities)) !== JSON.stringify(capabilities) ||
+      !capabilities.includes('pulse:connect') || !capabilities.includes('pulse:write')
+    ) {
+      throw new TeamDomainError('invalid_principal');
+    }
+    const boundIdentity = Object.freeze({
+      issuer: requireBoundedIdentity(identity.issuer),
+      subject: requireBoundedIdentity(identity.subject),
+      clientId: requireBoundedIdentity(identity.clientId),
+      capabilities: Object.freeze(capabilities),
+    });
+    const requestId = requireOpaqueValue(context.request_id, 'request ID');
+    return Object.freeze({
+      remember: (input: unknown) => this.remember(boundIdentity, requestId, input),
+    });
   }
 
   async check(identity: VerifiedOAuthIdentity, requestId: string): Promise<Readonly<TeamPrincipalContext>> {
@@ -374,6 +410,69 @@ export class TeamPrincipalClient {
     }
     await response.body?.cancel().catch(() => undefined);
   }
+
+  private async remember(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamRememberResult> {
+    const body = canonicalTeamRememberBody(input);
+    let assertion: string;
+    try {
+      assertion = await this.signer.signDomainRequest({
+        requestId,
+        method: 'POST',
+        path: TEAM_MEMORY_REMEMBER_PATH,
+        body: body.bytes,
+        oauthIssuer: identity.issuer,
+        oauthSubject: identity.subject,
+        oauthClientId: identity.clientId,
+        capabilities: identity.capabilities,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    const ipcKey = this.apiKey();
+    if (ipcKey === '' || Buffer.byteLength(ipcKey, 'utf8') > 512) {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let response: Response;
+    try {
+      response = await this.fetcher(this.teamMemoryEndpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Pulse-Key': ipcKey,
+          'X-Pulse-Principal': assertion,
+          'X-Pulse-Request-ID': requestId,
+        },
+        body: body.text,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (!isJSONResponse(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let value: unknown;
+    try {
+      value = await readBoundedJSONResponse(response, response.status === 200 ? 16 * 1024 : 4 * 1024);
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (response.status !== 200) {
+      const code = exactTeamDomainError(response.status, value);
+      throw new TeamDomainError(code ?? 'shared_memory_unavailable');
+    }
+    try {
+      return validateTeamRememberResult(value, body.value.items.length);
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+  }
 }
 
 export class PrincipalSigner {
@@ -403,6 +502,17 @@ export class PrincipalSigner {
     if (input.method !== 'POST' || input.path !== '/team/v1/principal/check') {
       throw new Error('principal assertion request binding is invalid');
     }
+    return this.signPrincipalRequest(input);
+  }
+
+  async signDomainRequest(input: PrincipalCheckInput): Promise<string> {
+    if (input.method !== 'POST' || input.path !== TEAM_MEMORY_REMEMBER_PATH) {
+      throw new Error('principal assertion request binding is invalid');
+    }
+    return this.signPrincipalRequest(input);
+  }
+
+  private async signPrincipalRequest(input: PrincipalCheckInput): Promise<string> {
     const now = this.now();
     const capabilities = sortedCapabilities(input.capabilities);
     return new SignJWT({
@@ -570,6 +680,29 @@ function isExactRecord(value: unknown, keys: readonly string[]): value is Record
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const actual = Object.keys(value as Record<string, unknown>).sort();
   return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+}
+
+function isJSONResponse(response: Response): boolean {
+  return response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
+}
+
+function exactTeamDomainError(status: number, value: unknown): TeamDomainErrorCode | undefined {
+  if (!isExactRecord(value, ['error', 'fallback']) || value.fallback !== false || typeof value.error !== 'string') {
+    return undefined;
+  }
+  const allowed: Partial<Record<number, readonly TeamDomainErrorCode[]>> = {
+    400: ['invalid_team_memory'],
+    401: ['invalid_principal', 'principal_request_mismatch', 'principal_replay'],
+    403: ['principal_revoked', 'policy_denied'],
+    404: ['not_found'],
+    409: [
+      'idempotency_conflict', 'idempotency_in_progress',
+      'idempotency_failed', 'authorization_stale',
+    ],
+    503: ['shared_memory_unavailable'],
+  };
+  const code = value.error as TeamDomainErrorCode;
+  return allowed[status]?.includes(code) ? code : undefined;
 }
 
 function sortedCapabilities(values: readonly TeamCapability[]): TeamCapability[] {

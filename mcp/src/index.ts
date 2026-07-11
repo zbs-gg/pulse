@@ -27,7 +27,11 @@ import {
   resolveRuntimeMode,
   type RuntimeMode,
 } from './runtime-mode.js';
-import type { GatewaySecurityEventInput, TeamPrincipalContext } from './principal-context.js';
+import type {
+  BoundTeamDomain,
+  GatewaySecurityEventInput,
+  TeamPrincipalContext,
+} from './principal-context.js';
 
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
@@ -272,6 +276,7 @@ function redactStatusForMcp(value: unknown): unknown {
 export function createPulseMcpServer(
   runtimeMode: RuntimeMode = RUNTIME_MODE,
   teamContext?: Readonly<TeamPrincipalContext>,
+  teamDomain?: Readonly<BoundTeamDomain>,
 ): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
@@ -794,9 +799,26 @@ export function createPulseMcpServer(
     try {
       if (runtimeMode === 'team-remote') {
         if (!teamContext) throw new Error('team request context is unavailable');
-        const { isTeamToolName, teamNotReadyResult } = await loadTeamRemoteContracts();
+        const contracts = await loadTeamRemoteContracts();
+        const { isTeamToolName, teamNotReadyResult } = contracts;
         if (!isTeamToolName(name)) {
           throw new Error('Unknown team tool');
+        }
+        if (name === 'pulse_team_remember') {
+          if (!teamDomain) {
+            return contracts.teamDomainErrorResult('shared_memory_unavailable');
+          }
+          try {
+            return jsonText(await teamDomain.remember(args));
+          } catch (error) {
+            if (error instanceof contracts.TeamContractError) {
+              return contracts.teamDomainErrorResult('invalid_team_contract');
+            }
+            if (error instanceof contracts.TeamDomainError) {
+              return contracts.teamDomainErrorResult(error.code);
+            }
+            return contracts.teamDomainErrorResult('shared_memory_unavailable');
+          }
         }
         return teamNotReadyResult(name);
       }
@@ -1133,6 +1155,7 @@ async function startHttpMode(): Promise<void> {
         }
         let parsedBody: unknown;
         let teamContext: Readonly<TeamPrincipalContext>;
+        let teamDomain: Readonly<BoundTeamDomain> | undefined;
         if (req.method === 'POST') {
           if (singleHeader(req.headers['content-type']).split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
             writeTeamCors(res, requestOrigin);
@@ -1148,11 +1171,14 @@ async function startHttpMode(): Promise<void> {
             body: parsedBody,
             requestId,
           });
+          if (required.includes('pulse:write')) {
+            teamDomain = teamSecurity.principalClient.bindDomain(identity, teamContext);
+          }
         } else {
           teamContext = await teamSecurity.requestSecurity.resolveBaseline(identity, requestId);
         }
         writeTeamCors(res, requestOrigin);
-        await dispatchMcpRequest(req, res, parsedBody, teamContext);
+        await dispatchMcpRequest(req, res, parsedBody, teamContext, teamDomain);
       } catch (error) {
         if (terminateStartedResponse(res)) return;
         writeTeamCors(res, requestOrigin);
@@ -1286,8 +1312,9 @@ async function dispatchMcpRequest(
   res: ServerResponse,
   parsedBody: unknown,
   teamContext?: Readonly<TeamPrincipalContext>,
+  teamDomain?: Readonly<BoundTeamDomain>,
 ): Promise<void> {
-  const requestServer = createPulseMcpServer(RUNTIME_MODE, teamContext);
+  const requestServer = createPulseMcpServer(RUNTIME_MODE, teamContext, teamDomain);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });
