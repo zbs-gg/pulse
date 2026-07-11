@@ -283,8 +283,9 @@ func TestGenerationFenceAllowsTombstoneWithOldAttachmentsButRejectsLateAttachmen
 		t.Fatalf("tombstone root with old attachments: %v", err)
 	}
 	if _, err := tx.Exec(`
-		UPDATE team_projection_jobs
-		   SET state = 'cancelled', next_attempt_at = NULL, updated_at = '2026-07-10T00:01:00Z'
+			UPDATE team_projection_jobs
+			   SET state = 'cancelled', next_attempt_at = NULL,
+			       last_error_code = 'root_tombstoned', updated_at = '2026-07-10T00:01:00Z'
 		 WHERE root_object_id = 'root' AND root_generation = 1`); err != nil {
 		tx.Rollback()
 		t.Fatal(err)
@@ -419,6 +420,95 @@ func TestAuthorizedCandidateFilterUsesScopePredicatesAndConcealsAbsence(t *testi
 	}
 	if !errors.Is(inaccessibleErr, ErrConcealedNotFound) || !errors.Is(absentErr, ErrConcealedNotFound) || inaccessibleErr.Error() != absentErr.Error() {
 		t.Fatalf("concealment differs: inaccessible=%v absent=%v", inaccessibleErr, absentErr)
+	}
+}
+
+func TestAuthorizedCandidateFilterConcealsExpiredSessionObjectsAtCandidateAndResponseBoundaries(t *testing.T) {
+	ctx := context.Background()
+	s, bootstrap := bootstrapTeamStore(t)
+	defer s.Close()
+
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	s.clock = func() time.Time { return now }
+	expiresAt := now.Add(5 * time.Minute)
+	if _, err := s.DB().Exec(`
+		INSERT INTO team_object_registry(
+			object_id, store_id, team_id, object_kind, scope_type, scope_id,
+			owner_principal_id, author_principal_id, privacy_tier, retention,
+			lifecycle, generation, expires_at, created_at, updated_at)
+		VALUES ('active-session', ?, ?, 'memory', 'session', 'session-opaque', ?, ?,
+			'normal', 'session', 'active', 1, ?, ?, ?)`,
+		bootstrap.StoreID, bootstrap.TeamID, bootstrap.OwnerPrincipalID,
+		bootstrap.OwnerPrincipalID, expiresAt.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	insertPolicyObject(t, s, bootstrap, "durable-personal", "personal", bootstrap.OwnerPrincipalID, bootstrap.OwnerPrincipalID)
+
+	buildFilter := func() AuthorizedCandidateFilter {
+		t.Helper()
+		filter, err := s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
+			PrincipalID:  bootstrap.OwnerPrincipalID,
+			Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
+			Context: teamauth.ActiveContext{
+				TeamID: bootstrap.TeamID, SessionID: "session-opaque",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filter
+	}
+	candidates := func(filter AuthorizedCandidateFilter) []string {
+		t.Helper()
+		predicate, args, err := filter.SQLPredicate("object")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(predicate, "expires_at") || strings.Contains(strings.ToLower(predicate), "object_id in") {
+			t.Fatalf("expiry filter is not a bounded SQL predicate: %s", predicate)
+		}
+		rows, err := s.DB().Query(`
+			SELECT object.object_id
+			  FROM team_object_registry object
+			 WHERE `+predicate+`
+			 ORDER BY object.object_id`, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+
+	filterBeforeExpiry := buildFilter()
+	if got, want := candidates(filterBeforeExpiry), []string{"active-session", "durable-personal"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pre-expiry candidates = %v, want %v", got, want)
+	}
+
+	now = expiresAt
+	filterAfterExpiry := buildFilter()
+	if got, want := candidates(filterAfterExpiry), []string{"durable-personal"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-expiry candidates = %v, want %v", got, want)
+	}
+	if _, err := s.LookupAuthorizedTeamObject(ctx, filterBeforeExpiry, "active-session"); !errors.Is(err, ErrConcealedNotFound) {
+		t.Fatalf("stale pre-expiry filter lookup error = %v, want concealed", err)
+	}
+	if err := s.RecheckAuthorizedTeamObjectAccess(ctx, filterBeforeExpiry, "active-session"); !errors.Is(err, ErrConcealedNotFound) {
+		t.Fatalf("expired session side-effect recheck error = %v, want concealed", err)
+	}
+	if err := s.RecheckAuthorizedTeamObjectAccess(ctx, filterBeforeExpiry, "durable-personal"); err != nil {
+		t.Fatalf("non-expiring personal object recheck: %v", err)
 	}
 }
 
@@ -977,15 +1067,29 @@ func insertProjectionJobFixture(
 	leaseHash, leaseExpiry, nextAttempt *string,
 ) error {
 	t.Helper()
+	var terminalHash, completionDigest, lastError any
+	if state == "failed" {
+		terminalHash = strings.Repeat("b", 64)
+		lastError = TeamProjectionFailureTemporary
+	}
+	if state == "ready" {
+		terminalHash = strings.Repeat("b", 64)
+		completionDigest = strings.Repeat("c", 64)
+	}
+	if state == "cancelled" {
+		lastError = TeamProjectionCancellationRootTombstoned
+	}
 	_, err := s.DB().Exec(`
 		INSERT INTO team_projection_jobs(
 			job_id, store_id, team_id, root_object_id, root_generation,
 			scope_type, scope_id, projection_kind, state, attempt_count,
-			lease_token_hash, lease_expires_at, next_attempt_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, 'personal', ?, ?, ?, ?, ?, ?, ?,
+			lease_token_hash, terminal_lease_token_hash, completion_digest,
+			lease_expires_at, next_attempt_at, last_error_code, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, 'personal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			'2026-07-11T00:00:00Z', '2026-07-11T00:00:00Z')`,
 		jobID, bootstrap.StoreID, bootstrap.TeamID, rootID, bootstrap.OwnerPrincipalID,
-		projectionKind, state, attempts, leaseHash, leaseExpiry, nextAttempt)
+		projectionKind, state, attempts, leaseHash, terminalHash, completionDigest,
+		leaseExpiry, nextAttempt, lastError)
 	return err
 }
 
@@ -1093,8 +1197,9 @@ func TestProjectionJobOutputLineageResolvesIntentAndPreservesOldAttachments(t *t
 	}
 	if _, err := s.DB().Exec(`
 		UPDATE team_projection_jobs
-		   SET state = 'ready', lease_token_hash = NULL, lease_expires_at = NULL
-		 WHERE job_id = 'output-job'`); err != nil {
+		   SET state = 'ready', terminal_lease_token_hash = lease_token_hash,
+		       completion_digest = ?, lease_token_hash = NULL, lease_expires_at = NULL
+		 WHERE job_id = 'output-job'`, strings.Repeat("c", 64)); err != nil {
 		t.Fatalf("complete output job: %v", err)
 	}
 	if _, err := s.DB().Exec(`
@@ -1280,6 +1385,85 @@ func TestSessionScopedObjectsRequireAnExpiry(t *testing.T) {
 	expires := "2026-07-12T00:00:00Z"
 	if err := insert("session-with-expiry", &expires); err != nil {
 		t.Fatalf("session-scoped object with expiry: %v", err)
+	}
+}
+
+func TestPolicyReadinessRejectsMissingOrMalformedSessionExpiry(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		scopeType   string
+		retention   string
+		expiresAt   any
+		bypassCheck bool
+		wantReady   bool
+	}{
+		{
+			name: "session scope without expiry", scopeType: "session", retention: "session",
+			bypassCheck: true,
+		},
+		{
+			name: "session retention without expiry", scopeType: "personal", retention: "session",
+			bypassCheck: true,
+		},
+		{
+			name: "malformed session expiry", scopeType: "session", retention: "session",
+			expiresAt: strings.Repeat("x", 20),
+		},
+		{
+			name: "session expiry exceeds maximum lifetime", scopeType: "session", retention: "session",
+			expiresAt: "2026-07-11T10:00:01Z",
+		},
+		{
+			name: "session expiry is not after creation", scopeType: "session", retention: "session",
+			expiresAt: "2026-07-10T10:00:00Z",
+		},
+		{
+			name: "expired session is structurally valid", scopeType: "session", retention: "session",
+			expiresAt: "2026-07-10T11:00:00Z", wantReady: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, bootstrap := bootstrapTeamStore(t)
+			defer s.Close()
+			lease := acquireReadyWriter(t, s)
+			if test.bypassCheck {
+				s.DB().SetMaxOpenConns(1)
+				if _, err := s.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scopeID := "session-opaque"
+			if test.scopeType == "personal" {
+				scopeID = bootstrap.OwnerPrincipalID
+			}
+			if _, err := s.DB().Exec(`
+				INSERT INTO team_object_registry(
+					object_id, store_id, team_id, object_kind, scope_type, scope_id,
+					owner_principal_id, author_principal_id, privacy_tier, retention,
+					lifecycle, generation, expires_at, created_at, updated_at)
+				VALUES ('session-expiry-readiness', ?, ?, 'memory', ?, ?, ?, ?,
+					'normal', ?, 'active', 1, ?,
+					'2026-07-10T10:00:00Z', '2026-07-10T10:00:00Z')`,
+				bootstrap.StoreID, bootstrap.TeamID, test.scopeType, scopeID,
+				bootstrap.OwnerPrincipalID, bootstrap.OwnerPrincipalID,
+				test.retention, test.expiresAt); err != nil {
+				t.Fatal(err)
+			}
+			if test.bypassCheck {
+				if _, err := s.DB().Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, err := s.CheckTeamPolicyReadiness(context.Background(), policyReadinessOptions(bootstrap, lease))
+			if test.wantReady {
+				if err != nil {
+					t.Fatalf("expired but valid session readiness: %v", err)
+				}
+			} else if !errors.Is(err, ErrTeamPolicyNotReady) {
+				t.Fatalf("readiness error = %v, want %v", err, ErrTeamPolicyNotReady)
+			}
+		})
 	}
 }
 

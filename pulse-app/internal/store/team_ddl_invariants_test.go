@@ -175,6 +175,8 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 		"team_audit_event_order_no_update",
 		"team_audit_event_order_no_delete",
 		"team_projection_jobs_active_generation_on_state",
+		"team_projection_jobs_cancel_only_tombstoned",
+		"team_projection_jobs_terminal_immutable",
 		"team_projection_outputs_generation_fence_insert",
 	} {
 		var count int
@@ -187,13 +189,18 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 	}
 
 	columns := teamTableColumns(t, s, "team_projection_jobs")
-	for _, required := range []string{"lease_token_hash", "next_attempt_at"} {
+	for _, required := range []string{"lease_token_hash", "terminal_lease_token_hash", "completion_digest", "next_attempt_at"} {
 		if _, ok := columns[required]; !ok {
 			t.Fatalf("team_projection_jobs missing %s", required)
 		}
 	}
 	if _, unsafe := columns["lease_token"]; unsafe {
 		t.Fatal("team_projection_jobs still persists raw lease_token")
+	}
+	for _, unsafe := range []string{"terminal_lease_token", "completion_payload"} {
+		if _, present := columns[unsafe]; present {
+			t.Fatalf("team_projection_jobs persists unsafe terminal material %s", unsafe)
+		}
 	}
 }
 

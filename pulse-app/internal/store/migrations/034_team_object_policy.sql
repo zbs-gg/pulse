@@ -480,6 +480,18 @@ CREATE TABLE team_projection_jobs (
                              AND lease_token_hash NOT GLOB '*[^0-9a-f]*'
                          )
                      ),
+    terminal_lease_token_hash TEXT CHECK(
+                         terminal_lease_token_hash IS NULL OR (
+                             length(terminal_lease_token_hash) = 64
+                             AND terminal_lease_token_hash NOT GLOB '*[^0-9a-f]*'
+                         )
+                     ),
+    completion_digest TEXT CHECK(
+                         completion_digest IS NULL OR (
+                             length(completion_digest) = 64
+                             AND completion_digest NOT GLOB '*[^0-9a-f]*'
+                         )
+                     ),
     lease_expires_at TEXT CHECK(lease_expires_at IS NULL OR length(lease_expires_at) BETWEEN 20 AND 40),
     next_attempt_at  TEXT CHECK(next_attempt_at IS NULL OR length(next_attempt_at) BETWEEN 20 AND 40),
     last_error_code  TEXT CHECK(
@@ -495,14 +507,32 @@ CREATE TABLE team_projection_jobs (
     CHECK(
            (state = 'leased' AND attempt_count >= 1
              AND lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL
-             AND next_attempt_at IS NULL)
-        OR (state IN ('pending', 'failed')
+             AND terminal_lease_token_hash IS NULL AND completion_digest IS NULL
+             AND next_attempt_at IS NULL AND last_error_code IS NULL)
+        OR (state = 'pending'
              AND lease_token_hash IS NULL AND lease_expires_at IS NULL
+             AND terminal_lease_token_hash IS NULL AND completion_digest IS NULL
+             AND next_attempt_at IS NOT NULL AND last_error_code IS NULL)
+        OR (state = 'failed' AND attempt_count >= 1
+             AND lease_token_hash IS NULL AND lease_expires_at IS NULL
+             AND terminal_lease_token_hash IS NOT NULL AND completion_digest IS NULL
              AND next_attempt_at IS NOT NULL
-             AND (state <> 'failed' OR attempt_count >= 1))
-        OR (state IN ('ready', 'cancelled')
+             AND last_error_code IN (
+                 'dependency_timeout', 'dependency_unavailable', 'rate_limited',
+                 'storage_unavailable', 'worker_interrupted',
+                 'materialization_failed', 'temporary_failure'
+             ))
+        OR (state = 'ready'
              AND lease_token_hash IS NULL AND lease_expires_at IS NULL
-             AND next_attempt_at IS NULL)
+             AND terminal_lease_token_hash IS NOT NULL AND completion_digest IS NOT NULL
+             AND next_attempt_at IS NULL AND last_error_code IS NULL)
+        OR (state = 'cancelled'
+             AND lease_token_hash IS NULL AND lease_expires_at IS NULL
+             AND terminal_lease_token_hash IS NULL AND completion_digest IS NULL
+             AND next_attempt_at IS NULL
+             AND last_error_code IN (
+                 'root_tombstoned', 'root_deleted', 'generation_superseded'
+             ))
     )
 );
 CREATE INDEX idx_team_projection_jobs_claim
@@ -537,6 +567,25 @@ WHEN NEW.state IN ('leased', 'ready') AND NOT EXISTS (
        AND root.lifecycle = 'active'
 )
 BEGIN SELECT RAISE(ABORT, 'projection job cannot lease or complete a stale root'); END;
+
+CREATE TRIGGER team_projection_jobs_cancel_only_tombstoned
+BEFORE UPDATE OF state ON team_projection_jobs
+WHEN NEW.state = 'cancelled' AND NOT EXISTS (
+    SELECT 1 FROM team_object_registry root
+     WHERE root.object_id = NEW.root_object_id
+       AND root.store_id = NEW.store_id
+       AND root.team_id = NEW.team_id
+       AND root.scope_type = NEW.scope_type
+       AND root.scope_id = NEW.scope_id
+       AND root.lifecycle = 'tombstoned'
+       AND root.generation = NEW.root_generation + 1
+)
+BEGIN SELECT RAISE(ABORT, 'projection job cancellation requires its tombstoned root'); END;
+
+CREATE TRIGGER team_projection_jobs_terminal_immutable
+BEFORE UPDATE ON team_projection_jobs
+WHEN OLD.state IN ('ready', 'cancelled')
+BEGIN SELECT RAISE(ABORT, 'terminal projection job is immutable'); END;
 
 -- A job row is the durable unresolved projection intent. Outputs are attached
 -- only when a worker materializes canonical same-scope derivatives.

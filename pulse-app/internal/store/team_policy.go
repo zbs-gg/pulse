@@ -45,6 +45,7 @@ type AuthorizedCandidateFilter struct {
 	context          teamauth.ActiveContext
 	privacyCeiling   string
 	retention        string
+	authorizedAt     time.Time
 	epoch            teamauth.EpochSnapshot
 }
 
@@ -55,13 +56,21 @@ func (filter AuthorizedCandidateFilter) PolicyEpoch() teamauth.EpochSnapshot {
 var sqlAliasPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (filter AuthorizedCandidateFilter) SQLPredicate(alias string) (string, []any, error) {
+	return filter.sqlPredicateAt(alias, filter.authorizedAt)
+}
+
+func (filter AuthorizedCandidateFilter) sqlPredicateAt(alias string, at time.Time) (string, []any, error) {
 	if !sqlAliasPattern.MatchString(alias) {
 		return "", nil, fmt.Errorf("invalid SQL alias %q", alias)
+	}
+	if at.IsZero() {
+		return "", nil, fmt.Errorf("authorized candidate filter has no evaluation time")
 	}
 	column := func(name string) string { return alias + "." + name }
 	clauses := []string{
 		column("team_id") + " = ?",
 		column("lifecycle") + " = 'active'",
+		"(" + column("expires_at") + " IS NULL OR julianday(" + column("expires_at") + ") > julianday(?))",
 		`EXISTS (
 			SELECT 1 FROM team_policy_metadata policy
 			 WHERE policy.team_id = ` + column("team_id") + `
@@ -72,7 +81,8 @@ func (filter AuthorizedCandidateFilter) SQLPredicate(alias string) (string, []an
 		)`,
 	}
 	args := []any{
-		filter.teamID, teamauth.PolicyVersion, teamauth.SchemaVersion,
+		filter.teamID, at.UTC().Format(time.RFC3339Nano),
+		teamauth.PolicyVersion, teamauth.SchemaVersion,
 		filter.epoch.Policy, filter.epoch.Global,
 	}
 
@@ -274,7 +284,7 @@ func (s *Store) BuildAuthorizedCandidateFilter(ctx context.Context, request Cand
 		humanPrincipalID: humanID, bindingID: principal.BindingID,
 		kind: teamauth.PrincipalKind(principal.Kind), context: request.Context,
 		privacyCeiling: request.PrivacyCeiling, retention: request.Retention,
-		epoch: epoch,
+		authorizedAt: s.clock().UTC(), epoch: epoch,
 	}, nil
 }
 
@@ -297,10 +307,38 @@ func (s *Store) LookupAuthorizedTeamObject(ctx context.Context, filter Authorize
 	if err != nil {
 		return TeamObject{}, err
 	}
-	if err := s.RecheckTeamPolicyEpoch(ctx, filter.epoch); err != nil {
+	if err := s.RecheckAuthorizedTeamObjectAccess(ctx, filter, objectID); err != nil {
 		return TeamObject{}, err
 	}
 	return object, nil
+}
+
+// RecheckAuthorizedTeamObjectAccess repeats the fixed policy predicate with a
+// fresh clock value immediately before a response or object-specific side
+// effect. The exact object lookup remains bounded by the registry primary key.
+func (s *Store) RecheckAuthorizedTeamObjectAccess(ctx context.Context, filter AuthorizedCandidateFilter, objectID string) error {
+	if objectID == "" {
+		return ErrConcealedNotFound
+	}
+	if err := s.RecheckTeamPolicyEpoch(ctx, filter.epoch); err != nil {
+		return err
+	}
+	predicate, args, err := filter.sqlPredicateAt("object", s.clock().UTC())
+	if err != nil {
+		return err
+	}
+	args = append([]any{objectID}, args...)
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT 1
+		  FROM team_object_registry object
+		 WHERE object.object_id = ? AND `+predicate, args...).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrConcealedNotFound
+		}
+		return err
+	}
+	return s.RecheckTeamPolicyEpoch(ctx, filter.epoch)
 }
 
 type teamObjectScanner interface {
@@ -583,6 +621,23 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		     OR (object.scope_type = 'project' AND project.project_id IS NULL)
 		     OR (object.scope_type IN ('project', 'repo', 'agent', 'session')
 		         AND object.owner_principal_id IS NULL)
+		     OR ((object.scope_type = 'session' OR object.retention = 'session') AND (
+		         object.expires_at IS NULL
+		         OR julianday(object.created_at) IS NULL
+		         OR julianday(object.expires_at) IS NULL
+		         OR julianday(object.expires_at) <= julianday(object.created_at)
+		         OR julianday(object.expires_at) > julianday(object.created_at, '+24 hours')
+		         OR substr(object.expires_at, 1, 19) NOT GLOB
+		            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+		         OR NOT (
+		            (length(object.expires_at) = 20 AND substr(object.expires_at, 20, 1) = 'Z')
+		            OR (length(object.expires_at) BETWEEN 22 AND 30
+		                AND substr(object.expires_at, 20, 1) = '.'
+		                AND substr(object.expires_at, -1, 1) = 'Z'
+		                AND substr(object.expires_at, 21, length(object.expires_at) - 21)
+		                    NOT GLOB '*[^0-9]*')
+		         )
+		     ))
 		     OR object.lifecycle NOT IN ('active', 'tombstoned', 'cleaning', 'cleanup_failed', 'complete')
 		     OR object.generation < 1
 		 LIMIT 1`, args: []any{policy.StoreID, policy.TeamID}},
