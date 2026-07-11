@@ -53,7 +53,10 @@ const TEAM_TOOL_CONTRACTS = [
 
 export const TEAM_MEMORY_SCHEMA = 'pulse.team.memory.v1' as const;
 export const TEAM_MEMORY_RESULT_SCHEMA = 'pulse.team.memory_result.v1' as const;
+export const TEAM_GRAPH_DELTA_SCHEMA = 'pulse.team.graph_delta.v1' as const;
+export const TEAM_GRAPH_DELTA_RESULT_SCHEMA = 'pulse.team.graph_delta_result.v1' as const;
 const TEAM_MEMORY_MAX_BODY_BYTES = 256 << 10;
+const TEAM_GRAPH_DELTA_MAX_BODY_BYTES = 256 << 10;
 
 export const TEAM_REMEMBER_INPUT_SCHEMA = {
   type: 'object' as const,
@@ -156,6 +159,236 @@ export const TEAM_REMEMBER_INPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const TEAM_GRAPH_DOMAIN_SCHEMA = {
+  type: 'string' as const,
+  enum: ['real', 'fiction_content', 'fiction_meta', 'meta_authorial'],
+};
+
+const TEAM_GRAPH_SCORE_SCHEMA = {
+  type: 'number' as const,
+  minimum: 0,
+  maximum: 1,
+};
+
+export const TEAM_GRAPH_DELTA_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_GRAPH_DELTA_SCHEMA },
+    source: {
+      type: 'object' as const,
+      properties: {
+        host: {
+          type: 'string' as const,
+          enum: [
+            'chatgpt', 'claude', 'codex', 'claude-code', 'gemini-cli',
+            'cursor', 'langchain', 'crewai', 'pulse-cli',
+          ],
+        },
+        conversation_scope: {
+          type: 'string' as const,
+          enum: ['current_turn', 'user_selected_excerpt', 'project_context', 'install_event'],
+        },
+        timestamp: { type: 'string' as const, format: 'date-time' },
+      },
+      required: ['host', 'conversation_scope', 'timestamp'],
+      additionalProperties: false,
+    },
+    nodes: {
+      type: 'array' as const,
+      maxItems: 30,
+      items: {
+        type: 'object' as const,
+        properties: {
+          client_id: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          kind: {
+            type: 'string' as const,
+            enum: [
+              'person', 'place', 'project', 'org', 'product', 'community',
+              'skill', 'concept', 'thing', 'event_series',
+            ],
+          },
+          canonical_name: { type: 'string' as const, minLength: 1, maxLength: 160 },
+          summary: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+          aliases: {
+            type: 'array' as const,
+            maxItems: 20,
+            uniqueItems: true,
+            items: { type: 'string' as const, minLength: 1, maxLength: 160 },
+          },
+          salience: TEAM_GRAPH_SCORE_SCHEMA,
+          emotional_weight: TEAM_GRAPH_SCORE_SCHEMA,
+          domain: TEAM_GRAPH_DOMAIN_SCHEMA,
+        },
+        required: ['client_id', 'kind', 'canonical_name', 'domain'],
+        additionalProperties: false,
+      },
+    },
+    edges: {
+      type: 'array' as const,
+      maxItems: 50,
+      items: {
+        type: 'object' as const,
+        properties: {
+          from: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          to: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          kind: { type: 'string' as const, minLength: 1, maxLength: 64 },
+          summary: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+          strength: TEAM_GRAPH_SCORE_SCHEMA,
+        },
+        required: ['from', 'to', 'kind'],
+        additionalProperties: false,
+      },
+    },
+    facts: {
+      type: 'array' as const,
+      maxItems: 50,
+      items: {
+        type: 'object' as const,
+        properties: {
+          node: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          text: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+          predicate: { type: 'string' as const, minLength: 1, maxLength: 120 },
+          object_text: { type: 'string' as const, minLength: 1, maxLength: 400 },
+          valid_from: { type: 'string' as const, format: 'date-time' },
+          change_cue: { type: 'boolean' as const },
+          source_event_refs: {
+            type: 'array' as const,
+            maxItems: 20,
+            uniqueItems: true,
+            items: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          },
+          confidence: TEAM_GRAPH_SCORE_SCHEMA,
+          domain: TEAM_GRAPH_DOMAIN_SCHEMA,
+        },
+        required: ['node', 'text', 'confidence', 'domain'],
+        dependentRequired: {
+          predicate: ['object_text'],
+          object_text: ['predicate'],
+          valid_from: ['predicate', 'object_text'],
+          change_cue: ['predicate', 'object_text'],
+          source_event_refs: ['predicate', 'object_text'],
+        },
+        additionalProperties: false,
+      },
+    },
+    events: {
+      type: 'array' as const,
+      maxItems: 20,
+      items: {
+        type: 'object' as const,
+        properties: {
+          client_id: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          title: { type: 'string' as const, minLength: 1, maxLength: 180 },
+          summary: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+          entity_refs: {
+            type: 'array' as const,
+            maxItems: 20,
+            uniqueItems: true,
+            items: { type: 'string' as const, minLength: 2, maxLength: 96 },
+          },
+          sentiment: { type: 'string' as const, minLength: 1, maxLength: 240 },
+          emotional_weight: TEAM_GRAPH_SCORE_SCHEMA,
+          confidence: TEAM_GRAPH_SCORE_SCHEMA,
+          domain: TEAM_GRAPH_DOMAIN_SCHEMA,
+          occurred_at: { type: 'string' as const, format: 'date-time' },
+          anchor: { type: 'boolean' as const },
+          biometrics: {
+            type: 'object' as const,
+            properties: {
+              hrv: { type: 'number' as const, minimum: 0, maximum: 300 },
+              sleep_quality: TEAM_GRAPH_SCORE_SCHEMA,
+              stress_proxy: TEAM_GRAPH_SCORE_SCHEMA,
+              hr_trend: { type: 'string' as const, enum: ['rising', 'stable', 'falling'] },
+              hrv_trend: { type: 'string' as const, enum: ['rising', 'stable', 'falling'] },
+              workout: { type: 'boolean' as const },
+            },
+            additionalProperties: false,
+          },
+          emotions: {
+            type: 'object' as const,
+            properties: Object.fromEntries([
+              'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust',
+              'anticipation', 'surprise', 'shame', 'guilt',
+            ].map((emotion) => [emotion, TEAM_GRAPH_SCORE_SCHEMA])),
+            additionalProperties: false,
+          },
+        },
+        required: ['client_id', 'title', 'summary', 'confidence', 'domain'],
+        additionalProperties: false,
+      },
+    },
+    continuity: {
+      type: 'object' as const,
+      properties: {
+        thread_id: { type: 'string' as const, minLength: 1, maxLength: 96 },
+        session_id: { type: 'string' as const, minLength: 1, maxLength: 96 },
+        summary: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+        decisions: teamContinuityArraySchema(),
+        open_loops: teamContinuityArraySchema(),
+        do_not_repeat: teamContinuityArraySchema(),
+        emotional_anchors: teamContinuityArraySchema(),
+        state_signals: teamContinuityArraySchema(),
+        active_threads: teamContinuityArraySchema(),
+        review_insights: teamContinuityArraySchema(),
+      },
+      required: ['thread_id', 'session_id', 'summary'],
+      additionalProperties: false,
+    },
+    raw_input_included: { type: 'boolean' as const, const: false },
+    active_context: {
+      type: 'object' as const,
+      properties: {
+        project_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+        repo_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+        agent_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+        session_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+      },
+      additionalProperties: false,
+    },
+    target_scope: {
+      type: 'object' as const,
+      properties: {
+        type: { type: 'string' as const, enum: ['personal', 'project', 'repo', 'agent', 'session'] },
+        id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+      },
+      required: ['type'],
+      additionalProperties: false,
+      oneOf: [
+        { properties: { type: { const: 'personal' } }, not: { required: ['id'] } },
+        {
+          properties: { type: { enum: ['project', 'repo', 'agent', 'session'] } },
+          required: ['id'],
+        },
+      ],
+    },
+    privacy_tier: { type: 'string' as const, enum: ['normal', 'sensitive', 'private'] },
+    retention: { type: 'string' as const, enum: ['session', 'project', 'long_term'] },
+    expires_at: { type: 'string' as const, format: 'date-time' },
+    idempotency_key: { type: 'string' as const, minLength: 8, maxLength: 255 },
+  },
+  required: [
+    'schema', 'source', 'nodes', 'edges', 'facts', 'events',
+    'raw_input_included', 'active_context', 'privacy_tier', 'retention',
+    'idempotency_key',
+  ],
+  anyOf: [
+    { properties: { nodes: { minItems: 1 } } },
+    { properties: { edges: { minItems: 1 } } },
+    { properties: { facts: { minItems: 1 } } },
+    { properties: { events: { minItems: 1 } } },
+    { required: ['continuity'] },
+  ],
+  additionalProperties: false,
+} as const;
+
+function teamContinuityArraySchema() {
+  return {
+    type: 'array' as const,
+    maxItems: 20,
+    items: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+  };
+}
+
 const TEAM_HOSTS = new Set([
   'chatgpt', 'claude', 'codex', 'claude-code', 'gemini-cli',
   'cursor', 'langchain', 'crewai', 'pulse-cli',
@@ -173,9 +406,27 @@ const TEAM_EVIDENCE_HINTS = new Set([
 const TEAM_PRIVACY_TIERS = new Set(['normal', 'sensitive', 'private']);
 const TEAM_RETENTION = new Set(['session', 'project', 'long_term']);
 const TEAM_TARGET_TYPES = new Set(['personal', 'project', 'repo', 'agent', 'session']);
+const TEAM_GRAPH_ENTITY_KINDS = new Set([
+  'person', 'place', 'project', 'org', 'product', 'community',
+  'skill', 'concept', 'thing', 'event_series',
+]);
+const TEAM_GRAPH_DOMAINS = new Set([
+  'real', 'fiction_content', 'fiction_meta', 'meta_authorial',
+]);
+const TEAM_GRAPH_TRENDS = new Set(['rising', 'stable', 'falling']);
+const TEAM_GRAPH_EMOTION_ORDER = [
+  'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust',
+  'anticipation', 'surprise', 'shame', 'guilt',
+] as const;
+const TEAM_GRAPH_EMOTIONS = new Set<string>(TEAM_GRAPH_EMOTION_ORDER);
 const TEAM_ENVELOPE_FIELDS = new Set([
   'schema', 'source', 'items', 'raw_input_included', 'active_context',
   'target_scope', 'privacy_tier', 'retention', 'expires_at', 'idempotency_key',
+]);
+const TEAM_GRAPH_ENVELOPE_FIELDS = new Set([
+  'schema', 'source', 'nodes', 'edges', 'facts', 'events', 'continuity',
+  'raw_input_included', 'active_context', 'target_scope', 'privacy_tier',
+  'retention', 'expires_at', 'idempotency_key',
 ]);
 const TEAM_SOURCE_FIELDS = new Set(['host', 'conversation_scope', 'timestamp']);
 const TEAM_ITEM_FIELDS = new Set([
@@ -185,9 +436,32 @@ const TEAM_ACTIVE_CONTEXT_FIELDS = new Set([
   'project_id', 'repo_id', 'agent_id', 'session_id',
 ]);
 const TEAM_TARGET_FIELDS = new Set(['type', 'id']);
+const TEAM_GRAPH_NODE_FIELDS = new Set([
+  'client_id', 'kind', 'canonical_name', 'summary', 'aliases',
+  'salience', 'emotional_weight', 'domain',
+]);
+const TEAM_GRAPH_EDGE_FIELDS = new Set(['from', 'to', 'kind', 'summary', 'strength']);
+const TEAM_GRAPH_FACT_FIELDS = new Set([
+  'node', 'text', 'predicate', 'object_text', 'valid_from', 'change_cue',
+  'source_event_refs', 'confidence', 'domain',
+]);
+const TEAM_GRAPH_EVENT_FIELDS = new Set([
+  'client_id', 'title', 'summary', 'entity_refs', 'sentiment',
+  'emotional_weight', 'confidence', 'domain', 'occurred_at', 'anchor',
+  'biometrics', 'emotions',
+]);
+const TEAM_GRAPH_BIOMETRIC_FIELDS = new Set([
+  'hrv', 'sleep_quality', 'stress_proxy', 'hr_trend', 'hrv_trend', 'workout',
+]);
+const TEAM_GRAPH_CONTINUITY_FIELDS = new Set([
+  'thread_id', 'session_id', 'summary', 'decisions', 'open_loops',
+  'do_not_repeat', 'emotional_anchors', 'state_signals', 'active_threads',
+  'review_insights',
+]);
 const TEAM_SAFE_TAG = /^[\p{L}\p{N}][\p{L}\p{N}._:-]{0,63}$/u;
 const TEAM_SAFE_OPAQUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
-const TEAM_RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+const TEAM_SEMANTIC_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,95}$/;
+const TEAM_RFC3339 = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|([+-])(\d{2}):(\d{2}))$/;
 const TEAM_SECRET_MARKERS = [
   'token=', 'api_key', 'apikey', 'password', 'secret', 'private_key',
   'begin private key', 'authorization: bearer', 'akia', 'xoxb-', 'ghp_',
@@ -212,6 +486,7 @@ export class TeamContractError extends Error {
 
 export type TeamDomainErrorCode =
   | 'invalid_team_memory'
+  | 'invalid_team_graph_delta'
   | 'invalid_principal'
   | 'principal_request_mismatch'
   | 'principal_replay'
@@ -228,7 +503,7 @@ export class TeamDomainError extends Error {
   readonly code: TeamDomainErrorCode;
 
   constructor(code: TeamDomainErrorCode) {
-    super('team memory domain request failed');
+    super('team domain request failed');
     this.name = 'TeamDomainError';
     this.code = code;
   }
@@ -281,10 +556,26 @@ function teamEnum(field: string, value: unknown, allowed: ReadonlySet<string>): 
 
 function teamRFC3339(field: string, value: unknown): string {
   const clean = teamString(field, value, 1, 64);
-  if (!TEAM_RFC3339.test(clean) || Number.isNaN(Date.parse(clean))) {
+  const parts = TEAM_RFC3339.exec(clean);
+  if (!parts) failTeamContract(`${field} must be RFC3339`);
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const hour = Number(parts[4]);
+  const minute = Number(parts[5]);
+  const second = Number(parts[6]);
+  const offsetHour = parts[10] === undefined ? 0 : Number(parts[10]);
+  const offsetMinute = parts[11] === undefined ? 0 : Number(parts[11]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [0, 31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month] ?? 0;
+  const parsed = Date.parse(clean);
+  if (
+    day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 ||
+    offsetHour > 23 || offsetMinute > 59 || Number.isNaN(parsed)
+  ) {
     failTeamContract(`${field} must be RFC3339`);
   }
-  return new Date(clean).toISOString();
+  return new Date(parsed).toISOString();
 }
 
 function countOccurrences(text: string, needle: string): number {
@@ -327,6 +618,90 @@ function safeTeamOpaque(field: string, value: unknown, minimum = 1): string {
     failTeamContract(`${field} must be a safe opaque identifier`);
   }
   return clean;
+}
+
+function safeTeamBoundedOpaque(
+  field: string,
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): string {
+  const clean = teamString(field, value, minimum, maximum);
+  if (!TEAM_SAFE_OPAQUE.test(clean) || unsafeTeamContentReason(clean)) {
+    failTeamContract(`${field} must be a safe opaque identifier`);
+  }
+  return clean;
+}
+
+function safeTeamSemanticRef(field: string, value: unknown): string {
+  const clean = teamString(field, value, 2, 96);
+  if (!TEAM_SEMANTIC_REF.test(clean) || unsafeTeamContentReason(clean)) {
+    failTeamContract(`${field} must be a safe semantic reference`);
+  }
+  return clean;
+}
+
+function safeTeamSlug(field: string, value: unknown): string {
+  const clean = safeTeamText(field, value, 64);
+  if (!TEAM_SAFE_TAG.test(clean)) failTeamContract(`${field} is unsafe`);
+  return clean;
+}
+
+function optionalSafeTeamText(field: string, value: unknown, maximum: number): string | undefined {
+  return value === undefined ? undefined : safeTeamText(field, value, maximum);
+}
+
+function teamFiniteNumber(
+  field: string,
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  required: boolean,
+  fallback?: number,
+): number | undefined {
+  if (value === undefined) {
+    if (required) failTeamContract(`${field} is required`);
+    return fallback;
+  }
+  if (
+    typeof value !== 'number' || !Number.isFinite(value) ||
+    value < minimum || value > maximum
+  ) {
+    failTeamContract(`${field} must be ${minimum}..${maximum}`);
+  }
+  return value;
+}
+
+function optionalTeamBoolean(field: string, value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') failTeamContract(`${field} must be a boolean`);
+  return value;
+}
+
+function canonicalTeamSet(
+  field: string,
+  value: unknown,
+  maximumItems: number,
+  cleaner: (field: string, value: unknown) => string,
+): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    failTeamContract(`${field} must contain at most ${maximumItems} items`);
+  }
+  const clean = value.map((entry, index) => cleaner(`${field}[${index}]`, entry));
+  clean.sort(compareUnicodeCodePoints);
+  for (let index = 1; index < clean.length; index++) {
+    if (clean[index] === clean[index - 1]) failTeamContract(`${field} contains a duplicate`);
+  }
+  return clean;
+}
+
+function continuityTeamStrings(field: string, value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    failTeamContract(`${field} must contain at most 20 items`);
+  }
+  return value.map((entry, index) => safeTeamText(`${field}[${index}]`, entry, 1200));
 }
 
 export interface CleanTeamRememberInput {
@@ -494,6 +869,435 @@ export function canonicalTeamRememberBody(input: unknown): {
   return { value, text, bytes };
 }
 
+export interface CleanTeamGraphNode {
+  client_id: string;
+  kind: string;
+  canonical_name: string;
+  summary?: string;
+  aliases: string[];
+  salience: number;
+  emotional_weight: number;
+  domain: string;
+}
+
+export interface CleanTeamGraphEdge {
+  from: string;
+  to: string;
+  kind: string;
+  summary?: string;
+  strength: number;
+}
+
+export interface CleanTeamGraphFact {
+  node: string;
+  text: string;
+  predicate?: string;
+  object_text?: string;
+  valid_from?: string;
+  change_cue?: boolean;
+  source_event_refs?: string[];
+  confidence: number;
+  domain: string;
+}
+
+export interface CleanTeamGraphBiometrics {
+  hrv?: number;
+  sleep_quality?: number;
+  stress_proxy?: number;
+  hr_trend?: string;
+  hrv_trend?: string;
+  workout?: boolean;
+}
+
+export interface CleanTeamGraphEvent {
+  client_id: string;
+  title: string;
+  summary: string;
+  entity_refs: string[];
+  sentiment?: string;
+  emotional_weight: number;
+  confidence: number;
+  domain: string;
+  occurred_at: string;
+  anchor: boolean;
+  biometrics?: CleanTeamGraphBiometrics;
+  emotions: Record<string, number>;
+}
+
+export interface CleanTeamGraphContinuity {
+  thread_id: string;
+  session_id: string;
+  summary: string;
+  decisions: string[];
+  open_loops: string[];
+  do_not_repeat: string[];
+  emotional_anchors: string[];
+  state_signals: string[];
+  active_threads: string[];
+  review_insights: string[];
+}
+
+export interface CleanTeamGraphDeltaInput {
+  schema: typeof TEAM_GRAPH_DELTA_SCHEMA;
+  source: { host: string; conversation_scope: string; timestamp: string };
+  nodes: CleanTeamGraphNode[];
+  edges: CleanTeamGraphEdge[];
+  facts: CleanTeamGraphFact[];
+  events: CleanTeamGraphEvent[];
+  continuity?: CleanTeamGraphContinuity;
+  raw_input_included: false;
+  active_context: {
+    project_id?: string;
+    repo_id?: string;
+    agent_id?: string;
+    session_id?: string;
+  };
+  target_scope?: { type: string; id?: string };
+  privacy_tier: string;
+  retention: string;
+  expires_at?: string;
+  idempotency_key: string;
+}
+
+export type TeamGraphProjectionKind = 'claim' | 'continuity' | 'embedding' | 'graph';
+
+function requiredTeamGraphArray(
+  field: string,
+  value: unknown,
+  maximum: number,
+): unknown[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    failTeamContract(`${field} must be an array with at most ${maximum} items`);
+  }
+  return value;
+}
+
+function cleanTeamGraphActiveContext(value: unknown): CleanTeamGraphDeltaInput['active_context'] {
+  const active = teamRecord(value, 'active_context', TEAM_ACTIVE_CONTEXT_FIELDS);
+  const clean: CleanTeamGraphDeltaInput['active_context'] = {};
+  for (const field of ['project_id', 'repo_id', 'agent_id', 'session_id'] as const) {
+    if (active[field] !== undefined) {
+      clean[field] = safeTeamOpaque(`active_context.${field}`, active[field]);
+    }
+  }
+  return clean;
+}
+
+function cleanTeamGraphTarget(value: unknown): CleanTeamGraphDeltaInput['target_scope'] {
+  if (value === undefined) return undefined;
+  const target = teamRecord(value, 'target_scope', TEAM_TARGET_FIELDS);
+  const type = teamEnum('target_scope.type', target.type, TEAM_TARGET_TYPES);
+  if (type === 'personal') {
+    if (target.id !== undefined) failTeamContract('target_scope.id is not allowed for personal scope');
+    return { type };
+  }
+  return { type, id: safeTeamOpaque('target_scope.id', target.id) };
+}
+
+function cleanTeamGraphBiometrics(value: unknown, field: string): CleanTeamGraphBiometrics | undefined {
+  if (value === undefined) return undefined;
+  const raw = teamRecord(value, field, TEAM_GRAPH_BIOMETRIC_FIELDS);
+  const clean: CleanTeamGraphBiometrics = {};
+  if (raw.hrv !== undefined) {
+    clean.hrv = teamFiniteNumber(`${field}.hrv`, raw.hrv, 0, 300, false) as number;
+  }
+  if (raw.sleep_quality !== undefined) {
+    clean.sleep_quality = teamFiniteNumber(
+      `${field}.sleep_quality`, raw.sleep_quality, 0, 1, false,
+    ) as number;
+  }
+  if (raw.stress_proxy !== undefined) {
+    clean.stress_proxy = teamFiniteNumber(
+      `${field}.stress_proxy`, raw.stress_proxy, 0, 1, false,
+    ) as number;
+  }
+  if (raw.hr_trend !== undefined) {
+    clean.hr_trend = teamEnum(`${field}.hr_trend`, raw.hr_trend, TEAM_GRAPH_TRENDS);
+  }
+  if (raw.hrv_trend !== undefined) {
+    clean.hrv_trend = teamEnum(`${field}.hrv_trend`, raw.hrv_trend, TEAM_GRAPH_TRENDS);
+  }
+  if (raw.workout !== undefined) {
+    if (typeof raw.workout !== 'boolean') failTeamContract(`${field}.workout must be a boolean`);
+    clean.workout = raw.workout;
+  }
+  return clean;
+}
+
+function cleanTeamGraphEmotions(value: unknown, field: string): Record<string, number> {
+  if (value === undefined) return {};
+  const raw = teamRecord(value, field, TEAM_GRAPH_EMOTIONS);
+  const clean: Record<string, number> = {};
+  for (const emotion of TEAM_GRAPH_EMOTION_ORDER) {
+    if (raw[emotion] !== undefined) {
+      clean[emotion] = teamFiniteNumber(`${field}.${emotion}`, raw[emotion], 0, 1, true) as number;
+    }
+  }
+  return clean;
+}
+
+export function validateTeamGraphDeltaInput(input: unknown): CleanTeamGraphDeltaInput {
+  const envelope = teamRecord(input, 'input', TEAM_GRAPH_ENVELOPE_FIELDS);
+  if (envelope.schema !== TEAM_GRAPH_DELTA_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_GRAPH_DELTA_SCHEMA}`);
+  }
+  if (envelope.raw_input_included !== false) {
+    failTeamContract('raw_input_included must be false');
+  }
+
+  const source = teamRecord(envelope.source, 'source', TEAM_SOURCE_FIELDS);
+  const cleanSource = {
+    host: teamEnum('source.host', source.host, TEAM_HOSTS),
+    conversation_scope: teamEnum(
+      'source.conversation_scope', source.conversation_scope, TEAM_CONVERSATION_SCOPES,
+    ),
+    timestamp: teamRFC3339('source.timestamp', source.timestamp),
+  };
+  const activeContext = cleanTeamGraphActiveContext(envelope.active_context);
+  const targetScope = cleanTeamGraphTarget(envelope.target_scope);
+
+  const nodesIn = requiredTeamGraphArray('nodes', envelope.nodes, 30);
+  const edgesIn = requiredTeamGraphArray('edges', envelope.edges, 50);
+  const factsIn = requiredTeamGraphArray('facts', envelope.facts, 50);
+  const eventsIn = requiredTeamGraphArray('events', envelope.events, 20);
+  if (
+    nodesIn.length === 0 && edgesIn.length === 0 && factsIn.length === 0 &&
+    eventsIn.length === 0 && envelope.continuity === undefined
+  ) {
+    failTeamContract('team graph delta must include graph content or continuity');
+  }
+
+  const nodeRefs = new Set<string>();
+  const nodeKeys = new Set<string>();
+  const nodes = nodesIn.map((entry, index): CleanTeamGraphNode => {
+    const field = `nodes[${index}]`;
+    const node = teamRecord(entry, field, TEAM_GRAPH_NODE_FIELDS);
+    const clientId = safeTeamSemanticRef(`${field}.client_id`, node.client_id);
+    if (nodeRefs.has(clientId)) failTeamContract(`${field}.client_id is duplicate`);
+    nodeRefs.add(clientId);
+    const kind = teamEnum(`${field}.kind`, node.kind, TEAM_GRAPH_ENTITY_KINDS);
+    const canonicalName = safeTeamText(`${field}.canonical_name`, node.canonical_name, 160);
+    const domain = teamEnum(`${field}.domain`, node.domain, TEAM_GRAPH_DOMAINS);
+    const nodeKey = `${domain}\u0000${kind}\u0000${canonicalName.normalize('NFKC').toLowerCase()}`;
+    if (nodeKeys.has(nodeKey)) failTeamContract(`${field} duplicates a semantic node`);
+    nodeKeys.add(nodeKey);
+    const summary = optionalSafeTeamText(`${field}.summary`, node.summary, 1200);
+    return {
+      client_id: clientId,
+      kind,
+      canonical_name: canonicalName,
+      ...(summary === undefined ? {} : { summary }),
+      aliases: canonicalTeamSet(
+        `${field}.aliases`, node.aliases, 20,
+        (aliasField, value) => safeTeamText(aliasField, value, 160),
+      ),
+      salience: teamFiniteNumber(`${field}.salience`, node.salience, 0, 1, false, 0) as number,
+      emotional_weight: teamFiniteNumber(
+        `${field}.emotional_weight`, node.emotional_weight, 0, 1, false, 0,
+      ) as number,
+      domain,
+    };
+  });
+
+  const edgeKeys = new Set<string>();
+  const edges = edgesIn.map((entry, index): CleanTeamGraphEdge => {
+    const field = `edges[${index}]`;
+    const edge = teamRecord(entry, field, TEAM_GRAPH_EDGE_FIELDS);
+    const from = safeTeamSemanticRef(`${field}.from`, edge.from);
+    const to = safeTeamSemanticRef(`${field}.to`, edge.to);
+    if (!nodeRefs.has(from)) failTeamContract(`${field}.from references unknown node`);
+    if (!nodeRefs.has(to)) failTeamContract(`${field}.to references unknown node`);
+    const kind = safeTeamSlug(`${field}.kind`, edge.kind);
+    const key = `${from}\u0000${to}\u0000${kind}`;
+    if (edgeKeys.has(key)) failTeamContract(`${field} duplicates a semantic edge`);
+    edgeKeys.add(key);
+    const summary = optionalSafeTeamText(`${field}.summary`, edge.summary, 1200);
+    return {
+      from,
+      to,
+      kind,
+      ...(summary === undefined ? {} : { summary }),
+      strength: teamFiniteNumber(`${field}.strength`, edge.strength, 0, 1, false, 0) as number,
+    };
+  });
+
+  const eventRefs = new Set<string>();
+  const events = eventsIn.map((entry, index): CleanTeamGraphEvent => {
+    const field = `events[${index}]`;
+    const event = teamRecord(entry, field, TEAM_GRAPH_EVENT_FIELDS);
+    const clientId = safeTeamSemanticRef(`${field}.client_id`, event.client_id);
+    if (eventRefs.has(clientId)) failTeamContract(`${field}.client_id is duplicate`);
+    eventRefs.add(clientId);
+    const entityRefs = canonicalTeamSet(
+      `${field}.entity_refs`, event.entity_refs, 20, safeTeamSemanticRef,
+    );
+    for (const ref of entityRefs) {
+      if (!nodeRefs.has(ref)) failTeamContract(`${field}.entity_refs references unknown node`);
+    }
+    const sentiment = optionalSafeTeamText(`${field}.sentiment`, event.sentiment, 240);
+    const occurredAt = event.occurred_at === undefined
+      ? cleanSource.timestamp
+      : teamRFC3339(`${field}.occurred_at`, event.occurred_at);
+    const biometrics = cleanTeamGraphBiometrics(event.biometrics, `${field}.biometrics`);
+    return {
+      client_id: clientId,
+      title: safeTeamText(`${field}.title`, event.title, 180),
+      summary: safeTeamText(`${field}.summary`, event.summary, 1200),
+      entity_refs: entityRefs,
+      ...(sentiment === undefined ? {} : { sentiment }),
+      emotional_weight: teamFiniteNumber(
+        `${field}.emotional_weight`, event.emotional_weight, 0, 1, false, 0,
+      ) as number,
+      confidence: teamFiniteNumber(`${field}.confidence`, event.confidence, 0, 1, true) as number,
+      domain: teamEnum(`${field}.domain`, event.domain, TEAM_GRAPH_DOMAINS),
+      occurred_at: occurredAt,
+      anchor: optionalTeamBoolean(`${field}.anchor`, event.anchor, false),
+      ...(biometrics === undefined ? {} : { biometrics }),
+      emotions: cleanTeamGraphEmotions(event.emotions, `${field}.emotions`),
+    };
+  });
+
+  const factKeys = new Set<string>();
+  const facts = factsIn.map((entry, index): CleanTeamGraphFact => {
+    const field = `facts[${index}]`;
+    const fact = teamRecord(entry, field, TEAM_GRAPH_FACT_FIELDS);
+    const node = safeTeamSemanticRef(`${field}.node`, fact.node);
+    if (!nodeRefs.has(node)) failTeamContract(`${field}.node references unknown node`);
+    const text = safeTeamText(`${field}.text`, fact.text, 1200);
+    const hasPredicate = fact.predicate !== undefined;
+    const hasObject = fact.object_text !== undefined;
+    if (hasPredicate !== hasObject) {
+      failTeamContract(`${field}.predicate and object_text must be supplied together`);
+    }
+    const hasClaimMetadata = fact.valid_from !== undefined || fact.change_cue !== undefined ||
+      fact.source_event_refs !== undefined;
+    if (!hasPredicate && hasClaimMetadata) {
+      failTeamContract(`${field} structured claim metadata requires predicate and object_text`);
+    }
+
+    let predicate: string | undefined;
+    let objectText: string | undefined;
+    let validFrom: string | undefined;
+    let changeCue: boolean | undefined;
+    let sourceEventRefs: string[] | undefined;
+    if (hasPredicate) {
+      predicate = safeTeamText(`${field}.predicate`, fact.predicate, 120);
+      objectText = safeTeamText(`${field}.object_text`, fact.object_text, 400);
+      validFrom = fact.valid_from === undefined
+        ? cleanSource.timestamp
+        : teamRFC3339(`${field}.valid_from`, fact.valid_from);
+      changeCue = optionalTeamBoolean(`${field}.change_cue`, fact.change_cue, false);
+      sourceEventRefs = canonicalTeamSet(
+        `${field}.source_event_refs`, fact.source_event_refs, 20, safeTeamSemanticRef,
+      );
+      for (const ref of sourceEventRefs) {
+        if (!eventRefs.has(ref)) {
+          failTeamContract(`${field}.source_event_refs references unknown event`);
+        }
+      }
+    }
+    const domain = teamEnum(`${field}.domain`, fact.domain, TEAM_GRAPH_DOMAINS);
+    const key = [node, domain, text, predicate ?? '', objectText ?? '', validFrom ?? ''].join('\u0000');
+    if (factKeys.has(key)) failTeamContract(`${field} duplicates a semantic fact`);
+    factKeys.add(key);
+    return {
+      node,
+      text,
+      ...(predicate === undefined ? {} : {
+        predicate,
+        object_text: objectText as string,
+        valid_from: validFrom as string,
+        change_cue: changeCue as boolean,
+        source_event_refs: sourceEventRefs as string[],
+      }),
+      confidence: teamFiniteNumber(`${field}.confidence`, fact.confidence, 0, 1, true) as number,
+      domain,
+    };
+  });
+
+  let continuity: CleanTeamGraphContinuity | undefined;
+  if (envelope.continuity !== undefined) {
+    const raw = teamRecord(envelope.continuity, 'continuity', TEAM_GRAPH_CONTINUITY_FIELDS);
+    const threadId = safeTeamBoundedOpaque('continuity.thread_id', raw.thread_id, 1, 96);
+    const sessionId = safeTeamBoundedOpaque('continuity.session_id', raw.session_id, 1, 96);
+    if (activeContext.session_id === undefined || activeContext.session_id !== sessionId) {
+      failTeamContract('continuity.session_id must equal active_context.session_id');
+    }
+    if (targetScope?.type === 'session' && targetScope.id !== sessionId) {
+      failTeamContract('session target_scope.id must equal continuity.session_id');
+    }
+    continuity = {
+      thread_id: threadId,
+      session_id: sessionId,
+      summary: safeTeamText('continuity.summary', raw.summary, 1200),
+      decisions: continuityTeamStrings('continuity.decisions', raw.decisions),
+      open_loops: continuityTeamStrings('continuity.open_loops', raw.open_loops),
+      do_not_repeat: continuityTeamStrings('continuity.do_not_repeat', raw.do_not_repeat),
+      emotional_anchors: continuityTeamStrings(
+        'continuity.emotional_anchors', raw.emotional_anchors,
+      ),
+      state_signals: continuityTeamStrings('continuity.state_signals', raw.state_signals),
+      active_threads: continuityTeamStrings('continuity.active_threads', raw.active_threads),
+      review_insights: continuityTeamStrings('continuity.review_insights', raw.review_insights),
+    };
+  }
+
+  const clean: CleanTeamGraphDeltaInput = {
+    schema: TEAM_GRAPH_DELTA_SCHEMA,
+    source: cleanSource,
+    nodes,
+    edges,
+    facts,
+    events,
+    ...(continuity === undefined ? {} : { continuity }),
+    raw_input_included: false,
+    active_context: activeContext,
+    ...(targetScope === undefined ? {} : { target_scope: targetScope }),
+    privacy_tier: teamEnum('privacy_tier', envelope.privacy_tier, TEAM_PRIVACY_TIERS),
+    retention: teamEnum('retention', envelope.retention, TEAM_RETENTION),
+    ...(envelope.expires_at === undefined
+      ? {}
+      : { expires_at: teamRFC3339('expires_at', envelope.expires_at) }),
+    idempotency_key: safeTeamOpaque('idempotency_key', envelope.idempotency_key, 8),
+  };
+  if (Buffer.byteLength(JSON.stringify(clean), 'utf8') > TEAM_GRAPH_DELTA_MAX_BODY_BYTES) {
+    failTeamContract('canonical team graph delta body is too large: max 256 KiB');
+  }
+  return clean;
+}
+
+export function expectedTeamGraphProjectionKinds(
+  input: CleanTeamGraphDeltaInput,
+): TeamGraphProjectionKind[] {
+  const kinds: TeamGraphProjectionKind[] = [];
+  const hasGraph = input.nodes.length > 0 || input.edges.length > 0 ||
+    input.facts.length > 0 || input.events.length > 0;
+  if (input.facts.some((fact) => fact.predicate !== undefined)) kinds.push('claim');
+  if (input.continuity !== undefined) kinds.push('continuity');
+  if (hasGraph) kinds.push('embedding', 'graph');
+  return kinds.sort();
+}
+
+export function canonicalTeamGraphDeltaBody(input: unknown): {
+  value: CleanTeamGraphDeltaInput;
+  text: string;
+  bytes: Buffer;
+  projectionKinds: TeamGraphProjectionKind[];
+} {
+  const value = validateTeamGraphDeltaInput(input);
+  const text = JSON.stringify(value);
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength > TEAM_GRAPH_DELTA_MAX_BODY_BYTES) {
+    failTeamContract('canonical team graph delta body is too large: max 256 KiB');
+  }
+  return {
+    value,
+    text,
+    bytes,
+    projectionKinds: expectedTeamGraphProjectionKinds(value),
+  };
+}
+
 export interface TeamRememberResult {
   schema: typeof TEAM_MEMORY_RESULT_SCHEMA;
   object_id: string;
@@ -561,14 +1365,93 @@ export function validateTeamRememberResult(value: unknown, expectedCapsules: num
   };
 }
 
-function exactTeamResponseRecord(value: unknown, fields: ReadonlySet<string>): Record<string, unknown> {
+export interface TeamGraphDeltaResult {
+  schema: typeof TEAM_GRAPH_DELTA_RESULT_SCHEMA;
+  object_id: string;
+  audit_event_id: string;
+  status: 'stored';
+  projection_state: 'pending';
+  projection_jobs: Array<{
+    kind: TeamGraphProjectionKind;
+    job_id: string;
+    state: 'pending';
+  }>;
+  fully_projected: false;
+  replayed: boolean;
+  fallback: false;
+}
+
+const TEAM_GRAPH_RESULT_FIELDS = new Set([
+  'schema', 'object_id', 'audit_event_id', 'status', 'projection_state',
+  'projection_jobs', 'fully_projected', 'replayed', 'fallback',
+]);
+const TEAM_GRAPH_JOB_FIELDS = new Set(['kind', 'job_id', 'state']);
+const TEAM_GRAPH_PROJECTION_KINDS = new Set<TeamGraphProjectionKind>([
+  'claim', 'continuity', 'embedding', 'graph',
+]);
+
+export function validateTeamGraphDeltaResult(
+  value: unknown,
+  expectedKinds: readonly TeamGraphProjectionKind[],
+): TeamGraphDeltaResult {
+  const error = 'team graph delta response is invalid';
+  if (
+    !Array.isArray(expectedKinds) || expectedKinds.length < 1 || expectedKinds.length > 4 ||
+    expectedKinds.some((kind) => !TEAM_GRAPH_PROJECTION_KINDS.has(kind)) ||
+    new Set(expectedKinds).size !== expectedKinds.length ||
+    [...expectedKinds].sort().some((kind, index) => kind !== expectedKinds[index])
+  ) {
+    throw new Error(error);
+  }
+  const result = exactTeamResponseRecord(value, TEAM_GRAPH_RESULT_FIELDS, error);
+  if (
+    result.schema !== TEAM_GRAPH_DELTA_RESULT_SCHEMA || result.status !== 'stored' ||
+    result.projection_state !== 'pending' || result.fully_projected !== false ||
+    typeof result.replayed !== 'boolean' || result.fallback !== false ||
+    !teamResponseOpaque(result.object_id) || !teamResponseOpaque(result.audit_event_id) ||
+    !Array.isArray(result.projection_jobs) || result.projection_jobs.length !== expectedKinds.length
+  ) {
+    throw new Error(error);
+  }
+  const jobs = result.projection_jobs.map((entry) =>
+    exactTeamResponseRecord(entry, TEAM_GRAPH_JOB_FIELDS, error));
+  if (
+    jobs.some((job, index) =>
+      job.kind !== expectedKinds[index] || job.state !== 'pending' ||
+      !teamResponseOpaque(job.job_id)) ||
+    new Set(jobs.map((job) => job.job_id)).size !== jobs.length
+  ) {
+    throw new Error(error);
+  }
+  return {
+    schema: TEAM_GRAPH_DELTA_RESULT_SCHEMA,
+    object_id: result.object_id as string,
+    audit_event_id: result.audit_event_id as string,
+    status: 'stored',
+    projection_state: 'pending',
+    projection_jobs: jobs.map((job) => ({
+      kind: job.kind as TeamGraphProjectionKind,
+      job_id: job.job_id as string,
+      state: 'pending',
+    })),
+    fully_projected: false,
+    replayed: result.replayed,
+    fallback: false,
+  };
+}
+
+function exactTeamResponseRecord(
+  value: unknown,
+  fields: ReadonlySet<string>,
+  error = 'team memory response is invalid',
+): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('team memory response is invalid');
+    throw new Error(error);
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
   if (keys.length !== fields.size || keys.some((key) => !fields.has(key))) {
-    throw new Error('team memory response is invalid');
+    throw new Error(error);
   }
   return record;
 }
@@ -599,6 +1482,13 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
       name,
       description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
       inputSchema: TEAM_REMEMBER_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_graph_delta') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway contract is active; domain execution is not active.`,
+      inputSchema: TEAM_GRAPH_DELTA_INPUT_SCHEMA,
     };
   }
   return {
