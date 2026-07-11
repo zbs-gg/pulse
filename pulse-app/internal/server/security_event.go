@@ -28,6 +28,7 @@ const (
 	SecurityEventTypeAuthenticationDenied     SecurityEventType = "authentication_denied"
 	SecurityEventTypeAuthorizationDenied      SecurityEventType = "authorization_denied"
 	SecurityEventTypePrincipalAssertionDenied SecurityEventType = "principal_assertion_denied"
+	SecurityEventTypeOperationDenied          SecurityEventType = "operation_denied"
 	SecurityEventTypeAuditDegraded            SecurityEventType = "audit_degraded"
 )
 
@@ -46,11 +47,15 @@ const (
 	SecurityEventReasonInsufficientScope        SecurityEventReason = "insufficient_scope"
 	SecurityEventReasonPrincipalUnmapped        SecurityEventReason = "principal_unmapped"
 	SecurityEventReasonPrincipalRevoked         SecurityEventReason = "principal_revoked"
+	SecurityEventReasonPolicyDenied             SecurityEventReason = "policy_denied"
 	SecurityEventReasonAssertionInvalid         SecurityEventReason = "assertion_invalid"
 	SecurityEventReasonAssertionExpired         SecurityEventReason = "assertion_expired"
 	SecurityEventReasonAssertionReplayed        SecurityEventReason = "assertion_replayed"
 	SecurityEventReasonAssertionBindingMismatch SecurityEventReason = "assertion_binding_mismatch"
 	SecurityEventReasonStaleGeneration          SecurityEventReason = "stale_generation"
+	SecurityEventReasonInvalidContract          SecurityEventReason = "invalid_contract"
+	SecurityEventReasonIdempotencyConflict      SecurityEventReason = "idempotency_conflict"
+	SecurityEventReasonOperationInProgress      SecurityEventReason = "operation_in_progress"
 	SecurityEventReasonStoreUnavailable         SecurityEventReason = "store_unavailable"
 	SecurityEventReasonRateLimited              SecurityEventReason = "rate_limited"
 	SecurityEventReasonInternalFailure          SecurityEventReason = "internal_failure"
@@ -371,6 +376,7 @@ func validSecurityEventReason(eventType SecurityEventType, reason SecurityEventR
 		case SecurityEventReasonInsufficientScope,
 			SecurityEventReasonPrincipalUnmapped,
 			SecurityEventReasonPrincipalRevoked,
+			SecurityEventReasonPolicyDenied,
 			SecurityEventReasonStaleGeneration:
 			return true
 		}
@@ -382,6 +388,13 @@ func validSecurityEventReason(eventType SecurityEventType, reason SecurityEventR
 			SecurityEventReasonAssertionBindingMismatch,
 			SecurityEventReasonUnknownSigningKey,
 			SecurityEventReasonStaleGeneration:
+			return true
+		}
+	case SecurityEventTypeOperationDenied:
+		switch reason {
+		case SecurityEventReasonInvalidContract,
+			SecurityEventReasonIdempotencyConflict,
+			SecurityEventReasonOperationInProgress:
 			return true
 		}
 	case SecurityEventTypeAuditDegraded:

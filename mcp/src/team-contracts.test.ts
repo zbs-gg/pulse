@@ -7,7 +7,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { createPulseMcpServer } from './index.js';
-import type { BoundTeamDomain, TeamPrincipalContext } from './principal-context.js';
+import type {
+  BoundTeamDomain,
+  GatewaySecurityEventInput,
+  TeamPrincipalContext,
+} from './principal-context.js';
 import { ContractError, validateCapsule } from './validation.js';
 
 import {
@@ -128,6 +132,7 @@ function teamContext(principalId: string): Readonly<TeamPrincipalContext> {
 
 async function startTeamRegistryServer(
   domainFactory?: (context: Readonly<TeamPrincipalContext>) => Readonly<BoundTeamDomain>,
+  securityEventSink?: (event: GatewaySecurityEventInput) => void,
 ) {
   const seenPrincipals: string[] = [];
   const httpServer = createServer(async (req, res) => {
@@ -137,7 +142,7 @@ async function startTeamRegistryServer(
     seenPrincipals.push(requestedPrincipal);
     const context = teamContext(requestedPrincipal);
     const requestServer = createPulseMcpServer(
-      'team-remote', context, domainFactory?.(context),
+      'team-remote', context, domainFactory?.(context), securityEventSink,
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     let cleaned = false;
@@ -559,5 +564,94 @@ test('pulse_team_remember returns closed typed errors without leaking domain fai
       await client.close();
       await server.stop();
     }
+  }
+});
+
+test('pulse_team_remember reports fixed metadata for authoritative denials and audit degradation', async () => {
+  const cases = [
+    {
+      name: 'policy',
+      failure: new TeamDomainError('policy_denied'),
+      expected: {
+        eventType: 'authorization_denied', reasonCode: 'policy_denied',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'revoked',
+      failure: new TeamDomainError('principal_revoked'),
+      expected: {
+        eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'invalid-contract',
+      failure: new TeamContractError('secret rejected field'),
+      expected: {
+        eventType: 'operation_denied', reasonCode: 'invalid_contract',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'store-outage',
+      failure: new TeamDomainError('shared_memory_unavailable'),
+      expected: {
+        eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'unexpected-failure',
+      failure: new Error('secret unexpected failure'),
+      expected: {
+        eventType: 'audit_degraded', reasonCode: 'internal_failure',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const events: GatewaySecurityEventInput[] = [];
+    const server = await startTeamRegistryServer(() => Object.freeze({
+      remember: async () => { throw testCase.failure; },
+    }), (event) => events.push(event));
+    const client = new Client({ name: `team-audit-${testCase.name}`, version: '0.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: 'pulse_team_remember', arguments: baseTeamRemember() });
+      assert.equal(result.isError, true);
+      assert.deepEqual(events, [testCase.expected]);
+      assert.doesNotMatch(JSON.stringify(events), /dedicated team store|bearer|oauth_subject|principal_id/i);
+    } finally {
+      await client.close();
+      await server.stop();
+    }
+  }
+
+  const unavailableEvents: GatewaySecurityEventInput[] = [];
+  const unavailable = await startTeamRegistryServer(
+    undefined, (event) => unavailableEvents.push(event),
+  );
+  const unavailableClient = new Client({ name: 'team-audit-missing-domain', version: '0.0.0' });
+  const unavailableTransport = new StreamableHTTPClientTransport(new URL(unavailable.url), {
+    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
+  });
+  try {
+    await unavailableClient.connect(unavailableTransport);
+    const result = await unavailableClient.callTool({
+      name: 'pulse_team_remember', arguments: baseTeamRemember(),
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(unavailableEvents, [{
+      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+      methodClass: 'write', requestId: 'request-principal-writer',
+    }]);
+  } finally {
+    await unavailableClient.close();
+    await unavailable.stop();
   }
 });

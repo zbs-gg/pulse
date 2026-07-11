@@ -124,18 +124,23 @@ export type SecurityEventReason =
   | 'missing_credential' | 'malformed_credential' | 'invalid_credential'
   | 'expired_credential' | 'credential_not_yet_valid' | 'issuer_mismatch'
   | 'audience_mismatch' | 'incomplete_claims' | 'unknown_signing_key'
-  | 'insufficient_scope' | 'principal_unmapped' | 'principal_revoked' | 'assertion_invalid'
+  | 'insufficient_scope' | 'principal_unmapped' | 'principal_revoked' | 'policy_denied' | 'assertion_invalid'
   | 'assertion_expired' | 'assertion_replayed' | 'assertion_binding_mismatch'
-  | 'stale_generation' | 'store_unavailable' | 'rate_limited' | 'internal_failure';
+  | 'stale_generation' | 'invalid_contract' | 'idempotency_conflict'
+  | 'operation_in_progress' | 'store_unavailable' | 'rate_limited' | 'internal_failure';
 
 type AuthenticationDenialReason =
   | 'missing_credential' | 'malformed_credential' | 'invalid_credential'
   | 'expired_credential' | 'credential_not_yet_valid' | 'issuer_mismatch'
   | 'audience_mismatch' | 'incomplete_claims' | 'unknown_signing_key';
-type AuthorizationDenialReason = 'insufficient_scope' | 'principal_unmapped' | 'principal_revoked';
+type AuthorizationDenialReason =
+  | 'insufficient_scope' | 'principal_unmapped' | 'principal_revoked'
+  | 'policy_denied' | 'stale_generation';
 type PrincipalAssertionDenialReason =
   | 'assertion_invalid' | 'assertion_expired' | 'assertion_replayed'
   | 'assertion_binding_mismatch' | 'stale_generation';
+type OperationDenialReason =
+  | 'invalid_contract' | 'idempotency_conflict' | 'operation_in_progress';
 type AuditDegradedReason = 'store_unavailable' | 'rate_limited' | 'internal_failure';
 
 type SecurityEventCommon = {
@@ -147,6 +152,7 @@ export type GatewaySecurityEventInput = SecurityEventCommon & (
   | { eventType: 'authentication_denied'; reasonCode: AuthenticationDenialReason }
   | { eventType: 'authorization_denied'; reasonCode: AuthorizationDenialReason }
   | { eventType: 'principal_assertion_denied'; reasonCode: PrincipalAssertionDenialReason }
+  | { eventType: 'operation_denied'; reasonCode: OperationDenialReason }
   | { eventType: 'audit_degraded'; reasonCode: AuditDegradedReason }
 );
 

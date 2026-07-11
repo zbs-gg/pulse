@@ -477,6 +477,62 @@ func TestStoreTeamMemoryCapsulePersistsAuthorizedProjectScope(t *testing.T) {
 	}
 }
 
+func TestStoreTeamMemoryCapsuleKeepsEmptyTagsReadyAndCorrelatesActiveProject(t *testing.T) {
+	f := newTeamObjectWriteFixture(t)
+	defer f.store.Close()
+	project, err := f.store.CreateTeamProject(context.Background(), f.bootstrap.OwnerPrincipalID, "Empty tags audit project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.GrantProjectAccess(context.Background(), GrantProjectAccessRequest{
+		ActorPrincipalID: f.bootstrap.OwnerPrincipalID, ProjectID: project.ProjectID,
+		TargetPrincipalID: f.actor.binding.AgentPrincipalID, AccessLevel: "write",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	authorization := mutationWriteRequest(f.bootstrap, f.actor)
+	authorization.Context.ProjectID = project.ProjectID
+	permit, err := f.store.AuthorizeTeamMutation(context.Background(), authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := syntheticTeamMemoryWrite()
+	write.ActiveContext.ProjectID = project.ProjectID
+	write.Items[0].Tags = nil
+
+	result, err := f.store.StoreTeamMemoryCapsule(
+		context.Background(), permit, f.request.Writer, "request-empty-tags-project",
+		f.actor.clientKey, write,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tagsJSON, auditProject string
+	if err := f.store.DB().QueryRow(`
+		SELECT tags_json FROM team_memory_capsules WHERE root_object_id = ?`,
+		result.ObjectID,
+	).Scan(&tagsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if tagsJSON != "[]" {
+		t.Fatalf("empty tags JSON = %q, want []", tagsJSON)
+	}
+	if err := f.store.DB().QueryRow(`
+		SELECT COALESCE(project_id, '') FROM team_audit_events WHERE event_id = ?`,
+		result.AuditEventID,
+	).Scan(&auditProject); err != nil {
+		t.Fatal(err)
+	}
+	if auditProject != project.ProjectID {
+		t.Fatalf("personal write audit project = %q, want %q", auditProject, project.ProjectID)
+	}
+	if _, err := f.store.CheckTeamPolicyReadiness(
+		context.Background(), policyReadinessOptions(f.bootstrap, f.lease),
+	); err != nil {
+		t.Fatalf("empty tags write degraded readiness: %v", err)
+	}
+}
+
 func TestTeamMemoryServiceWithoutExplicitGrantedTargetCannotObtainPermit(t *testing.T) {
 	f := newTeamObjectWriteFixture(t)
 	defer f.store.Close()

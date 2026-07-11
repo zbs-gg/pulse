@@ -308,7 +308,7 @@ func normalizeTeamMemoryWrite(permit TeamMutationPermit, write TeamMemoryWrite) 
 	}
 	write.Items = append([]TeamMemoryItem(nil), write.Items...)
 	for index := range write.Items {
-		write.Items[index].Tags = append([]string(nil), write.Items[index].Tags...)
+		write.Items[index].Tags = append([]string{}, write.Items[index].Tags...)
 	}
 	if write.Schema != TeamMemorySchema || write.RawInputIncluded ||
 		permit.Action() != teamauth.ActionWrite || permit.ObjectKind() != "memory" ||

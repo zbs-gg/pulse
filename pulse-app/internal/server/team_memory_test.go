@@ -127,6 +127,38 @@ func TestTeamMemoryRememberRejectsSpoofedAndUnknownFieldsWithoutMutation(t *test
 	}
 }
 
+func TestTeamMemoryRememberRequiresNumericConfidenceAtGoBoundary(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "omitted", mutate: func(item map[string]any) { delete(item, "confidence") }},
+		{name: "null", mutate: func(item map[string]any) { item["confidence"] = nil }},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv, fixture, _ := newReadyTeamServer(t)
+			body := validTeamMemoryBody(
+				t, fixture.now, fmt.Sprintf("memory-confidence-%04d", index),
+				store.TeamMemoryActiveContext{}, nil,
+			)
+			var envelope map[string]any
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(envelope["items"].([]any)[0].(map[string]any))
+			body, _ = json.Marshal(envelope)
+			response := serveSignedTeamMemory(
+				t, srv, fixture, fmt.Sprintf("remember-confidence-%d", index), "agent-client", body,
+			)
+			requireTeamMemoryError(t, response, http.StatusBadRequest, teamMemoryErrorInvalid)
+			if got := countTeamMemoryRows(t, fixture.store); got != 0 {
+				t.Fatalf("invalid confidence stored %d memory rows", got)
+			}
+		})
+	}
+}
+
 func TestTeamMemoryRememberBindsAssertionToExactBody(t *testing.T) {
 	srv, fixture, _ := newReadyTeamServer(t)
 	body := validTeamMemoryBody(t, fixture.now, "memory-binding-0001", store.TeamMemoryActiveContext{}, nil)

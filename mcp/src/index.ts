@@ -277,6 +277,7 @@ export function createPulseMcpServer(
   runtimeMode: RuntimeMode = RUNTIME_MODE,
   teamContext?: Readonly<TeamPrincipalContext>,
   teamDomain?: Readonly<BoundTeamDomain>,
+  teamSecurityEventSink?: (event: GatewaySecurityEventInput) => void,
 ): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
@@ -806,17 +807,27 @@ export function createPulseMcpServer(
         }
         if (name === 'pulse_team_remember') {
           if (!teamDomain) {
+            reportTeamDomainFailure(
+              teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable',
+            );
             return contracts.teamDomainErrorResult('shared_memory_unavailable');
           }
           try {
             return jsonText(await teamDomain.remember(args));
           } catch (error) {
             if (error instanceof contracts.TeamContractError) {
+              reportTeamDomainFailure(
+                teamSecurityEventSink, teamContext.request_id, 'invalid_contract',
+              );
               return contracts.teamDomainErrorResult('invalid_team_contract');
             }
             if (error instanceof contracts.TeamDomainError) {
+              reportTeamDomainFailure(teamSecurityEventSink, teamContext.request_id, error.code);
               return contracts.teamDomainErrorResult(error.code);
             }
+            reportTeamDomainFailure(
+              teamSecurityEventSink, teamContext.request_id, 'unexpected_domain_failure',
+            );
             return contracts.teamDomainErrorResult('shared_memory_unavailable');
           }
         }
@@ -1178,7 +1189,10 @@ async function startHttpMode(): Promise<void> {
           teamContext = await teamSecurity.requestSecurity.resolveBaseline(identity, requestId);
         }
         writeTeamCors(res, requestOrigin);
-        await dispatchMcpRequest(req, res, parsedBody, teamContext, teamDomain);
+        await dispatchMcpRequest(
+          req, res, parsedBody, teamContext, teamDomain,
+          (event) => recordTeamSecurityEvent(teamSecurity, event),
+        );
       } catch (error) {
         if (terminateStartedResponse(res)) return;
         writeTeamCors(res, requestOrigin);
@@ -1313,8 +1327,11 @@ async function dispatchMcpRequest(
   parsedBody: unknown,
   teamContext?: Readonly<TeamPrincipalContext>,
   teamDomain?: Readonly<BoundTeamDomain>,
+  teamSecurityEventSink?: (event: GatewaySecurityEventInput) => void,
 ): Promise<void> {
-  const requestServer = createPulseMcpServer(RUNTIME_MODE, teamContext, teamDomain);
+  const requestServer = createPulseMcpServer(
+    RUNTIME_MODE, teamContext, teamDomain, teamSecurityEventSink,
+  );
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });
@@ -1332,6 +1349,92 @@ async function dispatchMcpRequest(
   } catch (error) {
     cleanup();
     throw error;
+  }
+}
+
+function reportTeamDomainFailure(
+  sink: ((event: GatewaySecurityEventInput) => void) | undefined,
+  requestId: string,
+  code: string,
+): void {
+  if (!sink) return;
+  let event: GatewaySecurityEventInput | undefined;
+  switch (code) {
+  case 'principal_revoked':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'policy_denied':
+  case 'not_found':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'policy_denied',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'authorization_stale':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'stale_generation',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'invalid_principal':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_invalid',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'principal_request_mismatch':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_binding_mismatch',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'principal_replay':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_replayed',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'invalid_contract':
+  case 'invalid_team_memory':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'invalid_contract',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'idempotency_conflict':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'idempotency_conflict',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'idempotency_in_progress':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'operation_in_progress',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'shared_memory_unavailable':
+    event = {
+      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+      methodClass: 'write', requestId,
+    };
+    break;
+  case 'idempotency_failed':
+  case 'unexpected_domain_failure':
+    event = {
+      eventType: 'audit_degraded', reasonCode: 'internal_failure',
+      methodClass: 'write', requestId,
+    };
+    break;
+  }
+  if (!event) return;
+  try {
+    sink(event);
+  } catch {
+    // A denied operation stays denied if its metadata-only signal degrades.
   }
 }
 

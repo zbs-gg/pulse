@@ -44,7 +44,7 @@ var teamMemoryTagPattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._:-]{0,6
 type teamMemoryEnvelope struct {
 	Schema           string                         `json:"schema"`
 	Source           *store.CapsuleSource           `json:"source"`
-	Items            []store.TeamMemoryItem         `json:"items"`
+	Items            []teamMemoryWireItem           `json:"items"`
 	RawInputIncluded *bool                          `json:"raw_input_included"`
 	ActiveContext    *store.TeamMemoryActiveContext `json:"active_context"`
 	TargetScope      *store.TeamMemoryTarget        `json:"target_scope,omitempty"`
@@ -52,6 +52,14 @@ type teamMemoryEnvelope struct {
 	Retention        string                         `json:"retention"`
 	ExpiresAt        string                         `json:"expires_at,omitempty"`
 	IdempotencyKey   string                         `json:"idempotency_key"`
+}
+
+type teamMemoryWireItem struct {
+	Kind            string   `json:"kind"`
+	RedactedSummary string   `json:"redacted_summary"`
+	Confidence      *float64 `json:"confidence"`
+	EvidenceHint    string   `json:"evidence_hint"`
+	Tags            []string `json:"tags,omitempty"`
 }
 
 type teamMemoryProjectionJobResponse struct {
@@ -258,8 +266,15 @@ func decodeTeamMemoryEnvelope(raw []byte) (store.TeamMemoryWrite, error) {
 		!validTeamMemoryEnvelope(envelope) {
 		return store.TeamMemoryWrite{}, store.ErrTeamMemoryInvalid
 	}
+	items := make([]store.TeamMemoryItem, len(envelope.Items))
+	for index, item := range envelope.Items {
+		items[index] = store.TeamMemoryItem{
+			Kind: item.Kind, RedactedSummary: item.RedactedSummary, Confidence: *item.Confidence,
+			EvidenceHint: item.EvidenceHint, Tags: append([]string{}, item.Tags...),
+		}
+	}
 	return store.TeamMemoryWrite{
-		Schema: envelope.Schema, Source: *envelope.Source, Items: append([]store.TeamMemoryItem(nil), envelope.Items...),
+		Schema: envelope.Schema, Source: *envelope.Source, Items: items,
 		RawInputIncluded: *envelope.RawInputIncluded, ActiveContext: *envelope.ActiveContext,
 		TargetScope: cloneTeamMemoryTarget(envelope.TargetScope), PrivacyTier: envelope.PrivacyTier,
 		Retention: envelope.Retention, ExpiresAt: envelope.ExpiresAt, IdempotencyKey: envelope.IdempotencyKey,
@@ -328,7 +343,7 @@ func validTeamMemoryPolicy(privacy, retention string) bool {
 		(retention == "session" || retention == "project" || retention == "long_term")
 }
 
-func validTeamMemoryItem(item store.TeamMemoryItem) bool {
+func validTeamMemoryItem(item teamMemoryWireItem) bool {
 	allowedKind := map[string]bool{
 		"fact": true, "decision": true, "preference": true, "project_state": true, "open_loop": true,
 		"correction": true, "relationship_note": true, "do_not_repeat": true, "system_event": true, "state_signal": true,
@@ -337,8 +352,9 @@ func validTeamMemoryItem(item store.TeamMemoryItem) bool {
 		"user_selected": true, "current_turn": true, "assistant_inferred": true, "tool_result": true, "user_confirmed": true,
 	}
 	if !allowedKind[item.Kind] || item.RedactedSummary == "" || utf8.RuneCountInString(item.RedactedSummary) > 1200 ||
-		strings.TrimSpace(item.RedactedSummary) != item.RedactedSummary || math.IsNaN(item.Confidence) ||
-		math.IsInf(item.Confidence, 0) || item.Confidence < 0 || item.Confidence > 1 ||
+		strings.TrimSpace(item.RedactedSummary) != item.RedactedSummary || item.Confidence == nil ||
+		math.IsNaN(*item.Confidence) || math.IsInf(*item.Confidence, 0) ||
+		*item.Confidence < 0 || *item.Confidence > 1 ||
 		!allowedEvidence[item.EvidenceHint] || len(item.Tags) > 20 {
 		return false
 	}

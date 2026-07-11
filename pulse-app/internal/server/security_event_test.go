@@ -277,8 +277,16 @@ func TestSecurityEventHandlerAcceptsOnlyFixedClassifications(t *testing.T) {
 			MethodClass: SecurityEventMethodOther, PathClass: SecurityEventPathPrincipal,
 		},
 		{
+			EventType: SecurityEventTypeAuthorizationDenied, ReasonCode: SecurityEventReasonPolicyDenied,
+			MethodClass: SecurityEventMethodWrite, PathClass: SecurityEventPathMCP,
+		},
+		{
 			EventType: SecurityEventTypePrincipalAssertionDenied, ReasonCode: SecurityEventReasonAssertionReplayed,
 			MethodClass: SecurityEventMethodDelete, PathClass: SecurityEventPathPrincipal,
+		},
+		{
+			EventType: SecurityEventTypeOperationDenied, ReasonCode: SecurityEventReasonInvalidContract,
+			MethodClass: SecurityEventMethodWrite, PathClass: SecurityEventPathMCP,
 		},
 		{
 			EventType: SecurityEventTypeAuditDegraded, ReasonCode: SecurityEventReasonStoreUnavailable,

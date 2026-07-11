@@ -309,8 +309,8 @@ func (s *Store) storeTeamObjectWithExtension(
 		return TeamObjectWriteResult{}, err
 	}
 
-	projectID := ""
-	if normalized.target.Type == teamauth.ScopeProject {
+	projectID := normalized.permit.context.ProjectID
+	if projectID == "" && normalized.target.Type == teamauth.ScopeProject {
 		projectID = normalized.target.ID
 	}
 	auditEventID, err := appendTeamDomainAudit(ctx, tx, teamDomainAuditEvent{

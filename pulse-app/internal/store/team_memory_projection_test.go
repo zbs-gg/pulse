@@ -422,6 +422,66 @@ func TestTeamMemoryProjectionReadinessRejectsContentDrift(t *testing.T) {
 	}
 }
 
+func TestTeamMemoryProjectionReadinessRejectsMissingReadyMaterialization(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     string
+		table    string
+		complete func(*testing.T, *teamMemoryProjectionFixture, TeamProjectionJobClaim)
+	}{
+		{
+			name: "event", kind: "event", table: "team_memory_events",
+			complete: func(t *testing.T, fixture *teamMemoryProjectionFixture, claim TeamProjectionJobClaim) {
+				t.Helper()
+				if _, err := fixture.object.store.CompleteTeamMemoryEventProjection(
+					context.Background(), eventProjectionRequest(fixture, claim),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "embedding", kind: "embedding", table: "team_memory_embeddings",
+			complete: func(t *testing.T, fixture *teamMemoryProjectionFixture, claim TeamProjectionJobClaim) {
+				t.Helper()
+				results := make([]TeamMemoryEmbeddingResult, len(fixture.memory.CapsuleIDs))
+				for index, capsuleID := range fixture.memory.CapsuleIDs {
+					results[index] = TeamMemoryEmbeddingResult{
+						CapsuleID: capsuleID, Vector: []float32{float32(index) + 0.25, 0.75},
+					}
+				}
+				if _, err := fixture.object.store.CompleteTeamMemoryEmbeddingProjection(
+					context.Background(), TeamMemoryEmbeddingProjectionRequest{
+						WriterID: fixture.object.lease.WriterID, WriterToken: fixture.object.lease.Token,
+						JobID: claim.JobID, LeaseToken: claim.LeaseToken,
+						Model: "synthetic_embed_v1", Results: results,
+					},
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTeamMemoryProjectionFixture(t, nil)
+			defer fixture.object.store.Close()
+			claim := fixture.claim(t, test.kind)
+			test.complete(t, fixture, claim)
+			if _, err := fixture.object.store.DB().Exec(
+				`DELETE FROM `+test.table+` WHERE job_id = ?`, claim.JobID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.object.store.CheckTeamPolicyReadiness(
+				context.Background(), policyReadinessOptions(fixture.object.bootstrap, fixture.object.lease),
+			); !errors.Is(err, ErrTeamPolicyNotReady) {
+				t.Fatalf("missing %s materialization readiness error = %v", test.kind, err)
+			}
+		})
+	}
+}
+
 func assertTeamMemoryProjectionAttachments(
 	t *testing.T,
 	store *Store,

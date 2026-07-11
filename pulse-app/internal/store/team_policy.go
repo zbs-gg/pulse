@@ -777,6 +777,40 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		        ELSE 0 END
 		 LIMIT 1`},
 		{query: `SELECT 1
+		   FROM team_projection_jobs job
+		   JOIN team_object_registry root ON root.object_id = job.root_object_id
+		  WHERE root.object_kind = 'memory' AND root.lifecycle = 'active'
+		     AND root.generation = job.root_generation
+		     AND job.projection_kind = 'event' AND job.state = 'ready'
+		     AND (
+		       SELECT count(*) FROM team_memory_events event
+		        WHERE event.job_id = job.job_id
+		          AND event.root_object_id = job.root_object_id
+		          AND event.root_generation = job.root_generation
+		     ) <> (
+		       SELECT count(*) FROM team_memory_capsules capsule
+		        WHERE capsule.root_object_id = job.root_object_id
+		          AND capsule.root_generation = job.root_generation
+		     )
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_projection_jobs job
+		   JOIN team_object_registry root ON root.object_id = job.root_object_id
+		  WHERE root.object_kind = 'memory' AND root.lifecycle = 'active'
+		     AND root.generation = job.root_generation
+		     AND job.projection_kind = 'embedding' AND job.state = 'ready'
+		     AND (
+		       SELECT count(*) FROM team_memory_embeddings embedding
+		        WHERE embedding.job_id = job.job_id
+		          AND embedding.root_object_id = job.root_object_id
+		          AND embedding.root_generation = job.root_generation
+		     ) <> (
+		       SELECT count(*) FROM team_memory_capsules capsule
+		        WHERE capsule.root_object_id = job.root_object_id
+		          AND capsule.root_generation = job.root_generation
+		     )
+		 LIMIT 1`},
+		{query: `SELECT 1
 		   FROM team_object_contributions contribution
 		   LEFT JOIN team_object_registry parent ON parent.object_id = contribution.parent_object_id
 		   LEFT JOIN team_object_registry derivative ON derivative.object_id = contribution.derivative_object_id
