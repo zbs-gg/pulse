@@ -14,22 +14,23 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
-func TestMigrations034And035InstallPolicyObjectSpineAndTeamMemory(t *testing.T) {
-	if teamauth.SchemaVersion != 35 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 35", teamauth.SchemaVersion)
+func TestMigrations034Through036InstallPolicyMemoryAndGraphDeltaIngress(t *testing.T) {
+	if teamauth.SchemaVersion != 36 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 36", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 35 || latest.Name != "035_team_memory.sql" {
-		t.Fatalf("latest migration = %+v, want 035_team_memory.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 36 || latest.Name != "036_team_graph_delta.sql" {
+		t.Fatalf("latest migration = %+v, want 036_team_graph_delta.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
 	defer s.Close()
 	wantTables := []string{
 		"team_audit_event_order",
+		"team_graph_delta_inputs",
 		"team_idempotency_records",
 		"team_memory_capsules",
 		"team_memory_embeddings",
@@ -40,6 +41,7 @@ func TestMigrations034And035InstallPolicyObjectSpineAndTeamMemory(t *testing.T) 
 		"team_policy_metadata",
 		"team_projection_jobs",
 		"team_projection_outputs",
+		"team_semantic_projection_intents",
 		"team_service_object_grants",
 		"team_writer_leases",
 	}
@@ -48,10 +50,12 @@ func TestMigrations034And035InstallPolicyObjectSpineAndTeamMemory(t *testing.T) 
 		SELECT name FROM sqlite_master
 			 WHERE type = 'table' AND name IN (
 			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules',
-			'team_memory_embeddings', 'team_memory_events', 'team_object_contributions',
+			'team_memory_embeddings', 'team_memory_events', 'team_graph_delta_inputs',
+			'team_object_contributions',
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',
-			'team_projection_outputs', 'team_service_object_grants', 'team_writer_leases')
+			'team_projection_outputs', 'team_semantic_projection_intents',
+			'team_service_object_grants', 'team_writer_leases')
 		 ORDER BY name`)
 	if err != nil {
 		t.Fatal(err)

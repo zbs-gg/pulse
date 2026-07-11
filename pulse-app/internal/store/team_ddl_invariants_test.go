@@ -14,7 +14,7 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 	}{
 		{
 			name:       "reader floor",
-			regression: `UPDATE team_stores SET min_reader_version = 35 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_reader_version = 36 WHERE singleton = 1`,
 		},
 		{
 			name:       "writer floor",
@@ -30,7 +30,7 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 			// so only the required monotonic DDL guard can reject it.
 			if _, err := s.DB().Exec(`
 				UPDATE team_stores
-				   SET min_reader_version = 36, min_writer_version = 37
+				   SET min_reader_version = 37, min_writer_version = 37
 				 WHERE singleton = 1`); err != nil {
 				t.Fatalf("raise schema floors: %v", err)
 			}
@@ -157,13 +157,14 @@ func TestTeamEventMetadataOnlyAcceptsEmptyObject(t *testing.T) {
 	}
 }
 
-func TestFrozenTeamTablesAndTriggersExistAcrossMigrations034And035(t *testing.T) {
+func TestFrozenTeamTablesAndTriggersExistAcrossMigrations034Through036(t *testing.T) {
 	s, _ := bootstrapTeamStore(t)
 	defer s.Close()
 
 	for _, table := range []string{
-		"team_audit_event_order", "team_memory_capsules", "team_memory_embeddings",
-		"team_memory_events", "team_projection_outputs",
+		"team_audit_event_order", "team_graph_delta_inputs", "team_memory_capsules",
+		"team_memory_embeddings", "team_memory_events", "team_projection_outputs",
+		"team_semantic_projection_intents",
 	} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
@@ -187,6 +188,10 @@ func TestFrozenTeamTablesAndTriggersExistAcrossMigrations034And035(t *testing.T)
 		"team_memory_events_immutable",
 		"team_memory_embeddings_generation_fence_insert",
 		"team_memory_embeddings_immutable",
+		"team_graph_delta_inputs_generation_fence_insert",
+		"team_graph_delta_inputs_immutable",
+		"team_semantic_projection_intents_generation_fence_insert",
+		"team_semantic_projection_intents_immutable",
 	} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trigger).Scan(&count); err != nil {
@@ -249,6 +254,43 @@ func TestFrozenTeamTablesAndTriggersExistAcrossMigrations034And035(t *testing.T)
 	}
 	if _, unsafe := embeddingColumns["text_source"]; unsafe {
 		t.Fatal("team_memory_embeddings duplicates capsule text")
+	}
+	graphInputColumns := teamTableColumns(t, s, "team_graph_delta_inputs")
+	for _, required := range []string{
+		"root_object_id", "store_id", "team_id", "scope_type", "scope_id",
+		"root_generation", "schema_version", "source_host", "conversation_scope",
+		"source_timestamp", "canonical_json", "content_digest", "created_at",
+	} {
+		if _, ok := graphInputColumns[required]; !ok {
+			t.Fatalf("team_graph_delta_inputs missing %s", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"idempotency_key", "actor_principal_id", "owner_principal_id",
+		"raw_input", "transcript", "secret",
+	} {
+		if _, present := graphInputColumns[forbidden]; present {
+			t.Fatalf("team_graph_delta_inputs persists forbidden field %s", forbidden)
+		}
+	}
+	intentColumns := teamTableColumns(t, s, "team_semantic_projection_intents")
+	for _, required := range []string{
+		"intent_id", "root_object_id", "store_id", "team_id", "scope_type", "scope_id",
+		"root_generation", "projection_kind", "source_kind", "source_ordinal",
+		"derivative_object_id", "derivative_kind", "semantic_key_digest",
+		"policy_digest", "payload_digest", "created_at",
+	} {
+		if _, ok := intentColumns[required]; !ok {
+			t.Fatalf("team_semantic_projection_intents missing %s", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"canonical_json", "text", "summary", "object_text", "raw_input",
+		"transcript", "secret", "idempotency_key",
+	} {
+		if _, present := intentColumns[forbidden]; present {
+			t.Fatalf("team_semantic_projection_intents persists content field %s", forbidden)
+		}
 	}
 }
 

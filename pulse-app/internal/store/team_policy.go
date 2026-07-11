@@ -1,14 +1,19 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -694,6 +699,140 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		        ELSE 0 END
 		 LIMIT 1`},
 		{query: `SELECT 1
+		   FROM team_graph_delta_inputs input
+		   LEFT JOIN team_object_registry root ON root.object_id = input.root_object_id
+		  WHERE root.object_id IS NULL
+		     OR input.store_id <> root.store_id
+		     OR input.team_id <> root.team_id
+		     OR input.scope_type <> root.scope_type
+		     OR input.scope_id <> root.scope_id
+		     OR input.root_generation > root.generation
+		     OR (root.lifecycle = 'active' AND input.root_generation <> root.generation)
+		     OR root.object_kind <> 'graph_delta'
+		     OR input.schema_version <> 'pulse.team.graph_delta.v1'
+		     OR input.source_host NOT IN (
+		        'chatgpt', 'claude', 'codex', 'claude-code', 'gemini-cli',
+		        'cursor', 'langchain', 'crewai', 'pulse-cli')
+		     OR input.conversation_scope NOT IN (
+		        'current_turn', 'user_selected_excerpt', 'project_context', 'install_event')
+		     OR length(input.source_timestamp) <> 24
+		     OR substr(input.source_timestamp, 1, 19) NOT GLOB
+		        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+		     OR substr(input.source_timestamp, 20, 1) <> '.'
+		     OR substr(input.source_timestamp, 21, 3) GLOB '*[^0-9]*'
+		     OR substr(input.source_timestamp, 24, 1) <> 'Z'
+		     OR julianday(input.source_timestamp) IS NULL
+		     OR length(input.content_digest) <> 64
+		     OR input.content_digest GLOB '*[^0-9a-f]*'
+		     OR json_valid(input.canonical_json) <> 1
+		     OR CASE WHEN json_valid(input.canonical_json) = 1 THEN
+		          json_type(input.canonical_json) <> 'object'
+		          OR length(CAST(input.canonical_json AS BLOB)) NOT BETWEEN 2 AND 262144
+		          OR COALESCE(json_extract(input.canonical_json, '$.schema'), '') <> 'pulse.team.graph_delta.v1'
+		          OR COALESCE(json_type(input.canonical_json, '$.raw_input_included'), '') <> 'false'
+		          OR COALESCE(json_extract(input.canonical_json, '$.source.host'), '') <> input.source_host
+		          OR COALESCE(json_extract(input.canonical_json, '$.source.conversation_scope'), '') <> input.conversation_scope
+		          OR COALESCE(json_extract(input.canonical_json, '$.source.timestamp'), '') <> input.source_timestamp
+		          OR json_type(input.canonical_json, '$.idempotency_key') IS NOT NULL
+		          OR json_type(input.canonical_json, '$.actor') IS NOT NULL
+		          OR json_type(input.canonical_json, '$.principal_id') IS NOT NULL
+		          OR json_type(input.canonical_json, '$.owner_principal_id') IS NOT NULL
+		          OR json_type(input.canonical_json, '$.team_id') IS NOT NULL
+		        ELSE 0 END
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_object_registry root
+		   LEFT JOIN team_graph_delta_inputs input
+		     ON input.root_object_id = root.object_id
+		    AND input.store_id = root.store_id
+		    AND input.team_id = root.team_id
+		    AND input.scope_type = root.scope_type
+		    AND input.scope_id = root.scope_id
+		    AND input.root_generation = root.generation
+		  WHERE root.object_kind = 'graph_delta'
+		    AND root.lifecycle = 'active'
+		    AND input.root_object_id IS NULL
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_semantic_projection_intents intent
+		   LEFT JOIN team_object_registry root ON root.object_id = intent.root_object_id
+		   LEFT JOIN team_graph_delta_inputs input
+		     ON input.root_object_id = intent.root_object_id
+		    AND input.root_generation = intent.root_generation
+		  WHERE root.object_id IS NULL OR input.root_object_id IS NULL
+		     OR intent.store_id <> root.store_id OR intent.store_id <> input.store_id
+		     OR intent.team_id <> root.team_id OR intent.team_id <> input.team_id
+		     OR intent.scope_type <> root.scope_type OR intent.scope_type <> input.scope_type
+		     OR intent.scope_id <> root.scope_id OR intent.scope_id <> input.scope_id
+		     OR intent.root_generation > root.generation
+		     OR (root.lifecycle = 'active' AND intent.root_generation <> root.generation)
+		     OR root.object_kind <> 'graph_delta'
+		     OR length(intent.intent_id) NOT BETWEEN 1 AND 255
+		     OR intent.intent_id GLOB '*[^A-Za-z0-9._:-]*'
+		     OR length(intent.derivative_object_id) NOT BETWEEN 1 AND 255
+		     OR intent.derivative_object_id GLOB '*[^A-Za-z0-9._:-]*'
+		     OR intent.source_ordinal NOT BETWEEN 0 AND 49
+		     OR length(intent.semantic_key_digest) <> 64
+		     OR intent.semantic_key_digest GLOB '*[^0-9a-f]*'
+		     OR length(intent.policy_digest) <> 64
+		     OR intent.policy_digest GLOB '*[^0-9a-f]*'
+		     OR length(intent.payload_digest) <> 64
+		     OR intent.payload_digest GLOB '*[^0-9a-f]*'
+		     OR NOT (
+		        (intent.projection_kind = 'claim' AND intent.source_kind = 'fact'
+		         AND intent.derivative_kind = 'assertion')
+		        OR (intent.projection_kind = 'continuity' AND intent.source_kind = 'continuity'
+		            AND intent.source_ordinal = 0
+		            AND intent.derivative_kind = 'continuity_checkpoint')
+		        OR (intent.projection_kind = 'embedding'
+		            AND intent.source_kind IN ('node', 'edge', 'fact', 'event')
+		            AND intent.derivative_kind = 'embedding')
+		        OR (intent.projection_kind = 'graph' AND (
+		               (intent.source_kind = 'node' AND intent.derivative_kind = 'graph_entity')
+		            OR (intent.source_kind = 'edge' AND intent.derivative_kind = 'graph_relation')
+		            OR (intent.source_kind = 'fact' AND intent.derivative_kind = 'graph_fact')
+		            OR (intent.source_kind = 'event' AND intent.derivative_kind = 'graph_event')
+		        ))
+		     )
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_projection_jobs job
+		   JOIN team_object_registry root ON root.object_id = job.root_object_id
+		  WHERE root.object_kind = 'graph_delta'
+		    AND root.lifecycle = 'active'
+		    AND root.generation = job.root_generation
+		    AND (
+		      job.projection_kind NOT IN ('claim', 'continuity', 'embedding', 'graph')
+		      OR NOT EXISTS (
+		        SELECT 1 FROM team_semantic_projection_intents intent
+		         WHERE intent.root_object_id = job.root_object_id
+		           AND intent.root_generation = job.root_generation
+		           AND intent.store_id = job.store_id
+		           AND intent.team_id = job.team_id
+		           AND intent.scope_type = job.scope_type
+		           AND intent.scope_id = job.scope_id
+		           AND intent.projection_kind = job.projection_kind
+		      )
+		    )
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_semantic_projection_intents intent
+		   JOIN team_object_registry root ON root.object_id = intent.root_object_id
+		  WHERE root.object_kind = 'graph_delta'
+		    AND root.lifecycle = 'active'
+		    AND root.generation = intent.root_generation
+		    AND NOT EXISTS (
+		      SELECT 1 FROM team_projection_jobs job
+		       WHERE job.root_object_id = intent.root_object_id
+		         AND job.root_generation = intent.root_generation
+		         AND job.store_id = intent.store_id
+		         AND job.team_id = intent.team_id
+		         AND job.scope_type = intent.scope_type
+		         AND job.scope_id = intent.scope_id
+		         AND job.projection_kind = intent.projection_kind
+		    )
+		 LIMIT 1`},
+		{query: `SELECT 1
 		   FROM team_memory_events event
 		   LEFT JOIN team_object_registry root ON root.object_id = event.root_object_id
 		   LEFT JOIN team_memory_capsules capsule ON capsule.capsule_id = event.capsule_id
@@ -870,7 +1009,355 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		}
 		return ErrTeamPolicyNotReady
 	}
+	graphQuery, ok := q.(teamGraphIntegrityQueryer)
+	if !ok {
+		return ErrTeamPolicyNotReady
+	}
+	return validateTeamGraphIngressDescriptorIntegrity(ctx, graphQuery, policy)
+}
+
+type teamGraphIntegrityQueryer interface {
+	queryer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+type teamGraphIntegrityRoot struct {
+	objectID, storeID, teamID  string
+	scopeType                  teamauth.ScopeType
+	scopeID, ownerID, authorID string
+	privacyTier, retention     string
+	generation                 int64
+	expiresAt, canonicalJSON   string
+	contentDigest              string
+}
+
+func validateTeamGraphIngressDescriptorIntegrity(
+	ctx context.Context,
+	q teamGraphIntegrityQueryer,
+	policy teamPolicyState,
+) error {
+	rows, err := q.QueryContext(ctx, `
+		SELECT root.object_id FROM team_object_registry root
+		 WHERE root.object_kind = 'graph_delta' AND root.lifecycle = 'active'
+		 ORDER BY root.object_id`)
+	if err != nil {
+		return err
+	}
+	var rootIDs []string
+	for rows.Next() {
+		var rootID string
+		if err := rows.Scan(&rootID); err != nil {
+			rows.Close()
+			return err
+		}
+		rootIDs = append(rootIDs, rootID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, rootID := range rootIDs {
+		root, err := loadTeamGraphIntegrityRoot(ctx, q, rootID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTeamPolicyNotReady
+		}
+		if err != nil {
+			return err
+		}
+		if root.storeID != policy.StoreID || root.teamID != policy.TeamID {
+			return ErrTeamPolicyNotReady
+		}
+		if err := validateOneTeamGraphIngressDescriptorSet(ctx, q, root); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func loadTeamGraphIntegrityRoot(
+	ctx context.Context,
+	q queryer,
+	rootID string,
+) (teamGraphIntegrityRoot, error) {
+	var root teamGraphIntegrityRoot
+	var scopeType string
+	err := q.QueryRowContext(ctx, `
+		SELECT root.object_id, root.store_id, root.team_id, root.scope_type,
+		       root.scope_id, COALESCE(root.owner_principal_id, ''),
+		       root.author_principal_id, root.privacy_tier, root.retention,
+		       root.generation, COALESCE(root.expires_at, ''),
+		       input.canonical_json, input.content_digest
+		  FROM team_object_registry root
+		  JOIN team_graph_delta_inputs input
+		    ON input.root_object_id = root.object_id
+		   AND input.store_id = root.store_id
+		   AND input.team_id = root.team_id
+		   AND input.scope_type = root.scope_type
+		   AND input.scope_id = root.scope_id
+		   AND input.root_generation = root.generation
+		 WHERE root.object_id = ? AND root.object_kind = 'graph_delta'
+		   AND root.lifecycle = 'active'`, rootID).Scan(
+		&root.objectID, &root.storeID, &root.teamID, &scopeType,
+		&root.scopeID, &root.ownerID, &root.authorID,
+		&root.privacyTier, &root.retention, &root.generation,
+		&root.expiresAt, &root.canonicalJSON, &root.contentDigest,
+	)
+	root.scopeType = teamauth.ScopeType(scopeType)
+	return root, err
+}
+
+func validateOneTeamGraphIngressDescriptorSet(
+	ctx context.Context,
+	q teamGraphIntegrityQueryer,
+	root teamGraphIntegrityRoot,
+) error {
+	write, err := decodeCanonicalTeamGraphReadinessBody([]byte(root.canonicalJSON))
+	if err != nil {
+		return ErrTeamPolicyNotReady
+	}
+	write.IdempotencyKey = "readiness-placeholder"
+
+	var actorID, clientKey, idempotencyKeyHash, principalKind, humanPrincipalID string
+	var idempotencyRows int
+	err = q.QueryRowContext(ctx, `
+		SELECT idem.principal_id, idem.client_key, idem.idempotency_key_hash,
+		       principal.kind, COALESCE(binding.human_principal_id, ''),
+		       (SELECT count(*) FROM team_idempotency_records counted
+		         WHERE counted.object_id = ? AND counted.state = 'stored')
+		  FROM team_idempotency_records idem
+		  JOIN team_principals principal ON principal.principal_id = idem.principal_id
+		  LEFT JOIN team_agent_bindings binding
+		    ON binding.agent_principal_id = idem.principal_id
+		   AND binding.client_key = idem.client_key
+		 WHERE idem.object_id = ? AND idem.state = 'stored'
+		 LIMIT 1`, root.objectID, root.objectID).Scan(
+		&actorID, &clientKey, &idempotencyKeyHash,
+		&principalKind, &humanPrincipalID, &idempotencyRows,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTeamPolicyNotReady
+	}
+	if err != nil {
+		return err
+	}
+	if idempotencyRows != 1 || actorID != root.authorID || !lowerHexDigest(clientKey) ||
+		!lowerHexDigest(idempotencyKeyHash) {
+		return ErrTeamPolicyNotReady
+	}
+	kind := teamauth.PrincipalKind(principalKind)
+	if (kind != teamauth.PrincipalAgent && kind != teamauth.PrincipalService) ||
+		(kind == teamauth.PrincipalAgent && humanPrincipalID == "") ||
+		(kind == teamauth.PrincipalService && humanPrincipalID != "") {
+		return ErrTeamPolicyNotReady
+	}
+
+	var requestedScope *teamauth.CanonicalScope
+	if write.TargetScope != nil {
+		requestedScope = &teamauth.CanonicalScope{
+			Type: write.TargetScope.Type,
+			ID:   write.TargetScope.ID,
+		}
+	}
+	permit := TeamMutationPermit{
+		attribution: TeamMutationAttribution{
+			StoreID: root.storeID, TeamID: root.teamID,
+			ActorPrincipalID: actorID, HumanPrincipalID: humanPrincipalID,
+			OAuthClientKey: clientKey, PrincipalKind: kind,
+		},
+		action: teamauth.ActionWrite, objectKind: "graph_delta",
+		effectiveTarget: teamauth.CanonicalScope{
+			TeamID: root.teamID, Type: root.scopeType, ID: root.scopeID,
+			OwnerPrincipalID: root.ownerID, Lifecycle: teamauth.LifecycleActive,
+			Generation: root.generation, PrivacyTier: root.privacyTier,
+			Retention: root.retention,
+		},
+		context:        teamGraphActiveContextToAuth(root.teamID, write.ActiveContext),
+		requestedScope: requestedScope,
+	}
+	normalized, err := normalizeTeamGraphDeltaWriteWithIdempotencyHash(
+		permit, write, idempotencyKeyHash,
+	)
+	if err != nil || !bytes.Equal(normalized.canonicalBody, []byte(root.canonicalJSON)) ||
+		normalized.bodyDigest != root.contentDigest ||
+		normalized.body.PrivacyTier != root.privacyTier ||
+		normalized.body.Retention != root.retention ||
+		!teamGraphReadinessExpiryMatches(root, normalized.expiresAt) {
+		return ErrTeamPolicyNotReady
+	}
+	if err := validateTeamGraphIntentRows(ctx, q, root, normalized.intentDescriptors); err != nil {
+		return err
+	}
+	return validateTeamGraphJobRows(ctx, q, root, normalized.projectionKinds)
+}
+
+func teamGraphActiveContextToAuth(teamID string, active TeamGraphActiveContext) teamauth.ActiveContext {
+	return teamauth.ActiveContext{
+		TeamID: teamID, ProjectID: active.ProjectID, RepoID: active.RepoID,
+		AgentID: active.AgentID, SessionID: active.SessionID,
+	}
+}
+
+func decodeCanonicalTeamGraphReadinessBody(raw []byte) (TeamGraphDeltaWrite, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var canonical teamGraphCanonicalBody
+	if err := decoder.Decode(&canonical); err != nil {
+		return TeamGraphDeltaWrite{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("team graph canonical body has trailing JSON")
+		}
+		return TeamGraphDeltaWrite{}, err
+	}
+	reencoded, err := marshalTeamGraphCanonical(canonical)
+	if err != nil || !bytes.Equal(reencoded, raw) {
+		return TeamGraphDeltaWrite{}, ErrTeamGraphDeltaInvalid
+	}
+	var write TeamGraphDeltaWrite
+	if err := json.Unmarshal(raw, &write); err != nil {
+		return TeamGraphDeltaWrite{}, err
+	}
+	return write, nil
+}
+
+func teamGraphReadinessExpiryMatches(
+	root teamGraphIntegrityRoot,
+	explicit *time.Time,
+) bool {
+	if explicit != nil {
+		stored, err := time.Parse(time.RFC3339Nano, root.expiresAt)
+		return err == nil && stored.Equal(explicit.UTC())
+	}
+	if root.scopeType == teamauth.ScopeSession || root.retention == "session" {
+		_, err := time.Parse(time.RFC3339Nano, root.expiresAt)
+		return err == nil
+	}
+	return root.expiresAt == ""
+}
+
+func validateTeamGraphIntentRows(
+	ctx context.Context,
+	q teamGraphIntegrityQueryer,
+	root teamGraphIntegrityRoot,
+	descriptors []teamSemanticIntentDescriptor,
+) error {
+	expected := make(map[string]teamSemanticProjectionIntent, len(descriptors))
+	for _, descriptor := range descriptors {
+		key := teamGraphIntentSetKey(
+			descriptor.ProjectionKind, descriptor.SourceKind, descriptor.SourceOrdinal,
+		)
+		expected[key] = teamSemanticProjectionIntent{
+			IntentID: teamGraphOpaqueDigestID(
+				"semantic_intent", "pulse-team-semantic-intent-v1", root.objectID,
+				strconv.FormatInt(root.generation, 10), descriptor.ProjectionKind,
+				descriptor.SourceKind, strconv.Itoa(descriptor.SourceOrdinal),
+				descriptor.DerivativeObjectID, descriptor.PayloadDigest,
+			),
+			ProjectionKind: descriptor.ProjectionKind, SourceKind: descriptor.SourceKind,
+			SourceOrdinal:      descriptor.SourceOrdinal,
+			DerivativeObjectID: descriptor.DerivativeObjectID,
+			DerivativeKind:     descriptor.DerivativeKind,
+			SemanticKeyDigest:  descriptor.SemanticKeyDigest,
+			PolicyDigest:       descriptor.PolicyDigest, PayloadDigest: descriptor.PayloadDigest,
+		}
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT intent_id, projection_kind, source_kind, source_ordinal,
+		       derivative_object_id, derivative_kind, semantic_key_digest,
+		       policy_digest, payload_digest
+		  FROM team_semantic_projection_intents
+		 WHERE root_object_id = ? AND root_generation = ?
+		 ORDER BY projection_kind, source_kind, source_ordinal`,
+		root.objectID, root.generation)
+	if err != nil {
+		return err
+	}
+	seen := 0
+	for rows.Next() {
+		var actual teamSemanticProjectionIntent
+		if err := rows.Scan(
+			&actual.IntentID, &actual.ProjectionKind, &actual.SourceKind,
+			&actual.SourceOrdinal, &actual.DerivativeObjectID, &actual.DerivativeKind,
+			&actual.SemanticKeyDigest, &actual.PolicyDigest, &actual.PayloadDigest,
+		); err != nil {
+			rows.Close()
+			return err
+		}
+		key := teamGraphIntentSetKey(actual.ProjectionKind, actual.SourceKind, actual.SourceOrdinal)
+		want, ok := expected[key]
+		if !ok || actual != want {
+			rows.Close()
+			return ErrTeamPolicyNotReady
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if seen != len(expected) {
+		return ErrTeamPolicyNotReady
+	}
+	return nil
+}
+
+func validateTeamGraphJobRows(
+	ctx context.Context,
+	q teamGraphIntegrityQueryer,
+	root teamGraphIntegrityRoot,
+	expectedKinds []string,
+) error {
+	rows, err := q.QueryContext(ctx, `
+		SELECT projection_kind, store_id, team_id, scope_type, scope_id, root_generation
+		  FROM team_projection_jobs WHERE root_object_id = ?
+		 ORDER BY projection_kind`, root.objectID)
+	if err != nil {
+		return err
+	}
+	var actualKinds []string
+	for rows.Next() {
+		var kind, storeID, teamID, scopeType, scopeID string
+		var generation int64
+		if err := rows.Scan(&kind, &storeID, &teamID, &scopeType, &scopeID, &generation); err != nil {
+			rows.Close()
+			return err
+		}
+		if storeID != root.storeID || teamID != root.teamID ||
+			scopeType != string(root.scopeType) || scopeID != root.scopeID ||
+			generation != root.generation {
+			rows.Close()
+			return ErrTeamPolicyNotReady
+		}
+		actualKinds = append(actualKinds, kind)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	sort.Strings(expectedKinds)
+	if len(actualKinds) != len(expectedKinds) {
+		return ErrTeamPolicyNotReady
+	}
+	for index := range expectedKinds {
+		if actualKinds[index] != expectedKinds[index] {
+			return ErrTeamPolicyNotReady
+		}
+	}
+	return nil
+}
+
+func teamGraphIntentSetKey(projectionKind, sourceKind string, ordinal int) string {
+	return projectionKind + "\x00" + sourceKind + "\x00" + strconv.Itoa(ordinal)
 }
 
 func writerLeaseTokenHash(token string) string {
