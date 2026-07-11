@@ -357,6 +357,17 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
           fully_projected: false, replayed: false, fallback: false,
         });
       }
+      if (url.endsWith('/team/v1/recall')) {
+        return Response.json({
+          schema: 'pulse.team.recall_result.v1',
+          items: [{
+            object_id: 'team_root_memory_001', kind: 'decision',
+            redacted_summary: 'Use pre-retrieval authorization.', confidence: 0.9,
+            privacy_tier: 'sensitive', retention: 'project', tags: ['pulse'],
+          }],
+          returned_count: 1, fallback: false,
+        });
+      }
       const parsed = JSON.parse(body);
       return Response.json({
         version: 'pulse.team.principal_context.v1', request_id: headers.get('x-pulse-request-id'),
@@ -378,6 +389,7 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
     await Promise.all([
       ['human-a', 'client-a', 'pulse:connect pulse:write', 'pulse_team_remember'],
       ['human-b', 'client-b', 'pulse:connect pulse:write', 'pulse_team_remember'],
+      ['human-c', 'client-c', 'pulse:connect pulse:read', 'pulse_team_recall'],
     ].map(async ([subject, clientId, scope, tool], index) => {
       const authorization = `Bearer ${await makeToken(subject, clientId, scope)}`;
       const baseline = await security.authenticateBeforeBody(authorization);
@@ -400,17 +412,26 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
           privacy_tier: 'normal', retention: 'project', idempotency_key: `remember-${clientId}`,
         });
         assert.equal(stored.object_id, 'team_object_001');
+      } else {
+        const recalled = await principalClient.bindDomain(baseline, context).recall({
+          schema: 'pulse.team.recall.v1', query: 'What did we decide?',
+          active_context: { project_id: 'project-pulse' }, privacy_ceiling: 'sensitive',
+        });
+        assert.equal(recalled.items[0]?.object_id, 'team_root_memory_001');
       }
     }));
     assert.deepEqual(dispatched.sort(), [
       'principal-client-a:pulse:connect,pulse:write',
       'principal-client-b:pulse:connect,pulse:write',
+      'principal-client-c:pulse:connect,pulse:read',
     ]);
-    assert.equal(daemonRequests.length, 4);
+    assert.equal(daemonRequests.length, 6);
     assert.ok(daemonRequests.every(({ headers }) => !headers.has('authorization')));
     assert.ok(daemonRequests.every(({ body }) => !body.includes('Bearer ')));
     const memoryRequests = daemonRequests.filter(({ url }) => url.endsWith('/team/v1/memory/remember'));
     assert.equal(memoryRequests.length, 2);
+    const recallRequests = daemonRequests.filter(({ url }) => url.endsWith('/team/v1/recall'));
+    assert.equal(recallRequests.length, 1);
     const domainJtis = new Set<string>();
     for (const memoryRequest of memoryRequests) {
       const parsed = JSON.parse(memoryRequest.body);
@@ -437,6 +458,20 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
       domainJtis.add(String(domainAssertion.payload.jti));
     }
     assert.equal(domainJtis.size, 2, 'concurrent domain calls require fresh request-local JTIs');
+    const recallRequest = recallRequests[0];
+    const recallAssertion = await jwtVerify(
+      recallRequest.headers.get('x-pulse-principal') ?? '', createPublicKey(gatewayPrivate), {
+        issuer: 'pulse-team-gateway', audience: 'pulse-team-daemon', algorithms: ['EdDSA'],
+        currentDate: new Date(now * 1000),
+      },
+    );
+    assert.equal(recallAssertion.payload.path, '/team/v1/recall');
+    assert.equal(recallAssertion.payload.oauth_subject, 'human-c');
+    assert.equal(recallAssertion.payload.oauth_client_id, 'client-c');
+    assert.equal(
+      recallAssertion.payload.body_sha256,
+      createHash('sha256').update(recallRequest.body).digest('hex'),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

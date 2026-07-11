@@ -55,8 +55,19 @@ export const TEAM_MEMORY_SCHEMA = 'pulse.team.memory.v1' as const;
 export const TEAM_MEMORY_RESULT_SCHEMA = 'pulse.team.memory_result.v1' as const;
 export const TEAM_GRAPH_DELTA_SCHEMA = 'pulse.team.graph_delta.v1' as const;
 export const TEAM_GRAPH_DELTA_RESULT_SCHEMA = 'pulse.team.graph_delta_result.v1' as const;
+export const TEAM_RECALL_SCHEMA = 'pulse.team.recall.v1' as const;
+export const TEAM_RECALL_RESULT_SCHEMA = 'pulse.team.recall_result.v1' as const;
+export const TEAM_CONTEXT_QUERY_SCHEMA = 'pulse.team.context.v1' as const;
+export const TEAM_CONTEXT_QUERY_RESULT_SCHEMA = 'pulse.team.context_result.v1' as const;
+export const TEAM_RESUME_SCHEMA = 'pulse.team.resume.v1' as const;
+export const TEAM_RESUME_RESULT_SCHEMA = 'pulse.team.resume_result.v1' as const;
+export const TEAM_DELETE_SCHEMA = 'pulse.team.delete.v1' as const;
+export const TEAM_DELETE_RESULT_SCHEMA = 'pulse.team.delete_result.v1' as const;
+export const TEAM_DELETE_STATUS_SCHEMA = 'pulse.team.delete_status.v1' as const;
+export const TEAM_DELETE_STATUS_RESULT_SCHEMA = 'pulse.team.delete_status_result.v1' as const;
 const TEAM_MEMORY_MAX_BODY_BYTES = 256 << 10;
 const TEAM_GRAPH_DELTA_MAX_BODY_BYTES = 256 << 10;
+const TEAM_READ_MAX_BODY_BYTES = 64 << 10;
 
 export const TEAM_REMEMBER_INPUT_SCHEMA = {
   type: 'object' as const,
@@ -381,6 +392,89 @@ export const TEAM_GRAPH_DELTA_INPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const TEAM_READ_ACTIVE_CONTEXT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    project_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    repo_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    agent_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    session_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+  },
+  additionalProperties: false,
+} as const;
+
+export const TEAM_RECALL_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_RECALL_SCHEMA },
+    query: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+    privacy_ceiling: { type: 'string' as const, enum: ['normal', 'sensitive', 'private'] },
+    retention: { type: 'string' as const, enum: ['session', 'project', 'long_term'] },
+    limit: { type: 'integer' as const, minimum: 1, maximum: 50, default: 5 },
+  },
+  required: ['schema', 'query', 'active_context', 'privacy_ceiling'],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_CONTEXT_QUERY_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_CONTEXT_QUERY_SCHEMA },
+    query: { type: 'string' as const, minLength: 1, maxLength: 1200 },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+    privacy_ceiling: { type: 'string' as const, enum: ['normal', 'sensitive', 'private'] },
+    retention: { type: 'string' as const, enum: ['session', 'project', 'long_term'] },
+    limit: { type: 'integer' as const, minimum: 1, maximum: 50, default: 10 },
+    include_trace: { type: 'boolean' as const, default: false },
+    graph_mode: {
+      type: 'string' as const, enum: ['off', 'anchored', 'walk'], default: 'anchored',
+    },
+  },
+  required: ['schema', 'query', 'active_context', 'privacy_ceiling'],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_RESUME_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_RESUME_SCHEMA },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+    thread_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    limit: { type: 'integer' as const, minimum: 1, maximum: 50, default: 20 },
+  },
+  required: ['schema', 'active_context'],
+  anyOf: [
+    { required: ['thread_id'] },
+    { properties: { active_context: { required: ['project_id'] } } },
+    { properties: { active_context: { required: ['session_id'] } } },
+  ],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_DELETE_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_DELETE_SCHEMA },
+    object_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+    idempotency_key: { type: 'string' as const, minLength: 8, maxLength: 255 },
+  },
+  required: ['schema', 'object_id', 'active_context', 'idempotency_key'],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_DELETE_STATUS_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_DELETE_STATUS_SCHEMA },
+    operation_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+  },
+  required: ['schema', 'operation_id', 'active_context'],
+  additionalProperties: false,
+} as const;
+
 function teamContinuityArraySchema() {
   return {
     type: 'array' as const,
@@ -458,6 +552,19 @@ const TEAM_GRAPH_CONTINUITY_FIELDS = new Set([
   'do_not_repeat', 'emotional_anchors', 'state_signals', 'active_threads',
   'review_insights',
 ]);
+const TEAM_RECALL_FIELDS = new Set([
+  'schema', 'query', 'active_context', 'privacy_ceiling', 'retention', 'limit',
+]);
+const TEAM_CONTEXT_QUERY_FIELDS = new Set([
+  'schema', 'query', 'active_context', 'privacy_ceiling', 'retention', 'limit',
+  'include_trace', 'graph_mode',
+]);
+const TEAM_RESUME_FIELDS = new Set(['schema', 'active_context', 'thread_id', 'limit']);
+const TEAM_DELETE_FIELDS = new Set([
+  'schema', 'object_id', 'active_context', 'idempotency_key',
+]);
+const TEAM_DELETE_STATUS_FIELDS = new Set(['schema', 'operation_id', 'active_context']);
+const TEAM_GRAPH_MODES = new Set(['off', 'anchored', 'walk']);
 const TEAM_SAFE_TAG = /^[\p{L}\p{N}][\p{L}\p{N}._:-]{0,63}$/u;
 const TEAM_SAFE_OPAQUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 const TEAM_SEMANTIC_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,95}$/;
@@ -487,12 +594,18 @@ export class TeamContractError extends Error {
 export type TeamDomainErrorCode =
   | 'invalid_team_memory'
   | 'invalid_team_graph_delta'
+  | 'invalid_team_recall'
+  | 'invalid_team_context'
+  | 'invalid_team_resume'
+  | 'invalid_team_delete'
+  | 'invalid_team_delete_status'
   | 'invalid_principal'
   | 'principal_request_mismatch'
   | 'principal_replay'
   | 'principal_revoked'
   | 'policy_denied'
   | 'not_found'
+  | 'concealed_not_found'
   | 'idempotency_conflict'
   | 'idempotency_in_progress'
   | 'idempotency_failed'
@@ -885,6 +998,177 @@ export function canonicalTeamRememberBody(input: unknown): {
     failTeamContract('canonical team memory body is too large');
   }
   return { value, text, bytes };
+}
+
+export interface TeamReadActiveContext {
+  project_id?: string;
+  repo_id?: string;
+  agent_id?: string;
+  session_id?: string;
+}
+
+export interface CleanTeamRecallInput {
+  schema: typeof TEAM_RECALL_SCHEMA;
+  query: string;
+  active_context: TeamReadActiveContext;
+  privacy_ceiling: string;
+  retention?: string;
+  limit: number;
+}
+
+export interface CleanTeamContextQueryInput {
+  schema: typeof TEAM_CONTEXT_QUERY_SCHEMA;
+  query: string;
+  active_context: TeamReadActiveContext;
+  privacy_ceiling: string;
+  retention?: string;
+  limit: number;
+  include_trace: boolean;
+  graph_mode: string;
+}
+
+export interface CleanTeamResumeInput {
+  schema: typeof TEAM_RESUME_SCHEMA;
+  active_context: TeamReadActiveContext;
+  thread_id?: string;
+  limit: number;
+}
+
+function cleanTeamReadActiveContext(value: unknown): TeamReadActiveContext {
+  const input = teamRecord(value, 'active_context', TEAM_ACTIVE_CONTEXT_FIELDS);
+  const clean: TeamReadActiveContext = {};
+  for (const field of ['project_id', 'repo_id', 'agent_id', 'session_id'] as const) {
+    if (input[field] !== undefined) {
+      clean[field] = safeTeamOpaque(`active_context.${field}`, input[field]);
+    }
+  }
+  return clean;
+}
+
+function teamReadLimit(field: string, value: unknown, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 50) {
+    failTeamContract(`${field} must be an integer from 1 to 50`);
+  }
+  return value as number;
+}
+
+function canonicalTeamReadBody<T>(value: T): { value: T; text: string; bytes: Buffer } {
+  const text = JSON.stringify(value);
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength > TEAM_READ_MAX_BODY_BYTES) {
+    failTeamContract('canonical team read body is too large');
+  }
+  return { value, text, bytes };
+}
+
+export function canonicalTeamRecallBody(input: unknown): {
+  value: CleanTeamRecallInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_RECALL_FIELDS);
+  if (envelope.schema !== TEAM_RECALL_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_RECALL_SCHEMA}`);
+  }
+  const value: CleanTeamRecallInput = {
+    schema: TEAM_RECALL_SCHEMA,
+    query: safeTeamText('query', envelope.query, 1200),
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+    privacy_ceiling: teamEnum('privacy_ceiling', envelope.privacy_ceiling, TEAM_PRIVACY_TIERS),
+    ...(envelope.retention === undefined
+      ? {}
+      : { retention: teamEnum('retention', envelope.retention, TEAM_RETENTION) }),
+    limit: teamReadLimit('limit', envelope.limit, 5),
+  };
+  return canonicalTeamReadBody(value);
+}
+
+export function canonicalTeamContextQueryBody(input: unknown): {
+  value: CleanTeamContextQueryInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_CONTEXT_QUERY_FIELDS);
+  if (envelope.schema !== TEAM_CONTEXT_QUERY_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_CONTEXT_QUERY_SCHEMA}`);
+  }
+  const value: CleanTeamContextQueryInput = {
+    schema: TEAM_CONTEXT_QUERY_SCHEMA,
+    query: safeTeamText('query', envelope.query, 1200),
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+    privacy_ceiling: teamEnum('privacy_ceiling', envelope.privacy_ceiling, TEAM_PRIVACY_TIERS),
+    ...(envelope.retention === undefined
+      ? {}
+      : { retention: teamEnum('retention', envelope.retention, TEAM_RETENTION) }),
+    limit: teamReadLimit('limit', envelope.limit, 10),
+    include_trace: optionalTeamBoolean('include_trace', envelope.include_trace, false),
+    graph_mode: envelope.graph_mode === undefined
+      ? 'anchored'
+      : teamEnum('graph_mode', envelope.graph_mode, TEAM_GRAPH_MODES),
+  };
+  return canonicalTeamReadBody(value);
+}
+
+export function canonicalTeamResumeBody(input: unknown): {
+  value: CleanTeamResumeInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_RESUME_FIELDS);
+  if (envelope.schema !== TEAM_RESUME_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_RESUME_SCHEMA}`);
+  }
+  const active = cleanTeamReadActiveContext(envelope.active_context);
+  const threadID = envelope.thread_id === undefined
+    ? undefined
+    : safeTeamOpaque('thread_id', envelope.thread_id);
+  if (threadID === undefined && active.project_id === undefined && active.session_id === undefined) {
+    failTeamContract('resume requires thread_id, active_context.project_id, or active_context.session_id');
+  }
+  const value: CleanTeamResumeInput = {
+    schema: TEAM_RESUME_SCHEMA,
+    active_context: active,
+    ...(threadID === undefined ? {} : { thread_id: threadID }),
+    limit: teamReadLimit('limit', envelope.limit, 20),
+  };
+  return canonicalTeamReadBody(value);
+}
+
+export interface CleanTeamDeleteInput {
+  schema: typeof TEAM_DELETE_SCHEMA;
+  object_id: string;
+  active_context: TeamReadActiveContext;
+  idempotency_key: string;
+}
+
+export interface CleanTeamDeleteStatusInput {
+  schema: typeof TEAM_DELETE_STATUS_SCHEMA;
+  operation_id: string;
+  active_context: TeamReadActiveContext;
+}
+
+export function canonicalTeamDeleteBody(input: unknown): {
+  value: CleanTeamDeleteInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_DELETE_FIELDS);
+  if (envelope.schema !== TEAM_DELETE_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_DELETE_SCHEMA}`);
+  }
+  return canonicalTeamReadBody({
+    schema: TEAM_DELETE_SCHEMA,
+    object_id: safeTeamOpaque('object_id', envelope.object_id),
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+    idempotency_key: safeTeamOpaque('idempotency_key', envelope.idempotency_key, 8),
+  });
+}
+
+export function canonicalTeamDeleteStatusBody(input: unknown): {
+  value: CleanTeamDeleteStatusInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_DELETE_STATUS_FIELDS);
+  if (envelope.schema !== TEAM_DELETE_STATUS_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_DELETE_STATUS_SCHEMA}`);
+  }
+  return canonicalTeamReadBody({
+    schema: TEAM_DELETE_STATUS_SCHEMA,
+    operation_id: safeTeamOpaque('operation_id', envelope.operation_id),
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+  });
 }
 
 export interface CleanTeamGraphNode {
@@ -1458,6 +1742,485 @@ export function validateTeamGraphDeltaResult(
   };
 }
 
+export interface TeamRecallResult {
+  schema: typeof TEAM_RECALL_RESULT_SCHEMA;
+  items: Array<{
+    object_id: string;
+    kind: string;
+    redacted_summary: string;
+    confidence: number;
+    privacy_tier: string;
+    retention: string;
+    tags: string[];
+  }>;
+  returned_count: number;
+  fallback: false;
+}
+
+export interface TeamContextQueryResult {
+  schema: typeof TEAM_CONTEXT_QUERY_RESULT_SCHEMA;
+  facts: TeamContextFactResult[];
+  events: TeamContextEventResult[];
+  entities: TeamContextEntityResult[];
+  relations: TeamContextRelationResult[];
+  assertions: TeamContextAssertionResult[];
+  trace?: { stages: Array<{ kind: string; returned_object_ids: string[] }> };
+  returned_counts: {
+    facts: number; events: number; entities: number; relations: number; assertions: number;
+  };
+  fallback: false;
+}
+
+export interface TeamContextFactResult {
+  root_object_id: string; object_id: string; text: string;
+  score: number; confidence: number; domain: string;
+}
+
+export interface TeamContextEventResult {
+  root_object_id: string; object_id: string; title: string; summary: string;
+  score: number; confidence: number; domain: string;
+}
+
+export interface TeamContextEntityResult {
+  root_object_id: string; object_id: string; kind: string;
+  canonical_name: string; summary: string; score: number; confidence: number;
+}
+
+export interface TeamContextRelationResult {
+  root_object_id: string; object_id: string; kind: string;
+  from_object_id: string; to_object_id: string; summary: string;
+  score: number; confidence: number;
+}
+
+export interface TeamContextAssertionResult {
+  root_object_id: string; object_id: string; subject_object_id: string;
+  predicate: string; object_text: string; confidence: number;
+}
+
+export interface TeamResumeResult {
+  schema: typeof TEAM_RESUME_RESULT_SCHEMA;
+  thread_id?: string;
+  sections: Record<string, Array<{ object_id: string; text: string }>>;
+  returned_count: number;
+  fallback: false;
+}
+
+const TEAM_RECALL_RESULT_FIELDS = new Set(['schema', 'items', 'returned_count', 'fallback']);
+const TEAM_RECALL_ITEM_FIELDS = new Set([
+  'object_id', 'kind', 'redacted_summary', 'confidence', 'privacy_tier', 'retention', 'tags',
+]);
+const TEAM_CONTEXT_RESULT_FIELDS = new Set([
+  'schema', 'facts', 'events', 'entities', 'relations', 'assertions',
+  'returned_counts', 'fallback',
+]);
+const TEAM_CONTEXT_RESULT_TRACE_FIELDS = new Set([...TEAM_CONTEXT_RESULT_FIELDS, 'trace']);
+const TEAM_CONTEXT_FACT_FIELDS = new Set([
+  'root_object_id', 'object_id', 'text', 'score', 'confidence', 'domain',
+]);
+const TEAM_CONTEXT_EVENT_FIELDS = new Set([
+  'root_object_id', 'object_id', 'title', 'summary', 'score', 'confidence', 'domain',
+]);
+const TEAM_CONTEXT_ENTITY_FIELDS = new Set([
+  'root_object_id', 'object_id', 'kind', 'canonical_name', 'summary', 'score', 'confidence',
+]);
+const TEAM_CONTEXT_RELATION_FIELDS = new Set([
+  'root_object_id', 'object_id', 'kind', 'from_object_id', 'to_object_id',
+  'summary', 'score', 'confidence',
+]);
+const TEAM_CONTEXT_ASSERTION_FIELDS = new Set([
+  'root_object_id', 'object_id', 'subject_object_id', 'predicate', 'object_text', 'confidence',
+]);
+const TEAM_CONTEXT_COUNT_FIELDS = new Set(['facts', 'events', 'entities', 'relations', 'assertions']);
+const TEAM_CONTEXT_TRACE_FIELDS = new Set(['stages']);
+const TEAM_CONTEXT_TRACE_STAGE_FIELDS = new Set(['kind', 'returned_object_ids']);
+const TEAM_CONTEXT_TRACE_KINDS = new Set(['lexical', 'vector', 'graph', 'assertion', 'continuity']);
+const TEAM_RESUME_RESULT_BASE_FIELDS = new Set(['schema', 'sections', 'returned_count', 'fallback']);
+const TEAM_RESUME_RESULT_THREAD_FIELDS = new Set([...TEAM_RESUME_RESULT_BASE_FIELDS, 'thread_id']);
+const TEAM_RESUME_SECTION_FIELDS = new Set([
+  'where_we_left_off', 'active_decisions', 'open_loops', 'do_not_repeat',
+  'relevant_emotional_state_context', 'suggested_next_step',
+]);
+const TEAM_RESUME_ENTRY_FIELDS = new Set(['object_id', 'text']);
+
+function validTeamResponseText(value: unknown, maximum: number): value is string {
+  if (typeof value !== 'string' || !isCanonicalJSONUnicode(value) || value.trim() !== value) return false;
+  const length = Array.from(value).length;
+  return length >= 1 && length <= maximum && unsafeTeamContentReason(value) === undefined;
+}
+
+function validTeamResponseScore(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function exactTeamResponseArray(
+  value: unknown,
+  limit: number,
+  error: string,
+): unknown[] {
+  if (!Array.isArray(value) || value.length > limit) throw new Error(error);
+  return value;
+}
+
+function exactTeamResponseTags(value: unknown, error: string): string[] {
+  if (!Array.isArray(value) || value.length > 20) throw new Error(error);
+  const tags = value.map((tag) => {
+    if (typeof tag !== 'string' || !TEAM_SAFE_TAG.test(tag) || unsafeTeamContentReason(tag)) {
+      throw new Error(error);
+    }
+    return tag;
+  });
+  if (new Set(tags).size !== tags.length) throw new Error(error);
+  return tags;
+}
+
+export function validateTeamRecallResult(value: unknown, limit: number): TeamRecallResult {
+  const error = 'team recall response is invalid';
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error(error);
+  const result = exactTeamResponseRecord(value, TEAM_RECALL_RESULT_FIELDS, error);
+  const rawItems = exactTeamResponseArray(result.items, limit, error);
+  if (
+    result.schema !== TEAM_RECALL_RESULT_SCHEMA || result.fallback !== false ||
+    result.returned_count !== rawItems.length
+  ) throw new Error(error);
+  const items = rawItems.map((entry) => {
+    const item = exactTeamResponseRecord(entry, TEAM_RECALL_ITEM_FIELDS, error);
+    if (
+      !teamResponseOpaque(item.object_id) || !TEAM_MEMORY_KINDS.has(String(item.kind)) ||
+      !validTeamResponseText(item.redacted_summary, 1200) ||
+      !validTeamResponseScore(item.confidence) || !TEAM_PRIVACY_TIERS.has(String(item.privacy_tier)) ||
+      !TEAM_RETENTION.has(String(item.retention))
+    ) throw new Error(error);
+    return {
+      object_id: item.object_id,
+      kind: item.kind as string,
+      redacted_summary: item.redacted_summary,
+      confidence: item.confidence as number,
+      privacy_tier: item.privacy_tier as string,
+      retention: item.retention as string,
+      tags: exactTeamResponseTags(item.tags, error),
+    };
+  });
+  return {
+    schema: TEAM_RECALL_RESULT_SCHEMA,
+    items,
+    returned_count: items.length,
+    fallback: false,
+  };
+}
+
+function validateContextCommon(
+  entry: unknown,
+  fields: ReadonlySet<string>,
+  error: string,
+): Record<string, unknown> {
+  const item = exactTeamResponseRecord(entry, fields, error);
+  if (
+    !teamResponseOpaque(item.root_object_id) || !teamResponseOpaque(item.object_id) ||
+    !validTeamResponseScore(item.confidence)
+  ) throw new Error(error);
+  return item;
+}
+
+export function validateTeamContextQueryResult(
+  value: unknown,
+  limit: number,
+  includeTrace: boolean,
+): TeamContextQueryResult {
+  const error = 'team context response is invalid';
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50 || typeof includeTrace !== 'boolean') {
+    throw new Error(error);
+  }
+  const result = exactTeamResponseRecord(
+    value,
+    includeTrace ? TEAM_CONTEXT_RESULT_TRACE_FIELDS : TEAM_CONTEXT_RESULT_FIELDS,
+    error,
+  );
+  if (result.schema !== TEAM_CONTEXT_QUERY_RESULT_SCHEMA || result.fallback !== false) {
+    throw new Error(error);
+  }
+  const facts = exactTeamResponseArray(result.facts, limit, error).map((entry) => {
+    const item = validateContextCommon(entry, TEAM_CONTEXT_FACT_FIELDS, error);
+    if (!validTeamResponseText(item.text, 1200) || !validTeamResponseScore(item.score) ||
+      !TEAM_GRAPH_DOMAINS.has(String(item.domain))) throw new Error(error);
+    return {
+      root_object_id: item.root_object_id as string,
+      object_id: item.object_id as string,
+      text: item.text,
+      score: item.score,
+      confidence: item.confidence as number,
+      domain: item.domain as string,
+    };
+  });
+  const events = exactTeamResponseArray(result.events, limit, error).map((entry) => {
+    const item = validateContextCommon(entry, TEAM_CONTEXT_EVENT_FIELDS, error);
+    if (!validTeamResponseText(item.title, 180) || !validTeamResponseText(item.summary, 1200) ||
+      !validTeamResponseScore(item.score) || !TEAM_GRAPH_DOMAINS.has(String(item.domain))) {
+      throw new Error(error);
+    }
+    return {
+      root_object_id: item.root_object_id as string,
+      object_id: item.object_id as string,
+      title: item.title,
+      summary: item.summary,
+      score: item.score,
+      confidence: item.confidence as number,
+      domain: item.domain as string,
+    };
+  });
+  const entities = exactTeamResponseArray(result.entities, limit, error).map((entry) => {
+    const item = validateContextCommon(entry, TEAM_CONTEXT_ENTITY_FIELDS, error);
+    if (!TEAM_GRAPH_ENTITY_KINDS.has(String(item.kind)) ||
+      !validTeamResponseText(item.canonical_name, 160) ||
+      !validTeamResponseText(item.summary, 1200) || !validTeamResponseScore(item.score)) {
+      throw new Error(error);
+    }
+    return {
+      root_object_id: item.root_object_id as string,
+      object_id: item.object_id as string,
+      kind: item.kind as string,
+      canonical_name: item.canonical_name,
+      summary: item.summary,
+      score: item.score,
+      confidence: item.confidence as number,
+    };
+  });
+  const relations = exactTeamResponseArray(result.relations, limit, error).map((entry) => {
+    const item = validateContextCommon(entry, TEAM_CONTEXT_RELATION_FIELDS, error);
+    if (typeof item.kind !== 'string' || !TEAM_SAFE_TAG.test(item.kind) ||
+      !teamResponseOpaque(item.from_object_id) ||
+      !teamResponseOpaque(item.to_object_id) || !validTeamResponseText(item.summary, 1200) ||
+      !validTeamResponseScore(item.score)) throw new Error(error);
+    return {
+      root_object_id: item.root_object_id as string,
+      object_id: item.object_id as string,
+      kind: item.kind as string,
+      from_object_id: item.from_object_id as string,
+      to_object_id: item.to_object_id as string,
+      summary: item.summary,
+      score: item.score,
+      confidence: item.confidence as number,
+    };
+  });
+  const assertions = exactTeamResponseArray(result.assertions, limit, error).map((entry) => {
+    const item = validateContextCommon(entry, TEAM_CONTEXT_ASSERTION_FIELDS, error);
+    if (!teamResponseOpaque(item.subject_object_id) || typeof item.predicate !== 'string' ||
+      !TEAM_SAFE_TAG.test(item.predicate) ||
+      !validTeamResponseText(item.object_text, 400)) throw new Error(error);
+    return {
+      root_object_id: item.root_object_id as string,
+      object_id: item.object_id as string,
+      subject_object_id: item.subject_object_id as string,
+      predicate: item.predicate,
+      object_text: item.object_text,
+      confidence: item.confidence as number,
+    };
+  });
+  const groups = { facts, events, entities, relations, assertions };
+  const all = Object.values(groups).flat();
+  const derivativeIDs = all.map((item) => item.object_id as string);
+  if (new Set(derivativeIDs).size !== derivativeIDs.length) throw new Error(error);
+  const entityIDs = new Set(entities.map((item) => item.object_id as string));
+  if (relations.some((item) =>
+    !entityIDs.has(item.from_object_id as string) || !entityIDs.has(item.to_object_id as string)) ||
+    assertions.some((item) => !entityIDs.has(item.subject_object_id as string))) {
+    throw new Error(error);
+  }
+  const counts = exactTeamResponseRecord(result.returned_counts, TEAM_CONTEXT_COUNT_FIELDS, error);
+  for (const [kind, entries] of Object.entries(groups)) {
+    if (counts[kind] !== entries.length) throw new Error(error);
+  }
+  let trace: TeamContextQueryResult['trace'];
+  if (includeTrace) {
+    const rawTrace = exactTeamResponseRecord(result.trace, TEAM_CONTEXT_TRACE_FIELDS, error);
+    const rawStages = exactTeamResponseArray(rawTrace.stages, TEAM_CONTEXT_TRACE_KINDS.size, error);
+    const seenKinds = new Set<string>();
+    const returnedIDs = new Set(derivativeIDs);
+    const stages = rawStages.map((entry) => {
+      const stage = exactTeamResponseRecord(entry, TEAM_CONTEXT_TRACE_STAGE_FIELDS, error);
+      if (!TEAM_CONTEXT_TRACE_KINDS.has(String(stage.kind)) || seenKinds.has(String(stage.kind)) ||
+        !Array.isArray(stage.returned_object_ids) || stage.returned_object_ids.length > derivativeIDs.length) {
+        throw new Error(error);
+      }
+      seenKinds.add(String(stage.kind));
+      const ids = stage.returned_object_ids.map((id) => {
+        if (!teamResponseOpaque(id) || !returnedIDs.has(id)) throw new Error(error);
+        return id;
+      });
+      if (new Set(ids).size !== ids.length) throw new Error(error);
+      return { kind: stage.kind as string, returned_object_ids: ids };
+    });
+    trace = { stages };
+  }
+  return {
+    schema: TEAM_CONTEXT_QUERY_RESULT_SCHEMA,
+    facts, events, entities, relations, assertions,
+    ...(trace === undefined ? {} : { trace }),
+    returned_counts: {
+      facts: facts.length, events: events.length, entities: entities.length,
+      relations: relations.length, assertions: assertions.length,
+    },
+    fallback: false,
+  };
+}
+
+export function validateTeamResumeResult(
+  value: unknown,
+  limit: number,
+  expectedThreadID?: string,
+): TeamResumeResult {
+  const error = 'team resume response is invalid';
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error(error);
+  const hasThread = Boolean(value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.hasOwn(value as Record<string, unknown>, 'thread_id'));
+  const result = exactTeamResponseRecord(
+    value,
+    hasThread ? TEAM_RESUME_RESULT_THREAD_FIELDS : TEAM_RESUME_RESULT_BASE_FIELDS,
+    error,
+  );
+  if (result.schema !== TEAM_RESUME_RESULT_SCHEMA || result.fallback !== false ||
+    (hasThread && !teamResponseOpaque(result.thread_id)) ||
+    (expectedThreadID !== undefined && result.thread_id !== expectedThreadID)) {
+    throw new Error(error);
+  }
+  const rawSections = exactTeamResponseRecord(result.sections, TEAM_RESUME_SECTION_FIELDS, error);
+  const sections: Record<string, Array<{ object_id: string; text: string }>> = {};
+  let returnedCount = 0;
+  for (const field of TEAM_RESUME_SECTION_FIELDS) {
+    const entries = exactTeamResponseArray(rawSections[field], limit, error).map((entry) => {
+      const item = exactTeamResponseRecord(entry, TEAM_RESUME_ENTRY_FIELDS, error);
+      if (!teamResponseOpaque(item.object_id) || !validTeamResponseText(item.text, 1200)) {
+        throw new Error(error);
+      }
+      return { object_id: item.object_id, text: item.text };
+    });
+    returnedCount += entries.length;
+    if (returnedCount > limit) throw new Error(error);
+    sections[field] = entries;
+  }
+  if (result.returned_count !== returnedCount) throw new Error(error);
+  return {
+    schema: TEAM_RESUME_RESULT_SCHEMA,
+    ...(hasThread ? { thread_id: result.thread_id as string } : {}),
+    sections,
+    returned_count: returnedCount,
+    fallback: false,
+  };
+}
+
+export interface TeamDeleteResult {
+  schema: typeof TEAM_DELETE_RESULT_SCHEMA;
+  operation_id: string;
+  object_id: string;
+  audit_event_id: string;
+  status: 'deletion_in_progress' | 'complete';
+  replayed: boolean;
+  fallback: false;
+}
+
+export interface TeamDeleteStatusResult {
+  schema: typeof TEAM_DELETE_STATUS_RESULT_SCHEMA;
+  operation_id: string;
+  object_id: string;
+  audit_event_id: string;
+  status: 'deletion_in_progress' | 'cleanup_failed' | 'complete';
+  attempts: number;
+  next_attempt_at?: string;
+  completed_at?: string;
+  fallback: false;
+}
+
+const TEAM_DELETE_RESULT_FIELDS = new Set([
+  'schema', 'operation_id', 'object_id', 'audit_event_id', 'status', 'replayed', 'fallback',
+]);
+const TEAM_DELETE_STATUS_BASE_FIELDS = [
+  'schema', 'operation_id', 'object_id', 'audit_event_id', 'status', 'attempts', 'fallback',
+] as const;
+
+function teamDeletionResponseOpaque(value: unknown): value is string {
+  return typeof value === 'string' && TEAM_SAFE_OPAQUE.test(value) &&
+    unsafeTeamContentReason(value) === undefined;
+}
+
+function teamDeletionResponseTimestamp(value: unknown, error: string): string {
+  try {
+    return teamRFC3339('timestamp', value);
+  } catch {
+    throw new Error(error);
+  }
+}
+
+export function validateTeamDeleteResult(value: unknown): TeamDeleteResult {
+  const error = 'team delete response is invalid';
+  const result = exactTeamResponseRecord(value, TEAM_DELETE_RESULT_FIELDS, error);
+  if (
+    result.schema !== TEAM_DELETE_RESULT_SCHEMA ||
+    (result.status !== 'deletion_in_progress' && result.status !== 'complete') ||
+    typeof result.replayed !== 'boolean' || result.fallback !== false ||
+    !teamDeletionResponseOpaque(result.operation_id) ||
+    !teamDeletionResponseOpaque(result.object_id) ||
+    !teamDeletionResponseOpaque(result.audit_event_id)
+  ) {
+    throw new Error(error);
+  }
+  return {
+    schema: TEAM_DELETE_RESULT_SCHEMA,
+    operation_id: result.operation_id,
+    object_id: result.object_id,
+    audit_event_id: result.audit_event_id,
+    status: result.status,
+    replayed: result.replayed,
+    fallback: false,
+  };
+}
+
+export function validateTeamDeleteStatusResult(value: unknown): TeamDeleteStatusResult {
+  const error = 'team delete status response is invalid';
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(error);
+  const raw = value as Record<string, unknown>;
+  const hasNextAttempt = Object.hasOwn(raw, 'next_attempt_at');
+  const hasCompleted = Object.hasOwn(raw, 'completed_at');
+  const result = exactTeamResponseRecord(value, new Set([
+    ...TEAM_DELETE_STATUS_BASE_FIELDS,
+    ...(hasNextAttempt ? ['next_attempt_at'] : []),
+    ...(hasCompleted ? ['completed_at'] : []),
+  ]), error);
+  if (
+    result.schema !== TEAM_DELETE_STATUS_RESULT_SCHEMA || result.fallback !== false ||
+    !teamDeletionResponseOpaque(result.operation_id) ||
+    !teamDeletionResponseOpaque(result.object_id) ||
+    !teamDeletionResponseOpaque(result.audit_event_id) ||
+    !Number.isInteger(result.attempts) ||
+    (result.attempts as number) < 0 || (result.attempts as number) > 1_000_000
+  ) {
+    throw new Error(error);
+  }
+  if (
+    (result.status === 'complete' && (!hasCompleted || hasNextAttempt)) ||
+    (result.status === 'cleanup_failed' && (!hasNextAttempt || hasCompleted)) ||
+    (result.status === 'deletion_in_progress' && hasCompleted) ||
+    !['deletion_in_progress', 'cleanup_failed', 'complete'].includes(result.status as string)
+  ) {
+    throw new Error(error);
+  }
+  const nextAttempt = hasNextAttempt
+    ? teamDeletionResponseTimestamp(result.next_attempt_at, error)
+    : undefined;
+  const completed = hasCompleted
+    ? teamDeletionResponseTimestamp(result.completed_at, error)
+    : undefined;
+  return {
+    schema: TEAM_DELETE_STATUS_RESULT_SCHEMA,
+    operation_id: result.operation_id,
+    object_id: result.object_id,
+    audit_event_id: result.audit_event_id,
+    status: result.status as TeamDeleteStatusResult['status'],
+    attempts: result.attempts as number,
+    ...(nextAttempt === undefined ? {} : { next_attempt_at: nextAttempt }),
+    ...(completed === undefined ? {} : { completed_at: completed }),
+    fallback: false,
+  };
+}
+
 function exactTeamResponseRecord(
   value: unknown,
   fields: ReadonlySet<string>,
@@ -1507,6 +2270,41 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
       name,
       description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
       inputSchema: TEAM_GRAPH_DELTA_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_recall') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_RECALL_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_context_query') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_CONTEXT_QUERY_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_resume') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_RESUME_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_delete') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_DELETE_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_delete_status') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_DELETE_STATUS_INPUT_SCHEMA,
     };
   }
   return {

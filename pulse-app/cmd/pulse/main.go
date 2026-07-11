@@ -34,6 +34,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/server"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/teamauth"
+	"github.com/nkkmnk/pulse/internal/teamread"
 )
 
 const (
@@ -352,9 +353,16 @@ func runTeam(dataDir, addr string) error {
 		IPCSecret:         cfg.IPCSecret,
 		Store:             s,
 		PrincipalVerifier: verifier,
-		ExpectedStoreID:   cfg.ExpectedTeamStoreID,
-		ExpectedTeamID:    cfg.ExpectedTeamID,
-		WriterLease:       lease,
+		// Team retrieval is a separate no-cache engine. The foundation starts
+		// lexical-only so team mode never discovers or reuses a personal Cohere
+		// key from ~/.pulse; deployments may inject an explicit team embedder in
+		// a later activation unit without touching the local retrieval stack.
+		ReadService: teamread.New(
+			s, retrieve.NewTeamRetrievalEngine(retrieve.TeamRetrievalConfig{}),
+		),
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		WriterLease:     lease,
 	})
 	if err != nil {
 		return err

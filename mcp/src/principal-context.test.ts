@@ -21,14 +21,20 @@ import {
   SECURITY_EVENT_ASSERTION_VERSION,
   SecurityEventRateLimitedError,
   stablePrincipalCheckBody,
+  TEAM_CONTEXT_QUERY_PATH,
   TEAM_GRAPH_DELTA_PATH,
   TEAM_MEMORY_REMEMBER_PATH,
+  TEAM_RECALL_PATH,
+  TEAM_RESUME_PATH,
   TeamPrincipalClient,
   type TeamPrincipalContext,
 } from './principal-context.js';
 import {
+  canonicalTeamContextQueryBody,
   canonicalTeamGraphDeltaBody,
+  canonicalTeamRecallBody,
   canonicalTeamRememberBody,
+  canonicalTeamResumeBody,
   TeamContractError,
   TeamDomainError,
 } from './team-contracts.js';
@@ -228,6 +234,46 @@ test('domain signer admits only exact memory and graph mutation paths', async ()
   }
 });
 
+test('domain signer admits exact body-bound read paths and rejects aliases or path drift', async () => {
+  const keys = keyFixture();
+  let sequence = 0;
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW,
+    randomId: () => `read-domain-jti-${++sequence}`,
+  });
+  const bodies = [
+    [TEAM_RECALL_PATH, canonicalTeamRecallBody(teamRecallInput()).bytes],
+    [TEAM_CONTEXT_QUERY_PATH, canonicalTeamContextQueryBody(teamContextQueryInput()).bytes],
+    [TEAM_RESUME_PATH, canonicalTeamResumeBody(teamResumeInput()).bytes],
+  ] as const;
+  for (const [path, body] of bodies) {
+    const assertion = await signer.signDomainRequest({
+      requestId: `read-domain-request-${sequence}`, method: 'POST', path, body,
+      oauthIssuer: 'https://auth.example.com', oauthSubject: 'human-subject-1',
+      oauthClientId: 'agent-client-a', capabilities: ['pulse:connect', 'pulse:read'],
+    });
+    const verified = await jwtVerify(assertion, keys.publicKey, {
+      issuer: PRINCIPAL_ASSERTION_ISSUER, audience: PRINCIPAL_ASSERTION_AUDIENCE,
+      algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+    });
+    assert.equal(verified.payload.path, path);
+    assert.equal(verified.payload.body_sha256, createHash('sha256').update(body).digest('hex'));
+  }
+  const common = {
+    requestId: 'read-domain-rejected', method: 'POST', body: bodies[0][1],
+    oauthIssuer: 'https://auth.example.com', oauthSubject: 'human-subject-1',
+    oauthClientId: 'agent-client-a', capabilities: ['pulse:connect', 'pulse:read'] as const,
+  };
+  for (const [method, path] of [
+    ['GET', TEAM_RECALL_PATH], ['POST', `${TEAM_RECALL_PATH}/`],
+    ['POST', `${TEAM_CONTEXT_QUERY_PATH}?debug=1`], ['POST', '/team/v1/context'],
+    ['POST', '/continuity/resume'], ['POST', '/team/v1/recall/other'],
+  ] as const) {
+    await assert.rejects(signer.signDomainRequest({ ...common, method, path }), /request binding/i);
+  }
+});
+
 function teamRememberInput() {
   return {
     schema: 'pulse.team.memory.v1',
@@ -282,6 +328,28 @@ function teamGraphDeltaInput() {
   };
 }
 
+function teamRecallInput() {
+  return {
+    schema: 'pulse.team.recall.v1', query: 'What did we decide?',
+    active_context: { project_id: 'project-pulse' }, privacy_ceiling: 'sensitive',
+  };
+}
+
+function teamContextQueryInput() {
+  return {
+    schema: 'pulse.team.context.v1', query: 'What is the current plan?',
+    active_context: { project_id: 'project-pulse' }, privacy_ceiling: 'sensitive',
+    include_trace: true,
+  };
+}
+
+function teamResumeInput() {
+  return {
+    schema: 'pulse.team.resume.v1', active_context: { project_id: 'project-pulse' },
+    thread_id: 'pulse-team-foundation',
+  };
+}
+
 function writePrincipalContext(): Readonly<TeamPrincipalContext> {
   return Object.freeze({
     version: 'pulse.team.principal_context.v1',
@@ -301,6 +369,10 @@ function writePrincipalContext(): Readonly<TeamPrincipalContext> {
     membership_auth_epoch: 1,
     capabilities: ['pulse:connect', 'pulse:write'],
   });
+}
+
+function readPrincipalContext(): Readonly<TeamPrincipalContext> {
+  return Object.freeze({ ...writePrincipalContext(), capabilities: ['pulse:connect', 'pulse:read'] });
 }
 
 function storedTeamMemoryResult() {
@@ -335,6 +407,44 @@ function storedTeamGraphDeltaResult() {
     fully_projected: false,
     replayed: false,
     fallback: false,
+  };
+}
+
+function storedTeamRecallResult() {
+  return {
+    schema: 'pulse.team.recall_result.v1',
+    items: [{
+      object_id: 'team_root_memory_001', kind: 'decision',
+      redacted_summary: 'Use scoped retrieval.', confidence: 0.9,
+      privacy_tier: 'sensitive', retention: 'project', tags: ['pulse'],
+    }],
+    returned_count: 1, fallback: false,
+  };
+}
+
+function storedTeamContextResult() {
+  return {
+    schema: 'pulse.team.context_result.v1',
+    facts: [{
+      root_object_id: 'team_root_graph_001', object_id: 'team_fact_001',
+      text: 'Filter before ranking.', score: 0.9, confidence: 0.9, domain: 'real',
+    }],
+    events: [], entities: [], relations: [], assertions: [],
+    trace: { stages: [{ kind: 'lexical', returned_object_ids: ['team_fact_001'] }] },
+    returned_counts: { facts: 1, events: 0, entities: 0, relations: 0, assertions: 0 },
+    fallback: false,
+  };
+}
+
+function storedTeamResumeResult() {
+  return {
+    schema: 'pulse.team.resume_result.v1', thread_id: 'pulse-team-foundation',
+    sections: {
+      where_we_left_off: [{ object_id: 'team_root_continuity_001', text: 'U6 transport.' }],
+      active_decisions: [], open_loops: [], do_not_repeat: [],
+      relevant_emotional_state_context: [], suggested_next_step: [],
+    },
+    returned_count: 1, fallback: false,
   };
 }
 
@@ -428,6 +538,112 @@ test('bound team graph delta signs and sends one exact canonical loopback reques
   ]) {
     assert.equal(forbidden in verified.payload, false, forbidden);
   }
+});
+
+test('bound read domain sends exact canonical requests once with no bearer or caller identity', async () => {
+  const keys = keyFixture();
+  let sequence = 0;
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW,
+    randomId: () => `read-request-jti-${++sequence}`,
+  });
+  const responses = new Map([
+    [TEAM_RECALL_PATH, storedTeamRecallResult()],
+    [TEAM_CONTEXT_QUERY_PATH, storedTeamContextResult()],
+    [TEAM_RESUME_PATH, storedTeamResumeResult()],
+  ]);
+  const requests: Array<{ path: string; headers: Headers; body: string }> = [];
+  const client = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async (input, init) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname, headers: new Headers(init?.headers), body: String(init?.body) });
+      return Response.json(responses.get(url.pathname));
+    },
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:read'] as const,
+  };
+  const domain = client.bindDomain(identity, readPrincipalContext());
+  assert.deepEqual(await domain.recall(teamRecallInput()), storedTeamRecallResult());
+  assert.deepEqual(await domain.contextQuery(teamContextQueryInput()), storedTeamContextResult());
+  assert.deepEqual(await domain.resume(teamResumeInput()), storedTeamResumeResult());
+  assert.deepEqual(requests.map(({ path }) => path), [
+    TEAM_RECALL_PATH, TEAM_CONTEXT_QUERY_PATH, TEAM_RESUME_PATH,
+  ]);
+  const canonicalBodies = [
+    canonicalTeamRecallBody(teamRecallInput()).text,
+    canonicalTeamContextQueryBody(teamContextQueryInput()).text,
+    canonicalTeamResumeBody(teamResumeInput()).text,
+  ];
+  for (let index = 0; index < requests.length; index++) {
+    const request = requests[index];
+    assert.equal(request.body, canonicalBodies[index]);
+    assert.deepEqual([...request.headers.keys()].sort(), [
+      'content-type', 'x-pulse-key', 'x-pulse-principal', 'x-pulse-request-id',
+    ]);
+    assert.equal(request.headers.has('authorization'), false);
+    const verified = await jwtVerify(request.headers.get('x-pulse-principal') ?? '', keys.publicKey, {
+      issuer: PRINCIPAL_ASSERTION_ISSUER, audience: PRINCIPAL_ASSERTION_AUDIENCE,
+      algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+    });
+    assert.equal(verified.payload.path, request.path);
+    assert.equal(verified.payload.body_sha256, createHash('sha256').update(request.body).digest('hex'));
+    for (const forbidden of [
+      'authorization', 'principal_id', 'human_principal_id', 'agent_binding_id',
+      'membership_id', 'membership_role', 'team_auth_epoch',
+    ]) {
+      assert.equal(forbidden in verified.payload, false, forbidden);
+    }
+  }
+});
+
+test('read domain preserves only operation-specific closed errors and never retries', async () => {
+  const keys = keyFixture();
+  const signer = loadPrincipalSigner({
+    privateKeyFile: keys.privatePath, keyId: 'gateway-key-1', verifyKeyringFile: keys.keyringPath,
+    storeId: 'store_test', teamId: 'team_test', now: () => NOW,
+  });
+  const identity = {
+    issuer: 'https://auth.example.com', subject: 'human-subject-1', clientId: 'agent-client-a',
+    capabilities: ['pulse:connect', 'pulse:read'] as const,
+  };
+  for (const [operation, status, body, expected] of [
+    ['recall', 400, { error: 'invalid_team_recall', fallback: false }, 'invalid_team_recall'],
+    ['contextQuery', 400, { error: 'invalid_team_context', fallback: false }, 'invalid_team_context'],
+    ['resume', 400, { error: 'invalid_team_resume', fallback: false }, 'invalid_team_resume'],
+    ['recall', 404, { error: 'concealed_not_found', fallback: false }, 'concealed_not_found'],
+    ['resume', 403, { error: 'principal_revoked', fallback: false }, 'principal_revoked'],
+  ] as const) {
+    let calls = 0;
+    const domain = new TeamPrincipalClient({
+      daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+      fetch: async () => { calls++; return Response.json(body, { status }); },
+    }).bindDomain(identity, readPrincipalContext());
+    const invoke = operation === 'recall'
+      ? () => domain.recall(teamRecallInput())
+      : operation === 'contextQuery'
+        ? () => domain.contextQuery(teamContextQueryInput())
+        : () => domain.resume(teamResumeInput());
+    await assert.rejects(
+      invoke(),
+      (error: unknown) => error instanceof TeamDomainError && error.code === expected,
+    );
+    assert.equal(calls, 1);
+  }
+
+  let calls = 0;
+  const unavailable = new TeamPrincipalClient({
+    daemonBaseURL: 'http://127.0.0.1:18789', signer, apiKey: () => 'ipc-secret',
+    fetch: async () => { calls++; throw new Error('synthetic read outage'); },
+  }).bindDomain(identity, readPrincipalContext());
+  await assert.rejects(
+    unavailable.recall(teamRecallInput()),
+    (error: unknown) => error instanceof TeamDomainError && error.code === 'shared_memory_unavailable',
+  );
+  assert.equal(calls, 1);
 });
 
 test('graph domain errors are operation-specific and malformed responses fail closed', async () => {

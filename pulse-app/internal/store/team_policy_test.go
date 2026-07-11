@@ -439,6 +439,295 @@ func TestAuthorizedCandidateFilterUsesScopePredicatesAndConcealsAbsence(t *testi
 	}
 }
 
+func TestAuthorizedCandidateFilterExcludesMissingActiveContexts(t *testing.T) {
+	ctx := context.Background()
+	s, bootstrap := bootstrapTeamStore(t)
+	defer s.Close()
+
+	member, err := s.AddTeamMember(ctx, AddTeamMemberRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "context-member", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := s.RegisterAgentBinding(ctx, RegisterAgentBindingRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "context-member", ClientID: "context-agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.CreateTeamProject(ctx, bootstrap.OwnerPrincipalID, "Context project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GrantProjectAccess(ctx, GrantProjectAccessRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID, ProjectID: project.ProjectID,
+		TargetPrincipalID: binding.AgentPrincipalID, AccessLevel: "read",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	insertPolicyObject(t, s, bootstrap, "context-personal", "personal", member.PrincipalID, member.PrincipalID)
+	insertPolicyObject(t, s, bootstrap, "context-project", "project", project.ProjectID, member.PrincipalID)
+	insertPolicyObject(t, s, bootstrap, "context-repo", "repo", "repo-context", member.PrincipalID)
+	insertPolicyObject(t, s, bootstrap, "context-agent", "agent", binding.BindingID, member.PrincipalID)
+	if _, err := s.DB().Exec(`
+		INSERT INTO team_object_registry(
+			object_id, store_id, team_id, object_kind, scope_type, scope_id,
+			owner_principal_id, author_principal_id, privacy_tier, retention,
+			lifecycle, generation, expires_at, created_at, updated_at)
+		VALUES ('context-session', ?, ?, 'memory', 'session', 'session-context',
+			?, ?, 'normal', 'session', 'active', 1, '2035-01-01T00:00:00Z',
+			'2026-07-11T00:00:00Z', '2026-07-11T00:00:00Z')`,
+		bootstrap.StoreID, bootstrap.TeamID, member.PrincipalID, member.PrincipalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	filter, err := s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
+		PrincipalID:  member.PrincipalID,
+		Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
+		Context:      teamauth.ActiveContext{TeamID: bootstrap.TeamID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	predicate, args, err := filter.SQLPredicate("object")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.DB().Query(`
+		SELECT object.object_id FROM team_object_registry object
+		 WHERE `+predicate+` ORDER BY object.object_id`, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var objectID string
+		if err := rows.Scan(&objectID); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(objectID, "context-") {
+			got = append(got, objectID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"context-personal"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("missing-context candidates = %v, want %v", got, want)
+	}
+}
+
+func TestAuthorizedCandidateFilterCanonicalizesAgentScopeToCurrentBinding(t *testing.T) {
+	ctx := context.Background()
+	s, bootstrap := bootstrapTeamStore(t)
+	defer s.Close()
+
+	member, err := s.AddTeamMember(ctx, AddTeamMemberRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "two-binding-human", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.RegisterAgentBinding(ctx, RegisterAgentBindingRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "two-binding-human", ClientID: "binding-one",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.RegisterAgentBinding(ctx, RegisterAgentBindingRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "two-binding-human", ClientID: "binding-two",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertPolicyObject(t, s, bootstrap, "agent-binding-one", "agent", first.BindingID, member.PrincipalID)
+	insertPolicyObject(t, s, bootstrap, "agent-binding-two", "agent", second.BindingID, member.PrincipalID)
+
+	build := func(principalID, requestedAgentID string) (AuthorizedCandidateFilter, error) {
+		return s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
+			PrincipalID:  principalID,
+			Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
+			Context: teamauth.ActiveContext{
+				TeamID: bootstrap.TeamID, AgentID: requestedAgentID,
+			},
+		})
+	}
+	firstFilter, err := build(first.AgentPrincipalID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstFilter.context.AgentID != first.BindingID {
+		t.Fatalf("canonical agent context = %q, want binding %q", firstFilter.context.AgentID, first.BindingID)
+	}
+	if _, err := build(first.AgentPrincipalID, second.BindingID); !errors.Is(err, ErrTeamPolicyDenied) {
+		t.Fatalf("conflicting caller agent_id = %v, want policy denied", err)
+	}
+	secondFilter, err := build(second.AgentPrincipalID, second.BindingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	visible := func(filter AuthorizedCandidateFilter) []string {
+		t.Helper()
+		predicate, args, err := filter.SQLPredicate("object")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := s.DB().Query(`
+			SELECT object.object_id FROM team_object_registry object
+			 WHERE `+predicate+` AND object.scope_type = 'agent'
+			 ORDER BY object.object_id`, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	if got, want := visible(firstFilter), []string{"agent-binding-one"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("first binding candidates = %v, want %v", got, want)
+	}
+	if got, want := visible(secondFilter), []string{"agent-binding-two"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("second binding candidates = %v, want %v", got, want)
+	}
+}
+
+func TestAuthorizedCandidateFilterFingerprintAndFreshEmptyRecheck(t *testing.T) {
+	ctx := context.Background()
+	s, bootstrap := bootstrapTeamStore(t)
+	defer s.Close()
+	member, err := s.AddTeamMember(ctx, AddTeamMemberRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "fingerprint-member", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := s.RegisterAgentBinding(ctx, RegisterAgentBindingRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           "https://issuer.example", Subject: "fingerprint-member", ClientID: "fingerprint-agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := CandidateFilterRequest{
+		PrincipalID:  binding.AgentPrincipalID,
+		Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
+		Context: teamauth.ActiveContext{
+			TeamID: bootstrap.TeamID, RepoID: "repo-fingerprint",
+		},
+	}
+	first, err := s.BuildAuthorizedCandidateFilter(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.clock = func() time.Time { return time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC) }
+	second, err := s.BuildAuthorizedCandidateFilter(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FilterFingerprint() == "" || first.FilterFingerprint() != second.FilterFingerprint() {
+		t.Fatalf("filter fingerprint is not stable: first=%q second=%q",
+			first.FilterFingerprint(), second.FilterFingerprint())
+	}
+	changed := request
+	changed.Context.RepoID = "repo-other"
+	third, err := s.BuildAuthorizedCandidateFilter(ctx, changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.FilterFingerprint() == first.FilterFingerprint() {
+		t.Fatal("different active contexts shared one filter fingerprint")
+	}
+	if err := s.RecheckAuthorizedCandidateFilter(ctx, first); err != nil {
+		t.Fatalf("fresh empty-result recheck: %v", err)
+	}
+	if err := s.RevokeAgentBinding(ctx, bootstrap.OwnerPrincipalID, binding.BindingID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecheckAuthorizedCandidateFilter(ctx, first); !errors.Is(err, ErrPrincipalRevoked) {
+		t.Fatalf("revoked empty-result recheck = %v, want principal_revoked", err)
+	}
+	if err := s.RecheckAuthorizedCandidateRoots(ctx, first, []string{"unused-root"}); !errors.Is(err, ErrPrincipalRevoked) {
+		t.Fatalf("revoked root recheck = %v, want principal_revoked", err)
+	}
+	if _, err := s.BuildAuthorizedCandidateFilter(ctx, request); !errors.Is(err, ErrPrincipalRevoked) {
+		t.Fatalf("next-request revoked filter = %v, want principal_revoked", err)
+	}
+	_ = member
+}
+
+func TestRecheckAuthorizedCandidateRootsUsesOneSnapshotAndBoundaryTime(t *testing.T) {
+	ctx := context.Background()
+	s, bootstrap := bootstrapTeamStore(t)
+	defer s.Close()
+	base := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	s.clock = func() time.Time { return base }
+	filter, err := s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
+		PrincipalID:  bootstrap.OwnerPrincipalID,
+		Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
+		Context:      teamauth.ActiveContext{TeamID: bootstrap.TeamID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertExpiring := func(objectID string, expiresAt time.Time) {
+		t.Helper()
+		if _, err := s.DB().Exec(`
+			INSERT INTO team_object_registry(
+				object_id, store_id, team_id, object_kind, scope_type, scope_id,
+				owner_principal_id, author_principal_id, privacy_tier, retention,
+				lifecycle, generation, expires_at, created_at, updated_at)
+			VALUES (?, ?, ?, 'memory', 'personal', ?, ?, ?, 'normal', 'long_term',
+				'active', 1, ?, '2026-07-11T00:00:00Z', '2026-07-11T00:00:00Z')`,
+			objectID, bootstrap.StoreID, bootstrap.TeamID, bootstrap.OwnerPrincipalID,
+			bootstrap.OwnerPrincipalID, bootstrap.OwnerPrincipalID,
+			expiresAt.Format(time.RFC3339Nano),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertExpiring("batch-earlier-expiry", base.Add(time.Second))
+	insertExpiring("batch-later-expiry", base.Add(10*time.Second))
+
+	clockCalls := 0
+	s.clock = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return base
+		}
+		return base.Add(2 * time.Second)
+	}
+	if err := s.RecheckAuthorizedCandidateRoots(ctx, filter, []string{
+		"batch-earlier-expiry", "batch-later-expiry", "batch-earlier-expiry",
+	}); err != nil {
+		t.Fatalf("batch root recheck: %v", err)
+	}
+	if clockCalls != 1 {
+		t.Fatalf("batch root recheck evaluated %d response times, want one", clockCalls)
+	}
+}
+
 func TestAuthorizedCandidateFilterConcealsExpiredSessionObjectsAtCandidateAndResponseBoundaries(t *testing.T) {
 	ctx := context.Background()
 	s, bootstrap := bootstrapTeamStore(t)
@@ -1002,7 +1291,9 @@ func TestServiceCandidateFilterRequiresBothProjectAndObjectGrantAndHidesTombston
 	filter, err := s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
 		PrincipalID:  service.PrincipalID,
 		Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
-		Context:      teamauth.ActiveContext{TeamID: bootstrap.TeamID},
+		Context: teamauth.ActiveContext{
+			TeamID: bootstrap.TeamID, ProjectID: project.ProjectID,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1053,7 +1344,9 @@ func TestServiceCandidateFilterRequiresBothProjectAndObjectGrantAndHidesTombston
 	newFilter, err := s.BuildAuthorizedCandidateFilter(ctx, CandidateFilterRequest{
 		PrincipalID:  service.PrincipalID,
 		Capabilities: []teamauth.Capability{teamauth.CapabilityRead},
-		Context:      teamauth.ActiveContext{TeamID: bootstrap.TeamID},
+		Context: teamauth.ActiveContext{
+			TeamID: bootstrap.TeamID, ProjectID: project.ProjectID,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

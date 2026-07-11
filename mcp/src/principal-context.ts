@@ -18,17 +18,32 @@ import { SignJWT } from 'jose';
 
 import { OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
 import {
+  canonicalTeamDeleteBody,
+  canonicalTeamDeleteStatusBody,
+  canonicalTeamContextQueryBody,
   canonicalTeamGraphDeltaBody,
+  canonicalTeamRecallBody,
   canonicalTeamRememberBody,
+  canonicalTeamResumeBody,
   requiredTeamCapabilities,
   TEAM_CAPABILITIES,
   TeamDomainError,
+  validateTeamDeleteResult,
+  validateTeamDeleteStatusResult,
   validateTeamGraphDeltaResult,
+  validateTeamContextQueryResult,
+  validateTeamRecallResult,
   validateTeamRememberResult,
+  validateTeamResumeResult,
   type TeamCapability,
   type TeamDomainErrorCode,
+  type TeamDeleteResult,
+  type TeamDeleteStatusResult,
   type TeamGraphDeltaResult,
+  type TeamContextQueryResult,
+  type TeamRecallResult,
   type TeamRememberResult,
+  type TeamResumeResult,
 } from './team-contracts.js';
 
 export const PRINCIPAL_ASSERTION_ISSUER = 'pulse-team-gateway';
@@ -37,9 +52,19 @@ const PRINCIPAL_ASSERTION_VERSION = 'pulse.principal.v1';
 export const SECURITY_EVENT_ASSERTION_VERSION = 'pulse.security_event.v1';
 export const TEAM_MEMORY_REMEMBER_PATH = '/team/v1/memory/remember';
 export const TEAM_GRAPH_DELTA_PATH = '/team/v1/graph/delta';
-const TEAM_DOMAIN_MUTATION_PATHS = new Set([
+export const TEAM_RECALL_PATH = '/team/v1/recall';
+export const TEAM_CONTEXT_QUERY_PATH = '/team/v1/context/query';
+export const TEAM_RESUME_PATH = '/team/v1/resume';
+export const TEAM_DELETE_PATH = '/team/v1/delete';
+export const TEAM_DELETE_STATUS_PATH = '/team/v1/delete/status';
+const TEAM_DOMAIN_PATHS = new Set([
   TEAM_MEMORY_REMEMBER_PATH,
   TEAM_GRAPH_DELTA_PATH,
+  TEAM_RECALL_PATH,
+  TEAM_CONTEXT_QUERY_PATH,
+  TEAM_RESUME_PATH,
+  TEAM_DELETE_PATH,
+  TEAM_DELETE_STATUS_PATH,
 ]);
 const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_KEYRING_BYTES = 32 * 1024;
@@ -89,6 +114,11 @@ export interface TeamPrincipalClientOptions {
 export interface BoundTeamDomain {
   remember(input: unknown): Promise<TeamRememberResult>;
   graphDelta(input: unknown): Promise<TeamGraphDeltaResult>;
+  recall(input: unknown): Promise<TeamRecallResult>;
+  contextQuery(input: unknown): Promise<TeamContextQueryResult>;
+  resume(input: unknown): Promise<TeamResumeResult>;
+  delete(input: unknown): Promise<TeamDeleteResult>;
+  deleteStatus(input: unknown): Promise<TeamDeleteStatusResult>;
 }
 
 export interface TeamPrincipalContext {
@@ -276,6 +306,11 @@ export class TeamPrincipalClient {
   private readonly securityEventEndpoint: string;
   private readonly teamMemoryEndpoint: string;
   private readonly teamGraphEndpoint: string;
+  private readonly teamRecallEndpoint: string;
+  private readonly teamContextQueryEndpoint: string;
+  private readonly teamResumeEndpoint: string;
+  private readonly teamDeleteEndpoint: string;
+  private readonly teamDeleteStatusEndpoint: string;
   private readonly signer: PrincipalSigner;
   private readonly apiKey: () => string;
   private readonly fetcher: typeof fetch;
@@ -286,6 +321,11 @@ export class TeamPrincipalClient {
     this.securityEventEndpoint = teamDaemonEndpoint(options.daemonBaseURL, '/team/v1/security-events');
     this.teamMemoryEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_MEMORY_REMEMBER_PATH);
     this.teamGraphEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_GRAPH_DELTA_PATH);
+    this.teamRecallEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_RECALL_PATH);
+    this.teamContextQueryEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_CONTEXT_QUERY_PATH);
+    this.teamResumeEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_RESUME_PATH);
+    this.teamDeleteEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_DELETE_PATH);
+    this.teamDeleteStatusEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_DELETE_STATUS_PATH);
     this.signer = options.signer;
     this.apiKey = options.apiKey;
     this.fetcher = options.fetch ?? fetch;
@@ -303,7 +343,9 @@ export class TeamPrincipalClient {
     if (
       context.store_id !== this.signer.storeId || context.team_id !== this.signer.teamId ||
       JSON.stringify(sortedCapabilities(context.capabilities)) !== JSON.stringify(capabilities) ||
-      !capabilities.includes('pulse:connect') || !capabilities.includes('pulse:write')
+      !capabilities.includes('pulse:connect') ||
+      (!capabilities.includes('pulse:write') && !capabilities.includes('pulse:read') &&
+        !capabilities.includes('pulse:delete'))
     ) {
       throw new TeamDomainError('invalid_principal');
     }
@@ -317,6 +359,11 @@ export class TeamPrincipalClient {
     return Object.freeze({
       remember: (input: unknown) => this.remember(boundIdentity, requestId, input),
       graphDelta: (input: unknown) => this.graphDelta(boundIdentity, requestId, input),
+      recall: (input: unknown) => this.recall(boundIdentity, requestId, input),
+      contextQuery: (input: unknown) => this.contextQuery(boundIdentity, requestId, input),
+      resume: (input: unknown) => this.resume(boundIdentity, requestId, input),
+      delete: (input: unknown) => this.delete(boundIdentity, requestId, input),
+      deleteStatus: (input: unknown) => this.deleteStatus(boundIdentity, requestId, input),
     });
   }
 
@@ -434,6 +481,9 @@ export class TeamPrincipalClient {
     requestId: string,
     input: unknown,
   ): Promise<TeamRememberResult> {
+    if (!identity.capabilities.includes('pulse:write')) {
+      throw new TeamDomainError('invalid_principal');
+    }
     const body = canonicalTeamRememberBody(input);
     let assertion: string;
     try {
@@ -497,6 +547,9 @@ export class TeamPrincipalClient {
     requestId: string,
     input: unknown,
   ): Promise<TeamGraphDeltaResult> {
+    if (!identity.capabilities.includes('pulse:write')) {
+      throw new TeamDomainError('invalid_principal');
+    }
     const body = canonicalTeamGraphDeltaBody(input);
     let assertion: string;
     try {
@@ -554,6 +607,138 @@ export class TeamPrincipalClient {
       throw new TeamDomainError('shared_memory_unavailable');
     }
   }
+
+  private async recall(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamRecallResult> {
+    const body = canonicalTeamRecallBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_RECALL_PATH, this.teamRecallEndpoint,
+      body.text, body.bytes, 'pulse:read', 'recall', 256 * 1024,
+      (value) => validateTeamRecallResult(value, body.value.limit),
+    );
+  }
+
+  private async contextQuery(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamContextQueryResult> {
+    const body = canonicalTeamContextQueryBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_CONTEXT_QUERY_PATH, this.teamContextQueryEndpoint,
+      body.text, body.bytes, 'pulse:read', 'context', 1024 * 1024,
+      (value) => validateTeamContextQueryResult(
+        value, body.value.limit, body.value.include_trace,
+      ),
+    );
+  }
+
+  private async resume(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamResumeResult> {
+    const body = canonicalTeamResumeBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_RESUME_PATH, this.teamResumeEndpoint,
+      body.text, body.bytes, 'pulse:read', 'resume', 256 * 1024,
+      (value) => validateTeamResumeResult(value, body.value.limit, body.value.thread_id),
+    );
+  }
+
+  private async delete(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamDeleteResult> {
+    const body = canonicalTeamDeleteBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_DELETE_PATH, this.teamDeleteEndpoint,
+      body.text, body.bytes, 'pulse:delete', 'delete', 16 * 1024,
+      validateTeamDeleteResult,
+    );
+  }
+
+  private async deleteStatus(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamDeleteStatusResult> {
+    const body = canonicalTeamDeleteStatusBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_DELETE_STATUS_PATH, this.teamDeleteStatusEndpoint,
+      body.text, body.bytes, 'pulse:read', 'delete_status', 16 * 1024,
+      validateTeamDeleteStatusResult,
+    );
+  }
+
+  private async domainRequest<T>(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    path: string,
+    endpoint: string,
+    bodyText: string,
+    bodyBytes: Buffer,
+    requiredCapability: 'pulse:read' | 'pulse:delete',
+    operation: 'recall' | 'context' | 'resume' | 'delete' | 'delete_status',
+    maximumResponseBytes: number,
+    validate: (value: unknown) => T,
+  ): Promise<T> {
+    if (!identity.capabilities.includes(requiredCapability)) {
+      throw new TeamDomainError('invalid_principal');
+    }
+    let assertion: string;
+    try {
+      assertion = await this.signer.signDomainRequest({
+        requestId, method: 'POST', path, body: bodyBytes,
+        oauthIssuer: identity.issuer, oauthSubject: identity.subject,
+        oauthClientId: identity.clientId, capabilities: identity.capabilities,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    const ipcKey = this.apiKey();
+    if (ipcKey === '' || Buffer.byteLength(ipcKey, 'utf8') > 512) {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let response: Response;
+    try {
+      response = await this.fetcher(endpoint, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          'Content-Type': 'application/json', 'X-Pulse-Key': ipcKey,
+          'X-Pulse-Principal': assertion, 'X-Pulse-Request-ID': requestId,
+        },
+        body: bodyText,
+      });
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (!isJSONResponse(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    let value: unknown;
+    try {
+      value = await readBoundedJSONResponse(
+        response, response.status === 200 ? maximumResponseBytes : 4 * 1024,
+      );
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+    if (response.status !== 200) {
+      const code = exactTeamDomainError(response.status, value, operation);
+      throw new TeamDomainError(code ?? 'shared_memory_unavailable');
+    }
+    try {
+      return validate(value);
+    } catch {
+      throw new TeamDomainError('shared_memory_unavailable');
+    }
+  }
 }
 
 export class PrincipalSigner {
@@ -587,7 +772,7 @@ export class PrincipalSigner {
   }
 
   async signDomainRequest(input: PrincipalCheckInput): Promise<string> {
-    if (input.method !== 'POST' || !TEAM_DOMAIN_MUTATION_PATHS.has(input.path)) {
+    if (input.method !== 'POST' || !TEAM_DOMAIN_PATHS.has(input.path)) {
       throw new Error('principal assertion request binding is invalid');
     }
     return this.signPrincipalRequest(input);
@@ -770,20 +955,33 @@ function isJSONResponse(response: Response): boolean {
 function exactTeamDomainError(
   status: number,
   value: unknown,
-  operation: 'memory' | 'graph_delta',
+  operation: 'memory' | 'graph_delta' | 'recall' | 'context' | 'resume' | 'delete' | 'delete_status',
 ): TeamDomainErrorCode | undefined {
   if (!isExactRecord(value, ['error', 'fallback']) || value.fallback !== false || typeof value.error !== 'string') {
     return undefined;
   }
+  const invalidByOperation: Record<typeof operation, TeamDomainErrorCode> = {
+    memory: 'invalid_team_memory',
+    graph_delta: 'invalid_team_graph_delta',
+    recall: 'invalid_team_recall',
+    context: 'invalid_team_context',
+    resume: 'invalid_team_resume',
+    delete: 'invalid_team_delete',
+    delete_status: 'invalid_team_delete_status',
+  };
+  const concealedOperation = operation === 'recall' || operation === 'context' ||
+    operation === 'resume' || operation === 'delete' || operation === 'delete_status';
   const allowed: Partial<Record<number, readonly TeamDomainErrorCode[]>> = {
-    400: [operation === 'memory' ? 'invalid_team_memory' : 'invalid_team_graph_delta'],
+    400: [invalidByOperation[operation]],
     401: ['invalid_principal', 'principal_request_mismatch', 'principal_replay'],
     403: ['principal_revoked', 'policy_denied'],
-    404: ['not_found'],
-    409: [
-      'idempotency_conflict', 'idempotency_in_progress',
-      'idempotency_failed', 'authorization_stale',
-    ],
+    404: [concealedOperation ? 'concealed_not_found' : 'not_found'],
+    409: operation === 'delete_status'
+      ? ['authorization_stale']
+      : [
+          'idempotency_conflict', 'idempotency_in_progress',
+          'idempotency_failed', 'authorization_stale',
+        ],
     503: ['shared_memory_unavailable'],
   };
   const code = value.error as TeamDomainErrorCode;

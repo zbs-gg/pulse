@@ -160,7 +160,7 @@ func (v *PrincipalVerifier) validateDomainClaims(claims principalAssertionClaims
 	if claims.Version != principalAssertionVersion || claims.Issuer != principalAssertionIssuer || claims.Audience != principalAssertionAudience ||
 		claims.GrantKind != "registered" || !safeOpaque(claims.JTI, 128) || len(claims.RequestID) < 8 || !safeOpaque(claims.RequestID, 64) ||
 		!exactIdentity(claims.OAuthIssuer, 512) || !exactIdentity(claims.OAuthSubject, 512) || !exactIdentity(claims.OAuthClientID, 512) ||
-		claims.Method != http.MethodPost || !isExactTeamDomainMutationPath(claims.Path) ||
+		claims.Method != http.MethodPost || !isExactTeamDomainPath(claims.Path) ||
 		len(claims.BodySHA256) != 64 || strings.ToLower(claims.BodySHA256) != claims.BodySHA256 ||
 		claims.ExpiresAt < now-principalAssertionClockSkewSecs || claims.NotBefore > now+principalAssertionClockSkewSecs ||
 		claims.IssuedAt <= 0 || claims.NotBefore <= 0 || claims.ExpiresAt <= 0 || claims.IssuedAt > now+principalAssertionClockSkewSecs ||
@@ -174,9 +174,10 @@ func (v *PrincipalVerifier) validateDomainClaims(claims principalAssertionClaims
 	return nil
 }
 
-func isExactTeamDomainMutationPath(path string) bool {
+func isExactTeamDomainPath(path string) bool {
 	switch path {
-	case TeamMemoryRememberRoutePath, TeamGraphDeltaRoutePath:
+	case TeamMemoryRememberRoutePath, TeamGraphDeltaRoutePath,
+		TeamRecallRoutePath, TeamContextQueryRoutePath, TeamResumeRoutePath:
 		return true
 	default:
 		return false

@@ -58,6 +58,26 @@ func (filter AuthorizedCandidateFilter) PolicyEpoch() teamauth.EpochSnapshot {
 	return filter.epoch
 }
 
+// FilterFingerprint is a stable, content-free cache partition key for this
+// exact authorization snapshot. It deliberately excludes evaluation time and
+// every object/content identifier: cached candidates still require a fresh
+// root-access recheck before they can influence a response.
+func (filter AuthorizedCandidateFilter) FilterFingerprint() string {
+	return teamGraphOpaqueDigestID(
+		"candidate_filter", "pulse-team-authorized-candidate-filter-v1",
+		filter.teamID, filter.principalID, filter.humanPrincipalID, filter.bindingID,
+		string(filter.kind), filter.context.TeamID, filter.context.ProjectID,
+		filter.context.RepoID, filter.context.AgentID, filter.context.SessionID,
+		filter.privacyCeiling, filter.retention,
+		strconv.FormatInt(filter.epoch.Global, 10),
+		strconv.FormatInt(filter.epoch.Policy, 10),
+		strconv.FormatInt(filter.epoch.Principal, 10),
+		strconv.FormatInt(filter.epoch.Membership, 10),
+		strconv.FormatInt(filter.epoch.Binding, 10),
+		strconv.Itoa(teamauth.PolicyVersion), strconv.Itoa(teamauth.SchemaVersion),
+	)
+}
+
 var sqlAliasPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (filter AuthorizedCandidateFilter) SQLPredicate(alias string) (string, []any, error) {
@@ -99,21 +119,22 @@ func (filter AuthorizedCandidateFilter) sqlPredicateAt(alias string, at time.Tim
 	clauses = append(clauses, scopeSQL)
 	args = append(args, scopeArgs...)
 
-	if filter.context.ProjectID != "" {
-		clauses = append(clauses, "("+column("scope_type")+" <> 'project' OR "+column("scope_id")+" = ?)")
-		args = append(args, filter.context.ProjectID)
-	}
-	if filter.context.RepoID != "" {
-		clauses = append(clauses, "("+column("scope_type")+" <> 'repo' OR "+column("scope_id")+" = ?)")
-		args = append(args, filter.context.RepoID)
-	}
-	if filter.context.AgentID != "" {
-		clauses = append(clauses, "("+column("scope_type")+" <> 'agent' OR "+column("scope_id")+" = ?)")
-		args = append(args, filter.context.AgentID)
-	}
-	if filter.context.SessionID != "" {
-		clauses = append(clauses, "("+column("scope_type")+" <> 'session' OR "+column("scope_id")+" = ?)")
-		args = append(args, filter.context.SessionID)
+	for _, active := range []struct {
+		scopeType string
+		scopeID   string
+	}{
+		{scopeType: "project", scopeID: filter.context.ProjectID},
+		{scopeType: "repo", scopeID: filter.context.RepoID},
+		{scopeType: "agent", scopeID: filter.context.AgentID},
+		{scopeType: "session", scopeID: filter.context.SessionID},
+	} {
+		if active.scopeID == "" {
+			clauses = append(clauses, column("scope_type")+" <> '"+active.scopeType+"'")
+			continue
+		}
+		clauses = append(clauses,
+			"("+column("scope_type")+" <> '"+active.scopeType+"' OR "+column("scope_id")+" = ?)")
+		args = append(args, active.scopeID)
 	}
 	switch filter.privacyCeiling {
 	case "normal":
@@ -250,7 +271,7 @@ func (s *Store) BuildAuthorizedCandidateFilter(ctx context.Context, request Cand
 	}
 
 	principal, principalErr := s.ResolveTeamPrincipal(ctx, request.PrincipalID)
-	if principalErr != nil && !errors.Is(principalErr, ErrPrincipalRevoked) {
+	if principalErr != nil {
 		return AuthorizedCandidateFilter{}, principalErr
 	}
 	policy, err := readTeamPolicyState(ctx, s.db)
@@ -283,6 +304,15 @@ func (s *Store) BuildAuthorizedCandidateFilter(ctx context.Context, request Cand
 	if !decision.Allowed {
 		return AuthorizedCandidateFilter{}, fmt.Errorf("%w: %s", ErrTeamPolicyDenied, decision.Reason)
 	}
+	if actor.Kind == teamauth.PrincipalAgent {
+		if principal.BindingID == "" ||
+			(request.Context.AgentID != "" && request.Context.AgentID != principal.BindingID) {
+			return AuthorizedCandidateFilter{}, fmt.Errorf(
+				"%w: agent context conflicts with authenticated binding", ErrTeamPolicyDenied,
+			)
+		}
+		request.Context.AgentID = principal.BindingID
+	}
 	humanID := actor.EffectiveHumanPrincipalID()
 	return AuthorizedCandidateFilter{
 		teamID: principal.TeamID, principalID: principal.PrincipalID,
@@ -291,6 +321,164 @@ func (s *Store) BuildAuthorizedCandidateFilter(ctx context.Context, request Cand
 		privacyCeiling: request.PrivacyCeiling, retention: request.Retention,
 		authorizedAt: s.clock().UTC(), epoch: epoch,
 	}, nil
+}
+
+// RecheckAuthorizedCandidateFilter is the fresh empty-result boundary. It
+// proves that the identity and epoch snapshot which produced an empty candidate
+// set is still active, without probing or counting any hidden object.
+func (s *Store) RecheckAuthorizedCandidateFilter(
+	ctx context.Context,
+	filter AuthorizedCandidateFilter,
+) error {
+	if filter.teamID == "" || filter.principalID == "" || filter.authorizedAt.IsZero() {
+		return ErrTeamPolicyDenied
+	}
+	if err := s.recheckAuthorizedCandidateIdentity(ctx, filter); err != nil {
+		return err
+	}
+	if err := s.RecheckTeamPolicyEpoch(ctx, filter.epoch); err != nil {
+		return s.classifyAuthorizedCandidateEpochError(ctx, filter, err)
+	}
+	identitySQL, identityArgs := filter.identityPredicate()
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 WHERE `+identitySQL, identityArgs...).Scan(&present); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if identityErr := s.recheckAuthorizedCandidateIdentity(ctx, filter); identityErr != nil {
+				return identityErr
+			}
+			return ErrPrincipalRevoked
+		}
+		return err
+	}
+	if err := s.RecheckTeamPolicyEpoch(ctx, filter.epoch); err != nil {
+		return s.classifyAuthorizedCandidateEpochError(ctx, filter, err)
+	}
+	return nil
+}
+
+// recheckAuthorizedCandidateIdentity distinguishes revocation of the exact
+// authenticated principal/binding from unrelated policy or grant churn. The
+// team-wide epoch is intentionally checked separately: an active principal
+// surviving someone else's mutation must report epoch_changed, not revoked.
+func (s *Store) recheckAuthorizedCandidateIdentity(
+	ctx context.Context,
+	filter AuthorizedCandidateFilter,
+) error {
+	principal, err := s.ResolveTeamPrincipal(ctx, filter.principalID)
+	if err != nil {
+		return err
+	}
+	currentKind := teamauth.PrincipalKind(principal.Kind)
+	currentHumanID := ""
+	switch currentKind {
+	case teamauth.PrincipalHuman:
+		currentHumanID = principal.PrincipalID
+	case teamauth.PrincipalAgent:
+		currentHumanID = principal.HumanPrincipalID
+	case teamauth.PrincipalService:
+	default:
+		return ErrPrincipalRevoked
+	}
+	if principal.TeamID != filter.teamID || principal.PrincipalID != filter.principalID ||
+		currentKind != filter.kind || currentHumanID != filter.humanPrincipalID ||
+		principal.BindingID != filter.bindingID {
+		return ErrPrincipalRevoked
+	}
+	if principal.PrincipalEpoch != filter.epoch.Principal ||
+		principal.MembershipEpoch != filter.epoch.Membership ||
+		principal.BindingEpoch != filter.epoch.Binding {
+		return ErrTeamPolicyEpochChanged
+	}
+	return nil
+}
+
+func (s *Store) classifyAuthorizedCandidateEpochError(
+	ctx context.Context,
+	filter AuthorizedCandidateFilter,
+	epochErr error,
+) error {
+	if !errors.Is(epochErr, ErrTeamPolicyEpochChanged) {
+		return epochErr
+	}
+	identityErr := s.recheckAuthorizedCandidateIdentity(ctx, filter)
+	if errors.Is(identityErr, ErrPrincipalRevoked) {
+		return identityErr
+	}
+	if identityErr != nil && !errors.Is(identityErr, ErrTeamPolicyEpochChanged) {
+		return identityErr
+	}
+	return epochErr
+}
+
+// RecheckAuthorizedCandidateRoots repeats current root access for every opaque
+// parent returned by a repository. Empty sets use the indistinguishable empty
+// recheck above. A final identity/epoch check closes revocation races between
+// the last root lookup and the caller's response boundary.
+func (s *Store) RecheckAuthorizedCandidateRoots(
+	ctx context.Context,
+	filter AuthorizedCandidateFilter,
+	rootObjectIDs []string,
+) error {
+	if len(rootObjectIDs) == 0 {
+		return s.RecheckAuthorizedCandidateFilter(ctx, filter)
+	}
+	seen := make(map[string]struct{}, len(rootObjectIDs))
+	uniqueRootIDs := make([]string, 0, len(rootObjectIDs))
+	for _, rootObjectID := range rootObjectIDs {
+		if !validProjectionOpaque(rootObjectID, 255) {
+			return ErrConcealedNotFound
+		}
+		if _, duplicate := seen[rootObjectID]; duplicate {
+			continue
+		}
+		seen[rootObjectID] = struct{}{}
+		uniqueRootIDs = append(uniqueRootIDs, rootObjectID)
+	}
+	if len(uniqueRootIDs) > 1000 {
+		return ErrTeamPolicyDenied
+	}
+	if err := s.RecheckAuthorizedCandidateFilter(ctx, filter); err != nil {
+		return err
+	}
+
+	boundaryTime := s.clock().UTC()
+	predicate, predicateArgs, err := filter.sqlPredicateAt("object", boundaryTime)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	placeholders := make([]string, len(uniqueRootIDs))
+	args := make([]any, 0, len(uniqueRootIDs)+len(predicateArgs))
+	for index, rootObjectID := range uniqueRootIDs {
+		placeholders[index] = "?"
+		args = append(args, rootObjectID)
+	}
+	args = append(args, predicateArgs...)
+	var authorizedRoots int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*)
+		  FROM team_object_registry object
+		 WHERE object.object_id IN (`+strings.Join(placeholders, ",")+`)
+		   AND `+predicate, args...).Scan(&authorizedRoots); err != nil {
+		return err
+	}
+	if authorizedRoots != len(uniqueRootIDs) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			return err
+		}
+		if err := s.RecheckAuthorizedCandidateFilter(ctx, filter); err != nil {
+			return err
+		}
+		return ErrConcealedNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.RecheckAuthorizedCandidateFilter(ctx, filter)
 }
 
 func (s *Store) LookupAuthorizedTeamObject(ctx context.Context, filter AuthorizedCandidateFilter, objectID string) (TeamObject, error) {

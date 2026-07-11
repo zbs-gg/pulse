@@ -16,8 +16,11 @@ import type {
 import { ContractError, validateCapsule, validateDelta } from './validation.js';
 
 import {
+  canonicalTeamContextQueryBody,
   canonicalTeamGraphDeltaBody,
+  canonicalTeamRecallBody,
   canonicalTeamRememberBody,
+  canonicalTeamResumeBody,
   expectedTeamGraphProjectionKinds,
   isTeamToolName,
   requiredTeamCapabilities,
@@ -28,8 +31,11 @@ import {
   teamNotReadyResult,
   validateTeamGraphDeltaInput,
   validateTeamGraphDeltaResult,
+  validateTeamContextQueryResult,
+  validateTeamRecallResult,
   validateTeamRememberResult,
   validateTeamRememberInput,
+  validateTeamResumeResult,
 } from './team-contracts.js';
 
 function validateTeamRemember(input: unknown): Record<string, unknown> {
@@ -74,6 +80,114 @@ function baseTeamRemember() {
     privacy_tier: 'normal',
     retention: 'project',
     idempotency_key: 'remember-request-001',
+  };
+}
+
+function teamReadActiveContext() {
+  return {
+    project_id: 'project-pulse',
+    repo_id: 'repo-pulse',
+    agent_id: 'agent-bound',
+    session_id: 'session-2026-07-11',
+  };
+}
+
+function baseTeamRecall() {
+  return {
+    schema: 'pulse.team.recall.v1',
+    query: 'What did we decide about scoped retrieval?',
+    active_context: teamReadActiveContext(),
+    privacy_ceiling: 'sensitive',
+  };
+}
+
+function baseTeamContextQuery() {
+  return {
+    schema: 'pulse.team.context.v1',
+    query: 'What is the current Pulse team plan?',
+    active_context: teamReadActiveContext(),
+    privacy_ceiling: 'sensitive',
+  };
+}
+
+function baseTeamResume() {
+  return {
+    schema: 'pulse.team.resume.v1',
+    active_context: teamReadActiveContext(),
+    thread_id: 'pulse-team-foundation',
+  };
+}
+
+function storedTeamRecallResult() {
+  return {
+    schema: 'pulse.team.recall_result.v1' as const,
+    items: [{
+      object_id: 'team_root_memory_001',
+      kind: 'decision',
+      redacted_summary: 'Use pre-retrieval authorization for every read surface.',
+      confidence: 0.95,
+      privacy_tier: 'sensitive',
+      retention: 'project',
+      tags: ['authorization', 'pulse'],
+    }],
+    returned_count: 1,
+    fallback: false as const,
+  };
+}
+
+function storedTeamContextResult() {
+  return {
+    schema: 'pulse.team.context_result.v1' as const,
+    facts: [{
+      root_object_id: 'team_root_graph_001', object_id: 'team_fact_001',
+      text: 'Authorization runs before candidate generation.', score: 0.95,
+      confidence: 0.9, domain: 'real',
+    }],
+    events: [{
+      root_object_id: 'team_root_graph_002', object_id: 'team_event_001',
+      title: 'U6 started', summary: 'Scoped retrieval implementation started.',
+      score: 0.85, confidence: 0.9, domain: 'real',
+    }],
+    entities: [{
+      root_object_id: 'team_root_graph_003', object_id: 'team_entity_001',
+      kind: 'project', canonical_name: 'Pulse', summary: 'Team memory foundation.',
+      score: 0.8, confidence: 0.95,
+    }],
+    relations: [{
+      root_object_id: 'team_root_graph_004', object_id: 'team_relation_001',
+      kind: 'uses', from_object_id: 'team_entity_001', to_object_id: 'team_entity_001',
+      summary: 'Pulse uses scoped candidate filters.', score: 0.75, confidence: 0.9,
+    }],
+    assertions: [{
+      root_object_id: 'team_root_graph_005', object_id: 'team_assertion_001',
+      subject_object_id: 'team_entity_001', predicate: 'authorization_boundary',
+      object_text: 'pre_retrieval', confidence: 0.9,
+    }],
+    trace: {
+      stages: [
+        { kind: 'lexical' as const, returned_object_ids: ['team_fact_001'] },
+        { kind: 'graph' as const, returned_object_ids: ['team_entity_001', 'team_relation_001'] },
+      ],
+    },
+    returned_counts: { facts: 1, events: 1, entities: 1, relations: 1, assertions: 1 },
+    fallback: false as const,
+  };
+}
+
+function storedTeamResumeResult() {
+  return {
+    schema: 'pulse.team.resume_result.v1' as const,
+    thread_id: 'pulse-team-foundation',
+    sections: {
+      where_we_left_off: [{ object_id: 'team_root_continuity_001', text: 'U6 transport is next.' }],
+      active_decisions: [{ object_id: 'team_root_continuity_001', text: 'Filter before retrieval.' }],
+      open_loops: [],
+      do_not_repeat: [],
+      relevant_emotional_state_context: [],
+      suggested_next_step: [{ object_id: 'team_root_continuity_001', text: 'Wire read routes.' }],
+    },
+    returned_count: 3,
+    fallback: false as const,
   };
 }
 
@@ -362,6 +476,142 @@ test('pulse_team_graph_delta advertises an exact closed active domain contract',
     properties.events.items as Record<string, Record<string, unknown>>
   ).properties as Record<string, unknown>;
   assert.equal(Object.hasOwn(eventProperties, 'claims'), false);
+});
+
+test('team read tools advertise exact closed v1 contracts without caller authority fields', () => {
+  const expectations = [
+    ['pulse_team_recall', 'pulse.team.recall.v1', [
+      'schema', 'query', 'active_context', 'privacy_ceiling',
+    ]],
+    ['pulse_team_context_query', 'pulse.team.context.v1', [
+      'schema', 'query', 'active_context', 'privacy_ceiling',
+    ]],
+    ['pulse_team_resume', 'pulse.team.resume.v1', ['schema', 'active_context']],
+  ] as const;
+  for (const [name, contract, required] of expectations) {
+    const descriptor = TEAM_TOOL_DESCRIPTORS.find((candidate) => candidate.name === name);
+    assert.ok(descriptor);
+    assert.match(descriptor.description, /domain execution (?:is|are) active/i);
+    assert.doesNotMatch(descriptor.description, /not active/i);
+    const schema = descriptor.inputSchema as Record<string, unknown>;
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(schema.required, required);
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    assert.equal(properties.schema.const, contract);
+    assert.equal(properties.active_context.additionalProperties, false);
+    for (const forbidden of [
+      'actor_id', 'principal_id', 'human_principal_id', 'owner_id', 'team_id',
+      'membership_id', 'agent_binding_id', 'role', 'scope_id',
+    ]) {
+      assert.equal(Object.hasOwn(properties, forbidden), false, `${name}.${forbidden}`);
+    }
+  }
+});
+
+test('team read bodies canonicalize defaults without mutating callers', () => {
+  const recall = baseTeamRecall();
+  const recallOriginal = structuredClone(recall);
+  const recallBody = canonicalTeamRecallBody(recall);
+  assert.deepEqual(recall, recallOriginal);
+  assert.deepEqual(recallBody.value, {
+    ...recallOriginal, limit: 5,
+  });
+
+  const context = baseTeamContextQuery();
+  const contextOriginal = structuredClone(context);
+  const contextBody = canonicalTeamContextQueryBody(context);
+  assert.deepEqual(context, contextOriginal);
+  assert.deepEqual(contextBody.value, {
+    ...contextOriginal, limit: 10, include_trace: false, graph_mode: 'anchored',
+  });
+
+  const resume = baseTeamResume();
+  const resumeOriginal = structuredClone(resume);
+  const resumeBody = canonicalTeamResumeBody(resume);
+  assert.deepEqual(resume, resumeOriginal);
+  assert.deepEqual(resumeBody.value, { ...resumeOriginal, limit: 20 });
+
+  for (const body of [recallBody, contextBody, resumeBody]) {
+    assert.equal(body.text, JSON.stringify(body.value));
+    assert.deepEqual(body.bytes, Buffer.from(body.text, 'utf8'));
+  }
+});
+
+test('team read bodies reject authority spoofing, unknown fields, unsafe text, and missing resume locator', () => {
+  for (const [builder, canonicalizer] of [
+    [baseTeamRecall, canonicalTeamRecallBody],
+    [baseTeamContextQuery, canonicalTeamContextQueryBody],
+    [baseTeamResume, canonicalTeamResumeBody],
+  ] as const) {
+    for (const [field, value] of [
+      ['principal_id', 'principal-spoofed'],
+      ['team_id', 'team-spoofed'],
+      ['owner_id', 'owner-spoofed'],
+      ['unexpected', true],
+    ] as const) {
+      assert.throws(() => canonicalizer({ ...builder(), [field]: value }), TeamContractError);
+    }
+  }
+  assert.throws(
+    () => canonicalTeamRecallBody({ ...baseTeamRecall(), query: 'api_key=sk-test-secret-value' }),
+    TeamContractError,
+  );
+  assert.throws(
+    () => canonicalTeamContextQueryBody({
+      ...baseTeamContextQuery(), active_context: { ...teamReadActiveContext(), project_id: '../secret' },
+    }),
+    TeamContractError,
+  );
+  assert.throws(
+    () => canonicalTeamRecallBody({
+      ...baseTeamRecall(), active_context: { ...teamReadActiveContext(), team_id: 'team-spoofed' },
+    }),
+    TeamContractError,
+  );
+  assert.throws(
+    () => canonicalTeamResumeBody({ schema: 'pulse.team.resume.v1', active_context: {}, limit: 20 }),
+    /thread_id|project_id|session_id/i,
+  );
+});
+
+test('team read result validators accept exact returned-only shapes and reject hidden influence', () => {
+  assert.deepEqual(validateTeamRecallResult(storedTeamRecallResult(), 5), storedTeamRecallResult());
+  assert.deepEqual(
+    validateTeamContextQueryResult(storedTeamContextResult(), 10, true),
+    storedTeamContextResult(),
+  );
+  assert.deepEqual(validateTeamResumeResult(storedTeamResumeResult(), 20), storedTeamResumeResult());
+
+  assert.throws(() => validateTeamRecallResult({
+    ...storedTeamRecallResult(), returned_count: 2,
+  }, 5), /response/i);
+  assert.throws(() => validateTeamRecallResult({
+    ...storedTeamRecallResult(), total_count: 42,
+  }, 5), /response/i);
+  assert.throws(() => validateTeamRecallResult({
+    ...storedTeamRecallResult(), fallback: true,
+  }, 5), /response/i);
+  assert.throws(() => validateTeamContextQueryResult({
+    ...storedTeamContextResult(),
+    trace: { stages: [{ kind: 'lexical', returned_object_ids: ['hidden_object_001'] }] },
+  }, 10, true), /response/i);
+  assert.throws(() => validateTeamContextQueryResult({
+    ...storedTeamContextResult(),
+    events: [{ ...storedTeamContextResult().events[0], object_id: 'team_fact_001' }],
+  }, 10, true), /response/i);
+  assert.throws(() => validateTeamContextQueryResult({
+    ...storedTeamContextResult(), hidden_candidate_count: 1,
+  }, 10, true), /response/i);
+  assert.throws(() => validateTeamContextQueryResult(storedTeamContextResult(), 10, false), /response/i);
+  assert.throws(() => validateTeamResumeResult({
+    ...storedTeamResumeResult(), returned_count: 4,
+  }, 20), /response/i);
+  assert.throws(() => validateTeamResumeResult({
+    ...storedTeamResumeResult(), sections: {
+      ...storedTeamResumeResult().sections,
+      evidence_refs: ['/Users/alex/private.txt'],
+    },
+  }, 20), /response/i);
 });
 
 test('team graph validator canonicalizes clean content without mutating the caller', () => {
@@ -1028,6 +1278,82 @@ test('pulse_team_graph_delta uses isolated request-bound graph closures without 
     assert.equal(rememberCalls, 0);
   } finally {
     await server.stop();
+  }
+});
+
+test('team read tools dispatch once through isolated request-bound closures without fallback', async () => {
+  const calls: string[] = [];
+  let mutationCalls = 0;
+  const server = await startTeamRegistryServer(() => Object.freeze({
+    remember: async () => { mutationCalls++; throw new Error('write fallback is unreachable'); },
+    graphDelta: async () => { mutationCalls++; throw new Error('graph fallback is unreachable'); },
+    recall: async (input: unknown) => {
+      calls.push(`recall:${canonicalTeamRecallBody(input).value.query}`);
+      return storedTeamRecallResult();
+    },
+    contextQuery: async (input: unknown) => {
+      calls.push(`context:${canonicalTeamContextQueryBody(input).value.query}`);
+      return storedTeamContextResult();
+    },
+    resume: async (input: unknown) => {
+      calls.push(`resume:${canonicalTeamResumeBody(input).value.thread_id}`);
+      return storedTeamResumeResult();
+    },
+  }));
+  const client = new Client({ name: 'team-read-dispatch', version: '0.0.0' });
+  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+    requestInit: { headers: { 'X-Test-Principal': 'principal-reader' } },
+  });
+  try {
+    await client.connect(transport);
+    const recall = await client.callTool({ name: 'pulse_team_recall', arguments: baseTeamRecall() });
+    const context = await client.callTool({
+      name: 'pulse_team_context_query',
+      arguments: { ...baseTeamContextQuery(), include_trace: true },
+    });
+    const resume = await client.callTool({ name: 'pulse_team_resume', arguments: baseTeamResume() });
+    assert.deepEqual(toolJSON(recall), storedTeamRecallResult());
+    assert.deepEqual(toolJSON(context), storedTeamContextResult());
+    assert.deepEqual(toolJSON(resume), storedTeamResumeResult());
+    assert.deepEqual(calls, [
+      `recall:${baseTeamRecall().query}`,
+      `context:${baseTeamContextQuery().query}`,
+      `resume:${baseTeamResume().thread_id}`,
+    ]);
+    assert.equal(mutationCalls, 0);
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
+
+test('team read tools return closed errors and never reach local fallback', async () => {
+  for (const [name, call] of [
+    ['pulse_team_recall', baseTeamRecall],
+    ['pulse_team_context_query', baseTeamContextQuery],
+    ['pulse_team_resume', baseTeamResume],
+  ] as const) {
+    const events: GatewaySecurityEventInput[] = [];
+    const server = await startTeamRegistryServer(() => Object.freeze({
+      recall: async () => { throw new TeamDomainError('principal_revoked'); },
+      contextQuery: async () => { throw new TeamDomainError('principal_revoked'); },
+      resume: async () => { throw new TeamDomainError('principal_revoked'); },
+    }), (event) => events.push(event));
+    const client = new Client({ name: `team-read-error-${name}`, version: '0.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(server.url));
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name, arguments: call() });
+      assert.equal(result.isError, true);
+      assert.deepEqual(toolJSON(result), { error: 'principal_revoked', fallback: false });
+      assert.deepEqual(events, [{
+        eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+        methodClass: 'read', requestId: 'request-missing',
+      }]);
+    } finally {
+      await client.close();
+      await server.stop();
+    }
   }
 });
 

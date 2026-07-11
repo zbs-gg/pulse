@@ -23,6 +23,7 @@ type TeamServerConfig struct {
 	IPCSecret         string
 	Store             *store.Store
 	PrincipalVerifier *PrincipalVerifier
+	ReadService       teamReadApplication
 	ExpectedStoreID   string
 	ExpectedTeamID    string
 	WriterLease       store.TeamWriterLease
@@ -125,6 +126,9 @@ func (s *TeamServer) Handler() http.Handler {
 		RegisterSecurityEventRoute(protected, s.securityEventHandler)
 		protected.Post(TeamMemoryRememberRoutePath, s.handleTeamMemoryRemember)
 		protected.Post(TeamGraphDeltaRoutePath, s.handleTeamGraphDelta)
+		protected.Post(TeamRecallRoutePath, s.handleTeamRecall)
+		protected.Post(TeamContextQueryRoutePath, s.handleTeamContextQuery)
+		protected.Post(TeamResumeRoutePath, s.handleTeamResume)
 	})
 	return r
 }

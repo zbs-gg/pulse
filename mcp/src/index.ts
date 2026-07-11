@@ -805,31 +805,48 @@ export function createPulseMcpServer(
         if (!isTeamToolName(name)) {
           throw new Error('Unknown team tool');
         }
-        if (name === 'pulse_team_remember' || name === 'pulse_team_graph_delta') {
+        if (
+          name === 'pulse_team_remember' || name === 'pulse_team_graph_delta' ||
+          name === 'pulse_team_recall' || name === 'pulse_team_context_query' ||
+          name === 'pulse_team_resume' || name === 'pulse_team_delete' ||
+          name === 'pulse_team_delete_status'
+        ) {
+          const methodClass: 'read' | 'write' | 'delete' = name === 'pulse_team_delete'
+            ? 'delete'
+            : name === 'pulse_team_remember' || name === 'pulse_team_graph_delta'
+              ? 'write'
+              : 'read';
           if (!teamDomain) {
             reportTeamDomainFailure(
-              teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable',
+              teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable', methodClass,
             );
             return contracts.teamDomainErrorResult('shared_memory_unavailable');
           }
           try {
-            const result = name === 'pulse_team_remember'
-              ? await teamDomain.remember(args)
-              : await teamDomain.graphDelta(args);
+            let result: unknown;
+            if (name === 'pulse_team_remember') result = await teamDomain.remember(args);
+            else if (name === 'pulse_team_graph_delta') result = await teamDomain.graphDelta(args);
+            else if (name === 'pulse_team_recall') result = await teamDomain.recall(args);
+            else if (name === 'pulse_team_context_query') result = await teamDomain.contextQuery(args);
+            else if (name === 'pulse_team_resume') result = await teamDomain.resume(args);
+            else if (name === 'pulse_team_delete') result = await teamDomain.delete(args);
+            else result = await teamDomain.deleteStatus(args);
             return jsonText(result);
           } catch (error) {
             if (error instanceof contracts.TeamContractError) {
               reportTeamDomainFailure(
-                teamSecurityEventSink, teamContext.request_id, 'invalid_contract',
+                teamSecurityEventSink, teamContext.request_id, 'invalid_contract', methodClass,
               );
               return contracts.teamDomainErrorResult('invalid_team_contract');
             }
             if (error instanceof contracts.TeamDomainError) {
-              reportTeamDomainFailure(teamSecurityEventSink, teamContext.request_id, error.code);
+              reportTeamDomainFailure(
+                teamSecurityEventSink, teamContext.request_id, error.code, methodClass,
+              );
               return contracts.teamDomainErrorResult(error.code);
             }
             reportTeamDomainFailure(
-              teamSecurityEventSink, teamContext.request_id, 'unexpected_domain_failure',
+              teamSecurityEventSink, teamContext.request_id, 'unexpected_domain_failure', methodClass,
             );
             return contracts.teamDomainErrorResult('shared_memory_unavailable');
           }
@@ -1185,7 +1202,7 @@ async function startHttpMode(): Promise<void> {
             body: parsedBody,
             requestId,
           });
-          if (required.includes('pulse:write')) {
+          if (required.includes('pulse:write') || required.includes('pulse:read')) {
             teamDomain = teamSecurity.principalClient.bindDomain(identity, teamContext);
           }
         } else {
@@ -1359,6 +1376,7 @@ function reportTeamDomainFailure(
   sink: ((event: GatewaySecurityEventInput) => void) | undefined,
   requestId: string,
   code: string,
+  methodClass: 'read' | 'write' | 'delete' = 'write',
 ): void {
   if (!sink) return;
   let event: GatewaySecurityEventInput | undefined;
@@ -1366,71 +1384,77 @@ function reportTeamDomainFailure(
   case 'principal_revoked':
     event = {
       eventType: 'authorization_denied', reasonCode: 'principal_revoked',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'policy_denied':
   case 'not_found':
+  case 'concealed_not_found':
     event = {
       eventType: 'authorization_denied', reasonCode: 'policy_denied',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'authorization_stale':
     event = {
       eventType: 'authorization_denied', reasonCode: 'stale_generation',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'invalid_principal':
     event = {
       eventType: 'principal_assertion_denied', reasonCode: 'assertion_invalid',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'principal_request_mismatch':
     event = {
       eventType: 'principal_assertion_denied', reasonCode: 'assertion_binding_mismatch',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'principal_replay':
     event = {
       eventType: 'principal_assertion_denied', reasonCode: 'assertion_replayed',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'invalid_contract':
   case 'invalid_team_memory':
   case 'invalid_team_graph_delta':
+  case 'invalid_team_recall':
+  case 'invalid_team_context':
+  case 'invalid_team_resume':
+  case 'invalid_team_delete':
+  case 'invalid_team_delete_status':
     event = {
       eventType: 'operation_denied', reasonCode: 'invalid_contract',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'idempotency_conflict':
     event = {
       eventType: 'operation_denied', reasonCode: 'idempotency_conflict',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'idempotency_in_progress':
     event = {
       eventType: 'operation_denied', reasonCode: 'operation_in_progress',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'shared_memory_unavailable':
     event = {
       eventType: 'audit_degraded', reasonCode: 'store_unavailable',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   case 'idempotency_failed':
   case 'unexpected_domain_failure':
     event = {
       eventType: 'audit_degraded', reasonCode: 'internal_failure',
-      methodClass: 'write', requestId,
+      methodClass, requestId,
     };
     break;
   }
