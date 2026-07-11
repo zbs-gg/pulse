@@ -14,11 +14,11 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 	}{
 		{
 			name:       "reader floor",
-			regression: `UPDATE team_stores SET min_reader_version = 33 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_reader_version = 35 WHERE singleton = 1`,
 		},
 		{
 			name:       "writer floor",
-			regression: `UPDATE team_stores SET min_writer_version = 34 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_writer_version = 36 WHERE singleton = 1`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -30,7 +30,7 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 			// so only the required monotonic DDL guard can reject it.
 			if _, err := s.DB().Exec(`
 				UPDATE team_stores
-				   SET min_reader_version = 34, min_writer_version = 35
+				   SET min_reader_version = 36, min_writer_version = 37
 				 WHERE singleton = 1`); err != nil {
 				t.Fatalf("raise schema floors: %v", err)
 			}
@@ -157,7 +157,7 @@ func TestTeamEventMetadataOnlyAcceptsEmptyObject(t *testing.T) {
 	}
 }
 
-func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
+func TestFrozenTeamTablesAndTriggersExistAcrossMigrations034And035(t *testing.T) {
 	s, _ := bootstrapTeamStore(t)
 	defer s.Close()
 
@@ -170,7 +170,7 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 			t.Fatal(err)
 		}
 		if count != 1 {
-			t.Fatalf("required migration-034 table %s missing", table)
+			t.Fatalf("required team table %s missing", table)
 		}
 	}
 	for _, trigger := range []string{
@@ -193,7 +193,7 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 			t.Fatal(err)
 		}
 		if count != 1 {
-			t.Fatalf("required migration-034 trigger %s missing", trigger)
+			t.Fatalf("required team trigger %s missing", trigger)
 		}
 	}
 

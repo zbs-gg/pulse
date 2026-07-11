@@ -14,16 +14,16 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
-func TestMigration034InstallsPolicyObjectSpine(t *testing.T) {
-	if teamauth.SchemaVersion != 34 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 34", teamauth.SchemaVersion)
+func TestMigrations034And035InstallPolicyObjectSpineAndTeamMemory(t *testing.T) {
+	if teamauth.SchemaVersion != 35 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 35", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 34 || latest.Name != "034_team_object_policy.sql" {
-		t.Fatalf("latest migration = %+v, want 034_team_object_policy.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 35 || latest.Name != "035_team_memory.sql" {
+		t.Fatalf("latest migration = %+v, want 035_team_memory.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
