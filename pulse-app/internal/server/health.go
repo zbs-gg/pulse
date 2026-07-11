@@ -1,10 +1,38 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 )
+
+type teamHealthResponse struct {
+	Status string `json:"status"`
+}
+
+type teamReadinessResponse struct {
+	Status   string `json:"status"`
+	Mode     string `json:"mode"`
+	Fallback bool   `json:"fallback"`
+}
+
+func (s *TeamServer) handleTeamHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(teamHealthResponse{Status: "ok"})
+}
+
+func (s *TeamServer) handleTeamReadiness(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := s.CheckReadiness(ctx); err != nil {
+		writeTeamError(w, http.StatusServiceUnavailable, teamErrorNotReady, true)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(teamReadinessResponse{Status: "ready", Mode: "team-remote", Fallback: false})
+}
 
 // handleHealthSnapshot serves GET /health/snapshot.
 //

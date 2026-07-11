@@ -154,20 +154,8 @@ func (s *Store) CheckTeamReadiness(ctx context.Context, options TeamReadinessOpt
 	if err != nil {
 		return TeamStoreInfo{}, err
 	}
-	if (options.ExpectedStoreID != "" && options.ExpectedStoreID != info.StoreID) ||
-		(options.ExpectedTeamID != "" && options.ExpectedTeamID != info.TeamID) {
-		return TeamStoreInfo{}, ErrTeamStoreIdentityMismatch
-	}
-	readerVersion := options.ReaderVersion
-	if readerVersion == 0 {
-		readerVersion = teamauth.SchemaVersion
-	}
-	writerVersion := options.WriterVersion
-	if writerVersion == 0 {
-		writerVersion = teamauth.SchemaVersion
-	}
-	if readerVersion < info.MinReaderVersion || writerVersion < info.MinWriterVersion {
-		return TeamStoreInfo{}, fmt.Errorf("%w: store requires reader %d and writer %d", ErrUnsupportedTeamSchema, info.MinReaderVersion, info.MinWriterVersion)
+	if err := validateTeamReadinessInfo(info, options); err != nil {
+		return TeamStoreInfo{}, err
 	}
 	if err := verifyTeamPragmas(s.db); err != nil {
 		return TeamStoreInfo{}, err
@@ -180,6 +168,25 @@ func (s *Store) CheckTeamReadiness(ctx context.Context, options TeamReadinessOpt
 		return TeamStoreInfo{}, ErrLegacyLocalData
 	}
 	return info, nil
+}
+
+func validateTeamReadinessInfo(info TeamStoreInfo, options TeamReadinessOptions) error {
+	if (options.ExpectedStoreID != "" && options.ExpectedStoreID != info.StoreID) ||
+		(options.ExpectedTeamID != "" && options.ExpectedTeamID != info.TeamID) {
+		return ErrTeamStoreIdentityMismatch
+	}
+	readerVersion := options.ReaderVersion
+	if readerVersion == 0 {
+		readerVersion = teamauth.SchemaVersion
+	}
+	writerVersion := options.WriterVersion
+	if writerVersion == 0 {
+		writerVersion = teamauth.SchemaVersion
+	}
+	if readerVersion < info.MinReaderVersion || writerVersion < info.MinWriterVersion {
+		return fmt.Errorf("%w: store requires reader %d and writer %d", ErrUnsupportedTeamSchema, info.MinReaderVersion, info.MinWriterVersion)
+	}
+	return nil
 }
 
 func (s *Store) CurrentTeamAuthEpoch(ctx context.Context) (int64, error) {
@@ -199,10 +206,14 @@ func (s *Store) ResolveTeamPrincipal(ctx context.Context, principalID string) (R
 	if err != nil {
 		return ResolvedTeamPrincipal{}, err
 	}
+	return resolveTeamPrincipal(ctx, s.db, info, principalID)
+}
+
+func resolveTeamPrincipal(ctx context.Context, q queryer, info TeamStoreInfo, principalID string) (ResolvedTeamPrincipal, error) {
 	resolved := ResolvedTeamPrincipal{
 		StoreID: info.StoreID, TeamID: info.TeamID, PrincipalID: principalID, TeamEpoch: info.AuthEpoch,
 	}
-	if err := s.db.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT kind, status, auth_epoch FROM team_principals
 		 WHERE principal_id = ? AND store_id = ?`, principalID, info.StoreID).
 		Scan(&resolved.Kind, &resolved.PrincipalStatus, &resolved.PrincipalEpoch); err != nil {
@@ -211,20 +222,23 @@ func (s *Store) ResolveTeamPrincipal(ctx context.Context, principalID string) (R
 		}
 		return resolved, err
 	}
+	var err error
 	switch resolved.Kind {
-	case "human", "service":
-		err = s.db.QueryRowContext(ctx, `
+	case string(teamauth.PrincipalHuman), string(teamauth.PrincipalService):
+		err = q.QueryRowContext(ctx, `
 			SELECT membership_id, role, status, auth_epoch FROM team_memberships
 			 WHERE team_id = ? AND principal_id = ?`, info.TeamID, principalID).
 			Scan(&resolved.MembershipID, &resolved.MembershipRole, &resolved.MembershipStatus, &resolved.MembershipEpoch)
-	case "agent":
-		err = s.db.QueryRowContext(ctx, `
+	case string(teamauth.PrincipalAgent):
+		err = q.QueryRowContext(ctx, `
 			SELECT b.binding_id, b.human_principal_id, b.status, b.auth_epoch,
 			       m.membership_id, m.role, m.status, m.auth_epoch
 			  FROM team_agent_bindings b
-			  JOIN team_principals hp ON hp.principal_id = b.human_principal_id AND hp.status = 'active'
+			  JOIN team_principals hp
+			    ON hp.principal_id = b.human_principal_id
+			   AND hp.store_id = ? AND hp.status = 'active'
 			  JOIN team_memberships m ON m.team_id = b.team_id AND m.principal_id = b.human_principal_id
-			 WHERE b.team_id = ? AND b.agent_principal_id = ?`, info.TeamID, principalID).
+			 WHERE b.team_id = ? AND b.agent_principal_id = ?`, info.StoreID, info.TeamID, principalID).
 			Scan(&resolved.BindingID, &resolved.HumanPrincipalID, &resolved.BindingStatus, &resolved.BindingEpoch,
 				&resolved.MembershipID, &resolved.MembershipRole, &resolved.MembershipStatus, &resolved.MembershipEpoch)
 	default:
@@ -237,7 +251,7 @@ func (s *Store) ResolveTeamPrincipal(ctx context.Context, principalID string) (R
 		return resolved, err
 	}
 	if resolved.PrincipalStatus != "active" || resolved.MembershipStatus != "active" ||
-		(resolved.Kind == "agent" && resolved.BindingStatus != "active") {
+		(resolved.Kind == string(teamauth.PrincipalAgent) && resolved.BindingStatus != "active") {
 		return resolved, ErrPrincipalRevoked
 	}
 	return resolved, nil
@@ -1246,9 +1260,12 @@ func countLegacyRows(ctx context.Context, q legacyCounter) (int64, error) {
 		"team_human_identities": {}, "team_service_identities": {}, "team_memberships": {},
 		"team_projects": {}, "team_agent_bindings": {}, "team_oauth_clients": {},
 		"team_project_grants": {}, "team_audit_events": {}, "team_security_events": {},
-		"team_assertion_replay": {},
+		"team_assertion_replay": {}, "team_policy_metadata": {}, "team_object_registry": {},
+		"team_object_storage_map": {}, "team_object_contributions": {},
+		"team_service_object_grants": {}, "team_writer_leases": {},
+		"team_idempotency_records": {}, "team_projection_jobs": {},
+		"team_projection_outputs": {}, "team_audit_event_order": {},
 	}
-	var total int64
 	for _, table := range catalog {
 		if strings.HasPrefix(table.name, "sqlite_") {
 			continue
@@ -1259,13 +1276,15 @@ func countLegacyRows(ctx context.Context, q legacyCounter) (int64, error) {
 		if isFTS5CatalogTable(table.name, ftsRoots) {
 			continue
 		}
-		var count int64
-		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM `+quoteSQLiteIdentifier(table.name)).Scan(&count); err != nil {
+		var exists int
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM `+quoteSQLiteIdentifier(table.name)+` LIMIT 1)`).Scan(&exists); err != nil {
 			return 0, fmt.Errorf("inspect legacy table %s: %w", table.name, err)
 		}
-		total += count
+		if exists != 0 {
+			return 1, nil
+		}
 	}
-	return total, nil
+	return 0, nil
 }
 
 func isFTS5CatalogTable(name string, roots map[string]struct{}) bool {

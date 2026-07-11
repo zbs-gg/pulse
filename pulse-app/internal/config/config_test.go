@@ -3,8 +3,18 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func teamTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 func TestLoadGeneratesSecretIfMissing(t *testing.T) {
 	dir := t.TempDir()
@@ -106,13 +116,13 @@ func TestLoadTeamBootstrapRootIsAllOrNothing(t *testing.T) {
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "")
-	if _, err := LoadTeam(t.TempDir()); err == nil {
+	if _, err := LoadTeam(teamTempDir(t)); err == nil {
 		t.Fatal("partial team bootstrap root should fail")
 	}
 
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "owner-subject")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "admin-client")
-	cfg, err := LoadTeam(t.TempDir())
+	cfg, err := LoadTeam(teamTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +134,12 @@ func TestLoadTeamBootstrapRootIsAllOrNothing(t *testing.T) {
 func TestLoadExpectedTeamIdentityIsAllOrNothing(t *testing.T) {
 	t.Setenv("PULSE_TEAM_EXPECTED_STORE_ID", "store_123")
 	t.Setenv("PULSE_TEAM_EXPECTED_TEAM_ID", "")
-	if _, err := LoadTeam(t.TempDir()); err == nil {
+	if _, err := LoadTeam(teamTempDir(t)); err == nil {
 		t.Fatal("partial expected team identity should fail")
 	}
 
 	t.Setenv("PULSE_TEAM_EXPECTED_TEAM_ID", "team_123")
-	cfg, err := LoadTeam(t.TempDir())
+	cfg, err := LoadTeam(teamTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +153,7 @@ func TestLoadTeamPreservesBootstrapIdentityExactly(t *testing.T) {
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "Owner Subject")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "Admin/Client")
 
-	cfg, err := LoadTeam(t.TempDir())
+	cfg, err := LoadTeam(teamTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,9 +190,87 @@ func TestLoadTeamRejectsSurroundingWhitespace(t *testing.T) {
 			t.Setenv("PULSE_TEAM_EXPECTED_TEAM_ID", "team_123")
 			t.Setenv(tt.env, tt.value)
 
-			if _, err := LoadTeam(t.TempDir()); err == nil {
+			if _, err := LoadTeam(teamTempDir(t)); err == nil {
 				t.Fatalf("LoadTeam accepted surrounding whitespace in %s", tt.env)
 			}
 		})
 	}
+}
+
+func TestLoadTeamRequiresStrictIPCSecretAndPrivateDataDirectory(t *testing.T) {
+	valid := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("creates an exact private secret", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadTeam(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.IPCSecret) != 64 {
+			t.Fatalf("secret length = %d", len(cfg.IPCSecret))
+		}
+		info, err := os.Lstat(filepath.Join(dir, "secret.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			t.Fatalf("secret mode = %v", info.Mode())
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		content string
+		mode    os.FileMode
+	}{
+		{name: "short", content: "tiny", mode: 0600},
+		{name: "uppercase", content: strings.ToUpper(valid), mode: 0600},
+		{name: "group readable", content: valid, mode: 0640},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "secret.key"), []byte(tc.content), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Join(dir, "secret.key"), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadTeam(dir); err == nil {
+				t.Fatal("LoadTeam accepted an unsafe secret")
+			}
+		})
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "target.key")
+		if err := os.WriteFile(target, []byte(valid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, "secret.key")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadTeam(dir); err == nil {
+			t.Fatal("LoadTeam followed a secret symlink")
+		}
+	})
+
+	t.Run("permissive data directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadTeam(dir); err == nil {
+			t.Fatal("LoadTeam accepted a group/world accessible data directory")
+		}
+	})
 }

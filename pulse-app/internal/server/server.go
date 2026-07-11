@@ -77,7 +77,9 @@ func New(cfg Config) (*Server, error) {
 	return &Server{cfg: cfg, started: time.Now()}, nil
 }
 
-// Handler returns the root http.Handler with auth middleware.
+// Handler returns the local-only root http.Handler with auth middleware.
+// Team remote must use NewTeam(...).Handler(); the two route registries never
+// compose so a local route cannot become reachable through team configuration.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)

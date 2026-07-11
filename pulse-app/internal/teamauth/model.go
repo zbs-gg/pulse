@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 33
+const SchemaVersion = 34
 
 var ErrIncompleteBootstrapRoot = errors.New("bootstrap root requires issuer, subject, and admin client binding")
 

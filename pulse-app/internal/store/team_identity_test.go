@@ -51,7 +51,7 @@ func TestTeamStoreBootstrapIsPinnedAtomicAndDurable(t *testing.T) {
 	if synchronous != 2 {
 		t.Fatalf("team synchronous = %d, want FULL (2)", synchronous)
 	}
-	if _, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33}); !errors.Is(err, ErrTeamStoreUninitialized) {
+	if _, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion}); !errors.Is(err, ErrTeamStoreUninitialized) {
 		t.Fatalf("unmarked readiness error = %v", err)
 	}
 
@@ -82,13 +82,13 @@ func TestTeamStoreBootstrapIsPinnedAtomicAndDurable(t *testing.T) {
 	info, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{
 		ExpectedStoreID: result.StoreID,
 		ExpectedTeamID:  result.TeamID,
-		ReaderVersion:   33,
-		WriterVersion:   33,
+		ReaderVersion:   teamauth.SchemaVersion,
+		WriterVersion:   teamauth.SchemaVersion,
 	})
 	if err != nil {
 		t.Fatalf("ready team store: %v", err)
 	}
-	if info.AuthEpoch != 1 || info.MinReaderVersion != 33 || info.MinWriterVersion != 33 {
+	if info.AuthEpoch != 1 || info.MinReaderVersion != teamauth.SchemaVersion || info.MinWriterVersion != teamauth.SchemaVersion {
 		t.Fatalf("unexpected team metadata: %+v", info)
 	}
 	if epoch, err := s.CurrentTeamAuthEpoch(ctx); err != nil || epoch != 1 {
@@ -219,7 +219,7 @@ func TestTeamIdentityBindingsRevocationAndAuditAreAtomic(t *testing.T) {
 		t.Fatalf("resolved agent = %+v", resolvedAgent)
 	}
 
-	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestTeamIdentityBindingsRevocationAndAuditAreAtomic(t *testing.T) {
 	if _, err := s.ResolveAgentBinding(ctx, root.Issuer, root.Subject, "agent-client-a"); !errors.Is(err, ErrPrincipalRevoked) {
 		t.Fatalf("resolve after revoke error = %v", err)
 	}
-	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestMembershipRevocationInvalidatesDependentBindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind member agent: %v", err)
 	}
-	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestMembershipRevocationInvalidatesDependentBindings(t *testing.T) {
 	if _, err := s.ResolveAgentBinding(ctx, "https://issuer.example", "member-subject", "member-agent-client"); !errors.Is(err, ErrPrincipalRevoked) {
 		t.Fatalf("dependent binding remained active: %+v, %v", binding, err)
 	}
-	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestPrivilegedMutationRollsBackWhenAuditCannotAppend(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	before, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestPrivilegedMutationRollsBackWhenAuditCannotAppend(t *testing.T) {
 	}); err == nil {
 		t.Fatal("service principal mutation succeeded without durable audit")
 	}
-	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: 33, WriterVersion: 33})
+	after, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestTeamReadinessRejectsIdentityAndVersionMismatch(t *testing.T) {
 	defer s.Close()
 	if _, err := s.CheckTeamReadiness(ctx, TeamReadinessOptions{
 		ExpectedStoreID: "wrong-store", ExpectedTeamID: bootstrap.TeamID,
-		ReaderVersion: 33, WriterVersion: 33,
+		ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion,
 	}); !errors.Is(err, ErrTeamStoreIdentityMismatch) {
 		t.Fatalf("store mismatch error = %v", err)
 	}

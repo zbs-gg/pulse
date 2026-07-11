@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
 const (
@@ -58,6 +59,7 @@ type PrincipalVerifierConfig struct {
 	ExpectedStoreID string
 	ExpectedTeamID  string
 	Clock           func() time.Time
+	WriterLease     *store.TeamWriterLease
 }
 
 type PrincipalVerifier struct {
@@ -73,6 +75,7 @@ type PrincipalVerifier struct {
 	nextReplayPrune       time.Time
 	replayPruneInterval   time.Duration
 	onReplayPruneDegraded func()
+	writerLease           *store.TeamWriterLease
 }
 
 type principalReplayPruner interface {
@@ -169,10 +172,20 @@ func NewPrincipalVerifier(cfg PrincipalVerifierConfig) (*PrincipalVerifier, erro
 	for kid, key := range cfg.Keyring.Keys {
 		keys[kid] = append(ed25519.PublicKey(nil), key...)
 	}
+	var writerLease *store.TeamWriterLease
+	if cfg.WriterLease != nil {
+		lease := *cfg.WriterLease
+		if lease.StoreID != cfg.ExpectedStoreID || lease.TeamID != cfg.ExpectedTeamID ||
+			lease.WriterID == "" || lease.Token == "" || lease.WriterVersion < teamauth.SchemaVersion {
+			return nil, errors.New("principal verifier writer lease identity mismatch")
+		}
+		writerLease = &lease
+	}
 	return &PrincipalVerifier{
 		store: cfg.Store, keys: keys, expectedStoreID: cfg.ExpectedStoreID, expectedTeamID: cfg.ExpectedTeamID, clock: clock,
 		replayPruner: cfg.Store, replayPruneInterval: principalReplayPruneInterval,
 		onReplayPruneDegraded: func() { slog.Warn("principal assertion replay pruning degraded") },
+		writerLease:           writerLease,
 	}, nil
 }
 
@@ -235,7 +248,7 @@ func (v *PrincipalVerifier) VerifyRequest(ctx context.Context, compact, requestI
 	default:
 		return PrincipalContext{}, ErrPrincipalRevoked
 	}
-	if err := v.store.ConsumeAssertionID(ctx, header.Kid, claims.JTI, time.Unix(claims.ExpiresAt, 0)); err != nil {
+	if err := v.consumeAssertionID(ctx, header.Kid, claims.JTI, time.Unix(claims.ExpiresAt, 0)); err != nil {
 		if errors.Is(err, store.ErrAssertionReplay) {
 			return PrincipalContext{}, ErrPrincipalReplay
 		}
@@ -246,6 +259,15 @@ func (v *PrincipalVerifier) VerifyRequest(ctx context.Context, compact, requestI
 	}
 	v.maybePruneExpiredAssertions(ctx)
 	return principalContextFromResolved(claims, registration.OAuthClientKey, resolved), nil
+}
+
+func (v *PrincipalVerifier) consumeAssertionID(ctx context.Context, kid, jti string, expiresAt time.Time) error {
+	if v.writerLease == nil {
+		return v.store.ConsumeAssertionID(ctx, kid, jti, expiresAt)
+	}
+	return v.store.ConsumeAssertionIDWithWriterLease(
+		ctx, kid, jti, expiresAt, v.writerLease.WriterID, v.writerLease.Token,
+	)
 }
 
 // VerifyGatewayEvent authenticates a content-free pre-principal security
@@ -271,7 +293,7 @@ func (v *PrincipalVerifier) VerifyGatewayEvent(ctx context.Context, compact, req
 		claims.BodySHA256 != hex.EncodeToString(digest[:]) || claims.StoreID != v.expectedStoreID || claims.TeamID != v.expectedTeamID {
 		return ErrPrincipalRequestMismatch
 	}
-	if err := v.store.ConsumeAssertionID(ctx, header.Kid, claims.JTI, time.Unix(claims.ExpiresAt, 0)); err != nil {
+	if err := v.consumeAssertionID(ctx, header.Kid, claims.JTI, time.Unix(claims.ExpiresAt, 0)); err != nil {
 		if errors.Is(err, store.ErrAssertionReplay) {
 			return ErrPrincipalReplay
 		}
@@ -294,7 +316,12 @@ func (v *PrincipalVerifier) maybePruneExpiredAssertions(ctx context.Context) {
 	v.replayPruneInFlight = true
 	v.replayPruneMu.Unlock()
 
-	_, err := v.replayPruner.PruneExpiredAssertionIDs(ctx)
+	var err error
+	if v.writerLease == nil {
+		_, err = v.replayPruner.PruneExpiredAssertionIDs(ctx)
+	} else {
+		_, err = v.store.PruneExpiredAssertionIDsWithWriterLease(ctx, v.writerLease.WriterID, v.writerLease.Token)
+	}
 	v.replayPruneMu.Lock()
 	v.replayPruneInFlight = false
 	v.nextReplayPrune = v.clock().Add(v.replayPruneInterval)

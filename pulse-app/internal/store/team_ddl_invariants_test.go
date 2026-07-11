@@ -66,6 +66,22 @@ func TestEveryTeamAuthEpochColumnRejectsRegressionAtDDL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed project grant: %v", err)
 	}
+	service, err := s.RegisterServicePrincipal(ctx, RegisterServicePrincipalRequest{
+		ActorPrincipalID: bootstrap.OwnerPrincipalID,
+		Issuer:           testBootstrapRoot().Issuer,
+		ClientID:         "ddl-invariant-service",
+	})
+	if err != nil {
+		t.Fatalf("seed service principal: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO team_service_object_grants(
+			grant_id, team_id, service_principal_id, object_kind, action,
+			scope_type, scope_id, status, auth_epoch, created_at)
+		VALUES ('ddl_service_grant', ?, ?, '*', 'read', 'team', ?, 'active', 1,
+			'2026-07-10T00:00:00Z')`, bootstrap.TeamID, service.PrincipalID, bootstrap.TeamID); err != nil {
+		t.Fatalf("seed service object grant: %v", err)
+	}
 
 	got := teamTablesWithColumn(t, s, "auth_epoch")
 	want := []string{
@@ -74,6 +90,7 @@ func TestEveryTeamAuthEpochColumnRejectsRegressionAtDDL(t *testing.T) {
 		"team_memberships",
 		"team_principals",
 		"team_project_grants",
+		"team_service_object_grants",
 		"team_stores",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -138,6 +155,69 @@ func TestTeamEventMetadataOnlyAcceptsEmptyObject(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
+	s, _ := bootstrapTeamStore(t)
+	defer s.Close()
+
+	for _, table := range []string{"team_audit_event_order", "team_projection_outputs"} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("required migration-034 table %s missing", table)
+		}
+	}
+	for _, trigger := range []string{
+		"team_audit_event_order_after_insert",
+		"team_audit_event_order_no_update",
+		"team_audit_event_order_no_delete",
+		"team_projection_jobs_active_generation_on_state",
+		"team_projection_outputs_generation_fence_insert",
+	} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trigger).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("required migration-034 trigger %s missing", trigger)
+		}
+	}
+
+	columns := teamTableColumns(t, s, "team_projection_jobs")
+	for _, required := range []string{"lease_token_hash", "next_attempt_at"} {
+		if _, ok := columns[required]; !ok {
+			t.Fatalf("team_projection_jobs missing %s", required)
+		}
+	}
+	if _, unsafe := columns["lease_token"]; unsafe {
+		t.Fatal("team_projection_jobs still persists raw lease_token")
+	}
+}
+
+func teamTableColumns(t *testing.T, s *Store, table string) map[string]struct{} {
+	t.Helper()
+	rows, err := s.DB().Query(fmt.Sprintf(`PRAGMA table_info(%q)`, table))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }
 
 func teamTablesWithColumn(t *testing.T, s *Store, column string) []string {

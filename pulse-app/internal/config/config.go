@@ -3,10 +3,13 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
@@ -46,9 +49,16 @@ func Load(dataDir string) (*Config, error) {
 
 // LoadTeam reads configuration for the authenticated team runtime.
 func LoadTeam(dataDir string) (*Config, error) {
-	cfg, err := Load(dataDir)
+	if err := ensurePrivateTeamDataDir(dataDir); err != nil {
+		return nil, err
+	}
+	secret, err := loadOrCreateTeamSecret(filepath.Join(dataDir, "secret.key"))
 	if err != nil {
 		return nil, err
+	}
+	cfg := &Config{
+		DataDir: dataDir, IPCSecret: secret, DBPath: filepath.Join(dataDir, "pulse.db"),
+		Mode: "host-extracted",
 	}
 
 	bootstrapRoot, err := loadTeamBootstrapRoot()
@@ -64,6 +74,109 @@ func LoadTeam(dataDir string) (*Config, error) {
 	cfg.ExpectedTeamStoreID = expectedStoreID
 	cfg.ExpectedTeamID = expectedTeamID
 	return cfg, nil
+}
+
+func ensurePrivateTeamDataDir(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return fmt.Errorf("create team data directory: %w", err)
+		}
+		if err := os.Chmod(path, 0700); err != nil {
+			return fmt.Errorf("secure team data directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect team data directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || !ownedByCurrentUser(info) {
+		return errors.New("team data directory must be an owner-only 0700 directory")
+	}
+	return nil
+}
+
+func loadOrCreateTeamSecret(path string) (string, error) {
+	secret, err := readStrictTeamSecret(path)
+	if err == nil {
+		return secret, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOENT) {
+		return "", err
+	}
+
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate team IPC secret: %w", err)
+	}
+	encoded := hex.EncodeToString(random[:])
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
+	if errors.Is(err, syscall.EEXIST) {
+		return readStrictTeamSecret(path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("create team IPC secret: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	removeOnFailure := true
+	defer func() {
+		_ = file.Close()
+		if removeOnFailure {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := file.Chmod(0600); err != nil {
+		return "", fmt.Errorf("secure team IPC secret: %w", err)
+	}
+	if _, err := io.WriteString(file, encoded); err != nil {
+		return "", fmt.Errorf("write team IPC secret: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return "", fmt.Errorf("sync team IPC secret: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close team IPC secret: %w", err)
+	}
+	removeOnFailure = false
+	return readStrictTeamSecret(path)
+}
+
+func readStrictTeamSecret(path string) (string, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "", fmt.Errorf("open team IPC secret: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspect team IPC secret: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !ownedByCurrentUser(info) {
+		return "", errors.New("team IPC secret must be an owner-only 0600 regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 65))
+	if err != nil {
+		return "", fmt.Errorf("read team IPC secret: %w", err)
+	}
+	if len(data) != 64 || !isLowerHex(data) {
+		return "", errors.New("team IPC secret must contain exactly 32 random bytes as lowercase hex")
+	}
+	return string(data), nil
+}
+
+func ownedByCurrentUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
+func isLowerHex(value []byte) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func loadTeamBootstrapRoot() (*teamauth.BootstrapRoot, error) {

@@ -17,8 +17,8 @@ func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if got := migrations[len(migrations)-1].Version; got != 33 {
-		t.Fatalf("latest migration = %d, want 33", got)
+	if got := migrations[len(migrations)-1].Version; got != 34 {
+		t.Fatalf("latest migration = %d, want 34", got)
 	}
 	for i, migration := range migrations {
 		if migration.Version != i+1 {

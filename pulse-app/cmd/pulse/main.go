@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,13 +33,20 @@ import (
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/server"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
 const (
 	defaultAddr  = "127.0.0.1:18789"
 	defaultModel = "claude-opus-4-6"
 	defaultAlias = "anthropic/opus"
+
+	teamWriterLeaseTTL        = 60 * time.Second
+	teamWriterRenewalInterval = 20 * time.Second
+	teamHandlerQuiesceTimeout = 5 * time.Second
 )
+
+var errTeamWriterLeaseChanged = errors.New("team writer lease changed during renewal")
 
 func main() {
 	var (
@@ -55,6 +65,17 @@ func main() {
 }
 
 func run(dataDir, addr string) error {
+	switch os.Getenv("PULSE_RUNTIME_MODE") {
+	case "", "local-stdio", "development-http":
+		return runLocal(dataDir, addr)
+	case "team-remote":
+		return runTeam(dataDir, addr)
+	default:
+		return errors.New("unsupported PULSE_RUNTIME_MODE")
+	}
+}
+
+func runLocal(dataDir, addr string) error {
 	cfg, err := config.Load(dataDir)
 	if err != nil {
 		return err
@@ -262,6 +283,341 @@ func run(dataDir, addr string) error {
 	reaperWG.Wait()
 
 	return runErr
+}
+
+func runTeam(dataDir, addr string) error {
+	if !isLoopbackListenAddress(addr) {
+		return errors.New("team-remote daemon must bind to a loopback address")
+	}
+	cfg, err := config.LoadTeam(dataDir)
+	if err != nil {
+		return err
+	}
+	if cfg.TeamBootstrapRoot == nil || cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" {
+		return errors.New("team-remote requires pinned bootstrap root and expected store identity")
+	}
+
+	s, err := store.OpenTeam(cfg.DBPath, store.TeamOpenOptions{ExpectedBootstrapRoot: *cfg.TeamBootstrapRoot})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if _, err := s.CheckTeamReadiness(context.Background(), store.TeamReadinessOptions{
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		ReaderVersion:   teamauth.SchemaVersion,
+		WriterVersion:   teamauth.SchemaVersion,
+	}); err != nil {
+		return fmt.Errorf("team-remote store readiness: %w", err)
+	}
+
+	keyring, err := server.LoadPrincipalVerifyKeyringFromEnv()
+	if err != nil {
+		return err
+	}
+	writerID, err := newTeamWriterID()
+	if err != nil {
+		return errors.New("team-remote writer identity unavailable")
+	}
+	lease, err := s.AcquireTeamWriterLease(context.Background(), store.TeamWriterLeaseRequest{
+		WriterID: writerID, WriterVersion: teamauth.SchemaVersion, TTL: teamWriterLeaseTTL,
+	})
+	if err != nil {
+		return fmt.Errorf("team-remote writer lease: %w", err)
+	}
+	releaseLease := true
+	defer func() {
+		if !releaseLease {
+			slog.Warn("team writer lease left to expire because request quiescence or ownership was not proven")
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.ReleaseTeamWriterLease(releaseCtx, lease.WriterID, lease.Token); err != nil {
+			slog.Warn("team writer lease release failed")
+		}
+	}()
+	verifier, err := server.NewPrincipalVerifier(server.PrincipalVerifierConfig{
+		Store:           s,
+		Keyring:         keyring,
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		WriterLease:     &lease,
+	})
+	if err != nil {
+		return err
+	}
+
+	teamServer, err := server.NewTeam(server.TeamServerConfig{
+		IPCSecret:         cfg.IPCSecret,
+		Store:             s,
+		PrincipalVerifier: verifier,
+		ExpectedStoreID:   cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:    cfg.ExpectedTeamID,
+		WriterLease:       lease,
+	})
+	if err != nil {
+		return err
+	}
+	listener, err := listenTeamDaemon(addr)
+	if err != nil {
+		return fmt.Errorf("team-remote listen: %w", err)
+	}
+	defer listener.Close()
+
+	httpSrv := &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           teamServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	slog.Info("pulse team daemon listening", "addr", listener.Addr().String())
+	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
+		Signals:         sigCh,
+		RenewLease:      func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
+		ShutdownTimeout: 10 * time.Second,
+		QuiesceTimeout:  teamHandlerQuiesceTimeout,
+	})
+	releaseLease = runtimeResult.ReleaseLease
+	return runtimeResult.Err
+}
+
+type teamWriterLeaseRenewer interface {
+	AcquireTeamWriterLease(context.Context, store.TeamWriterLeaseRequest) (store.TeamWriterLease, error)
+}
+
+func renewTeamWriterLease(ctx context.Context, renewer teamWriterLeaseRenewer, lease store.TeamWriterLease) error {
+	return renewTeamWriterLeaseAtInterval(ctx, renewer, lease, teamWriterRenewalInterval)
+}
+
+func renewTeamWriterLeaseAtInterval(ctx context.Context, renewer teamWriterLeaseRenewer, lease store.TeamWriterLease, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			renewed, err := renewer.AcquireTeamWriterLease(ctx, store.TeamWriterLeaseRequest{
+				WriterID: lease.WriterID, WriterVersion: teamauth.SchemaVersion,
+				Token: lease.Token, TTL: teamWriterLeaseTTL,
+			})
+			if err != nil {
+				return err
+			}
+			if renewed.StoreID != lease.StoreID || renewed.TeamID != lease.TeamID ||
+				renewed.WriterID != lease.WriterID || renewed.WriterVersion != lease.WriterVersion ||
+				renewed.Token != lease.Token {
+				return errTeamWriterLeaseChanged
+			}
+		}
+	}
+}
+
+type teamRuntimeOptions struct {
+	Signals         <-chan os.Signal
+	RenewLease      func(context.Context) error
+	ShutdownTimeout time.Duration
+	QuiesceTimeout  time.Duration
+}
+
+type teamRuntimeResult struct {
+	Err          error
+	ReleaseLease bool
+}
+
+type teamRequestTracker struct {
+	mu        sync.Mutex
+	accepting bool
+	active    int
+	drained   chan struct{}
+}
+
+func newTeamRequestTracker() *teamRequestTracker {
+	return &teamRequestTracker{accepting: true, drained: make(chan struct{})}
+}
+
+func (tracker *teamRequestTracker) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracker.mu.Lock()
+		if !tracker.accepting {
+			tracker.mu.Unlock()
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		tracker.active++
+		tracker.mu.Unlock()
+		defer func() {
+			tracker.mu.Lock()
+			tracker.active--
+			if !tracker.accepting && tracker.active == 0 {
+				select {
+				case <-tracker.drained:
+				default:
+					close(tracker.drained)
+				}
+			}
+			tracker.mu.Unlock()
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (tracker *teamRequestTracker) stop() {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	tracker.accepting = false
+	if tracker.active == 0 {
+		select {
+		case <-tracker.drained:
+		default:
+			close(tracker.drained)
+		}
+	}
+}
+
+func (tracker *teamRequestTracker) wait(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-tracker.drained:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamRuntimeOptions) teamRuntimeResult {
+	tracker := newTeamRequestTracker()
+	handler := httpSrv.Handler
+	if handler == nil {
+		handler = http.DefaultServeMux
+	}
+	httpSrv.Handler = tracker.wrap(handler)
+	requestsCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	httpSrv.BaseContext = func(net.Listener) context.Context { return requestsCtx }
+
+	leaseCtx, cancelLease := context.WithCancel(context.Background())
+	leaseResult := make(chan error, 1)
+	go func() { leaseResult <- options.RenewLease(leaseCtx) }()
+	serveResult := make(chan error, 1)
+	go func() {
+		err := httpSrv.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveResult <- err
+	}()
+
+	select {
+	case leaseErr := <-leaseResult:
+		tracker.stop()
+		cancelRequests()
+		_ = httpSrv.Close()
+		<-serveResult
+		cancelLease()
+		tracker.wait(options.QuiesceTimeout)
+		if leaseErr == nil {
+			leaseErr = errors.New("team writer lease renewal stopped")
+		}
+		return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+	case serveErr := <-serveResult:
+		tracker.stop()
+		cancelRequests()
+		_ = httpSrv.Close()
+		cancelLease()
+		leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
+		quiesced := tracker.wait(options.QuiesceTimeout)
+		if leaseErr != nil {
+			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+		}
+		return teamRuntimeResult{Err: serveErr, ReleaseLease: quiesced}
+	case <-options.Signals:
+		tracker.stop()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), options.ShutdownTimeout)
+		shutdownResult := make(chan error, 1)
+		go func() { shutdownResult <- httpSrv.Shutdown(shutdownCtx) }()
+		select {
+		case leaseErr := <-leaseResult:
+			cancelRequests()
+			_ = httpSrv.Close()
+			<-shutdownResult
+			cancelShutdown()
+			<-serveResult
+			cancelLease()
+			tracker.wait(options.QuiesceTimeout)
+			if leaseErr == nil {
+				leaseErr = errors.New("team writer lease renewal stopped")
+			}
+			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+		case shutdownErr := <-shutdownResult:
+			cancelShutdown()
+			if shutdownErr != nil {
+				cancelRequests()
+				_ = httpSrv.Close()
+			}
+			<-serveResult
+			cancelLease()
+			leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
+			quiesced := tracker.wait(options.QuiesceTimeout)
+			if leaseErr != nil {
+				return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+			}
+			return teamRuntimeResult{Err: shutdownErr, ReleaseLease: quiesced}
+		}
+	}
+}
+
+func normalizeStoppedLeaseError(ctx context.Context, err error) error {
+	if err == nil || (ctx.Err() != nil && errors.Is(err, context.Canceled)) {
+		return nil
+	}
+	return err
+}
+
+func newTeamWriterID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "team-daemon-" + hex.EncodeToString(value[:]), nil
+}
+
+func isLoopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func listenTeamDaemon(addr string) (net.Listener, error) {
+	if !isLoopbackListenAddress(addr) {
+		return nil, errors.New("team-remote daemon must bind to a loopback address")
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		_ = listener.Close()
+		return nil, errors.New("team-remote daemon resolved to a non-loopback address")
+	}
+	return listener, nil
 }
 
 func pulseMode(localAuto bool) string {
