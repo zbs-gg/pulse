@@ -805,7 +805,7 @@ export function createPulseMcpServer(
         if (!isTeamToolName(name)) {
           throw new Error('Unknown team tool');
         }
-        if (name === 'pulse_team_remember') {
+        if (name === 'pulse_team_remember' || name === 'pulse_team_graph_delta') {
           if (!teamDomain) {
             reportTeamDomainFailure(
               teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable',
@@ -813,7 +813,10 @@ export function createPulseMcpServer(
             return contracts.teamDomainErrorResult('shared_memory_unavailable');
           }
           try {
-            return jsonText(await teamDomain.remember(args));
+            const result = name === 'pulse_team_remember'
+              ? await teamDomain.remember(args)
+              : await teamDomain.graphDelta(args);
+            return jsonText(result);
           } catch (error) {
             if (error instanceof contracts.TeamContractError) {
               reportTeamDomainFailure(
@@ -1399,6 +1402,7 @@ function reportTeamDomainFailure(
     break;
   case 'invalid_contract':
   case 'invalid_team_memory':
+  case 'invalid_team_graph_delta':
     event = {
       eventType: 'operation_denied', reasonCode: 'invalid_contract',
       methodClass: 'write', requestId,

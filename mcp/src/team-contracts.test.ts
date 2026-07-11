@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 
@@ -171,6 +172,27 @@ function baseTeamGraphDelta() {
   };
 }
 
+function storedTeamGraphDeltaResult(suffix = '001') {
+  const projectionKinds = expectedTeamGraphProjectionKinds(
+    validateTeamGraphDeltaInput(baseTeamGraphDelta()),
+  );
+  return {
+    schema: 'pulse.team.graph_delta_result.v1' as const,
+    object_id: `team_graph_object_${suffix}`,
+    audit_event_id: `team_graph_audit_${suffix}`,
+    status: 'stored' as const,
+    projection_state: 'pending' as const,
+    projection_jobs: projectionKinds.map((kind) => ({
+      kind,
+      job_id: `team_graph_job_${kind}_${suffix}`,
+      state: 'pending' as const,
+    })),
+    fully_projected: false as const,
+    replayed: false,
+    fallback: false as const,
+  };
+}
+
 function assertTeamGraphRejected(input: unknown, expected: RegExp): void {
   assert.throws(
     () => validateTeamGraphDeltaInput(input),
@@ -315,10 +337,11 @@ test('pulse_team_remember advertises a closed pulse.team.memory.v1 input contrac
   );
 });
 
-test('pulse_team_graph_delta advertises an exact closed inactive domain contract', () => {
+test('pulse_team_graph_delta advertises an exact closed active domain contract', () => {
   const descriptor = TEAM_TOOL_DESCRIPTORS.find(({ name }) => name === 'pulse_team_graph_delta');
   assert.ok(descriptor);
-  assert.match(descriptor.description, /domain execution is not active/i);
+  assert.match(descriptor.description, /domain execution (?:is|are) active/i);
+  assert.doesNotMatch(descriptor.description, /not active/i);
   const schema = descriptor.inputSchema as Record<string, unknown>;
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(schema.required, [
@@ -540,8 +563,11 @@ test('team graph rejects omitted/null required scalars and unsafe content', () =
   }
 });
 
-test('team contracts reject ill-formed Unicode before producing canonical bytes', () => {
-  for (const malformed of ['broken\uD800text', 'broken\uDC00text']) {
+test('team contracts reject cross-runtime ambiguous Unicode before producing canonical bytes', () => {
+  for (const malformed of [
+    'broken\uD800text', 'broken\uDC00text',
+    'line\u2028separator', 'paragraph\u2029separator',
+  ]) {
     const graph = baseTeamGraphDelta();
     graph.events[0].summary = malformed;
     assertTeamGraphRejected(graph, /unicode|surrogate|well-formed/i);
@@ -557,6 +583,10 @@ test('team graph canonical body is exact, bounded, and carries the conditional j
   assert.deepEqual(canonical.value, validateTeamGraphDeltaInput(baseTeamGraphDelta()));
   assert.equal(canonical.text, JSON.stringify(canonical.value));
   assert.deepEqual(canonical.bytes, Buffer.from(canonical.text, 'utf8'));
+  assert.equal(
+    createHash('sha256').update(canonical.bytes).digest('hex'),
+    '15b83a96a9b2ce3f4a286a2ca077dc1ea4f02d44dd47139af9695df62f65a0dc',
+  );
   assert.deepEqual(canonical.projectionKinds, ['claim', 'continuity', 'embedding', 'graph']);
   assert.match(canonical.text, /"timestamp":"2026-07-11T05:00:00.000Z"/);
   assert.match(canonical.text, /"aliases":\["Alexander","Alexey"\]/);
@@ -944,6 +974,236 @@ test('pulse_team_remember dispatches only through its request-bound domain closu
     assert.equal(status.isError, true);
     assert.equal(toolJSON(status).error, 'team_remote_not_ready');
     assert.equal(seen.length, 1, 'other team tools must remain stubs');
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
+
+test('pulse_team_graph_delta uses isolated request-bound graph closures without local fallback', async () => {
+  const calls: Array<{ principal: string; idempotencyKey: string }> = [];
+  let rememberCalls = 0;
+  const server = await startTeamRegistryServer((context) => Object.freeze({
+    remember: async () => {
+      rememberCalls++;
+      throw new Error('memory domain must not receive graph calls');
+    },
+    graphDelta: async (input: unknown) => {
+      const canonical = canonicalTeamGraphDeltaBody(input);
+      calls.push({
+        principal: context.principal_id,
+        idempotencyKey: canonical.value.idempotency_key,
+      });
+      return storedTeamGraphDeltaResult(context.principal_id);
+    },
+  }));
+
+  const exercise = async (principal: string) => {
+    const client = new Client({ name: `team-graph-${principal}`, version: '0.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { 'X-Test-Principal': principal } },
+    });
+    try {
+      await client.connect(transport);
+      const input = baseTeamGraphDelta();
+      input.idempotency_key = `graph-request-${principal}`;
+      const result = await client.callTool({ name: 'pulse_team_graph_delta', arguments: input });
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(toolJSON(result), storedTeamGraphDeltaResult(principal));
+
+      const legacy = await client.callTool({ name: 'pulse_graph_delta', arguments: input });
+      assert.equal(legacy.isError, true);
+      assert.equal(calls.filter((call) => call.principal === principal).length, 1);
+    } finally {
+      await client.close();
+    }
+  };
+
+  try {
+    await Promise.all([exercise('principal-a'), exercise('principal-b')]);
+    assert.deepEqual(calls.sort((left, right) => left.principal.localeCompare(right.principal)), [
+      { principal: 'principal-a', idempotencyKey: 'graph-request-principal-a' },
+      { principal: 'principal-b', idempotencyKey: 'graph-request-principal-b' },
+    ]);
+    assert.equal(rememberCalls, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('pulse_team_graph_delta returns typed closed errors and fixed content-free security metadata', async () => {
+  const cases = [
+    {
+      name: 'invalid-contract',
+      failure: new TeamContractError('secret graph field detail'),
+      error: 'invalid_team_contract',
+      event: {
+        eventType: 'operation_denied', reasonCode: 'invalid_contract',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'invalid-graph',
+      failure: new TeamDomainError('invalid_team_graph_delta'),
+      error: 'invalid_team_graph_delta',
+      event: {
+        eventType: 'operation_denied', reasonCode: 'invalid_contract',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'policy',
+      failure: new TeamDomainError('policy_denied'),
+      error: 'policy_denied',
+      event: {
+        eventType: 'authorization_denied', reasonCode: 'policy_denied',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'revoked',
+      failure: new TeamDomainError('principal_revoked'),
+      error: 'principal_revoked',
+      event: {
+        eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'stale',
+      failure: new TeamDomainError('authorization_stale'),
+      error: 'authorization_stale',
+      event: {
+        eventType: 'authorization_denied', reasonCode: 'stale_generation',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'idempotency-conflict',
+      failure: new TeamDomainError('idempotency_conflict'),
+      error: 'idempotency_conflict',
+      event: {
+        eventType: 'operation_denied', reasonCode: 'idempotency_conflict',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'idempotency-in-progress',
+      failure: new TeamDomainError('idempotency_in_progress'),
+      error: 'idempotency_in_progress',
+      event: {
+        eventType: 'operation_denied', reasonCode: 'operation_in_progress',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'store-outage',
+      failure: new TeamDomainError('shared_memory_unavailable'),
+      error: 'shared_memory_unavailable',
+      event: {
+        eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'idempotency-failed',
+      failure: new TeamDomainError('idempotency_failed'),
+      error: 'idempotency_failed',
+      event: {
+        eventType: 'audit_degraded', reasonCode: 'internal_failure',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+    {
+      name: 'unexpected',
+      failure: new Error('secret graph daemon failure'),
+      error: 'shared_memory_unavailable',
+      event: {
+        eventType: 'audit_degraded', reasonCode: 'internal_failure',
+        methodClass: 'write', requestId: 'request-principal-writer',
+      },
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const events: GatewaySecurityEventInput[] = [];
+    let graphCalls = 0;
+    const server = await startTeamRegistryServer(() => Object.freeze({
+      remember: async () => { throw new Error('memory fallback must remain unreachable'); },
+      graphDelta: async () => {
+        graphCalls++;
+        throw testCase.failure;
+      },
+    }), (event) => events.push(event));
+    const client = new Client({ name: `team-graph-error-${testCase.name}`, version: '0.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
+      });
+      assert.equal(result.isError, true);
+      assert.deepEqual(toolJSON(result), { error: testCase.error, fallback: false });
+      assert.deepEqual(events, [testCase.event]);
+      assert.equal(graphCalls, 1, 'domain failures must not retry or fall back locally');
+      assert.doesNotMatch(
+        JSON.stringify({ result: toolJSON(result), events }),
+        /secret|graph daemon|principal_id|oauth_subject|bearer/i,
+      );
+    } finally {
+      await client.close();
+      await server.stop();
+    }
+  }
+});
+
+test('pulse_team_graph_delta fails closed when its request-bound domain is unavailable', async () => {
+  const events: GatewaySecurityEventInput[] = [];
+  const server = await startTeamRegistryServer(undefined, (event) => events.push(event));
+  const client = new Client({ name: 'team-graph-missing-domain', version: '0.0.0' });
+  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(toolJSON(result), { error: 'shared_memory_unavailable', fallback: false });
+    assert.deepEqual(events, [{
+      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+      methodClass: 'write', requestId: 'request-principal-writer',
+    }]);
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
+
+test('pulse_team_graph_delta stays denied when security reporting fails', async () => {
+  let graphCalls = 0;
+  const server = await startTeamRegistryServer(() => Object.freeze({
+    remember: async () => { throw new Error('memory fallback must remain unreachable'); },
+    graphDelta: async () => {
+      graphCalls++;
+      throw new TeamDomainError('policy_denied');
+    },
+  }), () => { throw new Error('synthetic security sink outage'); });
+  const client = new Client({ name: 'team-graph-audit-failure', version: '0.0.0' });
+  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(toolJSON(result), { error: 'policy_denied', fallback: false });
+    assert.equal(graphCalls, 1);
   } finally {
     await client.close();
     await server.stop();

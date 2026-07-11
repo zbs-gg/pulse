@@ -528,9 +528,10 @@ function teamRecord(
   return record;
 }
 
-function isWellFormedUnicode(value: string): boolean {
+function isCanonicalJSONUnicode(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const unit = value.charCodeAt(index);
+    if (unit === 0x2028 || unit === 0x2029) return false;
     if (unit >= 0xD800 && unit <= 0xDBFF) {
       const next = value.charCodeAt(index + 1);
       if (next < 0xDC00 || next > 0xDFFF) return false;
@@ -544,7 +545,9 @@ function isWellFormedUnicode(value: string): boolean {
 
 function teamString(field: string, value: unknown, minimum: number, maximum: number): string {
   if (typeof value !== 'string') failTeamContract(`${field} must be a string`);
-  if (!isWellFormedUnicode(value)) failTeamContract(`${field} must contain well-formed Unicode`);
+  if (!isCanonicalJSONUnicode(value)) {
+    failTeamContract(`${field} must contain cross-runtime-safe Unicode`);
+  }
   const clean = value.trim();
   const length = Array.from(clean).length;
   if (length < minimum || length > maximum) {
@@ -1502,7 +1505,7 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
   if (name === 'pulse_team_graph_delta') {
     return {
       name,
-      description: `${purpose} Contract: ${contract}. Gateway contract is active; domain execution is not active.`,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
       inputSchema: TEAM_GRAPH_DELTA_INPUT_SCHEMA,
     };
   }
