@@ -680,6 +680,191 @@ CREATE TRIGGER team_projection_outputs_immutable
 BEFORE UPDATE ON team_projection_outputs
 BEGIN SELECT RAISE(ABORT, 'projection output lineage is immutable'); END;
 
+-- Team event and embedding projections remain physically separate from the
+-- standalone events/event_embeddings tables. Their canonical scope and
+-- lifecycle are inherited from generation-fenced derivative roots.
+CREATE TABLE team_memory_events (
+    event_id              TEXT PRIMARY KEY CHECK(
+                              length(event_id) BETWEEN 1 AND 255
+                              AND event_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                          ),
+    derivative_object_id  TEXT NOT NULL UNIQUE REFERENCES team_object_registry(object_id),
+    job_id                TEXT NOT NULL REFERENCES team_projection_jobs(job_id),
+    root_object_id        TEXT NOT NULL REFERENCES team_object_registry(object_id),
+    root_generation       INTEGER NOT NULL CHECK(root_generation >= 1),
+    capsule_id            TEXT NOT NULL REFERENCES team_memory_capsules(capsule_id),
+    team_id               TEXT NOT NULL,
+    scope_type            TEXT NOT NULL CHECK(scope_type IN ('personal', 'project', 'repo', 'agent', 'session')),
+    scope_id              TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 255),
+    kind                  TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 64),
+    redacted_summary      TEXT NOT NULL CHECK(length(redacted_summary) BETWEEN 1 AND 1200),
+    source_timestamp      TEXT NOT NULL CHECK(length(source_timestamp) = 24),
+    tags_json             TEXT NOT NULL CHECK(
+                              json_valid(tags_json) = 1 AND json_type(tags_json) = 'array'
+                          ),
+    content_digest        TEXT NOT NULL CHECK(
+                              length(content_digest) = 64
+                              AND content_digest NOT GLOB '*[^0-9a-f]*'
+                          ),
+    created_at            TEXT NOT NULL,
+    UNIQUE(root_object_id, root_generation, capsule_id)
+);
+CREATE INDEX idx_team_memory_events_scope
+    ON team_memory_events(team_id, scope_type, scope_id, root_generation);
+
+CREATE TRIGGER team_memory_events_generation_fence_insert
+BEFORE INSERT ON team_memory_events
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM team_projection_jobs job
+      JOIN team_object_registry root
+        ON root.object_id = job.root_object_id
+       AND root.team_id = job.team_id
+       AND root.scope_type = job.scope_type
+       AND root.scope_id = job.scope_id
+       AND root.generation = job.root_generation
+       AND root.lifecycle = 'active'
+      JOIN team_memory_capsules capsule
+        ON capsule.capsule_id = NEW.capsule_id
+       AND capsule.root_object_id = root.object_id
+       AND capsule.team_id = root.team_id
+       AND capsule.scope_type = root.scope_type
+       AND capsule.scope_id = root.scope_id
+       AND capsule.root_generation = root.generation
+      JOIN team_object_registry derivative
+        ON derivative.object_id = NEW.derivative_object_id
+       AND derivative.team_id = root.team_id
+       AND derivative.scope_type = root.scope_type
+       AND derivative.scope_id = root.scope_id
+       AND derivative.generation = 1
+       AND derivative.object_kind = 'event'
+       AND derivative.lifecycle = 'active'
+      JOIN team_projection_outputs output
+        ON output.job_id = job.job_id
+       AND output.derivative_object_id = derivative.object_id
+       AND output.derivative_generation = derivative.generation
+      JOIN team_object_contributions contribution
+        ON contribution.parent_object_id = root.object_id
+       AND contribution.derivative_object_id = derivative.object_id
+       AND contribution.parent_generation = root.generation
+       AND contribution.derivative_generation = derivative.generation
+      JOIN team_object_storage_map storage
+        ON storage.object_id = derivative.object_id
+       AND storage.team_id = root.team_id
+       AND storage.scope_type = root.scope_type
+       AND storage.scope_id = root.scope_id
+       AND storage.generation = derivative.generation
+       AND storage.representation_kind = 'memory_event'
+       AND storage.storage_key = NEW.event_id
+     WHERE job.job_id = NEW.job_id
+       AND job.projection_kind = 'event'
+       AND job.state = 'leased'
+       AND root.object_id = NEW.root_object_id
+       AND root.generation = NEW.root_generation
+       AND root.team_id = NEW.team_id
+       AND root.scope_type = NEW.scope_type
+       AND root.scope_id = NEW.scope_id
+)
+BEGIN SELECT RAISE(ABORT, 'team memory event projection is stale'); END;
+
+CREATE TRIGGER team_memory_events_immutable
+BEFORE UPDATE ON team_memory_events
+BEGIN SELECT RAISE(ABORT, 'team memory events are immutable'); END;
+
+CREATE TABLE team_memory_embeddings (
+    embedding_id          TEXT PRIMARY KEY CHECK(
+                              length(embedding_id) BETWEEN 1 AND 255
+                              AND embedding_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                          ),
+    derivative_object_id  TEXT NOT NULL UNIQUE REFERENCES team_object_registry(object_id),
+    job_id                TEXT NOT NULL REFERENCES team_projection_jobs(job_id),
+    root_object_id        TEXT NOT NULL REFERENCES team_object_registry(object_id),
+    root_generation       INTEGER NOT NULL CHECK(root_generation >= 1),
+    capsule_id            TEXT NOT NULL REFERENCES team_memory_capsules(capsule_id),
+    team_id               TEXT NOT NULL,
+    scope_type            TEXT NOT NULL CHECK(scope_type IN ('personal', 'project', 'repo', 'agent', 'session')),
+    scope_id              TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 255),
+    model                 TEXT NOT NULL CHECK(
+                              length(model) BETWEEN 1 AND 64
+                              AND model NOT GLOB '*[^a-z0-9._:-]*'
+                          ),
+    dimensions            INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 4096),
+    vector_json           TEXT NOT NULL CHECK(
+                              json_valid(vector_json) = 1 AND json_type(vector_json) = 'array'
+                          ),
+    vector_digest         TEXT NOT NULL CHECK(
+                              length(vector_digest) = 64
+                              AND vector_digest NOT GLOB '*[^0-9a-f]*'
+                          ),
+    content_digest        TEXT NOT NULL CHECK(
+                              length(content_digest) = 64
+                              AND content_digest NOT GLOB '*[^0-9a-f]*'
+                          ),
+    created_at            TEXT NOT NULL,
+    UNIQUE(root_object_id, root_generation, capsule_id, model)
+);
+CREATE INDEX idx_team_memory_embeddings_scope_model
+    ON team_memory_embeddings(team_id, scope_type, scope_id, root_generation, model);
+
+CREATE TRIGGER team_memory_embeddings_generation_fence_insert
+BEFORE INSERT ON team_memory_embeddings
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM team_projection_jobs job
+      JOIN team_object_registry root
+        ON root.object_id = job.root_object_id
+       AND root.team_id = job.team_id
+       AND root.scope_type = job.scope_type
+       AND root.scope_id = job.scope_id
+       AND root.generation = job.root_generation
+       AND root.lifecycle = 'active'
+      JOIN team_memory_capsules capsule
+        ON capsule.capsule_id = NEW.capsule_id
+       AND capsule.root_object_id = root.object_id
+       AND capsule.team_id = root.team_id
+       AND capsule.scope_type = root.scope_type
+       AND capsule.scope_id = root.scope_id
+       AND capsule.root_generation = root.generation
+      JOIN team_object_registry derivative
+        ON derivative.object_id = NEW.derivative_object_id
+       AND derivative.team_id = root.team_id
+       AND derivative.scope_type = root.scope_type
+       AND derivative.scope_id = root.scope_id
+       AND derivative.generation = 1
+       AND derivative.object_kind = 'embedding'
+       AND derivative.lifecycle = 'active'
+      JOIN team_projection_outputs output
+        ON output.job_id = job.job_id
+       AND output.derivative_object_id = derivative.object_id
+       AND output.derivative_generation = derivative.generation
+      JOIN team_object_contributions contribution
+        ON contribution.parent_object_id = root.object_id
+       AND contribution.derivative_object_id = derivative.object_id
+       AND contribution.parent_generation = root.generation
+       AND contribution.derivative_generation = derivative.generation
+      JOIN team_object_storage_map storage
+        ON storage.object_id = derivative.object_id
+       AND storage.team_id = root.team_id
+       AND storage.scope_type = root.scope_type
+       AND storage.scope_id = root.scope_id
+       AND storage.generation = derivative.generation
+       AND storage.representation_kind = 'memory_embedding'
+       AND storage.storage_key = NEW.embedding_id
+     WHERE job.job_id = NEW.job_id
+       AND job.projection_kind = 'embedding'
+       AND job.state = 'leased'
+       AND root.object_id = NEW.root_object_id
+       AND root.generation = NEW.root_generation
+       AND root.team_id = NEW.team_id
+       AND root.scope_type = NEW.scope_type
+       AND root.scope_id = NEW.scope_id
+)
+BEGIN SELECT RAISE(ABORT, 'team memory embedding projection is stale'); END;
+
+CREATE TRIGGER team_memory_embeddings_immutable
+BEFORE UPDATE ON team_memory_embeddings
+BEGIN SELECT RAISE(ABORT, 'team memory embeddings are immutable'); END;
+
 CREATE TRIGGER team_projection_jobs_generation_fence_update
 BEFORE UPDATE OF store_id, team_id, root_object_id, root_generation, scope_type, scope_id
 ON team_projection_jobs

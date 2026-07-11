@@ -32,6 +32,8 @@ func TestMigration034InstallsPolicyObjectSpine(t *testing.T) {
 		"team_audit_event_order",
 		"team_idempotency_records",
 		"team_memory_capsules",
+		"team_memory_embeddings",
+		"team_memory_events",
 		"team_object_contributions",
 		"team_object_registry",
 		"team_object_storage_map",
@@ -45,7 +47,8 @@ func TestMigration034InstallsPolicyObjectSpine(t *testing.T) {
 	rows, err := s.DB().Query(`
 		SELECT name FROM sqlite_master
 			 WHERE type = 'table' AND name IN (
-			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules', 'team_object_contributions',
+			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules',
+			'team_memory_embeddings', 'team_memory_events', 'team_object_contributions',
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',
 			'team_projection_outputs', 'team_service_object_grants', 'team_writer_leases')

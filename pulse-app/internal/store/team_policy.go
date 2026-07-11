@@ -694,6 +694,89 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		        ELSE 0 END
 		 LIMIT 1`},
 		{query: `SELECT 1
+		   FROM team_memory_events event
+		   LEFT JOIN team_object_registry root ON root.object_id = event.root_object_id
+		   LEFT JOIN team_memory_capsules capsule ON capsule.capsule_id = event.capsule_id
+		   LEFT JOIN team_object_registry derivative ON derivative.object_id = event.derivative_object_id
+		   LEFT JOIN team_projection_jobs job ON job.job_id = event.job_id
+		   LEFT JOIN team_projection_outputs output
+		     ON output.job_id = event.job_id AND output.derivative_object_id = event.derivative_object_id
+		   LEFT JOIN team_object_contributions contribution
+		     ON contribution.parent_object_id = event.root_object_id
+		    AND contribution.derivative_object_id = event.derivative_object_id
+		   LEFT JOIN team_object_storage_map storage
+		     ON storage.object_id = event.derivative_object_id
+		    AND storage.representation_kind = 'memory_event' AND storage.storage_key = event.event_id
+		  WHERE root.object_id IS NULL OR capsule.capsule_id IS NULL OR derivative.object_id IS NULL
+		     OR job.job_id IS NULL OR output.job_id IS NULL OR contribution.parent_object_id IS NULL
+		     OR storage.object_id IS NULL OR root.object_kind <> 'memory'
+		     OR event.team_id <> root.team_id OR event.scope_type <> root.scope_type
+		     OR event.scope_id <> root.scope_id OR event.root_generation > root.generation
+		     OR capsule.root_object_id <> event.root_object_id
+		     OR capsule.root_generation <> event.root_generation
+		     OR capsule.team_id <> event.team_id OR capsule.scope_type <> event.scope_type
+		     OR capsule.scope_id <> event.scope_id
+		     OR event.kind <> capsule.kind OR event.redacted_summary <> capsule.redacted_summary
+		     OR event.source_timestamp <> capsule.source_timestamp OR event.tags_json <> capsule.tags_json
+		     OR derivative.team_id <> event.team_id OR derivative.scope_type <> event.scope_type
+		     OR derivative.scope_id <> event.scope_id OR derivative.object_kind <> 'event'
+		     OR job.root_object_id <> event.root_object_id
+		     OR job.root_generation <> event.root_generation OR job.projection_kind <> 'event'
+		     OR job.state <> 'ready' OR length(event.content_digest) <> 64
+		     OR event.content_digest GLOB '*[^0-9a-f]*'
+		     OR length(event.source_timestamp) <> 24
+		     OR substr(event.source_timestamp, 1, 19) NOT GLOB
+		        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+		     OR substr(event.source_timestamp, 20, 1) <> '.'
+		     OR substr(event.source_timestamp, 21, 3) GLOB '*[^0-9]*'
+		     OR substr(event.source_timestamp, 24, 1) <> 'Z'
+		     OR julianday(event.source_timestamp) IS NULL
+		     OR json_valid(event.tags_json) <> 1
+		     OR CASE WHEN json_valid(event.tags_json) = 1 THEN json_type(event.tags_json) <> 'array' ELSE 0 END
+		 LIMIT 1`},
+		{query: `SELECT 1
+		   FROM team_memory_embeddings embedding
+		   LEFT JOIN team_object_registry root ON root.object_id = embedding.root_object_id
+		   LEFT JOIN team_memory_capsules capsule ON capsule.capsule_id = embedding.capsule_id
+		   LEFT JOIN team_object_registry derivative ON derivative.object_id = embedding.derivative_object_id
+		   LEFT JOIN team_projection_jobs job ON job.job_id = embedding.job_id
+		   LEFT JOIN team_projection_outputs output
+		     ON output.job_id = embedding.job_id AND output.derivative_object_id = embedding.derivative_object_id
+		   LEFT JOIN team_object_contributions contribution
+		     ON contribution.parent_object_id = embedding.root_object_id
+		    AND contribution.derivative_object_id = embedding.derivative_object_id
+		   LEFT JOIN team_object_storage_map storage
+		     ON storage.object_id = embedding.derivative_object_id
+		    AND storage.representation_kind = 'memory_embedding' AND storage.storage_key = embedding.embedding_id
+		  WHERE root.object_id IS NULL OR capsule.capsule_id IS NULL OR derivative.object_id IS NULL
+		     OR job.job_id IS NULL OR output.job_id IS NULL OR contribution.parent_object_id IS NULL
+		     OR storage.object_id IS NULL OR root.object_kind <> 'memory'
+		     OR embedding.team_id <> root.team_id OR embedding.scope_type <> root.scope_type
+		     OR embedding.scope_id <> root.scope_id OR embedding.root_generation > root.generation
+		     OR capsule.root_object_id <> embedding.root_object_id
+		     OR capsule.root_generation <> embedding.root_generation
+		     OR capsule.team_id <> embedding.team_id OR capsule.scope_type <> embedding.scope_type
+		     OR capsule.scope_id <> embedding.scope_id
+		     OR derivative.team_id <> embedding.team_id OR derivative.scope_type <> embedding.scope_type
+		     OR derivative.scope_id <> embedding.scope_id OR derivative.object_kind <> 'embedding'
+		     OR job.root_object_id <> embedding.root_object_id
+		     OR job.root_generation <> embedding.root_generation OR job.projection_kind <> 'embedding'
+		     OR job.state <> 'ready' OR embedding.dimensions NOT BETWEEN 1 AND 4096
+		     OR length(embedding.model) NOT BETWEEN 1 AND 64
+		     OR embedding.model GLOB '*[^a-z0-9._:-]*'
+		     OR length(embedding.vector_digest) <> 64 OR embedding.vector_digest GLOB '*[^0-9a-f]*'
+		     OR length(embedding.content_digest) <> 64 OR embedding.content_digest GLOB '*[^0-9a-f]*'
+		     OR json_valid(embedding.vector_json) <> 1
+		     OR CASE WHEN json_valid(embedding.vector_json) = 1 THEN
+		          json_type(embedding.vector_json) <> 'array'
+		          OR json_array_length(embedding.vector_json) <> embedding.dimensions
+		          OR EXISTS (
+		             SELECT 1 FROM json_each(embedding.vector_json) value
+		              WHERE value.type NOT IN ('integer', 'real')
+		          )
+		        ELSE 0 END
+		 LIMIT 1`},
+		{query: `SELECT 1
 		   FROM team_object_contributions contribution
 		   LEFT JOIN team_object_registry parent ON parent.object_id = contribution.parent_object_id
 		   LEFT JOIN team_object_registry derivative ON derivative.object_id = contribution.derivative_object_id

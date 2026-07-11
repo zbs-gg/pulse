@@ -107,6 +107,8 @@ type TeamProjectionCompletionResult struct {
 type teamProjectionContentWriter interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	InsertTeamMemoryEvent(context.Context, teamMemoryEventMaterialization) error
+	InsertTeamMemoryEmbedding(context.Context, teamMemoryEmbeddingMaterialization) error
 }
 
 type teamProjectionCompletionContext struct {
@@ -126,8 +128,10 @@ type teamProjectionCompletionExtension func(
 ) error
 
 type restrictedProjectionContentWriter struct {
-	execContext     func(context.Context, string, ...any) (sql.Result, error)
-	queryRowContext func(context.Context, string, ...any) *sql.Row
+	execContext               func(context.Context, string, ...any) (sql.Result, error)
+	queryRowContext           func(context.Context, string, ...any) *sql.Row
+	insertTeamMemoryEvent     func(context.Context, teamMemoryEventMaterialization) error
+	insertTeamMemoryEmbedding func(context.Context, teamMemoryEmbeddingMaterialization) error
 }
 
 func (writer *restrictedProjectionContentWriter) ExecContext(ctx context.Context, statement string, args ...any) (sql.Result, error) {
@@ -136,6 +140,20 @@ func (writer *restrictedProjectionContentWriter) ExecContext(ctx context.Context
 
 func (writer *restrictedProjectionContentWriter) QueryRowContext(ctx context.Context, statement string, args ...any) *sql.Row {
 	return writer.queryRowContext(ctx, statement, args...)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamMemoryEvent(
+	ctx context.Context,
+	materialization teamMemoryEventMaterialization,
+) error {
+	return writer.insertTeamMemoryEvent(ctx, materialization)
+}
+
+func (writer *restrictedProjectionContentWriter) InsertTeamMemoryEmbedding(
+	ctx context.Context,
+	materialization teamMemoryEmbeddingMaterialization,
+) error {
+	return writer.insertTeamMemoryEmbedding(ctx, materialization)
 }
 
 type TeamProjectionCancellationRequest struct {
@@ -422,6 +440,20 @@ func (s *Store) completeTeamProjectionJobWithExtension(
 					return tx.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
 				}
 				return tx.QueryRowContext(ctx, statement, args...)
+			},
+			insertTeamMemoryEvent: func(ctx context.Context, materialization teamMemoryEventMaterialization) error {
+				err := insertTeamMemoryEventTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
+			},
+			insertTeamMemoryEmbedding: func(ctx context.Context, materialization teamMemoryEmbeddingMaterialization) error {
+				err := insertTeamMemoryEmbeddingTx(ctx, tx, job, materialization, now)
+				if err == nil {
+					successfulMutations++
+				}
+				return err
 			},
 		}
 		if err := extension(ctx, writer, completion); err != nil ||

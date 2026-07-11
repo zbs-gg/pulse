@@ -161,7 +161,10 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 	s, _ := bootstrapTeamStore(t)
 	defer s.Close()
 
-	for _, table := range []string{"team_audit_event_order", "team_memory_capsules", "team_projection_outputs"} {
+	for _, table := range []string{
+		"team_audit_event_order", "team_memory_capsules", "team_memory_embeddings",
+		"team_memory_events", "team_projection_outputs",
+	} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -180,6 +183,10 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 		"team_projection_outputs_generation_fence_insert",
 		"team_memory_capsules_generation_fence_insert",
 		"team_memory_capsules_immutable",
+		"team_memory_events_generation_fence_insert",
+		"team_memory_events_immutable",
+		"team_memory_embeddings_generation_fence_insert",
+		"team_memory_embeddings_immutable",
 	} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trigger).Scan(&count); err != nil {
@@ -219,6 +226,29 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 		if _, present := memoryColumns[forbidden]; present {
 			t.Fatalf("team_memory_capsules persists forbidden field %s", forbidden)
 		}
+	}
+	eventColumns := teamTableColumns(t, s, "team_memory_events")
+	for _, required := range []string{
+		"event_id", "derivative_object_id", "job_id", "root_object_id", "root_generation",
+		"capsule_id", "team_id", "scope_type", "scope_id", "kind", "redacted_summary",
+		"source_timestamp", "tags_json", "content_digest", "created_at",
+	} {
+		if _, ok := eventColumns[required]; !ok {
+			t.Fatalf("team_memory_events missing %s", required)
+		}
+	}
+	embeddingColumns := teamTableColumns(t, s, "team_memory_embeddings")
+	for _, required := range []string{
+		"embedding_id", "derivative_object_id", "job_id", "root_object_id", "root_generation",
+		"capsule_id", "team_id", "scope_type", "scope_id", "model", "dimensions",
+		"vector_json", "vector_digest", "content_digest", "created_at",
+	} {
+		if _, ok := embeddingColumns[required]; !ok {
+			t.Fatalf("team_memory_embeddings missing %s", required)
+		}
+	}
+	if _, unsafe := embeddingColumns["text_source"]; unsafe {
+		t.Fatal("team_memory_embeddings duplicates capsule text")
 	}
 }
 
