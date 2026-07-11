@@ -222,6 +222,57 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'storage attachment generation is stale'); END;
 
+-- Team capsules are physically separate from the standalone/local v1 table.
+-- Scope, policy, identity, lifecycle, and expiry remain canonical on the root;
+-- these rows contain only validated host-extracted capsule fields.
+CREATE TABLE team_memory_capsules (
+    capsule_id          TEXT PRIMARY KEY CHECK(
+                            length(capsule_id) BETWEEN 1 AND 255
+                            AND capsule_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                        ),
+    root_object_id      TEXT NOT NULL,
+    team_id             TEXT NOT NULL,
+    scope_type          TEXT NOT NULL
+                        CHECK(scope_type IN ('personal', 'project', 'repo', 'agent', 'session')),
+    scope_id            TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 255),
+    root_generation     INTEGER NOT NULL CHECK(root_generation >= 1),
+    item_ordinal        INTEGER NOT NULL CHECK(item_ordinal BETWEEN 0 AND 19),
+    schema_version      TEXT NOT NULL CHECK(schema_version = 'pulse.team.memory.v1'),
+    source_host         TEXT NOT NULL CHECK(length(source_host) BETWEEN 1 AND 64),
+    conversation_scope  TEXT NOT NULL CHECK(length(conversation_scope) BETWEEN 1 AND 64),
+    source_timestamp    TEXT NOT NULL CHECK(length(source_timestamp) BETWEEN 20 AND 30),
+    kind                TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 64),
+    redacted_summary    TEXT NOT NULL CHECK(length(redacted_summary) BETWEEN 1 AND 1200),
+    confidence          REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+    evidence_hint       TEXT NOT NULL CHECK(length(evidence_hint) BETWEEN 1 AND 64),
+    tags_json           TEXT NOT NULL DEFAULT '[]' CHECK(length(CAST(tags_json AS BLOB)) BETWEEN 2 AND 16384),
+    created_at          TEXT NOT NULL,
+    UNIQUE(root_object_id, item_ordinal),
+    FOREIGN KEY(root_object_id) REFERENCES team_object_registry(object_id)
+);
+CREATE INDEX idx_team_memory_capsules_root
+    ON team_memory_capsules(root_object_id, root_generation, item_ordinal);
+CREATE INDEX idx_team_memory_capsules_scope
+    ON team_memory_capsules(team_id, scope_type, scope_id, root_generation);
+
+CREATE TRIGGER team_memory_capsules_generation_fence_insert
+BEFORE INSERT ON team_memory_capsules
+WHEN NOT EXISTS (
+    SELECT 1 FROM team_object_registry root
+     WHERE root.object_id = NEW.root_object_id
+       AND root.team_id = NEW.team_id
+       AND root.scope_type = NEW.scope_type
+       AND root.scope_id = NEW.scope_id
+       AND root.generation = NEW.root_generation
+       AND root.object_kind = 'memory'
+       AND root.lifecycle = 'active'
+)
+BEGIN SELECT RAISE(ABORT, 'team memory root generation is stale'); END;
+
+CREATE TRIGGER team_memory_capsules_immutable
+BEFORE UPDATE ON team_memory_capsules
+BEGIN SELECT RAISE(ABORT, 'team memory capsules are immutable'); END;
+
 CREATE TABLE team_object_contributions (
     parent_object_id       TEXT NOT NULL,
     derivative_object_id   TEXT NOT NULL,

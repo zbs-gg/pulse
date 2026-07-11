@@ -31,6 +31,7 @@ func TestMigration034InstallsPolicyObjectSpine(t *testing.T) {
 	wantTables := []string{
 		"team_audit_event_order",
 		"team_idempotency_records",
+		"team_memory_capsules",
 		"team_object_contributions",
 		"team_object_registry",
 		"team_object_storage_map",
@@ -44,7 +45,7 @@ func TestMigration034InstallsPolicyObjectSpine(t *testing.T) {
 	rows, err := s.DB().Query(`
 		SELECT name FROM sqlite_master
 			 WHERE type = 'table' AND name IN (
-			'team_audit_event_order', 'team_idempotency_records', 'team_object_contributions',
+			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules', 'team_object_contributions',
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',
 			'team_projection_outputs', 'team_service_object_grants', 'team_writer_leases')
@@ -751,6 +752,31 @@ func TestPolicyReadinessRejectsInvalidRegistryAndOrphanStorage(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := s.DB().Exec(`PRAGMA foreign_keys=ON`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "invalid team memory row", inject: func(t *testing.T, s *Store, bootstrap BootstrapResult) {
+			s.DB().SetMaxOpenConns(1)
+			insertPolicyObject(t, s, bootstrap, "invalid-memory-root", "personal", bootstrap.OwnerPrincipalID, bootstrap.OwnerPrincipalID)
+			if _, err := s.DB().Exec(`DROP TRIGGER team_memory_capsules_generation_fence_insert`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB().Exec(`
+				INSERT INTO team_memory_capsules(
+					capsule_id, root_object_id, team_id, scope_type, scope_id,
+					root_generation, item_ordinal, schema_version, source_host,
+					conversation_scope, source_timestamp, kind, redacted_summary,
+					confidence, evidence_hint, tags_json, created_at)
+				VALUES ('invalid-team-memory', 'invalid-memory-root', 'wrong-team', 'repo',
+					'wrong-scope', 9, 30, 'wrong.schema', 'unknown-host', 'raw',
+					'not-a-timestamp', 'unknown', 'synthetic invalid row', 2.0,
+					'unknown', '{}', '2026-07-10T00:00:00Z')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB().Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
 				t.Fatal(err)
 			}
 		}},

@@ -651,6 +651,49 @@ func validateTeamPolicyIntegrity(ctx context.Context, q queryer, policy teamPoli
 		     OR storage.generation > object.generation
 		 LIMIT 1`},
 		{query: `SELECT 1
+		   FROM team_memory_capsules memory
+		   LEFT JOIN team_object_registry root ON root.object_id = memory.root_object_id
+		  WHERE root.object_id IS NULL
+		     OR memory.team_id <> root.team_id
+		     OR memory.scope_type <> root.scope_type
+		     OR memory.scope_id <> root.scope_id
+		     OR memory.root_generation > root.generation
+		     OR (root.lifecycle = 'active' AND memory.root_generation <> root.generation)
+		     OR root.object_kind <> 'memory'
+		     OR length(memory.capsule_id) NOT BETWEEN 1 AND 255
+		     OR memory.capsule_id GLOB '*[^A-Za-z0-9._:-]*'
+		     OR memory.schema_version <> 'pulse.team.memory.v1'
+		     OR memory.item_ordinal NOT BETWEEN 0 AND 19
+		     OR memory.source_host NOT IN (
+		        'chatgpt', 'claude', 'codex', 'claude-code', 'gemini-cli',
+		        'cursor', 'langchain', 'crewai', 'pulse-cli')
+		     OR memory.conversation_scope NOT IN (
+		        'current_turn', 'user_selected_excerpt', 'project_context', 'install_event')
+		     OR memory.kind NOT IN (
+		        'fact', 'decision', 'preference', 'project_state', 'open_loop',
+		        'correction', 'relationship_note', 'do_not_repeat', 'system_event', 'state_signal')
+		     OR memory.evidence_hint NOT IN (
+		        'user_selected', 'current_turn', 'assistant_inferred', 'tool_result', 'user_confirmed')
+		     OR memory.confidence < 0.0 OR memory.confidence > 1.0
+		     OR length(memory.redacted_summary) NOT BETWEEN 1 AND 1200
+		     OR length(memory.source_timestamp) <> 24
+		     OR substr(memory.source_timestamp, 1, 19) NOT GLOB
+		        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+		     OR substr(memory.source_timestamp, 20, 1) <> '.'
+		     OR substr(memory.source_timestamp, 21, 3) GLOB '*[^0-9]*'
+		     OR substr(memory.source_timestamp, 24, 1) <> 'Z'
+		     OR julianday(memory.source_timestamp) IS NULL
+		     OR json_valid(memory.tags_json) <> 1
+		     OR CASE WHEN json_valid(memory.tags_json) = 1 THEN
+		          json_type(memory.tags_json) <> 'array'
+		          OR json_array_length(memory.tags_json) > 32
+		          OR EXISTS (
+		             SELECT 1 FROM json_each(memory.tags_json) tag
+		              WHERE tag.type <> 'text' OR length(tag.value) NOT BETWEEN 1 AND 64
+		          )
+		        ELSE 0 END
+		 LIMIT 1`},
+		{query: `SELECT 1
 		   FROM team_object_contributions contribution
 		   LEFT JOIN team_object_registry parent ON parent.object_id = contribution.parent_object_id
 		   LEFT JOIN team_object_registry derivative ON derivative.object_id = contribution.derivative_object_id

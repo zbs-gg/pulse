@@ -105,16 +105,17 @@ type normalizedTeamObjectWrite struct {
 // calling storeTeamObjectWithExtension. The closure-backed facade accepts only
 // one validated DML/SELECT statement and exposes no raw or commit-capable tx.
 type teamObjectWriteTransaction struct {
-	execDML        func(context.Context, string, ...any) (sql.Result, error)
-	queryRow       func(context.Context, string, ...any) (*sql.Row, error)
-	mapStorage     func(context.Context, string, string) error
-	ObjectID       string
-	StoreID        string
-	TeamID         string
-	AuthorID       string
-	OAuthClientKey string
-	BodyDigest     string
-	Scope          teamauth.CanonicalScope
+	execDML          func(context.Context, string, ...any) (sql.Result, error)
+	queryRow         func(context.Context, string, ...any) (*sql.Row, error)
+	mapStorage       func(context.Context, string, string) error
+	insertTeamMemory func(context.Context, teamMemoryCapsuleStorageItem) error
+	ObjectID         string
+	StoreID          string
+	TeamID           string
+	AuthorID         string
+	OAuthClientKey   string
+	BodyDigest       string
+	Scope            teamauth.CanonicalScope
 }
 
 type teamObjectWriteExtension func(context.Context, *teamObjectWriteTransaction) error
@@ -144,6 +145,25 @@ func newTeamObjectWriteTransaction(tx *sql.Tx, now time.Time, write teamObjectWr
 			VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
 			write.ObjectID, write.TeamID, write.Scope.Type, write.Scope.ID,
 			representationKind, storageKey, now.UTC().Format(time.RFC3339Nano),
+		)
+		return err
+	}
+	write.insertTeamMemory = func(ctx context.Context, item teamMemoryCapsuleStorageItem) error {
+		if !validTeamMemoryCapsuleStorageItem(item) {
+			return ErrTeamMemoryInvalid
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO team_memory_capsules(
+				capsule_id, root_object_id, team_id, scope_type, scope_id,
+				root_generation, item_ordinal, schema_version, source_host,
+				conversation_scope, source_timestamp, kind, redacted_summary,
+				confidence, evidence_hint, tags_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.CapsuleID, write.ObjectID, write.TeamID, write.Scope.Type, write.Scope.ID,
+			write.Scope.Generation, item.Ordinal, TeamMemorySchema, item.Source.Host,
+			item.Source.ConversationScope, item.Source.Timestamp, item.Item.Kind,
+			item.Item.RedactedSummary, item.Item.Confidence, item.Item.EvidenceHint,
+			item.TagsJSON, now.UTC().Format(time.RFC3339Nano),
 		)
 		return err
 	}
@@ -180,6 +200,16 @@ func (write *teamObjectWriteTransaction) MapStorage(
 		return errTeamObjectExtensionStatementInvalid
 	}
 	return write.mapStorage(ctx, representationKind, storageKey)
+}
+
+func (write *teamObjectWriteTransaction) InsertTeamMemoryCapsuleItem(
+	ctx context.Context,
+	item teamMemoryCapsuleStorageItem,
+) error {
+	if write == nil || write.insertTeamMemory == nil {
+		return ErrTeamMemoryInvalid
+	}
+	return write.insertTeamMemory(ctx, item)
 }
 
 func (s *Store) StoreTeamObject(ctx context.Context, request TeamObjectWriteRequest) (TeamObjectWriteResult, error) {

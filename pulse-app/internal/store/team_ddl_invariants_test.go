@@ -161,7 +161,7 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 	s, _ := bootstrapTeamStore(t)
 	defer s.Close()
 
-	for _, table := range []string{"team_audit_event_order", "team_projection_outputs"} {
+	for _, table := range []string{"team_audit_event_order", "team_memory_capsules", "team_projection_outputs"} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -178,6 +178,8 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 		"team_projection_jobs_cancel_only_tombstoned",
 		"team_projection_jobs_terminal_immutable",
 		"team_projection_outputs_generation_fence_insert",
+		"team_memory_capsules_generation_fence_insert",
+		"team_memory_capsules_immutable",
 	} {
 		var count int
 		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trigger).Scan(&count); err != nil {
@@ -200,6 +202,22 @@ func TestMigration034FreezeTablesAndTriggersExist(t *testing.T) {
 	for _, unsafe := range []string{"terminal_lease_token", "completion_payload"} {
 		if _, present := columns[unsafe]; present {
 			t.Fatalf("team_projection_jobs persists unsafe terminal material %s", unsafe)
+		}
+	}
+	memoryColumns := teamTableColumns(t, s, "team_memory_capsules")
+	for _, required := range []string{
+		"capsule_id", "root_object_id", "team_id", "scope_type", "scope_id",
+		"root_generation", "item_ordinal", "schema_version", "source_host",
+		"conversation_scope", "source_timestamp", "kind", "redacted_summary",
+		"confidence", "evidence_hint", "tags_json", "created_at",
+	} {
+		if _, ok := memoryColumns[required]; !ok {
+			t.Fatalf("team_memory_capsules missing %s", required)
+		}
+	}
+	for _, forbidden := range []string{"actor_principal_id", "owner_principal_id", "raw_input", "transcript", "secret"} {
+		if _, present := memoryColumns[forbidden]; present {
+			t.Fatalf("team_memory_capsules persists forbidden field %s", forbidden)
 		}
 	}
 }
