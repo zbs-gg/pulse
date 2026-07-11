@@ -493,6 +493,73 @@ func TestCompleteTeamProjectionJobAtomicallyAttachesMultipleOutputsAndIsRestartI
 	}
 }
 
+func TestCompleteTeamProjectionJobAcceptsMaximumGraphDeltaSourceBatch(t *testing.T) {
+	fixture := newProjectionLifecycleFixture(t)
+	defer fixture.store.Close()
+	installProjectionTestMaterialization(t, fixture)
+	writer := fixture.acquireWriter(t)
+	insertProjectionLifecycleRoot(t, fixture, "maximum-graph-root")
+	insertProjectionLifecycleJob(t, fixture, "maximum-graph-job", "maximum-graph-root", "graph", "pending", 0, fixture.now.Add(-time.Second))
+	claims, err := fixture.store.ClaimTeamProjectionJobs(context.Background(), TeamProjectionClaimRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		ProjectionKind: "graph", Limit: 1, LeaseTTL: time.Minute,
+	})
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim maximum graph job = %+v, %v", claims, err)
+	}
+
+	// One maximum-size graph delta can contain 30 nodes, 50 edges, 50 facts,
+	// and 20 events. The graph projector emits one output and mapping per source.
+	const maximumGraphDeltaSources = 150
+	outputs := make([]TeamProjectionOutput, 0, maximumGraphDeltaSources)
+	for index := 0; index < maximumGraphDeltaSources; index++ {
+		suffix := strconv.Itoa(index)
+		outputs = append(outputs, TeamProjectionOutput{
+			DerivativeObjectID:   "maximum-graph-derivative-" + suffix,
+			DerivativeGeneration: 1,
+			ObjectKind:           "graph_entity",
+			StorageMappings: []TeamProjectionStorageMapping{{
+				RepresentationKind: "graph_entity",
+				StorageKey:         "graph_entity:maximum-" + suffix,
+			}},
+		})
+	}
+	completion := TeamProjectionCompletionRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: "maximum-graph-job", LeaseToken: claims[0].LeaseToken,
+		Outputs: outputs,
+	}
+	result, err := fixture.store.completeTeamProjectionJobWithExtension(
+		context.Background(), completion, projectionTestMaterializer,
+	)
+	if err != nil || result.State != "ready" || result.AlreadyReady ||
+		len(result.OutputObjectIDs) != maximumGraphDeltaSources {
+		t.Fatalf("complete maximum graph batch = %+v, %v", result, err)
+	}
+	for table, want := range map[string]int{
+		"team_projection_outputs":         maximumGraphDeltaSources,
+		"team_object_contributions":       maximumGraphDeltaSources,
+		"team_object_storage_map":         maximumGraphDeltaSources,
+		"projection_test_materialization": maximumGraphDeltaSources,
+	} {
+		var count int
+		if err := fixture.store.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s rows = %d, want %d", table, count, want)
+		}
+	}
+
+	replay, err := fixture.store.completeTeamProjectionJobWithExtension(
+		context.Background(), completion, projectionTestMaterializer,
+	)
+	if err != nil || !replay.AlreadyReady || replay.State != "ready" ||
+		len(replay.OutputObjectIDs) != maximumGraphDeltaSources {
+		t.Fatalf("replay maximum graph batch = %+v, %v", replay, err)
+	}
+}
+
 func TestProjectionCompletionReplayBindsFullCanonicalOutputsAcrossWriterRotation(t *testing.T) {
 	fixture := newProjectionLifecycleFixture(t)
 	writer := fixture.acquireWriter(t)

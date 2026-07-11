@@ -24,8 +24,13 @@ const (
 	maxProjectionClaimBatch = 64
 	maxProjectionLeaseTTL   = 5 * time.Minute
 	maxProjectionBackoff    = 24 * time.Hour
-	maxProjectionOutputs    = 32
-	maxProjectionMappings   = 128
+	// A maximum graph delta contains 30 nodes, 50 edges, 50 facts, and
+	// 20 events. Graph materialization emits one output and mapping per source.
+	maxProjectionOutputs  = 150
+	maxProjectionMappings = 150
+
+	maxProjectionVectorDimensions      = 4096
+	maxProjectionAggregateVectorValues = maxProjectionOutputs * maxProjectionVectorDimensions
 )
 
 const (

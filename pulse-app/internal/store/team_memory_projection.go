@@ -209,16 +209,21 @@ func normalizeTeamMemoryEmbeddingResults(
 	model string,
 	results []TeamMemoryEmbeddingResult,
 ) ([]normalizedTeamMemoryEmbeddingResult, error) {
-	if !validTeamClass(model, 64) || len(results) != len(source.Capsules) || len(results) == 0 {
+	if !validTeamClass(model, 64) || len(results) != len(source.Capsules) || len(results) == 0 ||
+		len(results) > maxProjectionOutputs {
 		return nil, ErrInvalidProjectionJobRequest
 	}
 	byCapsule := make(map[string][]float32, len(results))
 	dimensions := 0
+	aggregateVectorValues := 0
 	for _, result := range results {
 		if !validProjectionOpaque(result.CapsuleID, 255) || len(result.Vector) == 0 ||
-			len(result.Vector) > 4096 || byCapsule[result.CapsuleID] != nil {
+			len(result.Vector) > maxProjectionVectorDimensions ||
+			len(result.Vector) > maxProjectionAggregateVectorValues-aggregateVectorValues ||
+			byCapsule[result.CapsuleID] != nil {
 			return nil, ErrInvalidProjectionJobRequest
 		}
+		aggregateVectorValues += len(result.Vector)
 		if dimensions == 0 {
 			dimensions = len(result.Vector)
 		} else if dimensions != len(result.Vector) {

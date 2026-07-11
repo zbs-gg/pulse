@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/nkkmnk/pulse/internal/teamauth"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -387,7 +389,7 @@ func normalizeTeamGraphDeltaWriteWithIdempotencyHash(
 		if !validTeamGraphNodeKind(kind) || !nameOK || !validTeamGraphDomain(domain) {
 			return invalid()
 		}
-		semanticName := strings.ToLower(norm.NFKC.String(name))
+		semanticName := teamGraphECMAScriptNFKCLower(name)
 		semanticIdentity := domain + "\x00" + kind + "\x00" + semanticName
 		if _, duplicate := semanticNodes[semanticIdentity]; duplicate {
 			return invalid()
@@ -784,7 +786,7 @@ func buildTeamSemanticIntentDescriptors(
 			// can recompute supersession and restore the prior survivor on delete.
 			claimSemantic := teamGraphDigestParts(
 				"pulse-team-claim-semantic-v1", nodeSemanticKeys[fact.Node],
-				strings.ToLower(norm.NFKC.String(*fact.Predicate)),
+				teamGraphECMAScriptNFKCLower(*fact.Predicate),
 			)
 			add("claim", "fact", ordinal, "assertion", claimSemantic, payload)
 		}
@@ -1213,6 +1215,13 @@ func teamGraphDigestParts(parts ...string) string {
 		teamGraphWriteDigestPart(digest, part)
 	}
 	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func teamGraphECMAScriptNFKCLower(value string) string {
+	// ECMAScript toLowerCase uses Unicode Default Case Conversion, including
+	// multi-rune mappings (İ -> i + combining dot) and contextual final sigma.
+	// A Caser can be stateful, so create one per call instead of sharing it.
+	return cases.Lower(language.Und, cases.HandleFinalSigma(true)).String(norm.NFKC.String(value))
 }
 
 func teamGraphWriteDigestPart(digest hash.Hash, value string) {

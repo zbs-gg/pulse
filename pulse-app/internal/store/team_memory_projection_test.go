@@ -6,6 +6,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -260,6 +261,32 @@ func TestTeamMemoryEmbeddingProjectionRejectsInvalidVectorsBeforeMutation(t *tes
 			}
 			assertNoTeamMemoryProjectionRows(t, fixture.object.store, claim.JobID, fixture.memory.ObjectID)
 		})
+	}
+}
+
+func TestNormalizeTeamMemoryEmbeddingResultsRejectsAggregateBeyondMaximumProjectionBatch(t *testing.T) {
+	// A graph delta can produce at most 150 projection sources. Keep the
+	// embedding normalizer bounded even if a future caller supplies a larger
+	// synthetic source directly instead of loading today's smaller capsule set.
+	const (
+		maximumProjectionSources = 150
+		maximumVectorDimensions  = 4096
+	)
+	vector := make([]float32, maximumVectorDimensions)
+	vector[0] = 1
+	source := teamMemoryProjectionSource{
+		Capsules: make([]teamMemoryProjectionCapsule, 0, maximumProjectionSources+1),
+	}
+	results := make([]TeamMemoryEmbeddingResult, 0, maximumProjectionSources+1)
+	for index := 0; index <= maximumProjectionSources; index++ {
+		capsuleID := "aggregate-capsule-" + strconv.Itoa(index)
+		source.Capsules = append(source.Capsules, teamMemoryProjectionCapsule{CapsuleID: capsuleID})
+		results = append(results, TeamMemoryEmbeddingResult{CapsuleID: capsuleID, Vector: vector})
+	}
+	if _, err := normalizeTeamMemoryEmbeddingResults(
+		source, "synthetic_embed_v1", results,
+	); !errors.Is(err, ErrInvalidProjectionJobRequest) {
+		t.Fatalf("aggregate embedding result error = %v, want %v", err, ErrInvalidProjectionJobRequest)
 	}
 }
 

@@ -31,6 +31,26 @@ func graphString(value string) *string  { return &value }
 func graphFloat(value float64) *float64 { return &value }
 func graphBool(value bool) *bool        { return &value }
 
+func TestTeamGraphECMAScriptNFKCLowerGoldenVectors(t *testing.T) {
+	// Frozen from Node.js String.prototype.normalize("NFKC").toLowerCase().
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "İ", want: "i\u0307"},
+		{input: "I\u0307", want: "i\u0307"},
+		{input: "Aİ", want: "ai\u0307"},
+		{input: "ΟΣ", want: "ος"},
+		{input: "ΟΣΑ", want: "οσα"},
+		{input: "Σ", want: "σ"},
+	}
+	for _, test := range tests {
+		if got := teamGraphECMAScriptNFKCLower(test.input); got != test.want {
+			t.Errorf("NFKC+toLowerCase(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
 func newTeamGraphDeltaFixture(t *testing.T) teamGraphDeltaFixture {
 	t.Helper()
 	return newTeamGraphDeltaFixtureAt(t, filepath.Join(t.TempDir(), "team.db"))
@@ -586,6 +606,40 @@ func TestTeamGraphDerivativeIDsShareWithinScopeAndIsolateAcrossScopes(t *testing
 	}
 }
 
+func TestTeamGraphPredicateDerivativeKeysMatchECMAScriptNFKCLower(t *testing.T) {
+	tests := []struct {
+		name       string
+		first      string
+		equivalent string
+	}{
+		{name: "dotted capital I", first: "İD", equivalent: "I\u0307D"},
+		{name: "contextual final sigma", first: "ΟΣ", equivalent: "Ος"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTeamGraphDeltaFixture(t)
+			defer fixture.object.store.Close()
+
+			firstWrite := baseTeamGraphDeltaWrite()
+			firstWrite.IdempotencyKey = "predicate-golden-first"
+			firstWrite.Facts[0].Predicate = graphString(test.first)
+			first := storeFixtureTeamGraph(t, fixture, firstWrite)
+
+			equivalentWrite := baseTeamGraphDeltaWrite()
+			equivalentWrite.IdempotencyKey = "predicate-golden-equivalent"
+			equivalentWrite.Facts[0].Predicate = graphString(test.equivalent)
+			equivalent := storeFixtureTeamGraph(t, fixture, equivalentWrite)
+
+			firstIDs := teamGraphDerivativeIDs(t, fixture.object.store, first.ObjectID)
+			equivalentIDs := teamGraphDerivativeIDs(t, fixture.object.store, equivalent.ObjectID)
+			if firstIDs["claim/fact/0"] != equivalentIDs["claim/fact/0"] {
+				t.Fatalf("ECMAScript-equivalent predicates split assertion derivative: first=%q equivalent=%q",
+					firstIDs["claim/fact/0"], equivalentIDs["claim/fact/0"])
+			}
+		})
+	}
+}
+
 func TestTeamGraphEmbeddingDerivativeIgnoresRootLocalReferenceNames(t *testing.T) {
 	fixture := newTeamGraphDeltaFixture(t)
 	defer fixture.object.store.Close()
@@ -708,6 +762,18 @@ func TestNormalizeTeamGraphDeltaRejectsUnsafeReferencesClaimsAndContinuity(t *te
 		{name: "nfkc duplicate node", mutate: func(write *TeamGraphDeltaWrite) {
 			write.Nodes = append(write.Nodes, TeamGraphNode{
 				ClientID: "person:compat", Kind: "person", CanonicalName: "Ａｌｅｘ", Domain: "real",
+			})
+		}},
+		{name: "ecmascript dotted I duplicate node", mutate: func(write *TeamGraphDeltaWrite) {
+			write.Nodes[0].CanonicalName = "İ"
+			write.Nodes = append(write.Nodes, TeamGraphNode{
+				ClientID: "person:dotted-i", Kind: "person", CanonicalName: "I\u0307", Domain: "real",
+			})
+		}},
+		{name: "ecmascript final sigma duplicate node", mutate: func(write *TeamGraphDeltaWrite) {
+			write.Nodes[0].CanonicalName = "ΟΣ"
+			write.Nodes = append(write.Nodes, TeamGraphNode{
+				ClientID: "person:final-sigma", Kind: "person", CanonicalName: "Ος", Domain: "real",
 			})
 		}},
 		{name: "missing fact confidence", mutate: func(write *TeamGraphDeltaWrite) { write.Facts[0].Confidence = nil }},
