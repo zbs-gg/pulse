@@ -177,7 +177,8 @@ func (v *PrincipalVerifier) validateDomainClaims(claims principalAssertionClaims
 func isExactTeamDomainPath(path string) bool {
 	switch path {
 	case TeamMemoryRememberRoutePath, TeamGraphDeltaRoutePath,
-		TeamRecallRoutePath, TeamContextQueryRoutePath, TeamResumeRoutePath:
+		TeamRecallRoutePath, TeamContextQueryRoutePath, TeamResumeRoutePath,
+		TeamDeleteRoutePath, TeamDeleteStatusRoutePath:
 		return true
 	default:
 		return false

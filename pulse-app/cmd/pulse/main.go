@@ -34,6 +34,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/server"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/teamauth"
+	"github.com/nkkmnk/pulse/internal/teamjobs"
 	"github.com/nkkmnk/pulse/internal/teamread"
 )
 
@@ -45,9 +46,16 @@ const (
 	teamWriterLeaseTTL        = 60 * time.Second
 	teamWriterRenewalInterval = 20 * time.Second
 	teamHandlerQuiesceTimeout = 5 * time.Second
+	teamDeletionLeaseTTL      = 30 * time.Second
+	teamDeletionPollInterval  = time.Second
+	teamDeletionBaseBackoff   = time.Second
+	teamDeletionMaxBackoff    = 5 * time.Minute
 )
 
-var errTeamWriterLeaseChanged = errors.New("team writer lease changed during renewal")
+var (
+	errTeamWriterLeaseChanged        = errors.New("team writer lease changed during renewal")
+	errTeamDeletionWorkerStopTimeout = errors.New("team deletion worker did not stop before timeout")
+)
 
 func main() {
 	var (
@@ -367,6 +375,18 @@ func runTeam(dataDir, addr string) error {
 	if err != nil {
 		return err
 	}
+	deletionWorker, err := teamjobs.NewDeletionWorker(teamjobs.DeletionWorkerConfig{
+		Store: s,
+		Writer: store.TeamWriterLeaseIdentity{
+			WriterID: lease.WriterID, Token: lease.Token,
+		},
+		ClaimLimit: 16, ReapLimit: 64, LeaseTTL: teamDeletionLeaseTTL,
+		PollInterval: teamDeletionPollInterval,
+		BaseBackoff:  teamDeletionBaseBackoff, MaxBackoff: teamDeletionMaxBackoff,
+	})
+	if err != nil {
+		return err
+	}
 	listener, err := listenTeamDaemon(addr)
 	if err != nil {
 		return fmt.Errorf("team-remote listen: %w", err)
@@ -388,10 +408,11 @@ func runTeam(dataDir, addr string) error {
 	defer signal.Stop(sigCh)
 	slog.Info("pulse team daemon listening", "addr", listener.Addr().String())
 	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
-		Signals:         sigCh,
-		RenewLease:      func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
-		ShutdownTimeout: 10 * time.Second,
-		QuiesceTimeout:  teamHandlerQuiesceTimeout,
+		Signals:           sigCh,
+		RenewLease:        func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
+		RunDeletionWorker: deletionWorker.Run,
+		ShutdownTimeout:   10 * time.Second,
+		QuiesceTimeout:    teamHandlerQuiesceTimeout,
 	})
 	releaseLease = runtimeResult.ReleaseLease
 	return runtimeResult.Err
@@ -430,10 +451,11 @@ func renewTeamWriterLeaseAtInterval(ctx context.Context, renewer teamWriterLease
 }
 
 type teamRuntimeOptions struct {
-	Signals         <-chan os.Signal
-	RenewLease      func(context.Context) error
-	ShutdownTimeout time.Duration
-	QuiesceTimeout  time.Duration
+	Signals           <-chan os.Signal
+	RenewLease        func(context.Context) error
+	RunDeletionWorker func(context.Context) error
+	ShutdownTimeout   time.Duration
+	QuiesceTimeout    time.Duration
 }
 
 type teamRuntimeResult struct {
@@ -516,6 +538,16 @@ func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamR
 	leaseCtx, cancelLease := context.WithCancel(context.Background())
 	leaseResult := make(chan error, 1)
 	go func() { leaseResult <- options.RenewLease(leaseCtx) }()
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	runDeletionWorker := options.RunDeletionWorker
+	if runDeletionWorker == nil {
+		runDeletionWorker = func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		}
+	}
+	workerResult := make(chan error, 1)
+	go func() { workerResult <- runDeletionWorker(workerCtx) }()
 	serveResult := make(chan error, 1)
 	go func() {
 		err := httpSrv.Serve(listener)
@@ -531,19 +563,39 @@ func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamR
 		cancelRequests()
 		_ = httpSrv.Close()
 		<-serveResult
+		_, _ = stopTeamDeletionWorker(workerCtx, cancelWorker, workerResult, options.QuiesceTimeout)
 		cancelLease()
 		tracker.wait(options.QuiesceTimeout)
 		if leaseErr == nil {
 			leaseErr = errors.New("team writer lease renewal stopped")
 		}
 		return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+	case workerErr := <-workerResult:
+		tracker.stop()
+		cancelRequests()
+		_ = httpSrv.Close()
+		<-serveResult
+		cancelWorker()
+		cancelLease()
+		_ = normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
+		tracker.wait(options.QuiesceTimeout)
+		if workerErr == nil {
+			workerErr = errors.New("team deletion worker stopped")
+		}
+		return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
 	case serveErr := <-serveResult:
 		tracker.stop()
 		cancelRequests()
 		_ = httpSrv.Close()
+		workerErr, _ := stopTeamDeletionWorker(
+			workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
+		)
 		cancelLease()
 		leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
 		quiesced := tracker.wait(options.QuiesceTimeout)
+		if workerErr != nil {
+			return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
+		}
 		if leaseErr != nil {
 			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
 		}
@@ -560,12 +612,29 @@ func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamR
 			<-shutdownResult
 			cancelShutdown()
 			<-serveResult
+			_, _ = stopTeamDeletionWorker(
+				workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
+			)
 			cancelLease()
 			tracker.wait(options.QuiesceTimeout)
 			if leaseErr == nil {
 				leaseErr = errors.New("team writer lease renewal stopped")
 			}
 			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
+		case workerErr := <-workerResult:
+			cancelRequests()
+			_ = httpSrv.Close()
+			<-shutdownResult
+			cancelShutdown()
+			<-serveResult
+			cancelWorker()
+			cancelLease()
+			_ = normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
+			tracker.wait(options.QuiesceTimeout)
+			if workerErr == nil {
+				workerErr = errors.New("team deletion worker stopped")
+			}
+			return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
 		case shutdownErr := <-shutdownResult:
 			cancelShutdown()
 			if shutdownErr != nil {
@@ -573,9 +642,15 @@ func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamR
 				_ = httpSrv.Close()
 			}
 			<-serveResult
+			workerErr, _ := stopTeamDeletionWorker(
+				workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
+			)
 			cancelLease()
 			leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
 			quiesced := tracker.wait(options.QuiesceTimeout)
+			if workerErr != nil {
+				return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
+			}
 			if leaseErr != nil {
 				return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
 			}
@@ -589,6 +664,26 @@ func normalizeStoppedLeaseError(ctx context.Context, err error) error {
 		return nil
 	}
 	return err
+}
+
+func stopTeamDeletionWorker(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	result <-chan error,
+	timeout time.Duration,
+) (error, bool) {
+	cancel()
+	if timeout <= 0 {
+		return errTeamDeletionWorkerStopTimeout, false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return normalizeStoppedLeaseError(ctx, err), true
+	case <-timer.C:
+		return errTeamDeletionWorkerStopTimeout, false
+	}
 }
 
 func newTeamWriterID() (string, error) {

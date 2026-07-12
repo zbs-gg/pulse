@@ -129,6 +129,8 @@ func (s *TeamServer) Handler() http.Handler {
 		protected.Post(TeamRecallRoutePath, s.handleTeamRecall)
 		protected.Post(TeamContextQueryRoutePath, s.handleTeamContextQuery)
 		protected.Post(TeamResumeRoutePath, s.handleTeamResume)
+		protected.Post(TeamDeleteRoutePath, s.handleTeamDelete)
+		protected.Post(TeamDeleteStatusRoutePath, s.handleTeamDeleteStatus)
 	})
 	return r
 }

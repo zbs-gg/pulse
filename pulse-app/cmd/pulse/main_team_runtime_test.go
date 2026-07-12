@@ -121,6 +121,137 @@ func TestServeTeamRuntimeLeaseFailureCancelsRequestsAndHardCloses(t *testing.T) 
 	}
 }
 
+func TestServeTeamRuntimeDeletionWorkerFailureCancelsRequestsAndIsFatal(t *testing.T) {
+	listener, err := listenTeamDaemon("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	workerLostLease := errors.New("deletion worker lost writer lease")
+	server := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+		close(canceled)
+	})}
+	resultCh := make(chan teamRuntimeResult, 1)
+	go func() {
+		resultCh <- serveTeamRuntime(server, listener, teamRuntimeOptions{
+			Signals: make(chan os.Signal),
+			RenewLease: func(ctx context.Context) error {
+				<-ctx.Done()
+				return nil
+			},
+			RunDeletionWorker: func(context.Context) error {
+				<-started
+				return workerLostLease
+			},
+			ShutdownTimeout: time.Second,
+			QuiesceTimeout:  time.Second,
+		})
+	}()
+	go func() {
+		response, _ := http.Get("http://" + listener.Addr().String() + "/blocked")
+		if response != nil {
+			response.Body.Close()
+		}
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deletion worker failure did not cancel active request")
+	}
+	result := <-resultCh
+	if !errors.Is(result.Err, workerLostLease) {
+		t.Fatalf("runtime error = %v, want worker failure", result.Err)
+	}
+	if result.ReleaseLease {
+		t.Fatal("runtime allowed lease release after deletion worker lost ownership")
+	}
+}
+
+func TestServeTeamRuntimeStopsDeletionWorkerBeforeReleasingLease(t *testing.T) {
+	listener, err := listenTeamDaemon("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan os.Signal, 1)
+	workerStopped := make(chan struct{})
+	resultCh := make(chan teamRuntimeResult, 1)
+	go func() {
+		resultCh <- serveTeamRuntime(
+			&http.Server{Handler: http.NotFoundHandler()}, listener,
+			teamRuntimeOptions{
+				Signals: signals,
+				RenewLease: func(ctx context.Context) error {
+					<-ctx.Done()
+					return nil
+				},
+				RunDeletionWorker: func(ctx context.Context) error {
+					<-ctx.Done()
+					close(workerStopped)
+					return nil
+				},
+				ShutdownTimeout: time.Second,
+				QuiesceTimeout:  time.Second,
+			},
+		)
+	}()
+	signals <- os.Interrupt
+	result := <-resultCh
+	if result.Err != nil || !result.ReleaseLease {
+		t.Fatalf("graceful runtime result = %+v", result)
+	}
+	select {
+	case <-workerStopped:
+	default:
+		t.Fatal("runtime released lease before deletion worker stopped")
+	}
+}
+
+func TestServeTeamRuntimeBoundsDeletionWorkerShutdownAndLeavesLeaseToExpire(t *testing.T) {
+	listener, err := listenTeamDaemon("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan os.Signal, 1)
+	workerStarted := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	resultCh := make(chan teamRuntimeResult, 1)
+	go func() {
+		resultCh <- serveTeamRuntime(
+			&http.Server{Handler: http.NotFoundHandler()}, listener,
+			teamRuntimeOptions{
+				Signals: signals,
+				RenewLease: func(ctx context.Context) error {
+					<-ctx.Done()
+					return nil
+				},
+				RunDeletionWorker: func(context.Context) error {
+					close(workerStarted)
+					<-releaseWorker
+					return nil
+				},
+				ShutdownTimeout: 50 * time.Millisecond,
+				QuiesceTimeout:  50 * time.Millisecond,
+			},
+		)
+	}()
+	<-workerStarted
+	signals <- os.Interrupt
+	select {
+	case result := <-resultCh:
+		if !errors.Is(result.Err, errTeamDeletionWorkerStopTimeout) || result.ReleaseLease {
+			t.Fatalf("stuck worker result = %+v", result)
+		}
+		close(releaseWorker)
+	case <-time.After(250 * time.Millisecond):
+		close(releaseWorker)
+		<-resultCh
+		t.Fatal("runtime waited without bound for deletion worker shutdown")
+	}
+}
+
 func TestServeTeamRuntimeLeaseFailureDuringGracefulDrainAbortsImmediately(t *testing.T) {
 	listener, err := listenTeamDaemon("127.0.0.1:0")
 	if err != nil {
