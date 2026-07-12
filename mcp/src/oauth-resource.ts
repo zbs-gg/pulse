@@ -17,6 +17,7 @@ export interface VerifiedOAuthIdentity {
   subject: string;
   clientId: string;
   capabilities: TeamCapability[];
+  authTime?: number;
 }
 
 export type OAuthSecurityReason =
@@ -214,6 +215,9 @@ export class OAuthResourceVerifier {
       payload.exp <= payload.iat ||
       payload.exp - payload.iat > this.maxTokenLifetimeSeconds ||
       payload.iat > now + this.clockToleranceSeconds ||
+      (payload.auth_time !== undefined &&
+        (!Number.isInteger(payload.auth_time) || (payload.auth_time as number) <= 0 ||
+          (payload.auth_time as number) > now + this.clockToleranceSeconds)) ||
       (payload.nbf !== undefined && (!Number.isInteger(payload.nbf) || payload.nbf > now + this.clockToleranceSeconds)) ||
       !isBoundedString(payload.scope, 1, MAX_SCOPE_BYTES)
     ) {
@@ -233,6 +237,7 @@ export class OAuthResourceVerifier {
       subject: payload.sub,
       clientId: payload.client_id,
       capabilities,
+      ...(payload.auth_time === undefined ? {} : { authTime: payload.auth_time as number }),
     };
   }
 

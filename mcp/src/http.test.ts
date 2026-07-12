@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, request as nodeHttpRequest, type IncomingMessage } from 'node:http';
 import { createConnection } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -229,6 +229,38 @@ async function rawHttpRequest(serverURL: string, requestTarget: string, host: st
   });
 }
 
+async function directHttpRequest(
+  serverURL: string,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body = '',
+): Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; body: string }> {
+  const url = new URL(serverURL);
+  return new Promise((resolve, reject) => {
+    const request = nodeHttpRequest({
+      host: url.hostname,
+      port: Number(url.port),
+      method,
+      path,
+      headers: {
+        ...headers,
+        ...(body === '' ? {} : { 'Content-Length': Buffer.byteLength(body).toString() }),
+      },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.once('end', () => resolve({
+        status: response.statusCode ?? 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
 test('team HTTP keeps public surface minimal and authenticates before parsing every protected method', async () => {
   const server = await startTeamHttpServer();
   try {
@@ -239,7 +271,10 @@ test('team HTTP keeps public surface minimal and authenticates before parsing ev
       resource: 'https://pulse.example.com/mcp',
       authorization_servers: ['https://auth.example.com'],
       bearer_methods_supported: ['header'],
-      scopes_supported: ['pulse:connect', 'pulse:status', 'pulse:read', 'pulse:write', 'pulse:audit', 'pulse:delete'],
+      scopes_supported: [
+        'pulse:connect', 'pulse:status', 'pulse:read', 'pulse:write',
+        'pulse:audit', 'pulse:delete', 'pulse:owner',
+      ],
     });
 
     const evilPreflight = await fetch(server.url, { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });
@@ -262,6 +297,49 @@ test('team HTTP keeps public surface minimal and authenticates before parsing ev
       assert.equal(denied.headers.get('access-control-allow-origin'), 'https://allowed.example');
       assert.match(denied.headers.get('www-authenticate') ?? '', /resource_metadata=/);
     }
+  } finally {
+    await server.stop();
+  }
+});
+
+test('Owner browser gateway requires exact Host Origin CORS and bearer before parsing', async () => {
+  const server = await startTeamHttpServer();
+  const browserHeaders = {
+    Host: 'pulse.example.com',
+    Origin: 'https://allowed.example',
+  };
+  try {
+    const preflight = await directHttpRequest(
+      server.url, 'OPTIONS', '/owner/v1/approval', browserHeaders,
+    );
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers['access-control-allow-origin'], 'https://allowed.example');
+    assert.equal(preflight.headers['access-control-allow-methods'], 'POST,OPTIONS');
+    assert.equal(preflight.headers['access-control-allow-headers'], 'Authorization, Content-Type');
+
+    const wrongHost = await directHttpRequest(server.url, 'POST', '/owner/v1/approval', {
+      Host: new URL(server.url).host,
+      Origin: 'https://allowed.example',
+      'Content-Type': 'application/json',
+    }, '{ definitely-not-json');
+    assert.equal(wrongHost.status, 403);
+    assert.deepEqual(JSON.parse(wrongHost.body), { error: 'owner_request_denied', fallback: false });
+
+    const missingBearer = await directHttpRequest(server.url, 'POST', '/owner/v1/approval', {
+      ...browserHeaders, 'Content-Type': 'application/json',
+    }, '{ definitely-not-json');
+    assert.equal(missingBearer.status, 401);
+    assert.deepEqual(JSON.parse(missingBearer.body), { error: 'invalid_token' });
+    assert.match(missingBearer.headers['www-authenticate'] ?? '', /resource_metadata=/);
+
+    const query = await directHttpRequest(server.url, 'POST', '/owner/v1/approval?debug=1', {
+      ...browserHeaders, 'Content-Type': 'application/json',
+    }, '{}');
+    assert.equal(query.status, 403);
+    const nearRoute = await directHttpRequest(
+      server.url, 'POST', '/owner/v1/approval/', browserHeaders,
+    );
+    assert.equal(nearRoute.status, 404);
   } finally {
     await server.stop();
   }

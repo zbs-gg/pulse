@@ -53,6 +53,12 @@ const TEAM_TOOL_CONTRACTS = [
 
 export const TEAM_MEMORY_SCHEMA = 'pulse.team.memory.v1' as const;
 export const TEAM_MEMORY_RESULT_SCHEMA = 'pulse.team.memory_result.v1' as const;
+export const TEAM_STATUS_SCHEMA = 'pulse.team.status.v1' as const;
+export const TEAM_STATUS_RESULT_SCHEMA = 'pulse.team.status_result.v1' as const;
+export const TEAM_INSPECT_SCHEMA = 'pulse.team.inspect.v1' as const;
+export const TEAM_INSPECT_RESULT_SCHEMA = 'pulse.team.inspect_result.v1' as const;
+export const TEAM_AUDIT_SCHEMA = 'pulse.team.audit.v1' as const;
+export const TEAM_AUDIT_RESULT_SCHEMA = 'pulse.team.audit_result.v1' as const;
 export const TEAM_GRAPH_DELTA_SCHEMA = 'pulse.team.graph_delta.v1' as const;
 export const TEAM_GRAPH_DELTA_RESULT_SCHEMA = 'pulse.team.graph_delta_result.v1' as const;
 export const TEAM_RECALL_SCHEMA = 'pulse.team.recall.v1' as const;
@@ -403,6 +409,39 @@ const TEAM_READ_ACTIVE_CONTEXT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const TEAM_STATUS_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_STATUS_SCHEMA },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+  },
+  required: ['schema', 'active_context'],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_INSPECT_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_INSPECT_SCHEMA },
+    object_id: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+  },
+  required: ['schema', 'object_id', 'active_context'],
+  additionalProperties: false,
+} as const;
+
+export const TEAM_AUDIT_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    schema: { type: 'string' as const, const: TEAM_AUDIT_SCHEMA },
+    active_context: TEAM_READ_ACTIVE_CONTEXT_SCHEMA,
+    cursor: { type: 'string' as const, minLength: 1, maxLength: 255 },
+    limit: { type: 'integer' as const, minimum: 1, maximum: 50, default: 50 },
+  },
+  required: ['schema', 'active_context'],
+  additionalProperties: false,
+} as const;
+
 export const TEAM_RECALL_INPUT_SCHEMA = {
   type: 'object' as const,
   properties: {
@@ -560,6 +599,9 @@ const TEAM_CONTEXT_QUERY_FIELDS = new Set([
   'include_trace', 'graph_mode',
 ]);
 const TEAM_RESUME_FIELDS = new Set(['schema', 'active_context', 'thread_id', 'limit']);
+const TEAM_STATUS_FIELDS = new Set(['schema', 'active_context']);
+const TEAM_INSPECT_FIELDS = new Set(['schema', 'object_id', 'active_context']);
+const TEAM_AUDIT_FIELDS = new Set(['schema', 'active_context', 'cursor', 'limit']);
 const TEAM_DELETE_FIELDS = new Set([
   'schema', 'object_id', 'active_context', 'idempotency_key',
 ]);
@@ -594,6 +636,9 @@ export class TeamContractError extends Error {
 export type TeamDomainErrorCode =
   | 'invalid_team_memory'
   | 'invalid_team_graph_delta'
+  | 'invalid_team_status'
+  | 'invalid_team_inspect'
+  | 'invalid_team_audit'
   | 'invalid_team_recall'
   | 'invalid_team_context'
   | 'invalid_team_resume'
@@ -1034,6 +1079,24 @@ export interface CleanTeamResumeInput {
   limit: number;
 }
 
+export interface CleanTeamStatusInput {
+  schema: typeof TEAM_STATUS_SCHEMA;
+  active_context: TeamReadActiveContext;
+}
+
+export interface CleanTeamInspectInput {
+  schema: typeof TEAM_INSPECT_SCHEMA;
+  object_id: string;
+  active_context: TeamReadActiveContext;
+}
+
+export interface CleanTeamAuditInput {
+  schema: typeof TEAM_AUDIT_SCHEMA;
+  active_context: TeamReadActiveContext;
+  cursor?: string;
+  limit: number;
+}
+
 function cleanTeamReadActiveContext(value: unknown): TeamReadActiveContext {
   const input = teamRecord(value, 'active_context', TEAM_ACTIVE_CONTEXT_FIELDS);
   const clean: TeamReadActiveContext = {};
@@ -1060,6 +1123,50 @@ function canonicalTeamReadBody<T>(value: T): { value: T; text: string; bytes: Bu
     failTeamContract('canonical team read body is too large');
   }
   return { value, text, bytes };
+}
+
+export function canonicalTeamStatusBody(input: unknown): {
+  value: CleanTeamStatusInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_STATUS_FIELDS);
+  if (envelope.schema !== TEAM_STATUS_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_STATUS_SCHEMA}`);
+  }
+  return canonicalTeamReadBody({
+    schema: TEAM_STATUS_SCHEMA,
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+  });
+}
+
+export function canonicalTeamInspectBody(input: unknown): {
+  value: CleanTeamInspectInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_INSPECT_FIELDS);
+  if (envelope.schema !== TEAM_INSPECT_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_INSPECT_SCHEMA}`);
+  }
+  return canonicalTeamReadBody({
+    schema: TEAM_INSPECT_SCHEMA,
+    object_id: safeTeamOpaque('object_id', envelope.object_id),
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+  });
+}
+
+export function canonicalTeamAuditBody(input: unknown): {
+  value: CleanTeamAuditInput; text: string; bytes: Buffer;
+} {
+  const envelope = teamRecord(input, 'input', TEAM_AUDIT_FIELDS);
+  if (envelope.schema !== TEAM_AUDIT_SCHEMA) {
+    failTeamContract(`schema must be ${TEAM_AUDIT_SCHEMA}`);
+  }
+  return canonicalTeamReadBody({
+    schema: TEAM_AUDIT_SCHEMA,
+    active_context: cleanTeamReadActiveContext(envelope.active_context),
+    ...(envelope.cursor === undefined
+      ? {}
+      : { cursor: safeTeamOpaque('cursor', envelope.cursor) }),
+    limit: teamReadLimit('limit', envelope.limit, 50),
+  });
 }
 
 export function canonicalTeamRecallBody(input: unknown): {
@@ -2107,6 +2214,355 @@ export function validateTeamResumeResult(
   };
 }
 
+export interface TeamStatusExpectedContext {
+  store_id: string;
+  team_id: string;
+  principal_id: string;
+  principal_kind: 'agent' | 'service';
+  human_principal_id: string | null;
+  agent_binding_id: string | null;
+  membership_id: string;
+  membership_role: 'owner' | 'member' | 'reviewer';
+  capabilities: readonly TeamCapability[];
+}
+
+export interface TeamStatusResult {
+  schema: typeof TEAM_STATUS_RESULT_SCHEMA;
+  mode: 'team-remote';
+  team_id: string;
+  store_id: string;
+  principal_id: string;
+  principal_kind: 'agent' | 'service';
+  human_principal_id: string | null;
+  agent_binding_id: string | null;
+  membership_id: string;
+  membership_role: 'owner' | 'member' | 'reviewer';
+  active_context: TeamReadActiveContext;
+  effective_capabilities: TeamCapability[];
+  policy_version: number;
+  projection_state: 'ready' | 'pending' | 'failed';
+  degraded: boolean;
+  degraded_reasons: string[];
+  fallback: false;
+}
+
+export interface TeamInspectResult {
+  schema: typeof TEAM_INSPECT_RESULT_SCHEMA;
+  object_id: string;
+  object_kind: string;
+  author_principal_id: string;
+  created_at: string;
+  scope: {
+    type: 'personal' | 'team' | 'project' | 'repo' | 'agent' | 'session';
+    id: string;
+    owner_principal_id: string | null;
+  };
+  privacy_tier: 'normal' | 'sensitive' | 'private';
+  retention: 'session' | 'project' | 'long_term';
+  expires_at?: string;
+  lifecycle_state: 'active' | 'tombstoned' | 'cleaning' | 'complete' | 'cleanup_failed';
+  generation: number;
+  projection_state: 'pending' | 'ready' | 'failed' | 'not_applicable';
+  deletion_state: 'none' | 'pending' | 'cleaning' | 'complete' | 'cleanup_failed';
+  fallback: false;
+}
+
+export interface TeamAuditEventResult {
+  event_id: string;
+  occurred_at: string;
+  action: string;
+  outcome: 'allowed' | 'denied' | 'error';
+  actor_principal_id: string;
+  client_key: string;
+  team_id: string;
+  project_id: string | null;
+  target_kind: string;
+  target_id: string | null;
+  request_id: string | null;
+  policy_version: number;
+  mode: 'team-remote';
+  reason_code: string;
+}
+
+export interface TeamAuditResult {
+  schema: typeof TEAM_AUDIT_RESULT_SCHEMA;
+  events: TeamAuditEventResult[];
+  next_cursor?: string;
+  own_actions_only: true;
+  fallback: false;
+}
+
+const TEAM_STATUS_RESULT_FIELDS = new Set([
+  'schema', 'mode', 'team_id', 'store_id', 'principal_id', 'principal_kind',
+  'human_principal_id', 'agent_binding_id', 'membership_id', 'membership_role',
+  'active_context', 'effective_capabilities', 'policy_version', 'projection_state',
+  'degraded', 'degraded_reasons', 'fallback',
+]);
+const TEAM_INSPECT_RESULT_BASE_FIELDS = [
+  'schema', 'object_id', 'object_kind', 'author_principal_id', 'created_at', 'scope',
+  'privacy_tier', 'retention', 'lifecycle_state', 'generation', 'projection_state',
+  'deletion_state', 'fallback',
+] as const;
+const TEAM_INSPECT_SCOPE_FIELDS = new Set(['type', 'id', 'owner_principal_id']);
+const TEAM_AUDIT_RESULT_BASE_FIELDS = [
+  'schema', 'events', 'own_actions_only', 'fallback',
+] as const;
+const TEAM_AUDIT_EVENT_FIELDS = new Set([
+  'event_id', 'occurred_at', 'action', 'outcome', 'actor_principal_id', 'client_key',
+  'team_id', 'project_id', 'target_kind', 'target_id', 'request_id', 'policy_version',
+  'mode', 'reason_code',
+]);
+
+function metadataResponseOpaque(value: unknown): value is string {
+  return typeof value === 'string' && TEAM_SAFE_OPAQUE.test(value) &&
+    unsafeTeamContentReason(value) === undefined;
+}
+
+function metadataResponseTimestamp(value: unknown, error: string): string {
+  try {
+    return teamRFC3339('timestamp', value);
+  } catch {
+    throw new Error(error);
+  }
+}
+
+function exactMetadataActiveContext(
+  value: unknown,
+  expected: TeamReadActiveContext,
+  error: string,
+): TeamReadActiveContext {
+  let clean: TeamReadActiveContext;
+  try {
+    clean = cleanTeamReadActiveContext(value);
+  } catch {
+    throw new Error(error);
+  }
+  if (JSON.stringify(clean) !== JSON.stringify(expected)) throw new Error(error);
+  return clean;
+}
+
+function exactMetadataCapabilities(
+  value: unknown,
+  expected: readonly TeamCapability[],
+  error: string,
+): TeamCapability[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > TEAM_CAPABILITIES.length) {
+    throw new Error(error);
+  }
+  const allowed = new Set<string>(TEAM_CAPABILITIES);
+  if (value.some((entry) => typeof entry !== 'string' || !allowed.has(entry))) throw new Error(error);
+  const capabilities = value as TeamCapability[];
+  const canonical = [...new Set(capabilities)].sort();
+  const expectedCanonical = [...new Set(expected)].sort();
+  if (
+    JSON.stringify(capabilities) !== JSON.stringify(canonical) ||
+    JSON.stringify(capabilities) !== JSON.stringify(expectedCanonical)
+  ) {
+    throw new Error(error);
+  }
+  return [...capabilities];
+}
+
+export function validateTeamStatusResult(
+  value: unknown,
+  expected: TeamStatusExpectedContext,
+  expectedActiveContext: TeamReadActiveContext,
+): TeamStatusResult {
+  const error = 'team status response is invalid';
+  const result = exactTeamResponseRecord(value, TEAM_STATUS_RESULT_FIELDS, error);
+  if (
+    result.schema !== TEAM_STATUS_RESULT_SCHEMA || result.mode !== 'team-remote' ||
+    result.fallback !== false || result.store_id !== expected.store_id ||
+    result.team_id !== expected.team_id || result.principal_id !== expected.principal_id ||
+    result.principal_kind !== expected.principal_kind ||
+    result.human_principal_id !== expected.human_principal_id ||
+    result.agent_binding_id !== expected.agent_binding_id ||
+    result.membership_id !== expected.membership_id ||
+    result.membership_role !== expected.membership_role ||
+    !metadataResponseOpaque(result.store_id) || !metadataResponseOpaque(result.team_id) ||
+    !metadataResponseOpaque(result.principal_id) ||
+    (result.human_principal_id !== null && !metadataResponseOpaque(result.human_principal_id)) ||
+    (result.agent_binding_id !== null && !metadataResponseOpaque(result.agent_binding_id)) ||
+    !metadataResponseOpaque(result.membership_id) ||
+    !Number.isInteger(result.policy_version) || (result.policy_version as number) < 1 ||
+    (result.policy_version as number) > 1_000_000 ||
+    !['ready', 'pending', 'failed'].includes(result.projection_state as string) ||
+    typeof result.degraded !== 'boolean' || !Array.isArray(result.degraded_reasons) ||
+    result.degraded_reasons.length > 16
+  ) {
+    throw new Error(error);
+  }
+  const reasons = result.degraded_reasons.map((reason) => {
+    if (!metadataResponseOpaque(reason)) throw new Error(error);
+    return reason;
+  });
+  if (
+    new Set(reasons).size !== reasons.length ||
+    JSON.stringify(reasons) !== JSON.stringify([...reasons].sort()) ||
+    (result.degraded === false && reasons.length !== 0) ||
+    (result.degraded === true && reasons.length === 0)
+  ) {
+    throw new Error(error);
+  }
+  const activeContext = exactMetadataActiveContext(result.active_context, expectedActiveContext, error);
+  const capabilities = exactMetadataCapabilities(
+    result.effective_capabilities, expected.capabilities, error,
+  );
+  return {
+    schema: TEAM_STATUS_RESULT_SCHEMA,
+    mode: 'team-remote',
+    team_id: result.team_id,
+    store_id: result.store_id,
+    principal_id: result.principal_id,
+    principal_kind: result.principal_kind as TeamStatusResult['principal_kind'],
+    human_principal_id: result.human_principal_id,
+    agent_binding_id: result.agent_binding_id,
+    membership_id: result.membership_id,
+    membership_role: result.membership_role as TeamStatusResult['membership_role'],
+    active_context: activeContext,
+    effective_capabilities: capabilities,
+    policy_version: result.policy_version as number,
+    projection_state: result.projection_state as TeamStatusResult['projection_state'],
+    degraded: result.degraded,
+    degraded_reasons: reasons,
+    fallback: false,
+  };
+}
+
+export function validateTeamInspectResult(
+  value: unknown,
+  expectedObjectID: string,
+): TeamInspectResult {
+  const error = 'team inspect response is invalid';
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const hasExpiry = Object.hasOwn(raw, 'expires_at');
+  const result = exactTeamResponseRecord(value, new Set([
+    ...TEAM_INSPECT_RESULT_BASE_FIELDS,
+    ...(hasExpiry ? ['expires_at'] : []),
+  ]), error);
+  const scope = exactTeamResponseRecord(result.scope, TEAM_INSPECT_SCOPE_FIELDS, error);
+  const scopeTypes = ['personal', 'team', 'project', 'repo', 'agent', 'session'] as const;
+  const lifecycles = ['active', 'tombstoned', 'cleaning', 'complete', 'cleanup_failed'] as const;
+  const expectedDeletion: Record<string, TeamInspectResult['deletion_state']> = {
+    active: 'none', tombstoned: 'pending', cleaning: 'cleaning',
+    complete: 'complete', cleanup_failed: 'cleanup_failed',
+  };
+  if (
+    result.schema !== TEAM_INSPECT_RESULT_SCHEMA || result.fallback !== false ||
+    result.object_id !== expectedObjectID || !metadataResponseOpaque(result.object_id) ||
+    !metadataResponseOpaque(result.object_kind) || !metadataResponseOpaque(result.author_principal_id) ||
+    !scopeTypes.includes(scope.type as typeof scopeTypes[number]) ||
+    !metadataResponseOpaque(scope.id) ||
+    (scope.owner_principal_id !== null && !metadataResponseOpaque(scope.owner_principal_id)) ||
+    ((scope.type === 'team') !== (scope.owner_principal_id === null)) ||
+    !['normal', 'sensitive', 'private'].includes(result.privacy_tier as string) ||
+    !['session', 'project', 'long_term'].includes(result.retention as string) ||
+    !lifecycles.includes(result.lifecycle_state as typeof lifecycles[number]) ||
+    !Number.isInteger(result.generation) || (result.generation as number) < 1 ||
+    (result.generation as number) > 1_000_000_000 ||
+    !['pending', 'ready', 'failed', 'not_applicable'].includes(result.projection_state as string) ||
+    result.deletion_state !== expectedDeletion[result.lifecycle_state as string] ||
+    ((result.retention === 'session' || scope.type === 'session') && !hasExpiry)
+  ) {
+    throw new Error(error);
+  }
+  const createdAt = metadataResponseTimestamp(result.created_at, error);
+  const expiresAt = hasExpiry ? metadataResponseTimestamp(result.expires_at, error) : undefined;
+  return {
+    schema: TEAM_INSPECT_RESULT_SCHEMA,
+    object_id: result.object_id,
+    object_kind: result.object_kind,
+    author_principal_id: result.author_principal_id,
+    created_at: createdAt,
+    scope: {
+      type: scope.type as TeamInspectResult['scope']['type'],
+      id: scope.id as string,
+      owner_principal_id: scope.owner_principal_id as string | null,
+    },
+    privacy_tier: result.privacy_tier as TeamInspectResult['privacy_tier'],
+    retention: result.retention as TeamInspectResult['retention'],
+    ...(expiresAt === undefined ? {} : { expires_at: expiresAt }),
+    lifecycle_state: result.lifecycle_state as TeamInspectResult['lifecycle_state'],
+    generation: result.generation as number,
+    projection_state: result.projection_state as TeamInspectResult['projection_state'],
+    deletion_state: result.deletion_state as TeamInspectResult['deletion_state'],
+    fallback: false,
+  };
+}
+
+export function validateTeamAuditResult(
+  value: unknown,
+  expectedPrincipalID: string,
+  limit: number,
+  expectedTeamID?: string,
+): TeamAuditResult {
+  const error = 'team audit response is invalid';
+  if (!metadataResponseOpaque(expectedPrincipalID) || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new Error(error);
+  }
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const hasCursor = Object.hasOwn(raw, 'next_cursor');
+  const result = exactTeamResponseRecord(value, new Set([
+    ...TEAM_AUDIT_RESULT_BASE_FIELDS,
+    ...(hasCursor ? ['next_cursor'] : []),
+  ]), error);
+  if (
+    result.schema !== TEAM_AUDIT_RESULT_SCHEMA || result.own_actions_only !== true ||
+    result.fallback !== false || !Array.isArray(result.events) || result.events.length > limit ||
+    (hasCursor && !metadataResponseOpaque(result.next_cursor))
+  ) {
+    throw new Error(error);
+  }
+  const events = result.events.map((entry) => {
+    const event = exactTeamResponseRecord(entry, TEAM_AUDIT_EVENT_FIELDS, error);
+    if (
+      !metadataResponseOpaque(event.event_id) || event.actor_principal_id !== expectedPrincipalID ||
+      !metadataResponseOpaque(event.actor_principal_id) ||
+      !(event.client_key === '' || (typeof event.client_key === 'string' && /^[0-9a-f]{64}$/.test(event.client_key))) ||
+      !metadataResponseOpaque(event.team_id) ||
+      (expectedTeamID !== undefined && event.team_id !== expectedTeamID) ||
+      (event.project_id !== null && !metadataResponseOpaque(event.project_id)) ||
+      !metadataResponseOpaque(event.action) ||
+      !['allowed', 'denied', 'error'].includes(event.outcome as string) ||
+      !metadataResponseOpaque(event.target_kind) ||
+      (event.target_id !== null && !metadataResponseOpaque(event.target_id)) ||
+      (event.request_id !== null && !metadataResponseOpaque(event.request_id)) ||
+      !Number.isInteger(event.policy_version) || (event.policy_version as number) < 1 ||
+      (event.policy_version as number) > 1_000_000 || event.mode !== 'team-remote' ||
+      !metadataResponseOpaque(event.reason_code)
+    ) {
+      throw new Error(error);
+    }
+    return {
+      event_id: event.event_id,
+      occurred_at: metadataResponseTimestamp(event.occurred_at, error),
+      action: event.action,
+      outcome: event.outcome,
+      actor_principal_id: event.actor_principal_id,
+      client_key: event.client_key,
+      team_id: event.team_id,
+      project_id: event.project_id,
+      target_kind: event.target_kind,
+      target_id: event.target_id,
+      request_id: event.request_id,
+      policy_version: event.policy_version,
+      mode: 'team-remote' as const,
+      reason_code: event.reason_code,
+    } as TeamAuditEventResult;
+  });
+  return {
+    schema: TEAM_AUDIT_RESULT_SCHEMA,
+    events,
+    ...(hasCursor ? { next_cursor: result.next_cursor as string } : {}),
+    own_actions_only: true,
+    fallback: false,
+  };
+}
+
 export interface TeamDeleteResult {
   schema: typeof TEAM_DELETE_RESULT_SCHEMA;
   operation_id: string;
@@ -2248,6 +2704,7 @@ export const TEAM_CAPABILITIES = [
   'pulse:write',
   'pulse:audit',
   'pulse:delete',
+  'pulse:owner',
 ] as const;
 
 export type TeamCapability = (typeof TEAM_CAPABILITIES)[number];
@@ -2258,6 +2715,13 @@ export type TeamToolName = (typeof TEAM_TOOL_CONTRACTS)[number]['name'];
 const TEAM_TOOL_NAME_SET = new Set<string>(TEAM_TOOL_CONTRACTS.map(({ name }) => name));
 
 export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, purpose }) => {
+  if (name === 'pulse_team_status') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_STATUS_INPUT_SCHEMA,
+    };
+  }
   if (name === 'pulse_team_remember') {
     return {
       name,
@@ -2291,6 +2755,20 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
       name,
       description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
       inputSchema: TEAM_RESUME_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_inspect') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active.`,
+      inputSchema: TEAM_INSPECT_INPUT_SCHEMA,
+    };
+  }
+  if (name === 'pulse_team_audit') {
+    return {
+      name,
+      description: `${purpose} Contract: ${contract}. Gateway validation and domain execution are active. Own actions only; Owner administration is out of band.`,
+      inputSchema: TEAM_AUDIT_INPUT_SCHEMA,
     };
   }
   if (name === 'pulse_team_delete') {

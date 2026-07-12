@@ -16,6 +16,9 @@ import type {
 import { ContractError, validateCapsule, validateDelta } from './validation.js';
 
 import {
+  canonicalTeamAuditBody,
+  canonicalTeamInspectBody,
+  canonicalTeamStatusBody,
   canonicalTeamContextQueryBody,
   canonicalTeamGraphDeltaBody,
   canonicalTeamRecallBody,
@@ -89,6 +92,44 @@ function teamReadActiveContext() {
     repo_id: 'repo-pulse',
     agent_id: 'agent-bound',
     session_id: 'session-2026-07-11',
+  };
+}
+
+function baseTeamStatus() {
+  return { schema: 'pulse.team.status.v1', active_context: teamReadActiveContext() };
+}
+
+function baseTeamInspect() {
+  return {
+    schema: 'pulse.team.inspect.v1',
+    object_id: 'team_object_001',
+    active_context: teamReadActiveContext(),
+  };
+}
+
+function baseTeamAudit() {
+  return { schema: 'pulse.team.audit.v1', active_context: teamReadActiveContext() };
+}
+
+function storedTeamStatusResult(context: Readonly<TeamPrincipalContext>) {
+  return {
+    schema: 'pulse.team.status_result.v1' as const,
+    mode: 'team-remote' as const,
+    team_id: context.team_id,
+    store_id: context.store_id,
+    principal_id: context.principal_id,
+    principal_kind: context.principal_kind,
+    human_principal_id: context.human_principal_id,
+    agent_binding_id: context.agent_binding_id,
+    membership_id: context.membership_id,
+    membership_role: context.membership_role,
+    active_context: teamReadActiveContext(),
+    effective_capabilities: [...context.capabilities].sort(),
+    policy_version: 1,
+    projection_state: 'ready' as const,
+    degraded: false,
+    degraded_reasons: [],
+    fallback: false as const,
   };
 }
 
@@ -1130,7 +1171,7 @@ test('team remember uses Unicode code-point limits and canonical unique tag orde
   assertTeamRememberRejected(duplicate, /duplicate|tags/i);
 });
 
-test('team StreamableHTTP registry exposes only exact descriptors and request-local stubs', async () => {
+test('team StreamableHTTP registry exposes only exact descriptors and request-local domains', async () => {
   assert.deepEqual(
     TEAM_TOOL_DESCRIPTORS.map((tool) => tool.name),
     EXPECTED_TEAM_TOOLS.map(([name]) => name),
@@ -1155,7 +1196,12 @@ test('team StreamableHTTP registry exposes only exact descriptors and request-lo
     }],
   });
 
-  const server = await startTeamRegistryServer();
+  const server = await startTeamRegistryServer((context) => Object.freeze({
+    status: async (input: unknown) => {
+      canonicalTeamStatusBody(input);
+      return storedTeamStatusResult(context);
+    },
+  }) as Readonly<BoundTeamDomain>);
   const exercise = async (principalId: string) => {
     const client = new Client({ name: `team-${principalId}`, version: '0.0.0' });
     const transport = new StreamableHTTPClientTransport(new URL(server.url), {
@@ -1165,11 +1211,8 @@ test('team StreamableHTTP registry exposes only exact descriptors and request-lo
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map(({ name }) => name), EXPECTED_TEAM_TOOLS.map(([name]) => name));
     assert.equal(tools.tools.some(({ name }) => name === 'pulse_status' || !name.startsWith('pulse_team_')), false);
-    const status = await client.callTool({ name: 'pulse_team_status', arguments: {} });
-    assert.deepEqual(toolJSON(status), {
-      schema: 'pulse.team.not_ready.v1', error: 'team_remote_not_ready',
-      mode: 'team-remote', tool: 'pulse_team_status', fallback: false,
-    });
+    const status = await client.callTool({ name: 'pulse_team_status', arguments: baseTeamStatus() });
+    assert.deepEqual(toolJSON(status), storedTeamStatusResult(teamContext(principalId)));
     const legacy = await client.callTool({ name: 'pulse_status', arguments: {} });
     assert.equal(legacy.isError, true);
     assert.doesNotMatch(legacy.content[0]?.type === 'text' ? legacy.content[0].text : '', /pulse_status/);
@@ -1180,6 +1223,57 @@ test('team StreamableHTTP registry exposes only exact descriptors and request-lo
     assert.ok(server.seenPrincipals.includes('principal-a'));
     assert.ok(server.seenPrincipals.includes('principal-b'));
   } finally {
+    await server.stop();
+  }
+});
+
+test('team inspect and own-audit dispatch only through their request-bound domain closures', async () => {
+  const calls: Array<{ tool: string; principal: string }> = [];
+  const server = await startTeamRegistryServer((context) => Object.freeze({
+    inspect: async (input: unknown) => {
+      canonicalTeamInspectBody(input);
+      calls.push({ tool: 'inspect', principal: context.principal_id });
+      return {
+        schema: 'pulse.team.inspect_result.v1', object_id: 'team_object_001',
+        object_kind: 'memory_capsule', author_principal_id: context.principal_id,
+        created_at: '2026-07-12T04:00:00.000Z',
+        scope: { type: 'project', id: 'project-pulse', owner_principal_id: context.human_principal_id },
+        privacy_tier: 'normal', retention: 'project', lifecycle_state: 'active',
+        generation: 1, projection_state: 'ready', deletion_state: 'none', fallback: false,
+      };
+    },
+    audit: async (input: unknown) => {
+      canonicalTeamAuditBody(input);
+      calls.push({ tool: 'audit', principal: context.principal_id });
+      return {
+        schema: 'pulse.team.audit_result.v1', events: [],
+        own_actions_only: true, fallback: false,
+      };
+    },
+  }) as Readonly<BoundTeamDomain>);
+  const client = new Client({ name: 'team-metadata', version: '0.0.0' });
+  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+    requestInit: { headers: { 'X-Test-Principal': 'principal-reader' } },
+  });
+  try {
+    await client.connect(transport);
+    const inspected = await client.callTool({
+      name: 'pulse_team_inspect', arguments: baseTeamInspect(),
+    });
+    assert.equal(toolJSON(inspected).object_id, 'team_object_001');
+    const audited = await client.callTool({
+      name: 'pulse_team_audit', arguments: baseTeamAudit(),
+    });
+    assert.deepEqual(toolJSON(audited), {
+      schema: 'pulse.team.audit_result.v1', events: [],
+      own_actions_only: true, fallback: false,
+    });
+    assert.deepEqual(calls, [
+      { tool: 'inspect', principal: 'principal-reader' },
+      { tool: 'audit', principal: 'principal-reader' },
+    ]);
+  } finally {
+    await client.close();
     await server.stop();
   }
 });
@@ -1220,10 +1314,7 @@ test('pulse_team_remember dispatches only through its request-bound domain closu
     assert.equal(seen.length, 1);
     assert.equal(seen[0].principal, 'principal-writer');
 
-    const status = await client.callTool({ name: 'pulse_team_status', arguments: {} });
-    assert.equal(status.isError, true);
-    assert.equal(toolJSON(status).error, 'team_remote_not_ready');
-    assert.equal(seen.length, 1, 'other team tools must remain stubs');
+    assert.equal(seen.length, 1, 'status and other domain calls must not be synthesized');
   } finally {
     await client.close();
     await server.stop();

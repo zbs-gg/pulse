@@ -18,43 +18,56 @@ import { SignJWT } from 'jose';
 
 import { OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
 import {
+  canonicalTeamAuditBody,
   canonicalTeamDeleteBody,
   canonicalTeamDeleteStatusBody,
   canonicalTeamContextQueryBody,
   canonicalTeamGraphDeltaBody,
+  canonicalTeamInspectBody,
   canonicalTeamRecallBody,
   canonicalTeamRememberBody,
   canonicalTeamResumeBody,
+  canonicalTeamStatusBody,
   requiredTeamCapabilities,
   TEAM_CAPABILITIES,
   TeamDomainError,
+  validateTeamAuditResult,
   validateTeamDeleteResult,
   validateTeamDeleteStatusResult,
   validateTeamGraphDeltaResult,
   validateTeamContextQueryResult,
+  validateTeamInspectResult,
   validateTeamRecallResult,
   validateTeamRememberResult,
   validateTeamResumeResult,
+  validateTeamStatusResult,
+  type TeamAuditResult,
   type TeamCapability,
   type TeamDomainErrorCode,
   type TeamDeleteResult,
   type TeamDeleteStatusResult,
   type TeamGraphDeltaResult,
   type TeamContextQueryResult,
+  type TeamInspectResult,
   type TeamRecallResult,
   type TeamRememberResult,
   type TeamResumeResult,
+  type TeamStatusResult,
 } from './team-contracts.js';
 
 export const PRINCIPAL_ASSERTION_ISSUER = 'pulse-team-gateway';
 export const PRINCIPAL_ASSERTION_AUDIENCE = 'pulse-team-daemon';
 const PRINCIPAL_ASSERTION_VERSION = 'pulse.principal.v1';
+export const OWNER_STEP_UP_ASSERTION_VERSION = 'pulse.owner_step_up.v1';
 export const SECURITY_EVENT_ASSERTION_VERSION = 'pulse.security_event.v1';
 export const TEAM_MEMORY_REMEMBER_PATH = '/team/v1/memory/remember';
 export const TEAM_GRAPH_DELTA_PATH = '/team/v1/graph/delta';
 export const TEAM_RECALL_PATH = '/team/v1/recall';
 export const TEAM_CONTEXT_QUERY_PATH = '/team/v1/context/query';
 export const TEAM_RESUME_PATH = '/team/v1/resume';
+export const TEAM_STATUS_PATH = '/team/v1/status';
+export const TEAM_INSPECT_PATH = '/team/v1/inspect';
+export const TEAM_AUDIT_PATH = '/team/v1/audit';
 export const TEAM_DELETE_PATH = '/team/v1/delete';
 export const TEAM_DELETE_STATUS_PATH = '/team/v1/delete/status';
 const TEAM_DOMAIN_PATHS = new Set([
@@ -63,6 +76,9 @@ const TEAM_DOMAIN_PATHS = new Set([
   TEAM_RECALL_PATH,
   TEAM_CONTEXT_QUERY_PATH,
   TEAM_RESUME_PATH,
+  TEAM_STATUS_PATH,
+  TEAM_INSPECT_PATH,
+  TEAM_AUDIT_PATH,
   TEAM_DELETE_PATH,
   TEAM_DELETE_STATUS_PATH,
 ]);
@@ -98,6 +114,19 @@ export interface PrincipalCheckBodyInput {
   capabilities: readonly TeamCapability[];
 }
 
+export interface OwnerStepUpSignInput {
+  requestId: string;
+  path: '/team/v1/owner/approval';
+  action: 'team.bootstrap' | 'team.activation.synthetic';
+  body: Uint8Array;
+  storeId: string;
+  teamId: string;
+  oauthIssuer: string;
+  oauthSubject: string;
+  oauthClientId: string;
+  authTime: number;
+}
+
 export interface PrincipalVerificationKeyring {
   active: { kid: string; public_key: string };
   previous: Array<{ kid: string; public_key: string }>;
@@ -112,11 +141,14 @@ export interface TeamPrincipalClientOptions {
 }
 
 export interface BoundTeamDomain {
+  status(input: unknown): Promise<TeamStatusResult>;
   remember(input: unknown): Promise<TeamRememberResult>;
   graphDelta(input: unknown): Promise<TeamGraphDeltaResult>;
   recall(input: unknown): Promise<TeamRecallResult>;
   contextQuery(input: unknown): Promise<TeamContextQueryResult>;
   resume(input: unknown): Promise<TeamResumeResult>;
+  inspect(input: unknown): Promise<TeamInspectResult>;
+  audit(input: unknown): Promise<TeamAuditResult>;
   delete(input: unknown): Promise<TeamDeleteResult>;
   deleteStatus(input: unknown): Promise<TeamDeleteStatusResult>;
 }
@@ -309,6 +341,9 @@ export class TeamPrincipalClient {
   private readonly teamRecallEndpoint: string;
   private readonly teamContextQueryEndpoint: string;
   private readonly teamResumeEndpoint: string;
+  private readonly teamStatusEndpoint: string;
+  private readonly teamInspectEndpoint: string;
+  private readonly teamAuditEndpoint: string;
   private readonly teamDeleteEndpoint: string;
   private readonly teamDeleteStatusEndpoint: string;
   private readonly signer: PrincipalSigner;
@@ -324,6 +359,9 @@ export class TeamPrincipalClient {
     this.teamRecallEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_RECALL_PATH);
     this.teamContextQueryEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_CONTEXT_QUERY_PATH);
     this.teamResumeEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_RESUME_PATH);
+    this.teamStatusEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_STATUS_PATH);
+    this.teamInspectEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_INSPECT_PATH);
+    this.teamAuditEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_AUDIT_PATH);
     this.teamDeleteEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_DELETE_PATH);
     this.teamDeleteStatusEndpoint = teamDaemonEndpoint(options.daemonBaseURL, TEAM_DELETE_STATUS_PATH);
     this.signer = options.signer;
@@ -344,7 +382,8 @@ export class TeamPrincipalClient {
       context.store_id !== this.signer.storeId || context.team_id !== this.signer.teamId ||
       JSON.stringify(sortedCapabilities(context.capabilities)) !== JSON.stringify(capabilities) ||
       !capabilities.includes('pulse:connect') ||
-      (!capabilities.includes('pulse:write') && !capabilities.includes('pulse:read') &&
+      (!capabilities.includes('pulse:status') && !capabilities.includes('pulse:write') &&
+        !capabilities.includes('pulse:read') && !capabilities.includes('pulse:audit') &&
         !capabilities.includes('pulse:delete'))
     ) {
       throw new TeamDomainError('invalid_principal');
@@ -357,11 +396,14 @@ export class TeamPrincipalClient {
     });
     const requestId = requireOpaqueValue(context.request_id, 'request ID');
     return Object.freeze({
+      status: (input: unknown) => this.status(boundIdentity, requestId, context, input),
       remember: (input: unknown) => this.remember(boundIdentity, requestId, input),
       graphDelta: (input: unknown) => this.graphDelta(boundIdentity, requestId, input),
       recall: (input: unknown) => this.recall(boundIdentity, requestId, input),
       contextQuery: (input: unknown) => this.contextQuery(boundIdentity, requestId, input),
       resume: (input: unknown) => this.resume(boundIdentity, requestId, input),
+      inspect: (input: unknown) => this.inspect(boundIdentity, requestId, input),
+      audit: (input: unknown) => this.audit(boundIdentity, requestId, context, input),
       delete: (input: unknown) => this.delete(boundIdentity, requestId, input),
       deleteStatus: (input: unknown) => this.deleteStatus(boundIdentity, requestId, input),
     });
@@ -608,6 +650,20 @@ export class TeamPrincipalClient {
     }
   }
 
+  private async status(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    context: Readonly<TeamPrincipalContext>,
+    input: unknown,
+  ): Promise<TeamStatusResult> {
+    const body = canonicalTeamStatusBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_STATUS_PATH, this.teamStatusEndpoint,
+      body.text, body.bytes, 'pulse:status', 'status', 64 * 1024,
+      (value) => validateTeamStatusResult(value, context, body.value.active_context),
+    );
+  }
+
   private async recall(
     identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
     requestId: string,
@@ -649,6 +705,35 @@ export class TeamPrincipalClient {
     );
   }
 
+  private async inspect(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    input: unknown,
+  ): Promise<TeamInspectResult> {
+    const body = canonicalTeamInspectBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_INSPECT_PATH, this.teamInspectEndpoint,
+      body.text, body.bytes, 'pulse:read', 'inspect', 64 * 1024,
+      (value) => validateTeamInspectResult(value, body.value.object_id),
+    );
+  }
+
+  private async audit(
+    identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
+    requestId: string,
+    context: Readonly<TeamPrincipalContext>,
+    input: unknown,
+  ): Promise<TeamAuditResult> {
+    const body = canonicalTeamAuditBody(input);
+    return this.domainRequest(
+      identity, requestId, TEAM_AUDIT_PATH, this.teamAuditEndpoint,
+      body.text, body.bytes, 'pulse:audit', 'audit', 256 * 1024,
+      (value) => validateTeamAuditResult(
+        value, context.principal_id, body.value.limit, context.team_id,
+      ),
+    );
+  }
+
   private async delete(
     identity: Readonly<Omit<VerifiedOAuthIdentity, 'capabilities'> & { capabilities: readonly TeamCapability[] }>,
     requestId: string,
@@ -682,8 +767,8 @@ export class TeamPrincipalClient {
     endpoint: string,
     bodyText: string,
     bodyBytes: Buffer,
-    requiredCapability: 'pulse:read' | 'pulse:delete',
-    operation: 'recall' | 'context' | 'resume' | 'delete' | 'delete_status',
+    requiredCapability: 'pulse:status' | 'pulse:read' | 'pulse:audit' | 'pulse:delete',
+    operation: 'status' | 'recall' | 'context' | 'resume' | 'inspect' | 'audit' | 'delete' | 'delete_status',
     maximumResponseBytes: number,
     validate: (value: unknown) => T,
   ): Promise<T> {
@@ -776,6 +861,42 @@ export class PrincipalSigner {
       throw new Error('principal assertion request binding is invalid');
     }
     return this.signPrincipalRequest(input);
+  }
+
+  async signOwnerStepUp(input: OwnerStepUpSignInput): Promise<string> {
+    const now = this.now();
+    if (
+      input.path !== '/team/v1/owner/approval' ||
+      !['team.bootstrap', 'team.activation.synthetic'].includes(input.action) ||
+      !Number.isInteger(input.authTime) || input.authTime <= 0 || input.authTime > now ||
+      now - input.authTime > 300
+    ) {
+      throw new Error('owner step-up assertion binding is invalid');
+    }
+    return new SignJWT({
+      version: OWNER_STEP_UP_ASSERTION_VERSION,
+      request_id: requireOpaqueValue(input.requestId, 'request ID'),
+      method: 'POST',
+      path: input.path,
+      action: input.action,
+      body_sha256: createHash('sha256').update(input.body).digest('hex'),
+      store_id: requireOpaqueValue(input.storeId, 'store ID'),
+      team_id: requireOpaqueValue(input.teamId, 'team ID'),
+      oauth_issuer: requireBoundedIdentity(input.oauthIssuer),
+      oauth_subject: requireBoundedIdentity(input.oauthSubject),
+      oauth_client_id: requireBoundedIdentity(input.oauthClientId),
+      auth_time: input.authTime,
+    })
+      .setProtectedHeader({
+        alg: 'EdDSA', kid: this.keyId, typ: OWNER_STEP_UP_ASSERTION_VERSION,
+      })
+      .setIssuer(PRINCIPAL_ASSERTION_ISSUER)
+      .setAudience(PRINCIPAL_ASSERTION_AUDIENCE)
+      .setIssuedAt(now)
+      .setNotBefore(now - 1)
+      .setExpirationTime(now + 30)
+      .setJti(this.randomId())
+      .sign(this.privateKey);
   }
 
   private async signPrincipalRequest(input: PrincipalCheckInput): Promise<string> {
@@ -955,7 +1076,8 @@ function isJSONResponse(response: Response): boolean {
 function exactTeamDomainError(
   status: number,
   value: unknown,
-  operation: 'memory' | 'graph_delta' | 'recall' | 'context' | 'resume' | 'delete' | 'delete_status',
+  operation: 'memory' | 'graph_delta' | 'status' | 'recall' | 'context' | 'resume' |
+    'inspect' | 'audit' | 'delete' | 'delete_status',
 ): TeamDomainErrorCode | undefined {
   if (!isExactRecord(value, ['error', 'fallback']) || value.fallback !== false || typeof value.error !== 'string') {
     return undefined;
@@ -963,20 +1085,29 @@ function exactTeamDomainError(
   const invalidByOperation: Record<typeof operation, TeamDomainErrorCode> = {
     memory: 'invalid_team_memory',
     graph_delta: 'invalid_team_graph_delta',
+    status: 'invalid_team_status',
     recall: 'invalid_team_recall',
     context: 'invalid_team_context',
     resume: 'invalid_team_resume',
+    inspect: 'invalid_team_inspect',
+    audit: 'invalid_team_audit',
     delete: 'invalid_team_delete',
     delete_status: 'invalid_team_delete_status',
   };
   const concealedOperation = operation === 'recall' || operation === 'context' ||
-    operation === 'resume' || operation === 'delete' || operation === 'delete_status';
+    operation === 'resume' || operation === 'inspect' || operation === 'delete' ||
+    operation === 'delete_status';
   const allowed: Partial<Record<number, readonly TeamDomainErrorCode[]>> = {
     400: [invalidByOperation[operation]],
     401: ['invalid_principal', 'principal_request_mismatch', 'principal_replay'],
     403: ['principal_revoked', 'policy_denied'],
-    404: [concealedOperation ? 'concealed_not_found' : 'not_found'],
-    409: operation === 'delete_status'
+    404: concealedOperation
+      ? ['concealed_not_found']
+      : operation === 'memory' || operation === 'graph_delta'
+        ? ['not_found']
+        : [],
+    409: operation === 'delete_status' || operation === 'status' || operation === 'inspect' ||
+      operation === 'audit'
       ? ['authorization_stale']
       : [
           'idempotency_conflict', 'idempotency_in_progress',
@@ -1120,6 +1251,6 @@ function deepFreeze<T>(value: T): Readonly<T> {
 
 function sameOAuthIdentity(left: VerifiedOAuthIdentity, right: VerifiedOAuthIdentity): boolean {
   return left.issuer === right.issuer && left.subject === right.subject &&
-    left.clientId === right.clientId &&
+    left.clientId === right.clientId && left.authTime === right.authTime &&
     JSON.stringify(left.capabilities) === JSON.stringify(right.capabilities);
 }

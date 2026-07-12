@@ -806,9 +806,11 @@ export function createPulseMcpServer(
           throw new Error('Unknown team tool');
         }
         if (
-          name === 'pulse_team_remember' || name === 'pulse_team_graph_delta' ||
+          name === 'pulse_team_status' || name === 'pulse_team_remember' ||
+          name === 'pulse_team_graph_delta' ||
           name === 'pulse_team_recall' || name === 'pulse_team_context_query' ||
-          name === 'pulse_team_resume' || name === 'pulse_team_delete' ||
+          name === 'pulse_team_resume' || name === 'pulse_team_inspect' ||
+          name === 'pulse_team_audit' || name === 'pulse_team_delete' ||
           name === 'pulse_team_delete_status'
         ) {
           const methodClass: 'read' | 'write' | 'delete' = name === 'pulse_team_delete'
@@ -824,11 +826,14 @@ export function createPulseMcpServer(
           }
           try {
             let result: unknown;
-            if (name === 'pulse_team_remember') result = await teamDomain.remember(args);
+            if (name === 'pulse_team_status') result = await teamDomain.status(args);
+            else if (name === 'pulse_team_remember') result = await teamDomain.remember(args);
             else if (name === 'pulse_team_graph_delta') result = await teamDomain.graphDelta(args);
             else if (name === 'pulse_team_recall') result = await teamDomain.recall(args);
             else if (name === 'pulse_team_context_query') result = await teamDomain.contextQuery(args);
             else if (name === 'pulse_team_resume') result = await teamDomain.resume(args);
+            else if (name === 'pulse_team_inspect') result = await teamDomain.inspect(args);
+            else if (name === 'pulse_team_audit') result = await teamDomain.audit(args);
             else if (name === 'pulse_team_delete') result = await teamDomain.delete(args);
             else result = await teamDomain.deleteStatus(args);
             return jsonText(result);
@@ -1136,6 +1141,79 @@ async function startHttpMode(): Promise<void> {
       persistOAuth();
       return;
     }
+    if (teamSecurity && teamSecurity.isOwnerPublicPath(path)) {
+      if (
+        requestURL.search !== '' ||
+        !teamSecurity.isExactOwnerBrowserRequest({
+          origin: requestOrigin,
+          host: singleHeader(req.headers.host),
+          publicBaseURL,
+          allowedOrigins: teamAllowedOrigins,
+        })
+      ) {
+        writeJSON(res, { error: 'owner_request_denied', fallback: false }, 403);
+        return;
+      }
+      writeOwnerCors(res, requestOrigin);
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (req.method !== 'POST') {
+        writeJSON(res, { error: 'method_not_allowed', fallback: false }, 405);
+        return;
+      }
+      if (teamRequestsInFlight >= 64) {
+        writeJSON(res, { error: 'owner_service_unavailable', fallback: false }, 503);
+        return;
+      }
+      teamRequestsInFlight++;
+      try {
+        if (
+          hasDuplicateHeader(req, 'authorization') || hasDuplicateHeader(req, 'content-type') ||
+          hasDuplicateHeader(req, 'content-encoding') || hasDuplicateHeader(req, 'content-length') ||
+          hasDuplicateHeader(req, 'transfer-encoding') ||
+          singleHeader(req.headers['transfer-encoding']) !== ''
+        ) {
+          throw new teamSecurity.OAuthError('invalid_token');
+        }
+        const identity = await teamSecurity.verifier.verifyAuthorization(
+          req.headers.authorization, ['pulse:owner'],
+        );
+        teamSecurity.ownerGateway.verifyRecentStepUp(identity);
+        const contentEncoding = singleHeader(req.headers['content-encoding']);
+        if (contentEncoding !== '' && contentEncoding.toLowerCase() !== 'identity') {
+          writeJSON(res, { error: 'content_encoding_not_supported', fallback: false }, 415);
+          return;
+        }
+        if (
+          singleHeader(req.headers['content-type']).split(';', 1)[0]?.trim().toLowerCase() !==
+          'application/json'
+        ) {
+          writeJSON(res, { error: 'content_type_not_supported', fallback: false }, 415);
+          return;
+        }
+        const body = await readRequestJSON(req, 64 * 1024);
+        const result = await teamSecurity.ownerGateway.call(path, identity, requestId, body);
+        writeJSON(res, result);
+      } catch (error) {
+        if (teamSecurity.isOAuthError(error)) {
+          writeTeamOAuthChallenge(res, publicBaseURL, error);
+        } else if (teamSecurity.isOwnerGatewayError(error)) {
+          writeJSON(res, { error: error.code, fallback: false }, error.status);
+        } else if (error instanceof RequestBodyTooLargeError) {
+          writeJSON(res, { error: 'invalid_owner_request', fallback: false }, 413);
+        } else if (error instanceof SyntaxError) {
+          writeJSON(res, { error: 'invalid_owner_request', fallback: false }, 400);
+        } else {
+          writeJSON(res, { error: 'owner_service_unavailable', fallback: false }, 503);
+        }
+      } finally {
+        teamRequestsInFlight--;
+      }
+      return;
+    }
     if (path !== '/mcp' || (teamSecurity && requestURL.search !== '')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
@@ -1202,7 +1280,7 @@ async function startHttpMode(): Promise<void> {
             body: parsedBody,
             requestId,
           });
-          if (required.includes('pulse:write') || required.includes('pulse:read')) {
+          if (required.some((capability) => capability !== 'pulse:connect')) {
             teamDomain = teamSecurity.principalClient.bindDomain(identity, teamContext);
           }
         } else {
@@ -1481,10 +1559,16 @@ function methodClassForCapabilities(capabilities: readonly string[]): 'read' | '
 }
 
 async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string) {
-  const [{ OAuthResourceError, OAuthResourceVerifier, protectedResourceMetadata: teamMetadata }, principal, contracts] = await Promise.all([
+  const [
+    { OAuthResourceError, OAuthResourceVerifier, protectedResourceMetadata: teamMetadata },
+    principal,
+    contracts,
+    owner,
+  ] = await Promise.all([
     import('./oauth-resource.js'),
     import('./principal-context.js'),
     import('./team-contracts.js'),
+    import('./owner-approval.js'),
   ]);
   const required = (name: string): string => {
     const value = process.env[name] ?? '';
@@ -1512,11 +1596,24 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
       apiKey: resolveApiKey,
     });
   const securityReporter = new principal.BoundedSecurityEventReporter(principalClient);
+  const ownerGateway = new owner.OwnerApprovalGateway({
+    daemonBaseURL: PULSE_BASE_URL,
+    signer,
+    apiKey: resolveApiKey,
+    maxStepUpAgeSeconds: parseBoundedEnvInt(
+      'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
+    ),
+  });
   return {
     verifier,
     principalClient,
     securityReporter,
     requestSecurity: new principal.TeamRequestSecurity({ verifier, principalClient }),
+    ownerGateway,
+    isOwnerPublicPath: owner.isOwnerPublicPath,
+    isExactOwnerBrowserRequest: owner.isExactOwnerBrowserRequest,
+    isOwnerGatewayError: (error: unknown): error is InstanceType<typeof owner.OwnerGatewayError> =>
+      error instanceof owner.OwnerGatewayError,
     requiredCapabilities: contracts.requiredTeamCapabilities,
     metadata: teamMetadata(resource, authIssuer),
     isOAuthError: (error: unknown): error is InstanceType<typeof OAuthResourceError> =>
@@ -1553,6 +1650,13 @@ function writeTeamCors(res: ServerResponse, origin: string): void {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
   res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+}
+
+function writeOwnerCors(res: ServerResponse, origin: string): void {
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 }
 
 function singleHeader(value: string | string[] | undefined): string {
@@ -1974,8 +2078,15 @@ const invokedAsEntrypoint = (() => {
   }
 })();
 
+// The published CLI imports the prebuilt MCP module instead of duplicating
+// its startup logic. Keep one explicit callable entrypoint while preserving
+// direct `node dist/index.js` execution.
+export async function runMcpEntrypoint(): Promise<void> {
+  await main();
+}
+
 if (invokedAsEntrypoint) {
-  main().catch((err) => {
+  runMcpEntrypoint().catch((err) => {
     // eslint-disable-next-line no-console
     console.error('[pulse-mcp] fatal:', err);
     process.exit(1);

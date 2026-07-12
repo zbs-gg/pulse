@@ -140,6 +140,7 @@ test('publishes exact protected-resource metadata and validates a strict access 
       'pulse:write',
       'pulse:audit',
       'pulse:delete',
+      'pulse:owner',
     ],
   });
 
@@ -158,6 +159,32 @@ test('publishes exact protected-resource metadata and validates a strict access 
     `${ISSUER}/.well-known/oauth-authorization-server`,
     `${ISSUER}/jwks`,
   ]);
+});
+
+test('preserves externally verified auth_time only for recent Owner enforcement', async () => {
+  const f = await fixture();
+  const identity = await f.verifier.verifyAuthorization(
+    `Bearer ${await f.token({
+      scope: 'pulse:connect pulse:owner',
+      auth_time: NOW - 60,
+      client_id: 'owner-browser-client',
+    })}`,
+    ['pulse:owner'],
+  );
+  assert.deepEqual(identity, {
+    issuer: ISSUER,
+    subject: 'human-subject-1',
+    clientId: 'owner-browser-client',
+    capabilities: ['pulse:connect', 'pulse:owner'],
+    authTime: NOW - 60,
+  });
+  await assert.rejects(
+    f.verifier.verifyAuthorization(
+      `Bearer ${await f.token({ scope: 'pulse:connect pulse:owner', auth_time: 'recent' })}`,
+      ['pulse:owner'],
+    ),
+    OAuthResourceError,
+  );
 });
 
 test('rejects malformed RFC9068-style claims, headers, lifetime, and exact audience violations', async (t) => {

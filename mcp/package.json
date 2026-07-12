@@ -26,6 +26,7 @@
     "dev": "tsx src/index.ts",
     "smoke:claude-connector": "node scripts/claude-connector-smoke.mjs",
     "smoke:standalone-negative": "node scripts/standalone-negative-smoke.mjs",
+    "smoke:team-remote-negative": "node scripts/team-remote-negative-smoke.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
