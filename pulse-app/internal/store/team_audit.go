@@ -12,8 +12,12 @@ import (
 var ErrTeamAuditInvalid = errors.New("team_audit_invalid")
 
 const (
-	teamObjectWriteAction  = "team.object.write"
-	teamObjectStoredReason = "object_stored"
+	teamObjectWriteAction          = "team.object.write"
+	teamObjectStoredReason         = "object_stored"
+	teamObjectDeleteStartAction    = "team.object.delete.start"
+	teamObjectDeleteStartedReason  = "deletion_started"
+	teamObjectDeleteCompleteAction = "team.object.delete.complete"
+	teamObjectDeleteCompleteReason = "deletion_complete"
 )
 
 // teamDomainAuditEvent is intentionally a closed, metadata-free shape. Domain
@@ -66,13 +70,24 @@ func appendTeamDomainAudit(ctx context.Context, tx *sql.Tx, event teamDomainAudi
 }
 
 func validTeamDomainAuditEvent(event teamDomainAuditEvent) bool {
-	if event.Action != teamObjectWriteAction || event.ReasonCode != teamObjectStoredReason {
+	validPair := (event.Action == teamObjectWriteAction && event.ReasonCode == teamObjectStoredReason) ||
+		(event.Action == teamObjectDeleteStartAction && event.ReasonCode == teamObjectDeleteStartedReason) ||
+		(event.Action == teamObjectDeleteCompleteAction && event.ReasonCode == teamObjectDeleteCompleteReason)
+	if !validPair {
 		return false
 	}
+	validClient := lowerHexDigest(event.OAuthClientKey)
+	if event.Action == teamObjectDeleteStartAction || event.Action == teamObjectDeleteCompleteAction {
+		validClient = event.OAuthClientKey == "" || validClient
+	}
+	validPolicyVersion := event.PolicyVersion == teamauth.PolicyVersion
+	if event.Action == teamObjectDeleteCompleteAction {
+		validPolicyVersion = event.PolicyVersion > 0 && event.PolicyVersion <= teamauth.PolicyVersion
+	}
 	return validTeamOpaque(event.StoreID, 1, 255) && validTeamOpaque(event.TeamID, 1, 255) &&
-		validTeamOpaque(event.ActorPrincipal, 1, 255) && lowerHexDigest(event.OAuthClientKey) &&
+		validTeamOpaque(event.ActorPrincipal, 1, 255) && validClient &&
 		validTeamOpaque(event.RequestID, 8, 64) && validTeamClass(event.TargetKind, 64) &&
 		validTeamOpaque(event.TargetID, 1, 255) &&
 		(event.ProjectID == "" || validTeamOpaque(event.ProjectID, 1, 255)) &&
-		event.PolicyVersion == teamauth.PolicyVersion && event.AuthorizationAt > 0 && !event.OccurredAt.IsZero()
+		validPolicyVersion && event.AuthorizationAt > 0 && !event.OccurredAt.IsZero()
 }

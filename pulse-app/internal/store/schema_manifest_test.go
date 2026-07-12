@@ -15,14 +15,15 @@ import (
 const frozenMigration034SHA256 = "fea59490f3117b2cd828aad7ca3c3f2930cc08bbd5cdc21c0414e703ba025822"
 const frozenMigration035SHA256 = "4e474c2c7f015b8263681df457e8b5cdfdd7107af4aef10c97a788b1cdc67076"
 const frozenMigration036SHA256 = "d5e574db7f1748f1a5f9518cb68fc7a5c5f0d06e6af9540ebbfb4233e6243b4a"
+const frozenMigration037SHA256 = "36f9130df47e262700e62344e1f8ab3552d8a1ae046791db77d17999e20d8249"
 
 func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if got := migrations[len(migrations)-1].Version; got != 37 {
-		t.Fatalf("latest migration = %d, want 37", got)
+	if got := migrations[len(migrations)-1].Version; got != 38 {
+		t.Fatalf("latest migration = %d, want 38", got)
 	}
 	for i, migration := range migrations {
 		if migration.Version != i+1 {
@@ -53,13 +54,13 @@ func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 	}
 }
 
-func TestMigrations035And036UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *testing.T) {
+func TestMigrations035Through038UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *testing.T) {
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 37 {
-		t.Fatalf("migration count = %d, want 37", len(migrations))
+	if len(migrations) != 38 {
+		t.Fatalf("migration count = %d, want 38", len(migrations))
 	}
 	if migrations[33].Name != "034_team_object_policy.sql" ||
 		migrations[33].SHA256 != frozenMigration034SHA256 ||
@@ -67,8 +68,10 @@ func TestMigrations035And036UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *
 		migrations[34].SHA256 != frozenMigration035SHA256 ||
 		migrations[35].Name != "036_team_graph_delta.sql" ||
 		migrations[35].SHA256 != frozenMigration036SHA256 ||
-		migrations[36].Name != "037_team_semantic_materializations.sql" {
-		t.Fatalf("frozen migration boundary changed: v34=%+v v35=%+v v36=%+v", migrations[33], migrations[34], migrations[35])
+		migrations[36].Name != "037_team_semantic_materializations.sql" ||
+		migrations[36].SHA256 != frozenMigration037SHA256 ||
+		migrations[37].Name != "038_team_deletion.sql" {
+		t.Fatalf("frozen migration boundary changed: v34=%+v v35=%+v v36=%+v v37=%+v", migrations[33], migrations[34], migrations[35], migrations[36])
 	}
 
 	path := filepath.Join(t.TempDir(), "team-v34.db")
@@ -155,8 +158,8 @@ func TestMigrations035And036UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 37 || minReader != 37 || minWriter != 37 || manifestRows != 37 {
-		t.Fatalf("v37 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
+	if schemaVersion != 38 || minReader != 38 || minWriter != 38 || manifestRows != 38 {
+		t.Fatalf("v38 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
 		"team_memory_capsules", "team_memory_events", "team_memory_embeddings",
@@ -164,6 +167,7 @@ func TestMigrations035And036UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *
 		"team_semantic_materializations", "team_graph_materializations",
 		"team_assertion_materializations", "team_continuity_materializations",
 		"team_semantic_embeddings",
+		"team_deletion_operations", "team_deletion_frontier", "team_deletion_discharges",
 	} {
 		var exists int
 		if err := upgraded.DB().QueryRow(`
@@ -171,22 +175,24 @@ func TestMigrations035And036UpgradeFrozenV34TeamStoreWithoutFingerprintDrift(t *
 			t.Fatal(err)
 		}
 		if exists != 1 {
-			t.Fatalf("v37 upgrade missing %s", table)
+			t.Fatalf("v38 upgrade missing %s", table)
 		}
 	}
 }
 
-func TestMigration036UpgradesFrozenV35TeamStoreWithoutFingerprintDrift(t *testing.T) {
+func TestMigrations036Through038UpgradeFrozenV35TeamStoreWithoutFingerprintDrift(t *testing.T) {
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 37 || migrations[34].Name != "035_team_memory.sql" ||
+	if len(migrations) != 38 || migrations[34].Name != "035_team_memory.sql" ||
 		migrations[34].SHA256 != frozenMigration035SHA256 ||
 		migrations[35].Name != "036_team_graph_delta.sql" ||
 		migrations[35].SHA256 != frozenMigration036SHA256 ||
-		migrations[36].Name != "037_team_semantic_materializations.sql" {
-		t.Fatalf("frozen v35 boundary changed: v35=%+v v36=%+v", migrations[34], migrations[35])
+		migrations[36].Name != "037_team_semantic_materializations.sql" ||
+		migrations[36].SHA256 != frozenMigration037SHA256 ||
+		migrations[37].Name != "038_team_deletion.sql" {
+		t.Fatalf("frozen v35 boundary changed: v35=%+v v36=%+v v37=%+v", migrations[34], migrations[35], migrations[36])
 	}
 
 	path := filepath.Join(t.TempDir(), "team-v35.db")
@@ -273,14 +279,15 @@ func TestMigration036UpgradesFrozenV35TeamStoreWithoutFingerprintDrift(t *testin
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 37 || minReader != 37 || minWriter != 37 || manifestRows != 37 {
-		t.Fatalf("v37 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
+	if schemaVersion != 38 || minReader != 38 || minWriter != 38 || manifestRows != 38 {
+		t.Fatalf("v38 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
 		"team_graph_delta_inputs", "team_semantic_projection_intents",
 		"team_semantic_materializations", "team_graph_materializations",
 		"team_assertion_materializations", "team_continuity_materializations",
 		"team_semantic_embeddings",
+		"team_deletion_operations", "team_deletion_frontier", "team_deletion_discharges",
 	} {
 		var exists int
 		if err := upgraded.DB().QueryRow(`
@@ -288,7 +295,117 @@ func TestMigration036UpgradesFrozenV35TeamStoreWithoutFingerprintDrift(t *testin
 			t.Fatal(err)
 		}
 		if exists != 1 {
-			t.Fatalf("v37 upgrade missing %s", table)
+			t.Fatalf("v38 upgrade missing %s", table)
+		}
+	}
+}
+
+func TestMigration038UpgradesFrozenV37TeamStoreWithoutFingerprintDrift(t *testing.T) {
+	migrations, err := loadMigrationSet(migrationsFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != 38 || migrations[36].Name != "037_team_semantic_materializations.sql" ||
+		migrations[36].SHA256 != frozenMigration037SHA256 ||
+		migrations[37].Name != "038_team_deletion.sql" {
+		t.Fatalf("frozen v37 boundary changed: v37=%+v v38=%+v", migrations[36], migrations[37])
+	}
+
+	path := filepath.Join(t.TempDir(), "team-v37.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_meta (version INTEGER PRIMARY KEY, applied TEXT NOT NULL)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:37] {
+		if _, err := db.Exec(migration.SQL); err != nil {
+			db.Close()
+			t.Fatalf("apply v37 fixture migration %d: %v", migration.Version, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_meta(version, applied) VALUES (?, 'v37-fixture')`, migration.Version); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if migration.Version == 33 {
+			for _, fingerprinted := range migrations[:33] {
+				if _, err := db.Exec(`
+					INSERT INTO schema_migration_manifest(version, name, sha256, applied_at)
+					VALUES (?, ?, ?, 'v37-fixture')`,
+					fingerprinted.Version, fingerprinted.Name, fingerprinted.SHA256); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			}
+		}
+		if migration.Version >= 34 {
+			if _, err := db.Exec(`
+				INSERT INTO schema_migration_manifest(version, name, sha256, applied_at)
+				VALUES (?, ?, ?, 'v37-fixture')`, migration.Version, migration.Name, migration.SHA256); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+		}
+	}
+
+	root := testBootstrapRoot()
+	rootFingerprint, err := root.Fingerprint()
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO team_stores(
+			singleton, store_id, team_id, team_name, min_reader_version,
+			min_writer_version, durability_profile, auth_epoch,
+			bootstrap_root_fingerprint, bootstrap_consumed_at, created_at)
+		VALUES (1, 'store-v37', 'team-v37', 'Frozen v37 fixture', 37, 37,
+			'wal-full-fk', 1, ?, 'v37-fixture', 'v37-fixture')`, rootFingerprint); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	var before int
+	if err := db.QueryRow(`SELECT schema_version FROM team_policy_metadata`).Scan(&before); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if before != 37 {
+		db.Close()
+		t.Fatalf("v37 fixture policy schema = %d, want 37", before)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := OpenTeam(path, reviewTeamOptions(root))
+	if err != nil {
+		t.Fatalf("open frozen v37 team store: %v", err)
+	}
+	defer upgraded.Close()
+
+	var schemaVersion, minReader, minWriter, manifestRows int
+	if err := upgraded.DB().QueryRow(`SELECT schema_version FROM team_policy_metadata`).Scan(&schemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB().QueryRow(`SELECT min_reader_version, min_writer_version FROM team_stores`).Scan(&minReader, &minWriter); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
+		t.Fatal(err)
+	}
+	if schemaVersion != 38 || minReader != 38 || minWriter != 38 || manifestRows != 38 {
+		t.Fatalf("v38 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
+	}
+	for _, table := range []string{"team_deletion_operations", "team_deletion_frontier", "team_deletion_discharges"} {
+		var exists int
+		if err := upgraded.DB().QueryRow(`
+			SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 1 {
+			t.Fatalf("v38 upgrade missing %s", table)
 		}
 	}
 }

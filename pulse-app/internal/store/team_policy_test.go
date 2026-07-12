@@ -14,16 +14,16 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
-func TestMigrations034Through037InstallTeamObjectAndSemanticSchema(t *testing.T) {
-	if teamauth.SchemaVersion != 37 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 37", teamauth.SchemaVersion)
+func TestMigrations034Through038InstallTeamObjectSemanticAndDeletionSchema(t *testing.T) {
+	if teamauth.SchemaVersion != 38 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 38", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 37 || latest.Name != "037_team_semantic_materializations.sql" {
-		t.Fatalf("latest migration = %+v, want 037_team_semantic_materializations.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 38 || latest.Name != "038_team_deletion.sql" {
+		t.Fatalf("latest migration = %+v, want 038_team_deletion.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
@@ -32,6 +32,9 @@ func TestMigrations034Through037InstallTeamObjectAndSemanticSchema(t *testing.T)
 		"team_assertion_materializations",
 		"team_audit_event_order",
 		"team_continuity_materializations",
+		"team_deletion_discharges",
+		"team_deletion_frontier",
+		"team_deletion_operations",
 		"team_graph_delta_inputs",
 		"team_graph_materializations",
 		"team_idempotency_records",
@@ -56,6 +59,7 @@ func TestMigrations034Through037InstallTeamObjectAndSemanticSchema(t *testing.T)
 			 WHERE type = 'table' AND name IN (
 			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules',
 			'team_memory_embeddings', 'team_memory_events', 'team_graph_delta_inputs',
+			'team_deletion_operations', 'team_deletion_frontier', 'team_deletion_discharges',
 			'team_object_contributions',
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',

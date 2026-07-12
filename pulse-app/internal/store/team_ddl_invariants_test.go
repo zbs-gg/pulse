@@ -14,11 +14,11 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 	}{
 		{
 			name:       "reader floor",
-			regression: `UPDATE team_stores SET min_reader_version = 36 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_reader_version = 38 WHERE singleton = 1`,
 		},
 		{
 			name:       "writer floor",
-			regression: `UPDATE team_stores SET min_writer_version = 36 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_writer_version = 38 WHERE singleton = 1`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -30,7 +30,7 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 			// so only the required monotonic DDL guard can reject it.
 			if _, err := s.DB().Exec(`
 				UPDATE team_stores
-				   SET min_reader_version = 37, min_writer_version = 37
+				   SET min_reader_version = 39, min_writer_version = 39
 				 WHERE singleton = 1`); err != nil {
 				t.Fatalf("raise schema floors: %v", err)
 			}

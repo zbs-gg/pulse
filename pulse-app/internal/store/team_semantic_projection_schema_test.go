@@ -13,12 +13,15 @@ func TestMigration037InstallsScopedSemanticContributionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 37 || migrations[36].Version != 37 ||
+	if len(migrations) != 38 || migrations[36].Version != 37 ||
 		migrations[36].Name != "037_team_semantic_materializations.sql" {
-		t.Fatalf("latest migration = %+v (count %d), want 037_team_semantic_materializations.sql", migrations[len(migrations)-1], len(migrations))
+		t.Fatalf("migration 037 = %+v (count %d), want frozen 037_team_semantic_materializations.sql", migrations[36], len(migrations))
 	}
 	if migrations[35].SHA256 != frozenMigration036SHA256 {
 		t.Fatalf("migration 036 fingerprint = %s, want frozen %s", migrations[35].SHA256, frozenMigration036SHA256)
+	}
+	if migrations[36].SHA256 != frozenMigration037SHA256 {
+		t.Fatalf("migration 037 fingerprint = %s, want frozen %s", migrations[36].SHA256, frozenMigration037SHA256)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
@@ -34,8 +37,8 @@ func TestMigration037InstallsScopedSemanticContributionSchema(t *testing.T) {
 	).Scan(&schemaVersion, &minReaderVersion, &minWriterVersion); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 37 || minReaderVersion != 37 || minWriterVersion != 37 {
-		t.Fatalf("migration 037 floors = schema %d reader %d writer %d", schemaVersion, minReaderVersion, minWriterVersion)
+	if schemaVersion != 38 || minReaderVersion != 38 || minWriterVersion != 38 {
+		t.Fatalf("current floors after frozen migration 037 = schema %d reader %d writer %d", schemaVersion, minReaderVersion, minWriterVersion)
 	}
 
 	wantColumns := map[string][]string{
