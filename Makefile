@@ -9,7 +9,7 @@
 #   make help        # list all targets
 #   make build       # compile the Go server -> pulse-app/bin/pulse
 #   make test        # run Go test suite (pulse-app/)
-#   make verify      # ONE gate: Go build+vet+gofmt+test, then mcp test+build
+#   make verify      # ONE gate: Go, MCP, negative smoke, and CLI checks
 #   make run         # start the server on 127.0.0.1:18789
 #   make lint        # go vet + gofmt check
 #   make clean       # remove build artifacts
@@ -18,6 +18,7 @@ GO            ?= go
 NPM           ?= npm
 APP_DIR       := pulse-app
 MCP_DIR       := mcp
+CLI_DIR       := $(APP_DIR)/cli
 BIN_DIR       := $(APP_DIR)/bin
 PULSE_BIN     := $(BIN_DIR)/pulse
 PULSE_DATA    ?= $(HOME)/.pulse
@@ -25,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -63,7 +64,10 @@ mcp-test: ## Run MCP server TS tests (mcp/)
 mcp-build: ## Build MCP server (mcp/)
 	cd $(MCP_DIR) && $(NPM) run build
 
-verify: ## ONE gate: Go build+vet+gofmt+test (pulse-app/) + mcp test+build; appends ~/.claude/verify-log.jsonl
+cli-test: ## Run published CLI contract tests (pulse-app/cli/)
+	cd $(CLI_DIR) && $(NPM) test
+
+verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
 	@status=pass; \
 	( cd $(APP_DIR) \
 	  && $(GO) build ./... \
@@ -78,9 +82,16 @@ verify: ## ONE gate: Go build+vet+gofmt+test (pulse-app/) + mcp test+build; appe
 	       cd $(MCP_DIR) \
 	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
 	       && $(NPM) test --silent && $(NPM) run --silent build \
-	       && $(NPM) run --silent smoke:standalone-negative; \
+	       && $(NPM) run --silent smoke:standalone-negative \
+	       && $(NPM) run --silent smoke:team-remote-negative; \
 	     else \
 	       echo "$(MCP_DIR)/package.json not found, skipping mcp checks"; \
+	     fi ) \
+	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
+	       cd $(CLI_DIR) \
+	       && $(NPM) test --silent; \
+	     else \
+	       echo "$(CLI_DIR)/package.json not found, skipping CLI checks"; \
 	     fi ) \
 	|| status=fail; \
 	ts=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \

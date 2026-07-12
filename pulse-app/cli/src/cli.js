@@ -17,6 +17,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { buildPulseRequestHeaders } from './remote-auth.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -180,18 +181,15 @@ function readSecretFromDataDir(dataDir, { create = false } = {}) {
 }
 
 async function pulseFetch(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json' };
   const secret = existsSync(SECRET_PATH) ? readSecret() : '';
-  if (secret) {
-    headers['X-Pulse-Key'] = secret;
-  }
   // Remote (hosted) Pulse: send a bearer token. The reverse proxy validates it
   // and injects the daemon's X-Pulse-Key internally, so the daemon secret never
   // leaves the host. Lets the same hooks capture into the hosted store.
   const remoteBearer = process.env.PULSE_REMOTE_BEARER;
-  if (remoteBearer) {
-    headers['Authorization'] = `Bearer ${remoteBearer}`;
-  }
+  const headers = buildPulseRequestHeaders(DEFAULT_BASE_URL, {
+    ipcSecret: secret,
+    remoteBearer,
+  });
   const controller = options.timeoutMs ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
   let response;
@@ -279,8 +277,11 @@ async function runMcpServer() {
     );
     process.exit(1);
   }
-  // The server module starts itself on import and owns stdio from here.
-  await import(pathToFileURL(entrypoint).href);
+  const module = await import(pathToFileURL(entrypoint).href);
+  if (typeof module.runMcpEntrypoint !== 'function') {
+    throw new Error('Pulse MCP server entrypoint is incompatible with this CLI');
+  }
+  await module.runMcpEntrypoint();
 }
 
 function commandOnPath(name) {

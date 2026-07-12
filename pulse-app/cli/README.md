@@ -115,4 +115,13 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
 Docs, agent install script, and source: https://github.com/zbs-gg/pulse
 (see `AGENTS.md` — written for AI agents asked to vet this install).
 
+## Team remote boundary
+
+Team remote is a separate synthetic foundation, not another Local Preview
+install target. The CLI never sends the local `X-Pulse-Key` to a configurable
+remote base; that header is allowed only for an exact loopback host. Real team
+onboarding and the IdP-specific Owner browser UI are not available in the
+public preview package. See
+[`docs/TEAM_REMOTE_PILOT.md`](../../docs/TEAM_REMOTE_PILOT.md).
+
 AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available (`COMMERCIAL.md`).

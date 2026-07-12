@@ -214,6 +214,19 @@ paper/bench, not reproduced in this repository.
   "Pulse MCP fallback is ready. Full retrieval is not enabled." — never
   "Pulse ready".
 
+## Team Remote Foundation
+
+This repository is also developing a separate, fail-closed team-remote mode.
+It uses a dedicated team database, distinct human and agent identities,
+current-request authorization, scoped retrieval, metadata-only audit, and no
+local fallback. It does not turn Local Preview into a shared store.
+
+The current team work is a synthetic-data foundation, not an available cloud
+product or a completed customer pilot. See
+[`docs/TEAM_REMOTE_PILOT.md`](docs/TEAM_REMOTE_PILOT.md) for the exact boundary,
+activation gate, interfaces, and the remaining work before Nikita, Dima, Krisp,
+or any real team content can be connected.
+
 ## Direction: Material Graph
 
 ```text

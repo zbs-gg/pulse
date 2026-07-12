@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { buildPulseRequestHeaders, requireLoopbackPulseIPC } from './remote-auth.js';
 
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -254,6 +255,47 @@ function stopChild(child) {
     child.kill('SIGTERM');
   });
 }
+
+test('remote Pulse requests never carry the loopback IPC secret', () => {
+  assert.deepEqual(
+    buildPulseRequestHeaders('https://pulse.example/team', {
+      ipcSecret: 'ipc-secret',
+      remoteBearer: 'access-token',
+    }),
+    {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer access-token',
+    },
+  );
+  assert.deepEqual(
+    buildPulseRequestHeaders('http://127.0.0.1:18789', {
+      ipcSecret: 'ipc-secret',
+      remoteBearer: '',
+    }),
+    {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': 'ipc-secret',
+    },
+  );
+  assert.equal(
+    Object.hasOwn(
+      buildPulseRequestHeaders('https://127.0.0.1.evil.example', {
+        ipcSecret: 'ipc-secret',
+        remoteBearer: '',
+      }),
+      'X-Pulse-Key',
+    ),
+    false,
+  );
+});
+
+test('IPC administration refuses non-loopback Pulse bases', () => {
+  assert.doesNotThrow(() => requireLoopbackPulseIPC('http://[::1]:18789'));
+  assert.throws(
+    () => requireLoopbackPulseIPC('https://pulse.example'),
+    /loopback/i,
+  );
+});
 
 test('daemon requires explicit Go binary path', () => {
   const { result } = run(['daemon']);

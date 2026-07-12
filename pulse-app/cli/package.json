@@ -10,6 +10,7 @@
   },
   "files": [
     "src/cli.js",
+    "src/remote-auth.js",
     "src/demo-corpus.json",
     "scripts",
     "vendor/pulse-preview-source",

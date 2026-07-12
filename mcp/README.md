@@ -37,3 +37,16 @@ The `@zbs-gg/pulse` package vendors `dist/` at pack time
 HTTP/remote modes (`--http`, bearer/OAuth dev loop) are development
 surfaces for connector experiments — see `docs/developer-preview/` for
 boundaries and safe claims.
+
+## Team remote foundation
+
+The team-remote registry is a separate, fail-closed MCP surface. It advertises
+only versioned `pulse_team_*` tools, resolves the current OAuth principal and
+client binding on every request, and forwards a body-bound signed assertion to
+the loopback Go daemon. It never falls back to the standalone store.
+
+Owner administration is intentionally absent from the MCP registry. Browser
+step-up, membership and grant changes, revocation, shared deletion, and public
+activation use a separate approval surface. This is a synthetic verification
+foundation, not a production connector; see
+[`docs/TEAM_REMOTE_PILOT.md`](../docs/TEAM_REMOTE_PILOT.md).
