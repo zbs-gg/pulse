@@ -12,9 +12,9 @@ func TestMigration038InstallsMetadataOnlyDeletionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 38 || migrations[37].Version != 38 ||
+	if len(migrations) != 39 || migrations[37].Version != 38 ||
 		migrations[37].Name != "038_team_deletion.sql" {
-		t.Fatalf("latest migration = %+v (count %d), want 038_team_deletion.sql", migrations[len(migrations)-1], len(migrations))
+		t.Fatalf("migration 038 = %+v (count %d), want frozen 038_team_deletion.sql", migrations[37], len(migrations))
 	}
 	if migrations[36].SHA256 != frozenMigration037SHA256 {
 		t.Fatalf("migration 037 fingerprint = %s, want frozen %s", migrations[36].SHA256, frozenMigration037SHA256)
@@ -30,6 +30,7 @@ func TestMigration038InstallsMetadataOnlyDeletionSchema(t *testing.T) {
 			"body_digest", "start_audit_event_id", "completion_audit_event_id", "state",
 			"attempt_count", "lease_token_hash", "lease_expires_at", "next_attempt_at",
 			"last_error_code", "started_at", "updated_at", "completed_at",
+			"owner_approval_nonce_hash",
 		},
 		"team_deletion_frontier": {
 			"operation_id", "object_id", "object_generation", "depth", "discovered_at",

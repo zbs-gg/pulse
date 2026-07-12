@@ -13,7 +13,7 @@ func TestMigration037InstallsScopedSemanticContributionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 38 || migrations[36].Version != 37 ||
+	if len(migrations) != 39 || migrations[36].Version != 37 ||
 		migrations[36].Name != "037_team_semantic_materializations.sql" {
 		t.Fatalf("migration 037 = %+v (count %d), want frozen 037_team_semantic_materializations.sql", migrations[36], len(migrations))
 	}
@@ -37,7 +37,7 @@ func TestMigration037InstallsScopedSemanticContributionSchema(t *testing.T) {
 	).Scan(&schemaVersion, &minReaderVersion, &minWriterVersion); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 38 || minReaderVersion != 38 || minWriterVersion != 38 {
+	if schemaVersion != 39 || minReaderVersion != 39 || minWriterVersion != 39 {
 		t.Fatalf("current floors after frozen migration 037 = schema %d reader %d writer %d", schemaVersion, minReaderVersion, minWriterVersion)
 	}
 

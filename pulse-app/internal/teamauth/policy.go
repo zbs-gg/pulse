@@ -14,6 +14,9 @@ const (
 	CapabilityWrite   Capability = "pulse:write"
 	CapabilityAudit   Capability = "pulse:audit"
 	CapabilityDelete  Capability = "pulse:delete"
+	// CapabilityOwner is accepted only by the dedicated browser-step-up Owner
+	// gateway. It is never mapped to an MCP tool or ordinary agent action.
+	CapabilityOwner Capability = "pulse:owner"
 )
 
 type PrincipalKind string

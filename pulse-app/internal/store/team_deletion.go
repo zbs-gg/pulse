@@ -41,6 +41,18 @@ type TeamDeletionStartRequest struct {
 	IdempotencyKey string
 }
 
+// TeamSharedDeletionStartRequest is the out-of-band Owner path for a
+// team-scoped root. Principal/store/team/capabilities are derived inside the
+// transaction from the approval and marked store, never from this request.
+type TeamSharedDeletionStartRequest struct {
+	ApprovalNonce  string
+	ClientKey      string
+	Writer         TeamWriterLeaseIdentity
+	RequestID      string
+	IdempotencyKey string
+	ObjectID       string
+}
+
 type TeamDeletionResult struct {
 	OperationID  string
 	ObjectID     string
@@ -109,11 +121,12 @@ type TeamDeletionCompletionRequest struct {
 }
 
 type normalizedTeamDeletionStart struct {
-	authorization   TeamMutationAuthorizationRequest
-	writer          TeamWriterLeaseIdentity
-	requestID       string
-	idempotencyHash string
-	bodyDigest      string
+	authorization     TeamMutationAuthorizationRequest
+	writer            TeamWriterLeaseIdentity
+	requestID         string
+	idempotencyHash   string
+	bodyDigest        string
+	ownerApprovalHash string
 }
 
 type teamDeletionPrincipalAuthorization struct {
@@ -133,6 +146,7 @@ type teamDeletionOperation struct {
 	RequestID         string
 	BodyDigest        string
 	StartAuditEventID string
+	OwnerApprovalHash string
 	State             string
 	AttemptCount      int
 	LeaseTokenHash    string
@@ -150,7 +164,23 @@ type teamDeletionOperation struct {
 // response-loss retry return the original operation after tombstone without
 // allowing a revoked binding or lost project grant to observe deletion state.
 func (s *Store) StartTeamDeletion(ctx context.Context, request TeamDeletionStartRequest) (TeamDeletionResult, error) {
-	return s.startTeamDeletionWithResponseBoundary(ctx, request, nil)
+	return s.startTeamDeletionWithApprovalBoundary(ctx, request, nil, nil)
+}
+
+func (s *Store) StartTeamDeletionWithApproval(ctx context.Context, request TeamSharedDeletionStartRequest) (TeamDeletionResult, error) {
+	if !validOwnerNonce(request.ApprovalNonce) || !validOwnerClientKey(request.ClientKey) ||
+		!validTeamOpaque(request.Writer.WriterID, 1, 255) ||
+		!validTeamOpaque(request.Writer.Token, 1, 255) ||
+		!validTeamOpaque(request.RequestID, 8, 64) ||
+		!validRawTeamIdempotencyKey(request.IdempotencyKey) ||
+		!validTeamOpaque(request.ObjectID, 1, 255) {
+		return TeamDeletionResult{}, ErrTeamDeletionInvalid
+	}
+	base := TeamDeletionStartRequest{
+		Writer: request.Writer, RequestID: request.RequestID,
+		IdempotencyKey: request.IdempotencyKey,
+	}
+	return s.startTeamDeletionWithApprovalBoundary(ctx, base, nil, &request)
 }
 
 func (s *Store) startTeamDeletionWithResponseBoundary(
@@ -158,15 +188,51 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 	request TeamDeletionStartRequest,
 	beforeResponseRecheck func(),
 ) (TeamDeletionResult, error) {
-	normalized, err := normalizeTeamDeletionStart(request)
-	if err != nil {
-		return TeamDeletionResult{}, err
+	return s.startTeamDeletionWithApprovalBoundary(ctx, request, beforeResponseRecheck, nil)
+}
+
+func (s *Store) startTeamDeletionWithApprovalBoundary(
+	ctx context.Context,
+	request TeamDeletionStartRequest,
+	beforeResponseRecheck func(),
+	approved *TeamSharedDeletionStartRequest,
+) (TeamDeletionResult, error) {
+	var normalized normalizedTeamDeletionStart
+	var err error
+	if approved == nil {
+		normalized, err = normalizeTeamDeletionStart(request)
+		if err != nil {
+			return TeamDeletionResult{}, err
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return TeamDeletionResult{}, err
 	}
 	defer tx.Rollback()
+	var approval ownerApprovalRow
+	if approved != nil {
+		info, infoErr := readTeamStoreInfo(ctx, tx)
+		if infoErr != nil {
+			return TeamDeletionResult{}, infoErr
+		}
+		approvalRequest := sharedDeletionOwnerApprovalRequest(info, *approved)
+		approval, err = s.readBoundSharedDeletionApprovalTx(ctx, tx, info, approvalRequest)
+		if err != nil {
+			return TeamDeletionResult{}, err
+		}
+		request.Authorization = TeamMutationAuthorizationRequest{
+			PrincipalID: approval.OwnerPrincipalID, Action: teamauth.ActionDelete,
+			Capabilities:     []teamauth.Capability{teamauth.CapabilityDelete},
+			Context:          teamauth.ActiveContext{TeamID: info.TeamID},
+			ExistingObjectID: approved.ObjectID,
+		}
+		normalized, err = normalizeTeamDeletionStart(request)
+		if err != nil {
+			return TeamDeletionResult{}, err
+		}
+		normalized.ownerApprovalHash = approval.NonceHash
+	}
 	if err := s.RecheckTeamWriterLeaseTx(ctx, tx, normalized.writer.WriterID, normalized.writer.Token); err != nil {
 		return TeamDeletionResult{}, err
 	}
@@ -186,8 +252,11 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 		return TeamDeletionResult{}, err
 	}
 	if found {
+		if approved != nil && (replayedOperation.OwnerApprovalHash != approval.NonceHash || approval.ConsumedAt == nil) {
+			return TeamDeletionResult{}, ErrOwnerApprovalBindingMismatch
+		}
 		if _, err := authorizeTeamDeletionObject(ctx, tx, principal, normalized.authorization,
-			replayedOperation.RootObjectID, true); err != nil {
+			replayedOperation.RootObjectID, true, approved != nil); err != nil {
 			return TeamDeletionResult{}, concealTeamDeletionAuthorization(err)
 		}
 		if err := s.RecheckTeamWriterLeaseTx(ctx, tx, normalized.writer.WriterID, normalized.writer.Token); err != nil {
@@ -198,7 +267,7 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 		}
 		replayedOperation, err = s.recheckTeamDeletionOperationAccess(
 			ctx, normalized.authorization, replayedOperation.OperationID,
-			normalized.bodyDigest, beforeResponseRecheck)
+			normalized.bodyDigest, beforeResponseRecheck, approved != nil)
 		if err != nil {
 			return TeamDeletionResult{}, err
 		}
@@ -211,9 +280,15 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 	}
 
 	object, err := authorizeTeamDeletionObject(ctx, tx, principal, normalized.authorization,
-		normalized.authorization.ExistingObjectID, false)
+		normalized.authorization.ExistingObjectID, false, approved != nil)
 	if err != nil {
 		return TeamDeletionResult{}, concealTeamDeletionAuthorization(err)
+	}
+	if object.Scope.Type == teamauth.ScopeTeam && approved == nil {
+		return TeamDeletionResult{}, ErrConcealedNotFound
+	}
+	if approved != nil && object.Scope.Type != teamauth.ScopeTeam {
+		return TeamDeletionResult{}, ErrConcealedNotFound
 	}
 	// U7 deletion is a root operation. Deleting a derivative in place would
 	// invalidate a still-active parent's ready projection without rebuilding or
@@ -239,6 +314,17 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 	}
 	now := s.clock().UTC()
 	nowText := now.Format(time.RFC3339Nano)
+	if approved != nil {
+		if approval.ConsumedAt != nil {
+			return TeamDeletionResult{}, ErrOwnerApprovalReplay
+		}
+		if _, err := s.consumeOwnerApprovalTxWithAuditTarget(
+			ctx, tx, principal.info, sharedDeletionOwnerApprovalRequest(principal.info, *approved),
+			object.ObjectKind, object.ObjectID,
+		); err != nil {
+			return TeamDeletionResult{}, err
+		}
+	}
 	projectID := normalized.authorization.Context.ProjectID
 	if projectID == "" && object.Scope.Type == teamauth.ScopeProject {
 		projectID = object.Scope.ID
@@ -278,14 +364,14 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 			actor_principal_id, oauth_client_key, request_id, idempotency_key_hash,
 			body_digest, start_audit_event_id, state, attempt_count,
 			lease_token_hash, lease_expires_at, next_attempt_at, last_error_code,
-			started_at, updated_at, completed_at)
+			started_at, updated_at, completed_at, owner_approval_nonce_hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0,
-		        NULL, NULL, ?, NULL, ?, ?, NULL)`,
+		        NULL, NULL, ?, NULL, ?, ?, NULL, NULLIF(?, ''))`,
 		operationID, principal.info.StoreID, principal.info.TeamID, object.ObjectID,
 		object.Scope.Generation, principal.principal.PrincipalID,
 		normalized.authorization.OAuthClientKey, normalized.requestID,
 		normalized.idempotencyHash, normalized.bodyDigest, startAuditID,
-		nowText, nowText, nowText)
+		nowText, nowText, nowText, normalized.ownerApprovalHash)
 	if err != nil {
 		return TeamDeletionResult{}, err
 	}
@@ -313,7 +399,7 @@ func (s *Store) startTeamDeletionWithResponseBoundary(
 		return TeamDeletionResult{}, err
 	}
 	operation, err := s.recheckTeamDeletionOperationAccess(
-		ctx, normalized.authorization, operationID, normalized.bodyDigest, beforeResponseRecheck)
+		ctx, normalized.authorization, operationID, normalized.bodyDigest, beforeResponseRecheck, approved != nil)
 	if err != nil {
 		return TeamDeletionResult{}, err
 	}
@@ -365,14 +451,14 @@ func (s *Store) readTeamDeletionStatusWithResponseBoundary(
 		return TeamDeletionStatus{}, ErrConcealedNotFound
 	}
 	if _, err := authorizeTeamDeletionObject(ctx, tx, principal, authorization,
-		operation.RootObjectID, true); err != nil {
+		operation.RootObjectID, true, false); err != nil {
 		return TeamDeletionStatus{}, concealTeamDeletionAuthorization(err)
 	}
 	if err := tx.Commit(); err != nil {
 		return TeamDeletionStatus{}, err
 	}
 	operation, err = s.recheckTeamDeletionOperationAccess(
-		ctx, authorization, request.OperationID, "", beforeResponseRecheck)
+		ctx, authorization, request.OperationID, "", beforeResponseRecheck, false)
 	if err != nil {
 		return TeamDeletionStatus{}, err
 	}
@@ -792,6 +878,7 @@ func (s *Store) recheckTeamDeletionOperationAccess(
 	operationID string,
 	expectedBodyDigest string,
 	beforeFinalEpochRecheck func(),
+	ownerApproval bool,
 ) (teamDeletionOperation, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -815,7 +902,7 @@ func (s *Store) recheckTeamDeletionOperationAccess(
 	}
 	authorization.ExistingObjectID = operation.RootObjectID
 	if _, err := authorizeTeamDeletionObject(ctx, tx, principal, authorization,
-		operation.RootObjectID, true); err != nil {
+		operation.RootObjectID, true, ownerApproval); err != nil {
 		return teamDeletionOperation{}, concealTeamDeletionAuthorization(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -932,6 +1019,7 @@ func authorizeTeamDeletionObject(
 	request TeamMutationAuthorizationRequest,
 	objectID string,
 	ignoreLifecycle bool,
+	ownerApproval bool,
 ) (TeamObject, error) {
 	object, err := loadTeamMutationObject(ctx, q, objectID)
 	if err != nil {
@@ -951,6 +1039,7 @@ func authorizeTeamDeletionObject(
 	if err != nil {
 		return TeamObject{}, err
 	}
+	grants.OwnerApproval = ownerApproval
 	decision := teamauth.Authorize(teamauth.AuthorizationRequest{
 		Action: request.Action, Capabilities: request.Capabilities,
 		Actor: principal.actor, Context: request.Context, Target: &target,
@@ -1031,7 +1120,7 @@ func loadTeamDeletionOperationByIdempotency(
 const teamDeletionOperationSelect = `
 	SELECT operation_id, store_id, team_id, root_object_id, root_generation,
 	       actor_principal_id, oauth_client_key, request_id, body_digest,
-		       start_audit_event_id, state, attempt_count,
+		       start_audit_event_id, COALESCE(owner_approval_nonce_hash, ''), state, attempt_count,
 		       COALESCE(lease_token_hash, ''), lease_expires_at, next_attempt_at,
 		       COALESCE(last_error_code, ''), started_at, updated_at, completed_at
 	  FROM team_deletion_operations`
@@ -1044,7 +1133,7 @@ func scanTeamDeletionOperation(row teamObjectScanner) (teamDeletionOperation, er
 		&operation.OperationID, &operation.StoreID, &operation.TeamID,
 		&operation.RootObjectID, &operation.RootGeneration,
 		&operation.ActorPrincipalID, &operation.OAuthClientKey, &operation.RequestID,
-		&operation.BodyDigest, &operation.StartAuditEventID, &operation.State,
+		&operation.BodyDigest, &operation.StartAuditEventID, &operation.OwnerApprovalHash, &operation.State,
 		&operation.AttemptCount, &operation.LeaseTokenHash, &leaseExpires, &nextAttempt,
 		&operation.LastErrorCode, &started, &updated, &completed,
 	); err != nil {

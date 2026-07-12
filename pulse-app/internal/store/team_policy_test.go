@@ -14,16 +14,16 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
-func TestMigrations034Through038InstallTeamObjectSemanticAndDeletionSchema(t *testing.T) {
-	if teamauth.SchemaVersion != 38 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 38", teamauth.SchemaVersion)
+func TestMigrations034Through039InstallTeamObjectSemanticDeletionAndOwnerSchema(t *testing.T) {
+	if teamauth.SchemaVersion != 39 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 39", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 38 || latest.Name != "038_team_deletion.sql" {
-		t.Fatalf("latest migration = %+v, want 038_team_deletion.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 39 || latest.Name != "039_team_owner_activation.sql" {
+		t.Fatalf("latest migration = %+v, want 039_team_owner_activation.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)
@@ -35,6 +35,8 @@ func TestMigrations034Through038InstallTeamObjectSemanticAndDeletionSchema(t *te
 		"team_deletion_discharges",
 		"team_deletion_frontier",
 		"team_deletion_operations",
+		"team_owner_approvals",
+		"team_remote_activation",
 		"team_graph_delta_inputs",
 		"team_graph_materializations",
 		"team_idempotency_records",
@@ -53,6 +55,7 @@ func TestMigrations034Through038InstallTeamObjectSemanticAndDeletionSchema(t *te
 		"team_service_object_grants",
 		"team_writer_leases",
 	}
+	sort.Strings(wantTables)
 	var gotTables []string
 	rows, err := s.DB().Query(`
 		SELECT name FROM sqlite_master
@@ -60,6 +63,7 @@ func TestMigrations034Through038InstallTeamObjectSemanticAndDeletionSchema(t *te
 			'team_audit_event_order', 'team_idempotency_records', 'team_memory_capsules',
 			'team_memory_embeddings', 'team_memory_events', 'team_graph_delta_inputs',
 			'team_deletion_operations', 'team_deletion_frontier', 'team_deletion_discharges',
+			'team_owner_approvals', 'team_remote_activation',
 			'team_object_contributions',
 			'team_object_registry', 'team_object_storage_map',
 			'team_policy_metadata', 'team_projection_jobs',
