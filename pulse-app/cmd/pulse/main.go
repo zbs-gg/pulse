@@ -302,6 +302,13 @@ func runTeam(dataDir, addr string) error {
 	if err != nil {
 		return err
 	}
+	ownerAdminOnly := os.Getenv("PULSE_TEAM_OWNER_ADMIN_ONLY")
+	if ownerAdminOnly != "" && ownerAdminOnly != "1" {
+		return errors.New("PULSE_TEAM_OWNER_ADMIN_ONLY must be unset or 1")
+	}
+	if ownerAdminOnly == "1" {
+		return runTeamOwnerAdmin(cfg, addr)
+	}
 	if cfg.TeamBootstrapRoot == nil || cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" {
 		return errors.New("team-remote requires pinned bootstrap root and expected store identity")
 	}
@@ -311,7 +318,7 @@ func runTeam(dataDir, addr string) error {
 		return err
 	}
 	defer s.Close()
-	if _, err := s.CheckTeamReadiness(context.Background(), store.TeamReadinessOptions{
+	if _, err := s.CheckSyntheticTeamReadiness(context.Background(), store.TeamReadinessOptions{
 		ExpectedStoreID: cfg.ExpectedTeamStoreID,
 		ExpectedTeamID:  cfg.ExpectedTeamID,
 		ReaderVersion:   teamauth.SchemaVersion,
@@ -356,6 +363,19 @@ func runTeam(dataDir, addr string) error {
 	if err != nil {
 		return err
 	}
+	ownerStepUpVerifier, err := server.NewOwnerStepUpVerifier(server.OwnerStepUpVerifierConfig{
+		Store: s, Keyring: keyring, ExpectedRoot: *cfg.TeamBootstrapRoot,
+	})
+	if err != nil {
+		return err
+	}
+	ownerAdminServer, err := server.NewOwnerAdminServer(server.OwnerAdminServerConfig{
+		IPCSecret: cfg.IPCSecret, Store: s, StepUpVerifier: ownerStepUpVerifier,
+		WriterLease: &lease,
+	})
+	if err != nil {
+		return err
+	}
 
 	teamServer, err := server.NewTeam(server.TeamServerConfig{
 		IPCSecret:         cfg.IPCSecret,
@@ -395,7 +415,7 @@ func runTeam(dataDir, addr string) error {
 
 	httpSrv := &http.Server{
 		Addr:              listener.Addr().String(),
-		Handler:           teamServer.Handler(),
+		Handler:           composeTeamRuntimeHandler(teamServer.Handler(), ownerAdminServer.Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -416,6 +436,109 @@ func runTeam(dataDir, addr string) error {
 	})
 	releaseLease = runtimeResult.ReleaseLease
 	return runtimeResult.Err
+}
+
+func runTeamOwnerAdmin(cfg *config.Config, addr string) error {
+	if cfg == nil || cfg.TeamBootstrapRoot == nil {
+		return errors.New("team owner administration requires a pinned bootstrap root")
+	}
+	s, err := store.OpenTeam(cfg.DBPath, store.TeamOpenOptions{ExpectedBootstrapRoot: *cfg.TeamBootstrapRoot})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	keyring, err := server.LoadPrincipalVerifyKeyringFromEnv()
+	if err != nil {
+		return err
+	}
+	stepUpVerifier, err := server.NewOwnerStepUpVerifier(server.OwnerStepUpVerifierConfig{
+		Store: s, Keyring: keyring, ExpectedRoot: *cfg.TeamBootstrapRoot,
+	})
+	if err != nil {
+		return err
+	}
+	identity, err := s.ResolveOwnerStepUpIdentity(context.Background(), *cfg.TeamBootstrapRoot)
+	if err != nil {
+		return err
+	}
+	var lease *store.TeamWriterLease
+	releaseLease := true
+	if !identity.Bootstrap {
+		if cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" ||
+			cfg.ExpectedTeamStoreID != identity.StoreID || cfg.ExpectedTeamID != identity.TeamID {
+			return errors.New("post-bootstrap owner administration requires exact expected store identity")
+		}
+		if _, err := s.CheckTeamReadiness(context.Background(), store.TeamReadinessOptions{
+			ExpectedStoreID: cfg.ExpectedTeamStoreID, ExpectedTeamID: cfg.ExpectedTeamID,
+			ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion,
+		}); err != nil {
+			return fmt.Errorf("team owner store readiness: %w", err)
+		}
+		writerID, err := newTeamWriterID()
+		if err != nil {
+			return errors.New("team owner writer identity unavailable")
+		}
+		acquired, err := s.AcquireTeamWriterLease(context.Background(), store.TeamWriterLeaseRequest{
+			WriterID: writerID, WriterVersion: teamauth.SchemaVersion, TTL: teamWriterLeaseTTL,
+		})
+		if err != nil {
+			return fmt.Errorf("team owner writer lease: %w", err)
+		}
+		lease = &acquired
+		defer func() {
+			if !releaseLease {
+				slog.Warn("team owner writer lease left to expire because request quiescence or ownership was not proven")
+				return
+			}
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.ReleaseTeamWriterLease(releaseCtx, acquired.WriterID, acquired.Token); err != nil {
+				slog.Warn("team owner writer lease release failed")
+			}
+		}()
+	}
+	ownerServer, err := server.NewOwnerAdminServer(server.OwnerAdminServerConfig{
+		IPCSecret: cfg.IPCSecret, Store: s, StepUpVerifier: stepUpVerifier, WriterLease: lease,
+	})
+	if err != nil {
+		return err
+	}
+	listener, err := listenTeamDaemon(addr)
+	if err != nil {
+		return fmt.Errorf("team owner listen: %w", err)
+	}
+	defer listener.Close()
+	httpSrv := &http.Server{
+		Addr: listener.Addr().String(), Handler: ownerServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	renewLease := func(ctx context.Context) error {
+		if lease == nil {
+			<-ctx.Done()
+			return nil
+		}
+		return renewTeamWriterLease(ctx, s, *lease)
+	}
+	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
+		Signals: sigCh, RenewLease: renewLease,
+		ShutdownTimeout: 10 * time.Second, QuiesceTimeout: teamHandlerQuiesceTimeout,
+	})
+	if lease != nil {
+		releaseLease = runtimeResult.ReleaseLease
+	}
+	return runtimeResult.Err
+}
+
+func composeTeamRuntimeHandler(teamHandler, ownerHandler http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/team/v1/owner/", ownerHandler)
+	mux.Handle("/", teamHandler)
+	return mux
 }
 
 type teamWriterLeaseRenewer interface {

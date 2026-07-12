@@ -5,12 +5,40 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/store"
 )
+
+func TestComposeTeamRuntimeHandlerKeepsOwnerAdministrationOnItsOwnRouter(t *testing.T) {
+	team := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Handler", "team")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	owner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Handler", "owner")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := composeTeamRuntimeHandler(team, owner)
+
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: "/team/v1/status", want: "team"},
+		{path: "/team/v1/owner/approval", want: "owner"},
+		{path: "/team/v1/owner/not-registered", want: "owner"},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, test.path, nil))
+		if got := recorder.Header().Get("X-Handler"); got != test.want {
+			t.Fatalf("%s routed to %q, want %q", test.path, got, test.want)
+		}
+	}
+}
 
 func TestListenTeamDaemonBindsAndVerifiesConcreteLoopbackAddress(t *testing.T) {
 	listener, err := listenTeamDaemon("127.0.0.1:0")

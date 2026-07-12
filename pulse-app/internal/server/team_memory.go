@@ -178,7 +178,8 @@ func isExactTeamDomainPath(path string) bool {
 	switch path {
 	case TeamMemoryRememberRoutePath, TeamGraphDeltaRoutePath,
 		TeamRecallRoutePath, TeamContextQueryRoutePath, TeamResumeRoutePath,
-		TeamDeleteRoutePath, TeamDeleteStatusRoutePath:
+		TeamDeleteRoutePath, TeamDeleteStatusRoutePath,
+		TeamStatusRoutePath, TeamInspectRoutePath, TeamAuditRoutePath:
 		return true
 	default:
 		return false

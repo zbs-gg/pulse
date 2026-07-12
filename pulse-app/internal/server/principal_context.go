@@ -614,10 +614,13 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 }
 
 func validCapabilities(capabilities []string) bool {
-	if len(capabilities) == 0 || len(capabilities) > 6 {
+	if len(capabilities) == 0 || len(capabilities) > 7 {
 		return false
 	}
-	allowed := map[string]struct{}{"pulse:connect": {}, "pulse:status": {}, "pulse:read": {}, "pulse:write": {}, "pulse:audit": {}, "pulse:delete": {}}
+	allowed := map[string]struct{}{
+		"pulse:connect": {}, "pulse:status": {}, "pulse:read": {}, "pulse:write": {},
+		"pulse:audit": {}, "pulse:delete": {}, "pulse:owner": {},
+	}
 	if !sort.StringsAreSorted(capabilities) {
 		return false
 	}

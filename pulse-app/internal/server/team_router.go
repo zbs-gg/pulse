@@ -73,7 +73,7 @@ func NewTeam(cfg TeamServerConfig) (*TeamServer, error) {
 	s := &TeamServer{cfg: cfg, securityEventHandler: securityHandler}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := s.CheckReadiness(ctx); err != nil {
+	if _, err := s.checkDaemonReadiness(ctx); err != nil {
 		return nil, fmt.Errorf("team server: readiness: %w", err)
 	}
 	if err := cfg.Store.AuditTeamSemanticIntegrity(ctx); err != nil {
@@ -94,10 +94,27 @@ func validTeamIPCSecret(secret string) bool {
 	return true
 }
 
-// CheckReadiness revalidates marker, identity, schema, durability, policy,
-// unscoped-row, and active-writer invariants against the authoritative store.
+// CheckReadiness is the public team-route gate. Structural daemon readiness
+// is insufficient: the one-way synthetic activation must also be explicitly
+// active before any protected team request can reach a domain handler.
 func (s *TeamServer) CheckReadiness(ctx context.Context) (store.TeamPolicyReadiness, error) {
+	if _, err := s.cfg.Store.CheckSyntheticTeamReadiness(ctx, teamActivationReadinessOptions(s.cfg)); err != nil {
+		return store.TeamPolicyReadiness{}, err
+	}
+	return s.checkDaemonReadiness(ctx)
+}
+
+func (s *TeamServer) checkDaemonReadiness(ctx context.Context) (store.TeamPolicyReadiness, error) {
 	return s.cfg.Store.CheckTeamPolicyReadiness(ctx, teamReadinessOptions(s.cfg))
+}
+
+func teamActivationReadinessOptions(cfg TeamServerConfig) store.TeamReadinessOptions {
+	return store.TeamReadinessOptions{
+		ExpectedStoreID: cfg.ExpectedStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		ReaderVersion:   teamauth.SchemaVersion,
+		WriterVersion:   teamauth.SchemaVersion,
+	}
 }
 
 func teamReadinessOptions(cfg TeamServerConfig) store.TeamPolicyReadinessOptions {
@@ -131,6 +148,9 @@ func (s *TeamServer) Handler() http.Handler {
 		protected.Post(TeamResumeRoutePath, s.handleTeamResume)
 		protected.Post(TeamDeleteRoutePath, s.handleTeamDelete)
 		protected.Post(TeamDeleteStatusRoutePath, s.handleTeamDeleteStatus)
+		protected.Post(TeamStatusRoutePath, s.handleTeamStatus)
+		protected.Post(TeamInspectRoutePath, s.handleTeamInspect)
+		protected.Post(TeamAuditRoutePath, s.handleTeamAudit)
 	})
 	return r
 }

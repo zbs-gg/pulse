@@ -19,6 +19,14 @@ import (
 const testTeamIPCSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func newReadyTeamServer(t *testing.T) (*TeamServer, *principalFixture, store.TeamWriterLease) {
+	return newTeamServerFixture(t, true)
+}
+
+func newInactiveTeamServer(t *testing.T) (*TeamServer, *principalFixture, store.TeamWriterLease) {
+	return newTeamServerFixture(t, false)
+}
+
+func newTeamServerFixture(t *testing.T, activate bool) (*TeamServer, *principalFixture, store.TeamWriterLease) {
 	t.Helper()
 	f := newPrincipalFixture(t)
 	lease, err := f.store.AcquireTeamWriterLease(context.Background(), store.TeamWriterLeaseRequest{
@@ -26,6 +34,9 @@ func newReadyTeamServer(t *testing.T) (*TeamServer, *principalFixture, store.Tea
 	})
 	if err != nil {
 		t.Fatalf("acquire writer lease: %v", err)
+	}
+	if activate {
+		activateSyntheticTeamFixture(t, f, lease)
 	}
 	verifier, err := NewPrincipalVerifier(PrincipalVerifierConfig{
 		Store: f.store,
@@ -47,6 +58,31 @@ func newReadyTeamServer(t *testing.T) (*TeamServer, *principalFixture, store.Tea
 		t.Fatalf("NewTeam: %v", err)
 	}
 	return srv, f, lease
+}
+
+func activateSyntheticTeamFixture(t *testing.T, f *principalFixture, lease store.TeamWriterLease) {
+	t.Helper()
+	gate := strings.Repeat("c", 64)
+	targetDigest := store.SyntheticActivationTargetDigest(f.storeID, f.teamID, gate)
+	challenge, err := f.store.IssueOwnerApproval(context.Background(), store.OwnerApprovalIssueRequest{
+		OwnerPrincipalID: f.ownerID, StoreID: f.storeID, TeamID: f.teamID,
+		ClientKey: teamauth.OAuthClientKey(f.root.Issuer, f.root.AdminClientID),
+		Action:    store.OwnerActionSyntheticActivate, TargetKind: "team_activation", TargetID: f.teamID,
+		TargetDigest: targetDigest, StepUpAt: f.now.Add(-time.Minute), ExpiresAt: f.now.Add(4 * time.Minute),
+		AssertionKID: "fixture-active", AssertionJTI: "fixture-activation-assertion",
+		AssertionExpiresAt: f.now.Add(25 * time.Second),
+		Writer:             store.TeamWriterLeaseIdentity{WriterID: lease.WriterID, Token: lease.Token},
+	})
+	if err != nil {
+		t.Fatalf("issue fixture activation approval: %v", err)
+	}
+	if _, err := f.store.ActivateSyntheticTeamRemote(context.Background(), store.ActivateSyntheticTeamRequest{
+		ApprovalNonce: challenge.Nonce, GateDigest: gate, RequestID: "fixture-activation-request",
+		ClientKey: teamauth.OAuthClientKey(f.root.Issuer, f.root.AdminClientID),
+		Writer:    store.TeamWriterLeaseIdentity{WriterID: lease.WriterID, Token: lease.Token},
+	}); err != nil {
+		t.Fatalf("activate fixture team: %v", err)
+	}
 }
 
 func serveTeamRequest(handler http.Handler, method, path, key, remoteAddr string, body []byte) *httptest.ResponseRecorder {
