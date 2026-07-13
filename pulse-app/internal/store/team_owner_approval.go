@@ -781,29 +781,11 @@ func validOwnerAction(action string) bool {
 }
 
 func validOwnerOpaque(value string, max int) bool {
-	if len(value) == 0 || len(value) > max || strings.TrimSpace(value) != value {
-		return false
-	}
-	for _, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') || strings.ContainsRune("._:-", character) {
-			continue
-		}
-		return false
-	}
-	return true
+	return validTeamOpaque(value, 1, max)
 }
 
 func validHexDigest(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	for _, character := range value {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
+	return lowerHexDigest(value)
 }
 
 func validOwnerNonce(value string) bool { return validHexDigest(value) }

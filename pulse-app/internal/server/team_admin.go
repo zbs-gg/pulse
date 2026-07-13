@@ -2,8 +2,6 @@ package server
 
 import (
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"sort"
 	"time"
@@ -296,7 +294,7 @@ func (s *TeamServer) handleTeamInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metadata, err := s.cfg.Store.InspectAuthorizedTeamObject(r.Context(), store.CandidateFilterRequest{
-		PrincipalID: principal.PrincipalID, Capabilities: principalCapabilities(principal),
+		PrincipalID: principal.PrincipalID, Capabilities: teamPrincipalCapabilities(principal),
 		Context: teamDeletionActiveContext(principal, request.ActiveContext), PrivacyCeiling: "private",
 	}, request.ObjectID)
 	if err != nil {
@@ -466,21 +464,7 @@ func writeTeamAdminStoreError(w http.ResponseWriter, err error, invalidCode stri
 }
 
 func readTeamAdminBody(w http.ResponseWriter, r *http.Request, invalidCode string) ([]byte, bool) {
-	if r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
-		writeTeamAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeTeamAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, teamAdminMaxBodyBytes+1))
-	if err != nil || len(raw) == 0 || len(raw) > teamAdminMaxBodyBytes {
-		writeTeamAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	return raw, true
+	return readTeamJSONBody(w, r, teamAdminMaxBodyBytes, invalidCode)
 }
 
 func teamPrincipalHasCapability(principal PrincipalContext, capability teamauth.Capability) bool {

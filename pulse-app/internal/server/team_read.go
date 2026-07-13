@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"math"
-	"mime"
 	"net/http"
 	"regexp"
 	"sort"
@@ -14,7 +12,6 @@ import (
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
-	"github.com/nkkmnk/pulse/internal/teamauth"
 	"github.com/nkkmnk/pulse/internal/teamread"
 )
 
@@ -259,21 +256,7 @@ func (s *TeamServer) handleTeamResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func readTeamDomainBody(w http.ResponseWriter, r *http.Request, invalidCode string) ([]byte, bool) {
-	if r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
-		writeTeamReadError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeTeamReadError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, teamReadMaxBodyBytes+1))
-	if err != nil || len(raw) == 0 || len(raw) > teamReadMaxBodyBytes {
-		writeTeamReadError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	return raw, true
+	return readTeamJSONBody(w, r, teamReadMaxBodyBytes, invalidCode)
 }
 
 func (s *TeamServer) verifyTeamReadPrincipal(
@@ -298,12 +281,9 @@ func (s *TeamServer) verifyTeamReadPrincipal(
 }
 
 func teamReadAuthorization(principal PrincipalContext) teamread.Authorization {
-	capabilities := make([]teamauth.Capability, len(principal.Capabilities))
-	for index, capability := range principal.Capabilities {
-		capabilities[index] = teamauth.Capability(capability)
-	}
 	return teamread.Authorization{
-		PrincipalID: principal.PrincipalID, TeamID: principal.TeamID, Capabilities: capabilities,
+		PrincipalID: principal.PrincipalID, TeamID: principal.TeamID,
+		Capabilities: teamPrincipalCapabilities(principal),
 	}
 }
 

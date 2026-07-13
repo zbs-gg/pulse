@@ -40,18 +40,10 @@ type ownerAdminMutationEnvelope struct {
 }
 
 type ownerAdminMutationRequestEnvelope struct {
-	Schema            *string `json:"schema"`
-	Action            *string `json:"action"`
-	ApprovalNonce     *string `json:"approval_nonce"`
-	Issuer            *string `json:"issuer,omitempty"`
-	Subject           *string `json:"subject,omitempty"`
-	ClientID          *string `json:"client_id,omitempty"`
-	Role              *string `json:"role,omitempty"`
-	Name              *string `json:"name,omitempty"`
-	TargetID          *string `json:"target_id,omitempty"`
-	ProjectID         *string `json:"project_id,omitempty"`
-	TargetPrincipalID *string `json:"target_principal_id,omitempty"`
-	AccessLevel       *string `json:"access_level,omitempty"`
+	Schema        *string `json:"schema"`
+	Action        *string `json:"action"`
+	ApprovalNonce *string `json:"approval_nonce"`
+	ownerAdminMutationEnvelope
 }
 
 type ownerAdminMutationRequest struct {
@@ -195,12 +187,7 @@ func decodeOwnerAdminMutationRequest(
 		!allowed[*envelope.Action] || !validTeamAdminDigest(*envelope.ApprovalNonce) {
 		return ownerAdminMutationRequest{}, store.ErrOwnerApprovalInvalid
 	}
-	mutation, ok := decodeOwnerAdminMutation(*envelope.Action, ownerAdminMutationEnvelope{
-		Issuer: envelope.Issuer, Subject: envelope.Subject, ClientID: envelope.ClientID,
-		Role: envelope.Role, Name: envelope.Name, TargetID: envelope.TargetID,
-		ProjectID: envelope.ProjectID, TargetPrincipalID: envelope.TargetPrincipalID,
-		AccessLevel: envelope.AccessLevel,
-	})
+	mutation, ok := decodeOwnerAdminMutation(*envelope.Action, envelope.ownerAdminMutationEnvelope)
 	if !ok {
 		return ownerAdminMutationRequest{}, store.ErrOwnerApprovalInvalid
 	}

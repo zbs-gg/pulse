@@ -446,7 +446,7 @@ async function fetchBoundedJSON(
       }
       chunks.push(value);
     }
-    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), length);
+    const bytes = Buffer.concat(chunks, length);
     try {
       return JSON.parse(bytes.toString('utf8'));
     } catch {

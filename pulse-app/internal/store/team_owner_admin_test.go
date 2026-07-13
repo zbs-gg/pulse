@@ -63,20 +63,25 @@ func TestApprovedOwnerAdminMutationsAreAtomicAndNonceDerived(t *testing.T) {
 		t.Fatalf("grant result = %+v", grantResult)
 	}
 
-	for suffix, mutation := range map[string]OwnerAdminMutation{
-		"grant-revoke": {
+	for _, operation := range []struct {
+		suffix   string
+		mutation OwnerAdminMutation
+	}{
+		{suffix: "grant-revoke", mutation: OwnerAdminMutation{
 			Action: OwnerActionProjectGrantRevoke, TargetID: grantResult.Grant.GrantID,
-		},
-		"binding-revoke": {
+		}},
+		{suffix: "binding-revoke", mutation: OwnerAdminMutation{
 			Action: OwnerActionAgentBindingRevoke, TargetID: bindingResult.Binding.BindingID,
-		},
-		"service-revoke": {
+		}},
+		{suffix: "service-revoke", mutation: OwnerAdminMutation{
 			Action: OwnerActionServicePrincipalRevoke, TargetID: serviceResult.Service.PrincipalID,
-		},
+		}},
 	} {
-		result := executeTestOwnerMutation(t, s, bootstrap, writer, clientKey.ClientKey, now, mutation, suffix)
+		result := executeTestOwnerMutation(
+			t, s, bootstrap, writer, clientKey.ClientKey, now, operation.mutation, operation.suffix,
+		)
 		if result.AuditEventID == "" {
-			t.Fatalf("%s missing audit: %+v", suffix, result)
+			t.Fatalf("%s missing audit: %+v", operation.suffix, result)
 		}
 	}
 	membershipRevoke := OwnerAdminMutation{

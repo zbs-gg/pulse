@@ -112,10 +112,6 @@ func (s *TeamServer) handleTeamGraphDelta(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	capabilities := make([]teamauth.Capability, len(principal.Capabilities))
-	for index, capability := range principal.Capabilities {
-		capabilities[index] = teamauth.Capability(capability)
-	}
 	active := teamauth.ActiveContext{
 		TeamID: principal.TeamID, ProjectID: write.ActiveContext.ProjectID,
 		RepoID: write.ActiveContext.RepoID, AgentID: write.ActiveContext.AgentID,
@@ -127,7 +123,7 @@ func (s *TeamServer) handleTeamGraphDelta(w http.ResponseWriter, r *http.Request
 	}
 	permit, err := s.cfg.Store.AuthorizeTeamMutation(r.Context(), store.TeamMutationAuthorizationRequest{
 		PrincipalID: principal.PrincipalID, OAuthClientKey: principal.OAuthClientKey,
-		Action: teamauth.ActionWrite, Capabilities: capabilities, Context: active,
+		Action: teamauth.ActionWrite, Capabilities: teamPrincipalCapabilities(principal), Context: active,
 		ObjectKind: "graph_delta", RequestedScope: requestedScope,
 	})
 	if err != nil {

@@ -47,22 +47,26 @@ export type OwnerGatewayErrorCode =
   | 'owner_operation_denied'
   | 'owner_service_unavailable';
 
+const OWNER_GATEWAY_ERRORS: Record<
+  OwnerGatewayErrorCode,
+  { message: string; status: 400 | 403 | 503 }
+> = {
+  invalid_owner_request: { message: 'Owner request is invalid', status: 400 },
+  owner_step_up_required: { message: 'Recent browser approval is required', status: 403 },
+  owner_operation_denied: { message: 'Owner operation was denied', status: 403 },
+  owner_service_unavailable: { message: 'Owner service is unavailable', status: 503 },
+};
+
 export class OwnerGatewayError extends Error {
   readonly code: OwnerGatewayErrorCode;
   readonly status: 400 | 403 | 503;
 
   constructor(code: OwnerGatewayErrorCode) {
-    super(code === 'invalid_owner_request'
-      ? 'Owner request is invalid'
-      : code === 'owner_step_up_required'
-        ? 'Recent browser approval is required'
-        : code === 'owner_operation_denied'
-          ? 'Owner operation was denied'
-          : 'Owner service is unavailable');
+    const details = OWNER_GATEWAY_ERRORS[code];
+    super(details.message);
     this.name = 'OwnerGatewayError';
     this.code = code;
-    this.status = code === 'invalid_owner_request' ? 400
-      : code === 'owner_service_unavailable' ? 503 : 403;
+    this.status = details.status;
   }
 }
 

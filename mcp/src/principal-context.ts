@@ -1192,7 +1192,7 @@ async function readBoundedJSONResponse(response: Response, maxBytes: number): Pr
     chunks.push(value);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), size).toString('utf8'));
+    return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
   } catch {
     throw new Error('team principal response is invalid');
   }

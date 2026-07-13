@@ -2,8 +2,6 @@ package server
 
 import (
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -156,7 +154,7 @@ func (s *TeamServer) handleTeamDelete(w http.ResponseWriter, r *http.Request) {
 	result, err := s.cfg.Store.StartTeamDeletion(r.Context(), store.TeamDeletionStartRequest{
 		Authorization: store.TeamMutationAuthorizationRequest{
 			PrincipalID: principal.PrincipalID, OAuthClientKey: principal.OAuthClientKey,
-			Action: teamauth.ActionDelete, Capabilities: principalCapabilities(principal),
+			Action: teamauth.ActionDelete, Capabilities: teamPrincipalCapabilities(principal),
 			Context:          teamDeletionActiveContext(principal, request.ActiveContext),
 			ExistingObjectID: request.ObjectID,
 		},
@@ -197,7 +195,7 @@ func (s *TeamServer) handleTeamDeleteStatus(w http.ResponseWriter, r *http.Reque
 	}
 	result, err := s.cfg.Store.ReadTeamDeletionStatus(r.Context(), store.TeamDeletionStatusRequest{
 		PrincipalID: principal.PrincipalID, OAuthClientKey: principal.OAuthClientKey,
-		Capabilities: principalCapabilities(principal),
+		Capabilities: teamPrincipalCapabilities(principal),
 		Context:      teamDeletionActiveContext(principal, request.ActiveContext),
 		OperationID:  request.OperationID,
 	})
@@ -224,24 +222,10 @@ func (s *TeamServer) handleTeamDeleteStatus(w http.ResponseWriter, r *http.Reque
 }
 
 func readTeamDeletionBody(w http.ResponseWriter, r *http.Request, invalidCode string) ([]byte, bool) {
-	if r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
-		writeTeamDeletionError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeTeamDeletionError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, teamDeletionMaxBodyBytes+1))
-	if err != nil || len(raw) == 0 || len(raw) > teamDeletionMaxBodyBytes {
-		writeTeamDeletionError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	return raw, true
+	return readTeamJSONBody(w, r, teamDeletionMaxBodyBytes, invalidCode)
 }
 
-func principalCapabilities(principal PrincipalContext) []teamauth.Capability {
+func teamPrincipalCapabilities(principal PrincipalContext) []teamauth.Capability {
 	capabilities := make([]teamauth.Capability, len(principal.Capabilities))
 	for index, capability := range principal.Capabilities {
 		capabilities[index] = teamauth.Capability(capability)

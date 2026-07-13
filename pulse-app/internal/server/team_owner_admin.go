@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -517,21 +515,7 @@ func toStoreBootstrapIntent(intent ownerBootstrapIntent) store.TeamBootstrapInte
 }
 
 func readOwnerAdminBody(w http.ResponseWriter, r *http.Request, invalidCode string) ([]byte, bool) {
-	if r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
-		writeOwnerAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeOwnerAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, ownerAdminMaxBodyBytes+1))
-	if err != nil || len(raw) == 0 || len(raw) > ownerAdminMaxBodyBytes {
-		writeOwnerAdminError(w, http.StatusBadRequest, invalidCode)
-		return nil, false
-	}
-	return raw, true
+	return readTeamJSONBody(w, r, ownerAdminMaxBodyBytes, invalidCode)
 }
 
 func validOwnerApprovalResponse(response ownerApprovalResponse) bool {

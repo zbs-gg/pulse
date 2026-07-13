@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"io"
+	"mime"
 	"net/http"
 )
 
@@ -26,4 +28,27 @@ func writeTeamError(w http.ResponseWriter, status int, code string, includeFallb
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func readTeamJSONBody(
+	w http.ResponseWriter,
+	r *http.Request,
+	maxBytes int64,
+	invalidCode string,
+) ([]byte, bool) {
+	if r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
+		writeTeamError(w, http.StatusBadRequest, invalidCode, true)
+		return nil, false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeTeamError(w, http.StatusBadRequest, invalidCode, true)
+		return nil, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil || len(raw) == 0 || int64(len(raw)) > maxBytes {
+		writeTeamError(w, http.StatusBadRequest, invalidCode, true)
+		return nil, false
+	}
+	return raw, true
 }

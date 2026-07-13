@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nkkmnk/pulse/internal/embed"
 )
@@ -183,33 +184,26 @@ func validTeamUnitFloat(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 1
 }
 
-func teamSearchTokens(text string) []string {
+func teamSearchTokens(text string) map[string]struct{} {
 	raw := graphTokenRe.FindAllString(strings.ToLower(text), -1)
-	seen := make(map[string]bool, len(raw))
-	tokens := make([]string, 0, len(raw))
+	tokens := make(map[string]struct{}, len(raw))
 	for _, token := range raw {
-		if len([]rune(token)) < 2 || seen[token] {
+		if utf8.RuneCountInString(token) < 2 {
 			continue
 		}
-		seen[token] = true
-		tokens = append(tokens, token)
+		tokens[token] = struct{}{}
 	}
-	sort.Strings(tokens)
 	return tokens
 }
 
-func teamLexicalScore(queryTokens []string, text string) float64 {
+func teamLexicalScore(queryTokens map[string]struct{}, text string) float64 {
 	if len(queryTokens) == 0 {
 		return 0
 	}
 	documentTokens := teamSearchTokens(text)
-	documentSet := make(map[string]bool, len(documentTokens))
-	for _, token := range documentTokens {
-		documentSet[token] = true
-	}
 	matches := 0
-	for _, token := range queryTokens {
-		if documentSet[token] {
+	for token := range queryTokens {
+		if _, ok := documentTokens[token]; ok {
 			matches++
 		}
 	}
