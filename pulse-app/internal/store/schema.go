@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"embed"
@@ -19,6 +20,26 @@ type migrationDescriptor struct {
 	Name    string
 	SQL     string
 	SHA256  string
+	Policy  migrationPolicy
+}
+
+type migrationPolicy struct {
+	StoreKinds       map[StoreKind]bool
+	MinReaderVersion int
+	MinWriterVersion int
+}
+
+var postFoundationMigrationPolicies = map[int]migrationPolicy{
+	40: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindLocalPreview: true,
+			StoreKindPersonal:     true,
+			StoreKindDesk:         true,
+			StoreKindCommons:      true,
+		},
+		MinReaderVersion: 40,
+		MinWriterVersion: 40,
+	},
 }
 
 func loadMigrationSet(fsys fs.FS) ([]migrationDescriptor, error) {
@@ -50,6 +71,7 @@ func loadMigrationSet(fsys fs.FS) ([]migrationDescriptor, error) {
 			Name:    name,
 			SQL:     string(body),
 			SHA256:  fmt.Sprintf("%x", digest),
+			Policy:  postFoundationMigrationPolicies[version],
 		})
 	}
 	if err := validateMigrationSequence(migrations); err != nil {
@@ -67,6 +89,12 @@ func validateMigrationSequence(migrations []migrationDescriptor) error {
 		if migration.Version != want {
 			return fmt.Errorf("migration sequence at position %d has version %d, want %d", i, migration.Version, want)
 		}
+		if migration.Version >= 40 {
+			if len(migration.Policy.StoreKinds) == 0 || migration.Policy.MinReaderVersion < migration.Version ||
+				migration.Policy.MinWriterVersion < migration.Policy.MinReaderVersion {
+				return fmt.Errorf("migration %03d has no valid store applicability policy", migration.Version)
+			}
+		}
 	}
 	return nil
 }
@@ -74,6 +102,10 @@ func validateMigrationSequence(migrations []migrationDescriptor) error {
 // migrate applies pending migrations in order and verifies the immutable
 // fingerprint manifest introduced by migration 033.
 func migrate(db *sql.DB) error {
+	return migrateForProfile(db, storeOpenProfile{Kind: StoreKindLocalPreview})
+}
+
+func migrateForProfile(db *sql.DB, profile storeOpenProfile) error {
 	if _, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS schema_meta (
             version INTEGER PRIMARY KEY,
@@ -94,6 +126,11 @@ func migrate(db *sql.DB) error {
 	if err := validateStoredManifest(db, migrations, current); err != nil {
 		return err
 	}
+	if current >= 40 {
+		if _, err := validateStoreIdentity(db, profile); err != nil {
+			return err
+		}
+	}
 
 	for _, migration := range migrations {
 		if migration.Version <= current {
@@ -103,11 +140,22 @@ func migrate(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("begin %s: %w", migration.Name, err)
 		}
-		if _, err := tx.Exec(migration.SQL); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply %s: %w", migration.Name, err)
+		disposition := "applied"
+		if migration.Version < 40 || migration.Policy.StoreKinds[profile.Kind] {
+			if _, err := tx.Exec(migration.SQL); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply %s: %w", migration.Name, err)
+			}
+		} else {
+			disposition = "skipped"
 		}
 		appliedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if migration.Version == 40 {
+			if err := createStoreIdentityTx(tx, profile, appliedAt); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("create store identity: %w", err)
+			}
+		}
 		if _, err := tx.Exec(
 			"INSERT INTO schema_meta(version, applied) VALUES (?, ?)",
 			migration.Version, appliedAt,
@@ -131,12 +179,93 @@ func migrate(db *sql.DB) error {
 				}
 			}
 		}
+		if migration.Version >= 40 {
+			if _, err := tx.Exec(`
+				INSERT INTO schema_migration_applicability(
+					version, store_kind, disposition, min_reader_version, min_writer_version, recorded_at
+				) VALUES (?, ?, ?, ?, ?, ?)`, migration.Version, profile.Kind, disposition,
+				migration.Policy.MinReaderVersion, migration.Policy.MinWriterVersion, appliedAt); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("record migration applicability %s: %w", migration.Name, err)
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit %s: %w", migration.Name, err)
 		}
 		current = migration.Version
 	}
-	return validateStoredManifest(db, migrations, current)
+	if err := validateStoredManifest(db, migrations, current); err != nil {
+		return err
+	}
+	if _, err := validateStoreIdentity(db, profile); err != nil {
+		return err
+	}
+	return validateMigrationApplicability(db, migrations, current, profile.Kind)
+}
+
+func createStoreIdentityTx(tx *sql.Tx, profile storeOpenProfile, appliedAt string) error {
+	storeID := profile.ExpectedStoreID
+	if storeID == "" {
+		generated, err := randomStoreInstanceID()
+		if err != nil {
+			return err
+		}
+		storeID = generated
+	}
+	_, err := tx.Exec(`
+		INSERT INTO store_identity(
+			singleton, store_id, store_kind, min_reader_version, min_writer_version, created_at
+		) VALUES (1, ?, ?, 40, 40, ?)`, storeID, profile.Kind, appliedAt)
+	return err
+}
+
+func randomStoreInstanceID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate physical store identity: %w", err)
+	}
+	return fmt.Sprintf("store_instance_%x", value[:]), nil
+}
+
+func validateMigrationApplicability(db *sql.DB, migrations []migrationDescriptor, current int, kind StoreKind) error {
+	if current < 40 {
+		return nil
+	}
+	rows, err := db.Query(`
+		SELECT version, store_kind, disposition, min_reader_version, min_writer_version
+		  FROM schema_migration_applicability ORDER BY version`)
+	if err != nil {
+		return fmt.Errorf("read migration applicability: %w", err)
+	}
+	defer rows.Close()
+	wantVersion := 40
+	for rows.Next() {
+		var version, readerFloor, writerFloor int
+		var storedKind StoreKind
+		var disposition string
+		if err := rows.Scan(&version, &storedKind, &disposition, &readerFloor, &writerFloor); err != nil {
+			return fmt.Errorf("scan migration applicability: %w", err)
+		}
+		if version != wantVersion || version > current || storedKind != kind {
+			return fmt.Errorf("migration applicability sequence invalid at version %d", version)
+		}
+		policy := migrations[version-1].Policy
+		wantDisposition := "skipped"
+		if policy.StoreKinds[kind] {
+			wantDisposition = "applied"
+		}
+		if disposition != wantDisposition || readerFloor != policy.MinReaderVersion || writerFloor != policy.MinWriterVersion {
+			return fmt.Errorf("migration applicability mismatch at version %d", version)
+		}
+		wantVersion++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read migration applicability: %w", err)
+	}
+	if wantVersion != current+1 {
+		return fmt.Errorf("migration applicability has %d rows, want %d", wantVersion-40, current-39)
+	}
+	return nil
 }
 
 func validateAppliedSequence(db *sql.DB, latest int) (int, error) {

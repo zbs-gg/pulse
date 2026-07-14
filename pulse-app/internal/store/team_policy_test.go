@@ -15,14 +15,14 @@ import (
 )
 
 func TestMigrations034Through039InstallTeamObjectSemanticDeletionAndOwnerSchema(t *testing.T) {
-	if teamauth.SchemaVersion != 39 {
-		t.Fatalf("teamauth.SchemaVersion = %d, want 39", teamauth.SchemaVersion)
+	if teamauth.SchemaVersion != 40 {
+		t.Fatalf("teamauth.SchemaVersion = %d, want 40", teamauth.SchemaVersion)
 	}
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 39 || latest.Name != "039_team_owner_activation.sql" {
+	if latest := migrations[len(migrations)-1]; latest.Version != 40 || latest.Name != "040_store_identity.sql" {
 		t.Fatalf("latest migration = %+v, want 039_team_owner_activation.sql", latest)
 	}
 

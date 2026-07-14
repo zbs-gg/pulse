@@ -121,6 +121,16 @@ function runAsync(args, env = {}, stdin = '') {
   });
 }
 
+test('workspace binding CLI exposes verification only and no model-reachable mutation command', () => {
+  const help = run(['--help']).result;
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /pulse binding resolve/);
+
+  const mutation = run(['binding', 'bind']).result;
+  assert.notEqual(mutation.status, 0);
+  assert.match(mutation.stderr, /supports only read-only resolve or status/);
+});
+
 function withPulseStub(handler) {
   const requests = [];
   const server = createServer(async (req, res) => {

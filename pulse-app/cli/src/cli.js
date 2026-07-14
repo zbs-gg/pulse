@@ -18,6 +18,14 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildPulseRequestHeaders } from './remote-auth.js';
+import { BindingError, resolveWorkspaceBinding } from './workspace-binding.js';
+import {
+  SupervisorError,
+  inspectVaultRuntime,
+  startVaultRuntime,
+  stopVaultRuntime,
+  vaultRuntimeFromBinding,
+} from './local-supervisor.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -52,6 +60,8 @@ Usage:
   pulse demo [--clean]
   pulse doctor
   pulse doctor --json
+  pulse binding resolve [--cwd <path>] [--json]
+  pulse supervisor start|status|stop [--cwd <path>] [--json]
   pulse connect claude-code [--remote-control]
   pulse connect chatgpt|claude-chat --base <https-origin-or-mcp-url> [--open]
   pulse connect-smoke --base <https-origin> [--thread <id>] [--json]
@@ -6417,6 +6427,61 @@ async function main() {
   if (command === 'doctor') {
     await runDoctor(args.slice(1));
     return;
+  }
+
+  if (command === 'binding') {
+	const subcommand = args[1];
+	if (subcommand !== 'resolve' && subcommand !== 'status') {
+	  throw new Error('pulse binding supports only read-only resolve or status');
+	}
+	try {
+	  const binding = resolveWorkspaceBinding({
+		cwd: getArg('--cwd') ?? process.cwd(),
+	  });
+	  if (args.includes('--json')) {
+		console.log(JSON.stringify(binding, null, 2));
+	  } else {
+		console.log(`[pulse] binding ${binding.binding_id}: ${binding.mode} (${binding.receipt_id})`);
+		console.log(`[pulse] workspace ${binding.workspace.workspace_id}; resolver epoch ${binding.resolver_epoch}; fallback=false`);
+	  }
+	} catch (error) {
+	  if (error instanceof BindingError) {
+		throw new Error(`${error.code}: ${error.message}`);
+	  }
+	  throw error;
+	}
+	return;
+  }
+
+  if (command === 'supervisor') {
+	const subcommand = args[1];
+	if (!['start', 'status', 'stop'].includes(subcommand)) {
+	  throw new Error('pulse supervisor supports start, status, or stop');
+	}
+	try {
+	  const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	  const runtime = vaultRuntimeFromBinding(binding);
+	  let result;
+	  if (subcommand === 'start') {
+		const daemonPath = process.env.PULSE_GO_BIN || join(DATA_DIR, 'bin', 'pulse-product-daemon');
+		result = await startVaultRuntime(runtime, { daemonPath });
+	  } else if (subcommand === 'stop') {
+		result = stopVaultRuntime(runtime);
+	  } else {
+		result = inspectVaultRuntime(runtime);
+	  }
+	  if (args.includes('--json')) {
+		console.log(JSON.stringify(result, null, 2));
+	  } else {
+		console.log(`[pulse] ${runtime.kind} vault: ${result.status}; store=${runtime.store_id}; fallback=false`);
+	  }
+	} catch (error) {
+	  if (error instanceof BindingError || error instanceof SupervisorError) {
+		throw new Error(`${error.code}: ${error.message}`);
+	  }
+	  throw error;
+	}
+	return;
   }
 
   if (command === 'init') {

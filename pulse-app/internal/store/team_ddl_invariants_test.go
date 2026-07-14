@@ -10,15 +10,18 @@ import (
 func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		raise      string
 		regression string
 	}{
 		{
 			name:       "reader floor",
-			regression: `UPDATE team_stores SET min_reader_version = 38 WHERE singleton = 1`,
+			raise:      `UPDATE team_stores SET min_reader_version = 41, min_writer_version = 41 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_reader_version = 40 WHERE singleton = 1`,
 		},
 		{
 			name:       "writer floor",
-			regression: `UPDATE team_stores SET min_writer_version = 38 WHERE singleton = 1`,
+			raise:      `UPDATE team_stores SET min_writer_version = 41 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_writer_version = 40 WHERE singleton = 1`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -28,10 +31,7 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 			// Raise both floors above their bootstrap values first. This makes the
 			// attempted regression satisfy the table's static CHECK constraints,
 			// so only the required monotonic DDL guard can reject it.
-			if _, err := s.DB().Exec(`
-				UPDATE team_stores
-				   SET min_reader_version = 39, min_writer_version = 39
-				 WHERE singleton = 1`); err != nil {
+			if _, err := s.DB().Exec(tc.raise); err != nil {
 				t.Fatalf("raise schema floors: %v", err)
 			}
 			if _, err := s.DB().Exec(tc.regression); err == nil {

@@ -141,7 +141,6 @@ func TestTeamStoreBootstrapIsPinnedAtomicAndDurable(t *testing.T) {
 }
 
 func TestTeamStoreRejectsLegacyLocalDataAndLocalReopen(t *testing.T) {
-	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "pulse.db")
 	local, err := Open(path)
 	if err != nil {
@@ -156,14 +155,9 @@ func TestTeamStoreRejectsLegacyLocalDataAndLocalReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := testBootstrapRoot()
-	team, err := OpenTeam(path, reviewTeamOptions(root))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := OpenTeam(path, reviewTeamOptions(root)); !errors.Is(err, ErrStoreIdentityMismatch) {
+		t.Fatalf("legacy team open error = %v", err)
 	}
-	if _, err := team.BootstrapTeam(ctx, BootstrapTeamRequest{TeamName: "No", PresentedRoot: root}); !errors.Is(err, ErrTeamBootstrapCandidateRequired) {
-		t.Fatalf("legacy bootstrap error = %v", err)
-	}
-	team.Close()
 
 	clean, result := bootstrapTeamStore(t)
 	markedPath := clean.DBPath()

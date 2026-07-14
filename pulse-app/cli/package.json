@@ -11,6 +11,8 @@
   "files": [
     "src/cli.js",
     "src/remote-auth.js",
+    "src/workspace-binding.js",
+    "src/local-supervisor.js",
     "src/demo-corpus.json",
     "scripts",
     "vendor/pulse-preview-source",

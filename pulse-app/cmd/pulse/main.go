@@ -77,6 +77,10 @@ func run(dataDir, addr string) error {
 	switch os.Getenv("PULSE_RUNTIME_MODE") {
 	case "", "local-stdio", "development-http":
 		return runLocal(dataDir, addr)
+	case "personal-local":
+		return runProductLocal(dataDir, addr, config.VaultPersonal)
+	case "desk-local":
+		return runProductLocal(dataDir, addr, config.VaultDesk)
 	case "team-remote":
 		return runTeam(dataDir, addr)
 	default:
@@ -85,11 +89,37 @@ func run(dataDir, addr string) error {
 }
 
 func runLocal(dataDir, addr string) error {
-	cfg, err := config.Load(dataDir)
+	return runLocalVault(dataDir, addr, "", "")
+}
+
+func runProductLocal(dataDir, addr string, kind config.VaultKind) error {
+	if !isLoopbackListenAddress(addr) {
+		return errors.New("product local vault must bind to a loopback address")
+	}
+	storeID := strings.TrimSpace(os.Getenv("PULSE_VAULT_STORE_ID"))
+	if storeID == "" || storeID != os.Getenv("PULSE_VAULT_STORE_ID") {
+		return errors.New("product local vault requires exact PULSE_VAULT_STORE_ID")
+	}
+	return runLocalVault(dataDir, addr, kind, storeID)
+}
+
+func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) error {
+	var cfg *config.Config
+	var err error
+	if kind == "" {
+		cfg, err = config.Load(dataDir)
+	} else {
+		cfg, err = config.LoadVault(dataDir, kind, storeID)
+	}
 	if err != nil {
 		return err
 	}
-	s, err := store.Open(cfg.DBPath)
+	var s *store.Store
+	if kind == "" {
+		s, err = store.Open(cfg.DBPath)
+	} else {
+		s, err = store.OpenVault(cfg.DBPath, store.StoreKind(kind), storeID)
+	}
 	if err != nil {
 		return err
 	}
@@ -258,7 +288,8 @@ func runLocal(dataDir, addr string) error {
 		reaperLoop(reaperCtx, ob)
 	}()
 
-	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir)
+	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir,
+		"vault_kind", s.StoreKind(), "store_id", s.StoreID())
 
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)

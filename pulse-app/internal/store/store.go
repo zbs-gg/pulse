@@ -13,10 +13,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type StoreKind string
+
+const (
+	StoreKindLocalPreview StoreKind = "local-preview"
+	StoreKindPersonal     StoreKind = "personal"
+	StoreKindDesk         StoreKind = "desk"
+	StoreKindCommons      StoreKind = "commons"
+)
+
+var ErrStoreIdentityMismatch = errors.New("store identity does not match the requested vault")
+
+type storeOpenProfile struct {
+	Kind            StoreKind
+	ExpectedStoreID string
+}
+
 // Store wraps a *sql.DB. Use DB() to access the underlying handle.
 type Store struct {
 	db                    *sql.DB
 	path                  string
+	storeKind             StoreKind
+	storeID               string
 	expectedBootstrapRoot *teamauth.BootstrapRoot
 	clock                 func() time.Time
 
@@ -39,6 +57,10 @@ func (s *Store) DB() *sql.DB {
 func (s *Store) DBPath() string {
 	return s.path
 }
+
+func (s *Store) StoreKind() StoreKind { return s.storeKind }
+
+func (s *Store) StoreID() string { return s.storeID }
 
 // Close closes the underlying database.
 func (s *Store) Close() error {
@@ -147,7 +169,14 @@ func (s *Store) RecentFeedSignals(limit int, markConsumed bool) ([]FeedSignal, e
 // Open opens a local SQLite database. A marked team database must be opened
 // explicitly with OpenTeam so an old/local writer cannot silently proceed.
 func Open(path string) (*Store, error) {
-	return openStore(path, false, TeamOpenOptions{})
+	return openStore(path, false, TeamOpenOptions{}, storeOpenProfile{Kind: StoreKindLocalPreview})
+}
+
+func OpenVault(path string, kind StoreKind, storeID string) (*Store, error) {
+	if (kind != StoreKindPersonal && kind != StoreKindDesk) || storeID == "" {
+		return nil, errors.New("product local store requires personal or desk kind and exact store ID")
+	}
+	return openStore(path, false, TeamOpenOptions{}, storeOpenProfile{Kind: kind, ExpectedStoreID: storeID})
 }
 
 type TeamOpenOptions struct {
@@ -161,10 +190,10 @@ func OpenTeam(path string, options TeamOpenOptions) (*Store, error) {
 	if err := options.ExpectedBootstrapRoot.Validate(); err != nil {
 		return nil, fmt.Errorf("team expected bootstrap root: %w", err)
 	}
-	return openStore(path, true, options)
+	return openStore(path, true, options, storeOpenProfile{Kind: StoreKindCommons})
 }
 
-func openStore(path string, team bool, options TeamOpenOptions) (*Store, error) {
+func openStore(path string, team bool, options TeamOpenOptions, profile storeOpenProfile) (*Store, error) {
 	synchronous := "NORMAL"
 	if team {
 		synchronous = "FULL"
@@ -205,7 +234,12 @@ func openStore(path string, team bool, options TeamOpenOptions) (*Store, error) 
 			return nil, fmt.Errorf("inspect initial SQLite catalog: %w", err)
 		}
 	}
-	if err := migrate(db); err != nil {
+	if err := migrateForProfile(db, profile); err != nil {
+		db.Close()
+		return nil, err
+	}
+	identity, err := validateStoreIdentity(db, profile)
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -232,7 +266,7 @@ func openStore(path string, team bool, options TeamOpenOptions) (*Store, error) 
 			return nil, ErrTeamStoreRequiresTeamOpen
 		}
 	}
-	store := &Store{db: db, path: path, clock: clock}
+	store := &Store{db: db, path: path, storeKind: identity.Kind, storeID: identity.StoreID, clock: clock}
 	if team {
 		expected := options.ExpectedBootstrapRoot
 		store.expectedBootstrapRoot = &expected
@@ -250,6 +284,30 @@ func openStore(path string, team bool, options TeamOpenOptions) (*Store, error) 
 		}
 	}
 	return store, nil
+}
+
+type persistedStoreIdentity struct {
+	StoreID string
+	Kind    StoreKind
+}
+
+func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStoreIdentity, error) {
+	var identity persistedStoreIdentity
+	var readerFloor, writerFloor int
+	err := db.QueryRow(`
+		SELECT store_id, store_kind, min_reader_version, min_writer_version
+		  FROM store_identity WHERE singleton = 1`,
+	).Scan(&identity.StoreID, &identity.Kind, &readerFloor, &writerFloor)
+	if err != nil {
+		return persistedStoreIdentity{}, fmt.Errorf("read store identity: %w", err)
+	}
+	if identity.Kind != profile.Kind || (profile.ExpectedStoreID != "" && identity.StoreID != profile.ExpectedStoreID) {
+		return persistedStoreIdentity{}, ErrStoreIdentityMismatch
+	}
+	if readerFloor > 40 || writerFloor > 40 || readerFloor < 40 || writerFloor < readerFloor {
+		return persistedStoreIdentity{}, errors.New("store schema floor is incompatible with this binary")
+	}
+	return identity, nil
 }
 
 func bootstrapCatalogIsBlank(db *sql.DB) (bool, error) {

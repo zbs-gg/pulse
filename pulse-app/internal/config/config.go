@@ -20,6 +20,8 @@ type Config struct {
 	AnthropicAPIKey     string
 	DBPath              string
 	Mode                string
+	VaultKind           VaultKind
+	StoreID             string
 	TeamBootstrapRoot   *teamauth.BootstrapRoot
 	ExpectedTeamStoreID string
 	ExpectedTeamID      string

@@ -1256,6 +1256,7 @@ func countLegacyRows(ctx context.Context, q legacyCounter) (int64, error) {
 	}
 	allowed := map[string]struct{}{
 		"schema_meta": {}, "schema_migration_manifest": {},
+		"store_identity": {}, "schema_migration_applicability": {},
 		"team_bootstrap_candidates": {}, "team_stores": {}, "team_principals": {},
 		"team_human_identities": {}, "team_service_identities": {}, "team_memberships": {},
 		"team_projects": {}, "team_agent_bindings": {}, "team_oauth_clients": {},

@@ -54,7 +54,6 @@ func TestOpenTeamRejectsWhitespaceNormalizedBootstrapRoot(t *testing.T) {
 }
 
 func TestExistingLatestLocalDatabaseCannotBecomeTeamStore(t *testing.T) {
-	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "pulse.db")
 	local, err := Open(path)
 	if err != nil {
@@ -65,15 +64,8 @@ func TestExistingLatestLocalDatabaseCannotBecomeTeamStore(t *testing.T) {
 	}
 
 	root := testBootstrapRoot()
-	team, err := OpenTeam(path, reviewTeamOptions(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer team.Close()
-	if _, err := team.BootstrapTeam(ctx, BootstrapTeamRequest{
-		TeamName: "Retroactive", PresentedRoot: root,
-	}); !errors.Is(err, ErrTeamBootstrapCandidateRequired) {
-		t.Fatalf("retroactive team bootstrap error = %v", err)
+	if _, err := OpenTeam(path, reviewTeamOptions(root)); !errors.Is(err, ErrStoreIdentityMismatch) {
+		t.Fatalf("retroactive team open error = %v", err)
 	}
 }
 
@@ -121,7 +113,7 @@ func TestExistingVersion32DatabaseCannotUseRetroactiveManifestAsBootstrapProof(t
 	if err := team.DB().QueryRow(`SELECT count(*) FROM team_bootstrap_candidates`).Scan(&candidates); err != nil {
 		t.Fatal(err)
 	}
-	if manifestRows != 39 || candidates != 0 {
+	if manifestRows != 40 || candidates != 0 {
 		t.Fatalf("v32 adoption state: manifest=%d candidates=%d", manifestRows, candidates)
 	}
 }
