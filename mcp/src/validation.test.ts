@@ -108,6 +108,13 @@ test('remember rejects an unsupported host', () => {
   assert.throws(() => store.remember(c), /host/i);
 });
 
+test('remember drops no caller-selected authority fields into the validated capsule', () => {
+  const capsule = baseCapsule() as Record<string, unknown>;
+  capsule.team_id = 'team-attacker';
+  capsule.vault = 'commons';
+  assert.throws(() => new StandaloneStore(tempDataDir()).remember(capsule), /authority|unknown|team_id|vault/i);
+});
+
 test('remember rejects an unsupported conversation_scope', () => {
   const store = new StandaloneStore(tempDataDir());
   const c = baseCapsule();

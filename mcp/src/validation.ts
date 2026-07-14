@@ -41,6 +41,10 @@ const PLUTCHIK = new Set([
   'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt',
 ]);
 
+const AUTHORITY_FIELDS = new Set([
+  'audience', 'principal', 'role', 'scope', 'team_id', 'vault', 'visibility', 'workspace',
+]);
+
 const SAFE_TAG = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SEMANTIC_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,95}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
@@ -82,6 +86,12 @@ function asRecord(value: unknown, what: string): Record<string, unknown> {
     fail(`invalid ${what}: expected an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function rejectAuthorityFields(value: Record<string, unknown>, what: string): void {
+  for (const key of Object.keys(value)) {
+    if (AUTHORITY_FIELDS.has(key.trim().toLowerCase())) fail(`${what} authority field is forbidden: ${key}`);
+  }
 }
 
 // Mirror of validateSemanticText: trims, enforces max length, rejects
@@ -144,6 +154,7 @@ export interface CleanCapsule {
 
 export function validateCapsule(input: unknown): CleanCapsule {
   const capsule = asRecord(input, 'memory capsule');
+  rejectAuthorityFields(capsule, 'memory capsule');
   if (capsule.schema !== CAPSULE_SCHEMA) fail(`schema must be ${CAPSULE_SCHEMA}`);
   if (capsule.raw_input_included !== false) fail('raw_input_included must be false');
   const source = asRecord(capsule.source, 'memory capsule source');
@@ -274,6 +285,7 @@ function continuityStrings(field: string, value: unknown): string[] {
 
 export function validateDelta(input: unknown): CleanDelta {
   const delta = asRecord(input, 'semantic delta');
+  rejectAuthorityFields(delta, 'semantic delta');
   if (delta.schema !== DELTA_SCHEMA) fail(`schema must be ${DELTA_SCHEMA}`);
   if (delta.raw_input_included !== false) fail('raw_input_included must be false');
   const source = asRecord(delta.source, 'semantic delta source');
