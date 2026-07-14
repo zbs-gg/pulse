@@ -6,6 +6,14 @@ This repository contains the security foundation for a synthetic-data team-remot
 
 The current increment proves identity separation, scoped storage, revocation, contribution-aware deletion, metadata-only audit, and fail-closed remote behavior with synthetic principals and content. Real client onboarding, a hosted pilot repository, a human review UI, Krisp ingestion, and production operations remain separate follow-up work.
 
+## Product Activation Base
+
+The Codex-first Personal/Desk/Commons product is built on commit `34cb4b4` from `codex/team-remote-foundation`. Migrations 033-039, Team store identity, request-local principals, pre-retrieval authorization, atomic objects and receipts, projection/deletion fencing, Owner approval, activation, audit, and `fallback:false` behavior remain the authoritative security kernel.
+
+Product activation adds versioned host lifecycle and binding contracts above that kernel. It does not reinterpret a Team store as Personal memory, adopt an existing local database, enable real content, or weaken the synthetic activation gate. Local Preview remains a separate one-person mode; Team remote remains a dedicated store and cannot construct or fall back to standalone storage.
+
+The product branch begins at `codex/pulse-codex-team-memory`. New migrations start only after the frozen 001-039 chain and must declare store-kind applicability and binary floors before executing DDL.
+
 ## Three Modes That Must Stay Separate
 
 | Mode | Intended use | Data boundary |
