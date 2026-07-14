@@ -69,7 +69,7 @@ export function normalizeLifecycleEvent(
   const model = requiredString(input, 'model', 'invalid_model');
   const source = requiredString(input, 'source', 'invalid_source');
   const rawTurnId = input.turn_id;
-  const turnId = host === 'codex' && event === 'session_start' && rawTurnId === undefined
+  const turnId = event === 'session_start' && rawTurnId === undefined
     ? `session_${createHash('sha256').update([
       'pulse-thread-scoped-turn-v1', host, sessionId, posix.normalize(cwd), source,
     ].join('\x1f')).digest('hex')}`

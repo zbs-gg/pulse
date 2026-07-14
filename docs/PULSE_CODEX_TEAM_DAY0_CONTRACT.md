@@ -48,8 +48,9 @@ sends candidates through `/turn/finalize`; it does not depend on
 binding, policy, or resolver authority. The first `Stop` requests exactly one bounded
 finalization pass. The recursive Stop records no-change only when the same
 turn was not already finalized with candidates. `PreCompact` never closes the
-turn early. Subagents receive role-specific context but return typed candidate
-proposals to the parent, which owns the single turn ledger.
+turn early. Subagents receive the same bound continuity context and return typed
+candidate proposals to the parent, which owns the single turn ledger. Trusted
+role-scoped retrieval is a later activation gate and is not claimed here.
 
 ## Binding decision table
 
@@ -61,9 +62,11 @@ proposals to the parent, which owns the single turn ledger.
 No binding may silently fall back to another Vault, Team, Safe Mode, or standalone storage.
 Codex product mode does not expose `pulse_forget`, `pulse_wipe`, or an
 ungoverned graph-write tool to agents. Deletion remains a direct human action
-through Viewer or the exact-confirmation CLI in a directly attached interactive
-terminal. Agent hooks block Pulse deletion, wipe, local destructive HTTP calls,
-and secret-file reads before shell execution.
+through the local product surface. Whole-vault product wipe requires a fresh
+OS-backed user-presence assertion and otherwise fails closed at the daemon,
+including exact-confirmation CLI and direct HTTP attempts. Agent hooks also
+block Pulse deletion, wipe, local destructive HTTP calls, and secret-file reads
+before shell execution as defense in depth.
 
 ## Write receipts
 

@@ -11,7 +11,7 @@ const RECEIPT_STATUSES = new Set([
   'pending', 'created', 'updated', 'deduplicated', 'canceled', 'rejected', 'failed',
 ]);
 
-const CODEX_EVENTS = new Map([
+const HOST_EVENTS = new Map([
   ['SessionStart', 'session_start'],
   ['UserPromptSubmit', 'turn_start'],
   ['PreToolUse', 'turn_start'],
@@ -61,11 +61,11 @@ function eventSource(eventName, input) {
   return 'stop';
 }
 
-export function normalizeCodexHook(eventName, rawInput) {
-  const event = CODEX_EVENTS.get(eventName);
-  if (!event) throw new Error('unsupported_codex_hook');
-  const input = record(rawInput, 'invalid_codex_hook_input');
-  if (input.hook_event_name !== eventName) throw new Error('codex_hook_event_mismatch');
+function normalizeHostHook(host, eventName, rawInput) {
+  const event = HOST_EVENTS.get(eventName);
+  if (!event) throw new Error(`unsupported_${host.replaceAll('-', '_')}_hook`);
+  const input = record(rawInput, `invalid_${host.replaceAll('-', '_')}_hook_input`);
+  if (input.hook_event_name !== eventName) throw new Error(`${host.replaceAll('-', '_')}_hook_event_mismatch`);
   for (const field of Object.keys(input).map((item) => item.trim().toLowerCase())) {
     if (AUTHORITY_FIELDS.has(field)) throw new Error(`authority_field_forbidden:${field}`);
   }
@@ -76,17 +76,17 @@ export function normalizeCodexHook(eventName, rawInput) {
   const model = safeString(input.model, 'invalid_model');
   const source = eventSource(eventName, input);
   const turnID = input.turn_id === undefined && eventName === 'SessionStart'
-    ? `session_${digest('pulse-thread-scoped-turn-v1', 'codex', sessionID, workspace, source)}`
+    ? `session_${digest('pulse-thread-scoped-turn-v1', host, sessionID, workspace, source)}`
     : safeString(input.turn_id, 'invalid_turn_id', { stable: true });
   const stopHookActive = input.stop_hook_active ?? false;
   if (typeof stopHookActive !== 'boolean') throw new Error('invalid_stop_hook_active');
   const agentID = input.agent_id === undefined ? '' : safeString(input.agent_id, 'invalid_agent_id', { stable: true });
   const sourceDigest = digest(
-    'pulse-codex-source-event-v1', event, sessionID, turnID, workspace, source, agentID,
+    `pulse-${host}-source-event-v1`, event, sessionID, turnID, workspace, source, agentID,
   );
   const normalized = {
     schema: 'pulse.lifecycle_event.v1',
-    host: 'codex',
+    host,
     native_event: eventName,
     event,
     session_id: sessionID,
@@ -99,6 +99,21 @@ export function normalizeCodexHook(eventName, rawInput) {
   };
   normalized.idempotency_key = lifecycleIdempotencyKey(normalized);
   return normalized;
+}
+
+export function normalizeCodexHook(eventName, rawInput) {
+  return normalizeHostHook('codex', eventName, rawInput);
+}
+
+export function normalizeClaudeHook(eventName, rawInput) {
+  const input = {
+    ...record(rawInput, 'invalid_claude_code_hook_input'),
+    model: rawInput?.model ?? 'claude_model_unavailable',
+  };
+  if (eventName !== 'SessionStart') {
+    input.turn_id = safeString(rawInput?.prompt_id, 'invalid_prompt_id', { stable: true });
+  }
+  return normalizeHostHook('claude-code', eventName, input);
 }
 
 export function lifecycleIdempotencyKey(event) {
@@ -199,29 +214,34 @@ export function isDestructivePulseTool(toolName) {
 export function isDestructivePulseShellInvocation(toolName, toolInput) {
   if (!/^Bash$/i.test(toolName ?? '') || typeof toolInput?.command !== 'string') return false;
   const command = toolInput.command;
-  return /(?:^|[;&|()\n]\s*|\b(?:env|command|exec|sudo)\s+)(?:[^\n;&|]*\/)?pulse\s+(?:wipe|delete)\b/i.test(command) ||
+  // Deliberately broad: wrappers such as `script`, `env`, `sudo`, `exec`, or
+  // `node /path/cli.js` must not turn an agent command into user presence.
+  // False-positive denial is safer than allowing a destructive invocation.
+  return /(?:^|[\s'";&|()])(?:[^\s'";&|()]*\/)?(?:pulse|cli\.js)\s+(?:wipe|delete)(?=$|[\s'";&|()])/i.test(command) ||
     /\/(?:memory\/wipe|memory\/delete)(?:\s|[?'"\\]|$)/i.test(command) ||
     /(?:^|[\s'"=])(?:~\/\.pulse|\$HOME\/\.pulse|\/[^\s'";|]+\/\.pulse)\/secret\.key(?:[\s'";|]|$)/i.test(command);
 }
 
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
-    /^mcp__pulse-product__pulse_(?:remember|graph_delta|tray|tray_status)$/i.test(toolName);
+    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status)$/i.test(toolName);
 }
 
 export function hookBundleDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export function codexHookExecutionDigest(pluginRoot, dataDir) {
+export function codexHookExecutionDigest(pluginRoot, runtimePath) {
   const hash = createHash('sha256');
-  for (const relative of ['.mcp.json', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs']) {
+  for (const relative of [
+    '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+  ]) {
     hash.update(relative);
     hash.update('\x00');
     hash.update(readFileSync(join(pluginRoot, relative)));
     hash.update('\x00');
   }
-  const runtime = JSON.parse(readFileSync(join(dataDir, 'runtime', 'codex', 'current', 'runtime-manifest.json'), 'utf8'));
+	const runtime = JSON.parse(readFileSync(join(normalize(runtimePath), '..', '..', 'runtime-manifest.json'), 'utf8'));
   if (runtime?.schema !== 'pulse.codex_runtime.v1' || !/^[a-f0-9]{64}$/.test(runtime.tree_digest ?? '')) {
     throw new Error('Codex runtime manifest is invalid');
   }
@@ -230,12 +250,20 @@ export function codexHookExecutionDigest(pluginRoot, dataDir) {
   return hash.digest('hex');
 }
 
-export function validateHookReadiness(source, receipt) {
+export function validateHookReadiness(source, receipt, expected = {}) {
   const current = typeof source === 'string' && /^[a-f0-9]{64}$/.test(source)
     ? source
     : hookBundleDigest(source);
   if (!receipt || receipt.schema !== 'pulse.codex_hook_readiness.v1' ||
-      receipt.hooks_digest !== current || !CODEX_EVENTS.has(receipt.last_event) ||
+      receipt.hooks_digest !== current || !HOST_EVENTS.has(receipt.last_event) ||
+      !/^[a-f0-9]{64}$/.test(receipt.binding_digest ?? '') ||
+      !Number.isSafeInteger(receipt.resolver_epoch) ||
+      typeof receipt.repository_id !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(receipt.workspace_digest ?? '') ||
+      !/^[a-f0-9]{64}$/.test(receipt.turn_proof ?? '') ||
+      !['prompt_context', 'write_receipt', 'turn_finalize'].every((name) =>
+        typeof receipt.milestones?.[name] === 'string' && !Number.isNaN(Date.parse(receipt.milestones[name]))) ||
+      Object.entries(expected).some(([name, value]) => value !== undefined && receipt[name] !== value) ||
       typeof receipt.observed_at !== 'string' || Number.isNaN(Date.parse(receipt.observed_at))) {
     return { ready: false, hooks_digest: current, reason: 'hook_trust_review_required' };
   }

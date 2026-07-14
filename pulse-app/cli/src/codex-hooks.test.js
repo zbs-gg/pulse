@@ -13,7 +13,7 @@ import {
   renderPulseContext,
   validateHookReadiness,
 } from './host-adapter.js';
-import { handleCodexHook } from './codex-hooks.js';
+import { codexWorkspaceDigest, handleCodexHook } from './codex-hooks.js';
 
 const base = {
   session_id: '019f5fc4-fea2-7142-90de-691158b1052d',
@@ -134,6 +134,8 @@ test('SessionStart injects bound resume as inert evidence with a short lease', a
   assert.match(injected, /pulse.context.v1/);
   assert.match(injected, /pulse.context_lease.v1/);
   assert.match(injected, /Prior decision/);
+	assert.match(injected, /"practices":\[\]/);
+	assert.match(injected, /Pulse host rules \(host-owned\)/);
   assert.doesNotMatch(injected, /transcript_path/);
 });
 
@@ -160,6 +162,7 @@ test('PreToolUse emits native empty success only after the original turn lease a
   const calls = [];
   const output = await handleCodexHook('PreToolUse', {
     ...base,
+    agent_id: 'subagent-1',
     hook_event_name: 'PreToolUse',
     tool_name: 'mcp__pulse-product__pulse_status',
     tool_input: {},
@@ -170,6 +173,10 @@ test('PreToolUse emits native empty success only after the original turn lease a
       assert.equal(event.session_id, base.session_id);
       assert.equal(event.turn_id, base.turn_id);
       assert.equal(event.source, 'stop');
+      const parent = normalizeCodexHook('Stop', {
+        ...base, hook_event_name: 'Stop', stop_hook_active: false,
+      });
+      assert.equal(event.source_event_key, parent.source_event_key);
       return { binding_digest: resolved.binding.binding_digest };
     },
     request: async (_resolved, path) => {
@@ -209,6 +216,8 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
   for (const command of [
     'pulse wipe --confirm "wipe pulse memory"',
     '/opt/pulse delete --id pulse:1',
+    "script -q /dev/null pulse wipe --confirm 'wipe pulse memory'",
+    'script -q /dev/null node /opt/pulse/src/cli.js delete --id pulse:1',
     'curl -X POST http://127.0.0.1:18801/memory/wipe',
     'cat ~/.pulse/secret.key',
   ]) {
@@ -219,8 +228,8 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
       tool_input: { command },
       tool_use_id: `tool-${command.length}`,
     });
-    assert.equal(output.decision, 'block');
-    assert.match(output.reason, /user-controlled/);
+    assert.equal(output.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /user-controlled/);
   }
 });
 
@@ -405,11 +414,21 @@ test('hook readiness becomes stale when the trusted bundle changes', () => {
   const receipt = {
     schema: 'pulse.codex_hook_readiness.v1',
     hooks_digest: hookBundleDigest(bytes),
+    binding_digest: 'a'.repeat(64), resolver_epoch: 7,
+    repository_id: 'repository-pulse',
+    workspace_digest: codexWorkspaceDigest('/workspace/pulse'),
+    turn_proof: 'b'.repeat(64),
+    milestones: {
+      prompt_context: '2026-07-14T10:00:00Z',
+      write_receipt: '2026-07-14T10:00:01Z',
+      turn_finalize: '2026-07-14T10:00:02Z',
+    },
     last_event: 'Stop',
     observed_at: '2026-07-14T10:00:00Z',
   };
   assert.equal(validateHookReadiness(bytes, receipt).ready, true);
   assert.deepEqual(validateHookReadiness(Buffer.from('{"hooks":{}}'), receipt).ready, false);
+  assert.equal(validateHookReadiness(bytes, receipt, { repository_id: 'repository-other' }).ready, false);
 });
 
 test('legacy Pulse Codex hook migration removes duplicates and preserves unrelated hooks', () => {

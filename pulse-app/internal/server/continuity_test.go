@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 func TestContinuityCheckpointResumeAndViewerEndpoints(t *testing.T) {
@@ -128,11 +131,11 @@ func TestFirstRunViewerKeepsTrustBoundaries(t *testing.T) {
 	body := string(raw)
 	for _, want := range []string{
 		"Your first memory starts here",
-		"Pending until the local Pulse daemon saves it.",
+		"Nothing is pending until a harness submits a visible Memory Tray candidate.",
 		"Hide in this preview",
 		"Pulse guess: maybe curiosity?",
 		"No emotion is stored until you choose one.",
-		"Connector: installed. Hooks: ready. Sessions: not scanned yet.",
+		"Connector: available. Run doctor for actual MCP and hook readiness. Sessions: not scanned yet.",
 		"Connector: available. Source: not scanned yet. Sessions: not scanned yet.",
 		"Connector: archive import. Source: choose an archive first. Sessions: not scanned yet.",
 	} {
@@ -372,6 +375,70 @@ func TestMemoryWipeRequiresServerSideConfirm(t *testing.T) {
 	}
 }
 
+func TestProductMemoryWipeRejectsCallerConfirmationWithoutOSPresence(t *testing.T) {
+	vault, ts := newProductMemoryServer(t)
+	defer ts.Close()
+
+	remember := pulseJSON(t, ts, http.MethodPost, "/memory/remember", map[string]any{
+		"schema": store.MemoryCapsuleSchema,
+		"source": map[string]any{
+			"host": "codex", "conversation_scope": "current_turn", "timestamp": "2026-07-14T09:00:00Z",
+		},
+		"items": []map[string]any{{
+			"kind": "decision", "redacted_summary": "Wipe guard fixture",
+			"confidence": 0.95, "evidence_hint": "current_turn", "privacy_tier": "normal", "retention": "project",
+		}},
+		"raw_input_included": false,
+	})
+	if remember.StatusCode != http.StatusOK {
+		t.Fatalf("seed protected product memory status=%d", remember.StatusCode)
+	}
+	var prepared store.TurnFinalizeResult
+	if err := json.NewDecoder(remember.Body).Decode(&prepared); err != nil {
+		t.Fatalf("decode protected product memory: %v", err)
+	}
+	if len(prepared.Receipts) != 1 {
+		t.Fatalf("expected one protected product memory candidate: %#v", prepared)
+	}
+	if _, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, time.Now().UTC().Add(11*time.Second)); err != nil {
+		t.Fatalf("commit protected product memory: %v", err)
+	}
+
+	resp := pulseJSON(t, ts, http.MethodPost, "/memory/wipe", map[string]any{
+		"confirm": "wipe pulse memory",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected caller-confirmed product wipe to fail closed, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read product wipe denial: %v", err)
+	}
+	if !strings.Contains(string(body), "OS-backed user presence") {
+		t.Fatalf("product wipe denial must name the missing trust boundary: %q", body)
+	}
+
+	status, err := vault.MemoryStatus()
+	if err != nil {
+		t.Fatalf("read protected product memory status: %v", err)
+	}
+	if status.ItemCount != 1 {
+		t.Fatalf("product memory changed despite denied wipe: %#v", status)
+	}
+
+	viewer := pulseJSON(t, ts, http.MethodGet, "/viewer?key=secret&first_run=1", nil)
+	viewerBody, err := io.ReadAll(viewer.Body)
+	if err != nil {
+		t.Fatalf("read product viewer: %v", err)
+	}
+	if !strings.Contains(string(viewerBody), "OS confirmation required") ||
+		strings.Contains(string(viewerBody), `id="wipe-confirm"`) ||
+		strings.Contains(string(viewerBody), `id="delete-id"`) ||
+		!strings.Contains(string(viewerBody), `data-first-memory-action="forget" disabled`) {
+		t.Fatalf("product viewer exposed a caller-authorized destructive control")
+	}
+}
+
 func TestViewerPageIncludesTrustControls(t *testing.T) {
 	_, ts := newMemoryServer(t)
 	defer ts.Close()
@@ -398,16 +465,17 @@ func TestViewerPageIncludesTrustControls(t *testing.T) {
 		"Onboarding path",
 		"Now",
 		"Later",
-		"Connected",
+		"Bound vault",
+		"harness readiness: see doctor",
 		"Proof",
 		"Import",
 		"Preview",
 		"Review",
 		"Resume",
 		"Pulse is alive",
-		"What Pulse will tell Claude next",
+		"What Pulse will provide next",
 		"You can inspect this before every new session.",
-		"Pulse will tell Claude:",
+		"Pulse will provide:",
 		"View raw resume block",
 		"Choose next step",
 		"Start with one memory first. Old chats can wait.",
@@ -521,7 +589,7 @@ func TestViewerFirstRunDelightKeepsEmotionOptionalAndEditable(t *testing.T) {
 		"data-first-memory-title",
 		"data-first-memory-id",
 		"Your first memory starts here",
-		"You installed Pulse MCP and connected it to Claude Code.",
+		"No saved structured memory is loaded for Claude Code yet.",
 		"How did that feel?",
 		"Pulse guess: maybe curiosity?",
 		"No emotion is stored until you choose one. Silence is not consent.",
@@ -543,7 +611,7 @@ func TestViewerFirstRunDelightKeepsEmotionOptionalAndEditable(t *testing.T) {
 		"Edit preview only and Mark important preview only do not persist yet.",
 		"Change emotion saves only after you choose a feeling.",
 		"Forget deletes only when a saved memory ID is loaded.",
-		"Pending until the local Pulse daemon saves it.",
+		"Nothing is pending until a harness submits a visible Memory Tray candidate.",
 		"Available sources",
 		"Source scanner",
 		"Preview sources after proof",
@@ -553,15 +621,14 @@ func TestViewerFirstRunDelightKeepsEmotionOptionalAndEditable(t *testing.T) {
 		"ChatGPT export",
 		"Claude app export",
 		"Manual capsule",
-		"Connector: installed",
-		"Hooks: ready",
+		"Run doctor for actual MCP and hook readiness",
 		"Connector: available",
 		"Source: choose an archive first",
 		"Source: not scanned yet",
 		"Sessions: not scanned yet",
 		"Sessions: not applicable",
 		"Preview first. Import later.",
-		"Context saved",
+		"Context continuity",
 		"Token savings appear after your first resume.",
 		"Possible state signals",
 		"needs confirmation",
@@ -833,7 +900,7 @@ func TestViewerShowsImportedGraphProfiles(t *testing.T) {
 	body := string(raw)
 	for _, want := range []string{
 		"Pulse keeps the thread",
-		"What Pulse will tell Claude next",
+		"What Pulse will provide next",
 		"Thread map and source details",
 		"People found in reviewed sources",
 		"Saved memory",

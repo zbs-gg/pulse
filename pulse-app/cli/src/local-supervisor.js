@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -84,6 +85,10 @@ function trustedExecutable(path) {
   return executable;
 }
 
+function executableDigest(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
 function readRuntimeReceipt(path) {
   if (!existsSync(path)) return undefined;
   const info = lstatSync(path);
@@ -103,13 +108,25 @@ function processCommand(pid) {
   return result.status === 0 ? result.stdout.trim() : '';
 }
 
-function receiptMatches(runtime, receipt) {
+function receiptMetadataMatches(runtime, receipt) {
   if (!receipt || receipt.schema !== 'pulse.local-vault-process.v1' ||
       receipt.binding_digest !== runtime.binding_digest || receipt.kind !== runtime.kind ||
       receipt.store_id !== runtime.store_id || receipt.data_dir !== runtime.data_dir ||
-      !Number.isSafeInteger(receipt.pid) || receipt.pid <= 1 || typeof receipt.executable !== 'string') {
+      !Number.isSafeInteger(receipt.pid) || receipt.pid <= 1 || typeof receipt.executable !== 'string' ||
+			!/^[a-f0-9]{64}$/.test(receipt.executable_digest ?? '') ||
+			(receipt.stop_requested_at !== undefined &&
+				(typeof receipt.stop_requested_at !== 'string' || Number.isNaN(Date.parse(receipt.stop_requested_at))))) {
     return false;
   }
+  try {
+    return trustedExecutable(receipt.executable) === receipt.executable &&
+      executableDigest(receipt.executable) === receipt.executable_digest;
+  } catch {
+    return false;
+  }
+}
+
+function receiptProcessMatches(runtime, receipt) {
   const command = processCommand(receipt.pid);
   return command.includes(receipt.executable) && command.includes(`-data-dir ${runtime.data_dir}`) &&
     command.includes(`-addr ${runtime.addr}`);
@@ -118,10 +135,44 @@ function receiptMatches(runtime, receipt) {
 export function inspectVaultRuntime(runtime) {
   const receipt = readRuntimeReceipt(runtime.pid_file);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
-  if (!receiptMatches(runtime, receipt)) {
+  if (!receiptMetadataMatches(runtime, receipt)) {
     return { status: 'stale_or_mismatched', runtime, fallback: false };
   }
-  return { status: 'running', runtime, pid: receipt.pid, fallback: false };
+  const command = processCommand(receipt.pid);
+  if (command === '') {
+    return {
+      status: 'crashed', runtime, pid: receipt.pid, executable: receipt.executable,
+      executable_digest: receipt.executable_digest, fallback: false,
+    };
+  }
+  if (!receiptProcessMatches(runtime, receipt)) {
+    return { status: 'stale_or_mismatched', runtime, fallback: false };
+  }
+  return {
+    status: 'running', runtime, pid: receipt.pid, executable: receipt.executable,
+    executable_digest: receipt.executable_digest, fallback: false,
+  };
+}
+
+async function waitForProcessExit(pid, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (processCommand(pid) === '') return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  throw new SupervisorError('vault_stop_timeout', 'bound local vault did not stop in time');
+}
+
+async function terminateSpawnedProcess(pid) {
+  try { process.kill(pid, 'SIGTERM'); } catch { return; }
+  try {
+    await waitForProcessExit(pid);
+    return;
+  } catch (error) {
+    if (!(error instanceof SupervisorError) || error.code !== 'vault_stop_timeout') throw error;
+  }
+  try { process.kill(pid, 'SIGKILL'); } catch { return; }
+  await waitForProcessExit(pid, 1500);
 }
 
 async function waitForVault(runtime, timeoutMs) {
@@ -148,13 +199,35 @@ async function waitForVault(runtime, timeoutMs) {
   throw new SupervisorError('vault_start_timeout', 'bound local vault did not become ready');
 }
 
-export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000, host = 'claude-code' } = {}) {
+export async function assertVaultRuntimeHealthy(runtime, { timeoutMs = 1500 } = {}) {
   const status = inspectVaultRuntime(runtime);
-  if (status.status === 'running') return status;
+  if (status.status !== 'running') {
+    throw new SupervisorError('vault_not_running', `bound local vault is ${status.status}`);
+  }
+  await waitForVault(runtime, timeoutMs);
+  return status;
+}
+
+export async function startVaultRuntime(runtime, {
+  daemonPath, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
+} = {}) {
+  const executable = trustedExecutable(daemonPath);
+  const desiredDigest = executableDigest(executable);
+  const status = inspectVaultRuntime(runtime);
+  let rollbackPath;
+	if (status.status === 'running') {
+		if (status.executable === executable && status.executable_digest === desiredDigest) return status;
+		rollbackPath = status.executable;
+		await stopVaultRuntimeAndWait(runtime);
+  }
+  if (status.status === 'crashed') {
+    // Exact receipt metadata plus a dead PID is safe to recover. Never signal
+    // it: the PID may already have been recycled after a reboot.
+    rmSync(runtime.pid_file, { force: true });
+  }
   if (status.status === 'stale_or_mismatched') {
     throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to replace a mismatched runtime receipt');
   }
-  const executable = trustedExecutable(daemonPath);
   ensurePrivateDirectory(runtime.data_dir);
   ensurePrivateDirectory(dirname(runtime.log_file));
   ensurePrivateDirectory(runtime.cache_dir);
@@ -182,7 +255,7 @@ export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000
   closeSync(logFD);
   const receipt = {
     schema: 'pulse.local-vault-process.v1', pid: child.pid,
-    executable, binding_digest: runtime.binding_digest,
+    executable, executable_digest: desiredDigest, binding_digest: runtime.binding_digest,
     kind: runtime.kind, store_id: runtime.store_id, data_dir: runtime.data_dir,
     started_at: new Date().toISOString(),
   };
@@ -193,9 +266,32 @@ export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000
     await waitForVault(runtime, timeoutMs);
     return { status: 'running', runtime, pid: child.pid, fallback: false };
   } catch (error) {
-    try { process.kill(child.pid, 'SIGTERM'); } catch { /* already stopped */ }
+	let terminationError;
+	try {
+		await terminateSpawnedProcess(child.pid);
+	} catch (failure) {
+		terminationError = failure;
+	}
     rmSync(temporary, { force: true });
     rmSync(runtime.pid_file, { force: true });
+	let rollbackError;
+    if (allowRollback && rollbackPath) {
+      try {
+        await startVaultRuntime(runtime, {
+          daemonPath: rollbackPath, timeoutMs, host, allowRollback: false,
+        });
+	  } catch (failure) {
+		rollbackError = failure;
+      }
+    }
+	if (terminationError || rollbackError) {
+		const details = [
+			`activation failed: ${error instanceof Error ? error.message : String(error)}`,
+			terminationError ? `new daemon termination failed: ${terminationError.message}` : '',
+			rollbackError ? `previous daemon restoration failed: ${rollbackError.message}` : '',
+		].filter(Boolean).join('; ');
+		throw new SupervisorError('vault_upgrade_rollback_failed', details);
+	}
     throw error;
   }
 }
@@ -203,10 +299,39 @@ export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000
 export function stopVaultRuntime(runtime) {
   const receipt = readRuntimeReceipt(runtime.pid_file);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
-  if (!receiptMatches(runtime, receipt)) {
+  if (!receiptMetadataMatches(runtime, receipt) || !receiptProcessMatches(runtime, receipt)) {
     throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to signal a mismatched process');
   }
-  try { process.kill(receipt.pid, 'SIGTERM'); } catch { /* process already exited */ }
-  rmSync(runtime.pid_file, { force: true });
-  return { status: 'stopped', runtime, fallback: false };
+	const stoppingReceipt = { ...receipt, stop_requested_at: new Date().toISOString() };
+	const temporary = `${runtime.pid_file}.${process.pid}.${Date.now()}.stopping`;
+	try {
+		writeFileSync(temporary, JSON.stringify(stoppingReceipt), { mode: 0o600, flag: 'wx' });
+		renameSync(temporary, runtime.pid_file);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
+	try { process.kill(receipt.pid, 'SIGTERM'); } catch { /* process already exited */ }
+	return { status: 'stopping', runtime, pid: receipt.pid, fallback: false };
+}
+
+export async function stopVaultRuntimeAndWait(runtime, { timeoutMs = 3000 } = {}) {
+	let receipt = readRuntimeReceipt(runtime.pid_file);
+	if (!receipt) return { status: 'stopped', runtime, fallback: false };
+	if (!receiptMetadataMatches(runtime, receipt)) {
+		throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
+	}
+	if (receipt.stop_requested_at === undefined) {
+		if (processCommand(receipt.pid) === '') {
+			rmSync(runtime.pid_file, { force: true });
+			return { status: 'stopped', runtime, fallback: false };
+		}
+		if (!receiptProcessMatches(runtime, receipt)) {
+			throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
+		}
+		stopVaultRuntime(runtime);
+		receipt = readRuntimeReceipt(runtime.pid_file);
+	}
+	await waitForProcessExit(receipt.pid, timeoutMs);
+	rmSync(runtime.pid_file, { force: true });
+	return { status: 'stopped', runtime, fallback: false };
 }

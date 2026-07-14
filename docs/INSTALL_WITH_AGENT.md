@@ -47,11 +47,12 @@ codex plugin marketplace remove zbs-gg
 rm -rf ~/.pulse/runtime/codex
 ```
 
-Memory remains in its bound Personal or Desk vault. Delete it only from a
-directly attached interactive terminal with the separate exact-confirmation
-command `pulse wipe --confirm "wipe pulse memory"`. Agent MCP tools never
-expose forget or wipe in Codex product mode, and piped/non-interactive CLI
-deletion is rejected.
+Memory remains in its bound Personal or Desk vault. Individual deletion stays
+human-controlled. Whole-vault product wipe fails closed until the privileged
+OS-backed Pulse surface can issue a fresh `vault.wipe` presence assertion; a
+terminal, pseudo-terminal, confirmation phrase, hook, or HTTP caller is never
+accepted as that assertion. Local Preview keeps its separate exact-confirmation
+wipe contract.
 
 The plugin injects remembered text only as `pulse.context.v1` inert evidence.
 Human-approved practices remain a separate array. A model cannot choose the

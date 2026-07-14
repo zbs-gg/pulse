@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { migrateLegacyPulseHookConfig } from './host-adapter.js';
 
@@ -80,16 +80,99 @@ export function pulseProductMcpShadowFiles({ cwd = process.cwd(), codexHome = co
 }
 
 export function parsePulsePluginList(output) {
-  if (typeof output !== 'string') return { enabled: false, path: undefined };
-  for (const line of output.split(/\r?\n/)) {
-    const match = line.match(/^pulse@zbs-gg\s{2,}(installed, enabled|installed, disabled)\s{2,}(\S+)\s{2,}(.+?)\s*$/);
-    if (match) return { enabled: match[1] === 'installed, enabled', version: match[2], path: match[3] };
-  }
-  return { enabled: false, path: undefined };
+	if (typeof output !== 'string') return { installed: false, enabled: false, path: undefined };
+	for (const line of output.split(/\r?\n/)) {
+		const match = line.match(/^pulse@zbs-gg\s{2,}(installed, enabled|installed, disabled)\s{2,}(\S+)\s{2,}(.+?)\s*$/);
+		if (match) return { installed: true, enabled: match[1] === 'installed, enabled', version: match[2], path: match[3] };
+	}
+	return { installed: false, enabled: false, path: undefined };
 }
 
 function runtimeRoot(dataDir) {
   return join(dataDir, 'runtime', 'codex');
+}
+
+function codexProductWorkspaceDigest(canonicalPath) {
+  return createHash('sha256')
+    .update('pulse-codex-product-locator-v1\x00')
+    .update(canonicalPath)
+    .digest('hex');
+}
+
+export function readCodexProductLocator({ codexHome, binding }) {
+	if (!binding?.workspace?.canonical_path) throw new Error('Codex product locator binding is invalid');
+	const path = join(resolve(codexHome), 'pulse', 'product-locators.json');
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
+		(info.mode & 0o077) !== 0 || info.size > 1024 * 1024) {
+		throw new Error('Codex product locator is unsafe');
+	}
+	const locator = JSON.parse(readFileSync(path, 'utf8'));
+	const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+	if (locator?.schema !== 'pulse.codex_product_locators.v1' ||
+		!locator.entries || typeof locator.entries !== 'object' || Array.isArray(locator.entries) ||
+		Object.keys(locator).some((name) => !['schema', 'entries'].includes(name))) {
+		throw new Error('Codex product locator is invalid');
+	}
+	const entry = locator.entries[workspaceDigest];
+	const allowed = ['data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	if (!entry) throw new Error('Codex product locator is missing for this workspace');
+	if (entry.workspace_digest !== workspaceDigest ||
+		Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
+		!['production', 'test'].includes(entry.trust_mode) ||
+		![entry.data_dir, entry.registry_path, entry.public_key_path]
+			.every((value) => typeof value === 'string' && isAbsolute(value))) {
+		throw new Error('Codex product locator is invalid for this workspace');
+	}
+	return { path, entry };
+}
+
+export function writeCodexProductLocator({
+	codexHome, binding, dataDir, registryPath, publicKeyPath, trustMode = 'production',
+}) {
+	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode)) {
+    throw new Error('Codex product locator input is invalid');
+  }
+  const directory = join(resolve(codexHome), 'pulse');
+  const path = join(directory, 'product-locators.json');
+  let current = { schema: 'pulse.codex_product_locators.v1', entries: {} };
+  if (existsSync(path)) {
+    const info = lstatSync(path);
+    const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+      throw new Error('Codex product locator is unsafe');
+    }
+    current = JSON.parse(readFileSync(path, 'utf8'));
+    if (current?.schema !== 'pulse.codex_product_locators.v1' ||
+        !current.entries || typeof current.entries !== 'object' || Array.isArray(current.entries)) {
+      throw new Error('Codex product locator is invalid');
+    }
+  }
+  const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+  current.entries[workspaceDigest] = {
+    workspace_digest: workspaceDigest,
+    data_dir: resolve(dataDir),
+		registry_path: resolve(registryPath),
+		public_key_path: resolve(publicKeyPath),
+		trust_mode: trustMode,
+  };
+  atomicWriteJSON(path, current);
+  return path;
+}
+
+export function removeCodexProductLocator({ codexHome, binding }) {
+	const { path } = readCodexProductLocator({ codexHome, binding });
+	const locator = JSON.parse(readFileSync(path, 'utf8'));
+	const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+	delete locator.entries[workspaceDigest];
+	const remaining = Object.keys(locator.entries).length;
+	if (remaining === 0) {
+		rmSync(path, { force: true });
+	} else {
+		atomicWriteJSON(path, locator);
+	}
+	return { path, remaining };
 }
 
 function runtimeTreeDigest(root) {
@@ -126,12 +209,75 @@ function includeRuntimePath(sourceRoot, sourcePath) {
   return !relative.endsWith('.test.js') && !relative.endsWith('.map') && !relative.endsWith('.d.ts');
 }
 
+function committedRuntimeDigest(dataDir) {
+	const path = join(dataDir, 'runtime', 'product-daemon.json');
+	if (!existsSync(path)) {
+		throw new Error('Codex runtime activation journal is missing; refusing ambiguous recovery');
+	}
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
+		(info.mode & 0o077) !== 0 || info.size > 8192) {
+		throw new Error('Codex runtime activation journal is unsafe; refusing ambiguous recovery');
+	}
+	const activation = JSON.parse(readFileSync(path, 'utf8'));
+	const allowed = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
+	const expectedRuntimePath = join(runtimeRoot(dataDir), 'current', 'src', 'cli.js');
+	if (activation?.schema !== 'pulse.product_activation.v2' ||
+		Object.keys(activation).length !== allowed.length ||
+		Object.keys(activation).some((name) => !allowed.includes(name)) ||
+		resolve(activation.runtime_path ?? '') !== resolve(expectedRuntimePath) ||
+		!isAbsolute(activation.daemon_path ?? '') ||
+		![activation.runtime_tree_digest, activation.daemon_digest]
+			.every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
+		typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
+		throw new Error('Codex runtime activation journal is invalid; refusing ambiguous recovery');
+	}
+	return activation.runtime_tree_digest;
+}
+
+function recoverInterruptedRuntimeInstall(dataDir) {
+	const root = runtimeRoot(dataDir);
+	const current = join(root, 'current');
+	const previous = join(root, 'previous');
+	if (!existsSync(previous)) return { action: 'none' };
+
+	const committedDigest = committedRuntimeDigest(dataDir);
+	const currentRuntime = inspectRuntimeRoot(current);
+	const previousRuntime = inspectRuntimeRoot(previous);
+	if (currentRuntime.ok && currentRuntime.digest === committedDigest) {
+		// Activation publication is the commit point. A crash before finalize only
+		// left an obsolete rollback tree behind; never replace the committed tree.
+		rmSync(previous, { recursive: true, force: true });
+		return { action: 'finalized_current', runtime: currentRuntime };
+	}
+	if (previousRuntime.ok && previousRuntime.digest === committedDigest) {
+		// The process died before publishing the staged current tree. Restore the
+		// exact tree still named by the durable activation receipt.
+		const abandoned = join(root, `abandoned-${process.pid}-${Date.now()}`);
+		if (existsSync(current)) renameSync(current, abandoned);
+		try {
+			renameSync(previous, current);
+		} catch (error) {
+			if (existsSync(abandoned) && !existsSync(current)) renameSync(abandoned, current);
+			throw error;
+		}
+		rmSync(abandoned, { recursive: true, force: true });
+		return { action: 'rolled_back_previous', runtime: previousRuntime };
+	}
+	throw new Error('Codex runtime activation journal matches neither current nor previous; refusing ambiguous recovery');
+}
+
 export function installCodexRuntime(packageRoot, dataDir, options = {}) {
   const root = runtimeRoot(dataDir);
   const current = join(root, 'current');
   const previous = join(root, 'previous');
   const next = join(root, `next-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
+	// `previous` is an activation journal entry. If the installer process died
+	// before finalize/rollback, the durable product activation decides which
+	// tree committed. Ambiguous state is preserved and rejected, never guessed.
+	recoverInterruptedRuntimeInstall(dataDir);
   try {
     cpSync(packageRoot, next, {
       recursive: true,
@@ -179,16 +325,35 @@ export function installCodexRuntime(packageRoot, dataDir, options = {}) {
       if (existsSync(previous) && !existsSync(current)) renameSync(previous, current);
       throw error;
     }
-    rmSync(previous, { recursive: true, force: true });
+    if (options.keepPrevious !== true) rmSync(previous, { recursive: true, force: true });
     return inspectCodexRuntime(dataDir);
   } finally {
     rmSync(next, { recursive: true, force: true });
   }
 }
 
-export function inspectCodexRuntime(dataDir) {
-  const current = join(runtimeRoot(dataDir), 'current');
-  const manifestPath = join(current, RUNTIME_MANIFEST);
+export function finalizeCodexRuntimeInstall(dataDir) {
+  rmSync(join(runtimeRoot(dataDir), 'previous'), { recursive: true, force: true });
+}
+
+export function rollbackCodexRuntimeInstall(dataDir) {
+  const root = runtimeRoot(dataDir);
+  const current = join(root, 'current');
+  const previous = join(root, 'previous');
+  rmSync(current, { recursive: true, force: true });
+  if (existsSync(previous)) {
+    renameSync(previous, current);
+    return inspectCodexRuntime(dataDir);
+  }
+	return {
+		ok: true,
+		restored: 'absent',
+		detail: 'the first staged runtime was removed; no prior runtime existed',
+	};
+}
+
+function inspectRuntimeRoot(root) {
+	const manifestPath = join(root, RUNTIME_MANIFEST);
   if (!existsSync(manifestPath)) return { ok: false, detail: 'trusted Codex runtime is not installed' };
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -197,16 +362,32 @@ export function inspectCodexRuntime(dataDir) {
         manifest.entrypoint !== 'src/cli.js') {
       throw new Error('runtime manifest is invalid');
     }
-    const actual = runtimeTreeDigest(current);
+		const actual = runtimeTreeDigest(root);
     if (actual !== manifest.tree_digest) throw new Error('runtime integrity digest mismatch');
     return {
       ok: true,
       detail: `local immutable runtime ${manifest.package_version}`,
-      path: join(current, manifest.entrypoint),
+			path: join(root, manifest.entrypoint),
       digest: manifest.tree_digest,
       manifest,
     };
   } catch (error) {
     return { ok: false, detail: error.message };
   }
+}
+
+export function inspectCodexRuntime(dataDir) {
+	return inspectRuntimeRoot(join(runtimeRoot(dataDir), 'current'));
+}
+
+export function inspectCodexRuntimeAt(runtimePath) {
+	if (typeof runtimePath !== 'string' || !isAbsolute(runtimePath) ||
+		basename(runtimePath) !== 'cli.js' || basename(dirname(runtimePath)) !== 'src') {
+		return { ok: false, detail: 'trusted Codex runtime path is invalid' };
+	}
+	const inspected = inspectRuntimeRoot(dirname(dirname(resolve(runtimePath))));
+	if (inspected.ok && inspected.path !== resolve(runtimePath)) {
+		return { ok: false, detail: 'trusted Codex runtime entrypoint is invalid' };
+	}
+	return inspected;
 }

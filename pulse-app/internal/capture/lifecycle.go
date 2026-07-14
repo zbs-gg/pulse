@@ -100,7 +100,7 @@ func NormalizeLifecycleEvent(host Host, event LifecycleEventKind, input map[stri
 		return LifecycleEvent{}, errors.New("invalid_source")
 	}
 	turnID, ok := input["turn_id"].(string)
-	if host == HostCodex && event == EventSessionStart {
+	if event == EventSessionStart {
 		if _, exists := input["turn_id"]; !exists {
 			material := strings.Join([]string{
 				"pulse-thread-scoped-turn-v1", string(host), sessionID, filepath.Clean(cwd), source,

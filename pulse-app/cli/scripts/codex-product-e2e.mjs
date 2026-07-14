@@ -3,12 +3,15 @@ import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync,
-  mkdirSync,
+	  existsSync,
+	  lstatSync,
+	  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
-  writeFileSync,
+	  rmSync,
+	  symlinkSync,
+	  writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -52,7 +55,7 @@ async function freePort() {
   return port;
 }
 
-function writeSignedPersonalBinding(root, workspace, port) {
+function writeSignedPersonalBindings(root, fixtures) {
   const supervisor = join(root, 'trust');
   mkdirSync(supervisor, { recursive: true, mode: 0o700 });
   const registryPath = join(supervisor, 'workspace-bindings.json');
@@ -60,24 +63,24 @@ function writeSignedPersonalBinding(root, workspace, port) {
   const payload = {
     schema: 'pulse.workspace-binding-registry.v1',
     epoch: 1,
-    bindings: [{
-      binding_id: 'binding_codex_e2e',
-      receipt_id: 'receipt_codex_e2e',
+		bindings: fixtures.map(({ workspace, port, suffix }) => ({
+			binding_id: `binding_codex_e2e_${suffix}`,
+			receipt_id: `receipt_codex_e2e_${suffix}`,
       resolver_epoch: 1,
       workspace: {
         workspace_id: workspace.workspace_id,
         repository_id: workspace.repository_id,
       },
       mode: 'personal',
-      principal_ref: 'principal_codex_e2e',
-      personal: {
-        store_id: 'store_personal_codex_e2e',
-        data_dir: join(root, 'vaults', 'personal'),
-        base_url: `http://127.0.0.1:${port}`,
-        credential_ref: 'local:pulse/codex-e2e',
-        cache_dir: join(root, 'caches', 'personal'),
-      },
-    }],
+			principal_ref: `principal_codex_e2e_${suffix}`,
+			personal: {
+				store_id: `store_personal_codex_e2e_${suffix}`,
+				data_dir: join(root, 'vaults', `personal-${suffix}`),
+				base_url: `http://127.0.0.1:${port}`,
+				credential_ref: `local:pulse/codex-e2e-${suffix}`,
+				cache_dir: join(root, 'caches', `personal-${suffix}`),
+			},
+		})),
   };
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const signature = sign(null, Buffer.from(canonicalJSONStringify(payload)), privateKey).toString('base64');
@@ -109,14 +112,20 @@ try {
   const home = join(root, 'home');
   const codexHome = join(root, 'codex');
   const workspace = join(root, 'workspace');
+	const workspaceB = join(root, 'workspace-b');
   const installRoot = join(root, 'packed-cli');
   mkdirSync(home, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(installRoot, { recursive: true });
   initializeRepository(workspace);
+	initializeRepository(workspaceB);
 
   const port = await freePort();
-  const bindingPaths = writeSignedPersonalBinding(root, canonicalizeWorkspace(workspace), port);
+	const portB = await freePort();
+	const bindingPaths = writeSignedPersonalBindings(root, [
+		{ workspace: canonicalizeWorkspace(workspace), port, suffix: 'a' },
+		{ workspace: canonicalizeWorkspace(workspaceB), port: portB, suffix: 'b' },
+	]);
   const daemon = join(root, 'pulse-product-daemon');
   run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
   chmodSync(daemon, 0o700);
@@ -144,11 +153,36 @@ try {
     PULSE_GO_BIN: daemon,
     PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
+    PULSE_TRUST_MODE: 'test',
     PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
     PULSE_LOCAL_EMBED_PYTHON: process.execPath,
     PULSE_LOCAL_EMBED_HELPER: fakeEmbedHelper,
     PULSE_LOCAL_EMBED_MODEL: fakeEmbedModel,
   };
+
+	const unhealthyDaemon = join(root, 'pulse-product-daemon-unhealthy.mjs');
+	writeFileSync(unhealthyDaemon, `#!${process.execPath}
+const fs = require('node:fs');
+const http = require('node:http');
+const value = (name) => process.argv[process.argv.indexOf(name) + 1];
+const dataDir = value('-data-dir');
+const [host, port] = value('-addr').split(':');
+fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
+const server = http.createServer((_request, response) => { response.statusCode = 503; response.end('not ready'); });
+server.listen(Number(port), host);
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+`, { mode: 0o700 });
+	chmodSync(unhealthyDaemon, 0o700);
+	const failedConnect = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+		cwd: workspace, env: { ...env, PULSE_GO_BIN: unhealthyDaemon }, status: 1, timeout: 30_000,
+	});
+	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /did not become ready/);
+	const pluginAfterFailure = run('codex', ['plugin', 'list', '--marketplace', 'zbs-gg'], { cwd: workspace, env });
+	assert.match(pluginAfterFailure.stdout, /pulse@zbs-gg\s+not installed/);
+	assert.equal(existsSync(join(root, 'pulse', 'runtime', 'codex', 'current')), false);
+	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
+	assert.equal(existsSync(join(codexHome, 'pulse', 'product-locators.json')), false);
 
   const connected = run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env });
   assert.match(connected.stdout, /pulse@|Codex plugin installed/);
@@ -165,10 +199,75 @@ try {
   const pluginRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', cacheVersions[0]);
   const hook = join(pluginRoot, 'hooks', 'pulse-hook.mjs');
   const sessionID = 'session-codex-e2e';
-  const hookEnv = {
-    ...env,
-    PLUGIN_DATA: join(root, 'plugin-data'),
-  };
+  const freshHostEnv = Object.fromEntries(
+		Object.entries(env).filter(([name]) => !name.startsWith('PULSE_') || name === 'PULSE_TRUST_MODE'),
+  );
+	const hookEnv = {
+	  ...freshHostEnv,
+	  PLUGIN_DATA: join(root, 'plugin-data'),
+	};
+	const activationPath = join(root, 'pulse', 'runtime', 'product-daemon.json');
+	const activationBeforeMismatch = readFileSync(activationPath);
+	const mismatchedActivation = JSON.parse(activationBeforeMismatch);
+	mismatchedActivation.runtime_tree_digest = 'f'.repeat(64);
+	writeFileSync(activationPath, JSON.stringify(mismatchedActivation), { mode: 0o600 });
+	const rejectedMixedPair = run(process.execPath, [hook, 'SessionStart'], {
+		cwd: workspace,
+		env: hookEnv,
+		status: 1,
+		input: JSON.stringify({
+			session_id: 'session-rejected-mixed-pair', cwd: workspace,
+			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
+		}),
+	});
+	assert.match(`${rejectedMixedPair.stdout}${rejectedMixedPair.stderr}`, /runtime and activation are out of sync/);
+	writeFileSync(activationPath, activationBeforeMismatch, { mode: 0o600 });
+	const installedRuntimeCLI = join(root, 'pulse', 'runtime', 'codex', 'current', 'src', 'cli.js');
+	const installedRuntimeCLIBytes = readFileSync(installedRuntimeCLI);
+	const installedRuntimeCLIMode = lstatSync(installedRuntimeCLI).mode & 0o777;
+	writeFileSync(installedRuntimeCLI, Buffer.concat([
+		installedRuntimeCLIBytes, Buffer.from('\n// untrusted-runtime-tamper\n'),
+	]));
+	const rejectedTamperedRuntime = run(process.execPath, [hook, 'SessionStart'], {
+		cwd: workspace,
+		env: hookEnv,
+		status: 1,
+		input: JSON.stringify({
+			session_id: 'session-rejected-runtime-tamper', cwd: workspace,
+			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
+		}),
+	});
+	assert.match(`${rejectedTamperedRuntime.stdout}${rejectedTamperedRuntime.stderr}`, /runtime and activation are out of sync/);
+	writeFileSync(installedRuntimeCLI, installedRuntimeCLIBytes, { mode: installedRuntimeCLIMode });
+
+	const runtimeSymlinkTarget = join(root, 'untrusted-runtime-target.mjs');
+	writeFileSync(runtimeSymlinkTarget, 'throw new Error("untrusted runtime executed");\n', { mode: 0o600 });
+	rmSync(installedRuntimeCLI);
+	symlinkSync(runtimeSymlinkTarget, installedRuntimeCLI);
+	const rejectedRuntimeSymlink = run(process.execPath, [hook, 'SessionStart'], {
+		cwd: workspace,
+		env: hookEnv,
+		status: 1,
+		input: JSON.stringify({
+			session_id: 'session-rejected-runtime-symlink', cwd: workspace,
+			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
+		}),
+	});
+	assert.match(`${rejectedRuntimeSymlink.stdout}${rejectedRuntimeSymlink.stderr}`, /trusted runtime contains a symlink: src\/cli\.js/);
+	rmSync(installedRuntimeCLI);
+	writeFileSync(installedRuntimeCLI, installedRuntimeCLIBytes, { mode: installedRuntimeCLIMode });
+	const syntheticWithoutHostOptIn = { ...hookEnv };
+	delete syntheticWithoutHostOptIn.PULSE_TRUST_MODE;
+	const rejectedSyntheticLaunch = run(process.execPath, [hook, 'SessionStart'], {
+		cwd: workspace,
+		env: syntheticWithoutHostOptIn,
+		status: 1,
+		input: JSON.stringify({
+			session_id: 'session-rejected-synthetic', cwd: workspace,
+			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
+		}),
+	});
+	assert.match(`${rejectedSyntheticLaunch.stdout}${rejectedSyntheticLaunch.stderr}`, /synthetic test locator requires an explicitly test-mode host process/);
   const sessionStart = run(process.execPath, [hook, 'SessionStart'], {
     cwd: workspace,
     env: hookEnv,
@@ -341,13 +440,41 @@ try {
 
   const doctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], { cwd: workspace, env });
   const report = JSON.parse(doctor.stdout);
-  assert.equal(report.verdict, 'Pulse Codex automatic lifecycle ready.');
+	assert.equal(report.verdict, 'Pulse Codex synthetic test lifecycle ready; production authority is not active.');
+	assert.equal(report.trust.authority_mode, 'synthetic-test');
   assert.equal(Object.values(report.checks).every((check) => check.ok), true);
   assert.equal(report.trust.raw_transcript_capture, false);
   assert.equal(report.trust.full_retrieval, true);
   assert.equal(report.trust.external_embedding_api, false);
 
-  const runtimeReceipt = JSON.parse(readFileSync(join(root, 'vaults', 'personal', 'supervisor-runtime.json'), 'utf8'));
+	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspaceB, env, timeout: 120_000 });
+	const receiptBv1 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
+	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// multi-workspace-runtime-v2\n`);
+	const daemonV2 = join(root, 'pulse-product-daemon-v2');
+	writeFileSync(daemonV2, Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_MULTI_WORKSPACE_V2\n')]), { mode: 0o700 });
+	chmodSync(daemonV2, 0o700);
+	run(process.execPath, [packedCLI, 'connect', 'codex'], {
+		cwd: workspace, env: { ...env, PULSE_GO_BIN: daemonV2 }, timeout: 120_000,
+	});
+	const activationV2 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
+	const receiptAv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
+	assert.equal(receiptAv2.executable_digest, activationV2.daemon_digest);
+	assert.notEqual(receiptBv1.executable_digest, activationV2.daemon_digest);
+	const workspaceBResume = run(process.execPath, [hook, 'SessionStart'], {
+		cwd: workspaceB,
+		env: hookEnv,
+		input: JSON.stringify({
+			session_id: 'session-workspace-b-after-upgrade', cwd: workspaceB,
+			hook_event_name: 'SessionStart', source: 'resume', model: 'gpt-5', permission_mode: 'default',
+		}),
+		timeout: 30_000,
+	});
+	assert.match(JSON.parse(workspaceBResume.stdout).hookSpecificOutput.additionalContext, /pulse.context.v1/);
+	const receiptBv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
+	assert.equal(receiptBv2.executable_digest, activationV2.daemon_digest,
+		'first hook in another workspace must reconcile its vault before reading memory');
+
+  const runtimeReceipt = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
   process.kill(runtimeReceipt.pid, 'SIGSTOP');
   try {
     const hungDoctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
@@ -360,6 +487,7 @@ try {
     process.kill(runtimeReceipt.pid, 'SIGCONT');
   }
 
+	run(process.execPath, [packedCLI, 'disconnect', 'codex'], { cwd: workspaceB, env });
   run(process.execPath, [packedCLI, 'disconnect', 'codex'], { cwd: workspace, env });
   const disconnected = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
     cwd: workspace, env, status: 1,
@@ -372,7 +500,8 @@ try {
 } finally {
   if (!runtimeStopped) {
     const receiptPaths = [
-      join(root, 'vaults', 'personal', 'supervisor-runtime.json'),
+		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'),
+		join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'),
     ];
     for (const path of receiptPaths) {
       try {

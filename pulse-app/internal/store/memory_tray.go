@@ -167,6 +167,22 @@ type preparedPrivateCandidate struct {
 	digest  string
 }
 
+type privateCapsuleIdentity struct {
+	Schema           string              `json:"schema"`
+	Items            []MemoryCapsuleItem `json:"items"`
+	RawInputIncluded bool                `json:"raw_input_included"`
+}
+
+type privateSemanticIdentity struct {
+	Schema           string              `json:"schema"`
+	Nodes            []SemanticNode      `json:"nodes,omitempty"`
+	Edges            []SemanticEdge      `json:"edges,omitempty"`
+	Facts            []SemanticFact      `json:"facts,omitempty"`
+	Events           []SemanticEvent     `json:"events,omitempty"`
+	Continuity       *SemanticContinuity `json:"continuity,omitempty"`
+	RawInputIncluded bool                `json:"raw_input_included"`
+}
+
 type trayCandidateRow struct {
 	id, ledgerID, kind, operation, targetObjectID, targetContentDigest string
 	digest, payload, state, graceExpires                               string
@@ -224,6 +240,7 @@ func validateTrayGrace(grace time.Duration) error {
 }
 
 func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateCandidate, error) {
+	var identity any
 	switch candidate.Kind {
 	case PrivateMemoryCandidateCapsule:
 		if candidate.Capsule == nil || candidate.SemanticDelta != nil || len(candidate.Capsule.Items) != 1 {
@@ -231,6 +248,10 @@ func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateC
 		}
 		if err := validateMemoryCapsule(*candidate.Capsule); err != nil {
 			return preparedPrivateCandidate{}, err
+		}
+		identity = privateCapsuleIdentity{
+			Schema: candidate.Capsule.Schema, Items: candidate.Capsule.Items,
+			RawInputIncluded: candidate.Capsule.RawInputIncluded,
 		}
 	case PrivateMemoryCandidateSemanticDelta:
 		if candidate.SemanticDelta == nil || candidate.Capsule != nil {
@@ -244,6 +265,12 @@ func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateC
 		if err := validateSemanticDelta(*candidate.SemanticDelta); err != nil {
 			return preparedPrivateCandidate{}, err
 		}
+		identity = privateSemanticIdentity{
+			Schema: candidate.SemanticDelta.Schema, Nodes: candidate.SemanticDelta.Nodes,
+			Edges: candidate.SemanticDelta.Edges, Facts: candidate.SemanticDelta.Facts,
+			Events: candidate.SemanticDelta.Events, Continuity: candidate.SemanticDelta.Continuity,
+			RawInputIncluded: candidate.SemanticDelta.RawInputIncluded,
+		}
 	default:
 		return preparedPrivateCandidate{}, errors.New("candidate kind is unsupported")
 	}
@@ -251,7 +278,11 @@ func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateC
 	if err != nil {
 		return preparedPrivateCandidate{}, err
 	}
-	digest := sha256.Sum256(payload)
+	identityPayload, err := json.Marshal(identity)
+	if err != nil {
+		return preparedPrivateCandidate{}, err
+	}
+	digest := sha256.Sum256(identityPayload)
 	return preparedPrivateCandidate{kind: candidate.Kind, payload: payload, digest: hex.EncodeToString(digest[:])}, nil
 }
 

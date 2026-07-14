@@ -48,41 +48,32 @@ const RUNTIME_MODE = resolveRuntimeMode(process.env.PULSE_RUNTIME_MODE, HTTP_REQ
 
 type EngineMode = 'auto' | 'daemon' | 'standalone';
 const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
-const CODEX_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex';
+const PRODUCT_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex' ||
+  process.env.PULSE_HOST_ADAPTER === 'claude-code';
+const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
+  ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code'
+  : undefined;
 
-async function assertCodexBindingCurrent(): Promise<void> {
-  if (!CODEX_HOST_ADAPTER) return;
-  const moduleURL = process.env.PULSE_CODEX_AUTHORITY_MODULE ?? '';
-  const expectedWorkspace = process.env.PULSE_CODEX_WORKSPACE ?? '';
+async function assertProductBindingCurrent(): Promise<void> {
+  if (!PRODUCT_HOST_ADAPTER) return;
+  const moduleURL = process.env.PULSE_HOST_AUTHORITY_MODULE ?? '';
+  const expectedWorkspace = process.env.PULSE_HOST_WORKSPACE ?? '';
   if (!moduleURL.startsWith('file:') || expectedWorkspace === '') {
-    throw new Error('Codex binding authority is unavailable; restart this Codex task');
+    throw new Error('Pulse host binding authority is unavailable; restart this task');
   }
   const authority = await import(moduleURL) as {
-    resolveWorkspaceBinding(options: {
-      cwd: string;
-      registryPath?: string;
-      publicKeyPath?: string;
-    }): {
+    resolveProductWorkspaceBinding(options: { cwd: string }): {
       binding_digest: string;
       resolver_epoch: number;
       workspace: { canonical_path: string };
     };
   };
-  const options: { cwd: string; registryPath?: string; publicKeyPath?: string } = {
-    cwd: process.cwd(),
-  };
-  if (process.env.PULSE_BINDING_REGISTRY_PATH) {
-    options.registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
-  }
-  if (process.env.PULSE_BINDING_PUBLIC_KEY_PATH) {
-    options.publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
-  }
-  const current = authority.resolveWorkspaceBinding(options);
+  const current = authority.resolveProductWorkspaceBinding({ cwd: process.cwd() });
   if (current.binding_digest !== process.env.PULSE_BINDING_DIGEST ||
       current.resolver_epoch !== Number(process.env.PULSE_RESOLVER_EPOCH) ||
       realpathSync(current.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
       realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
-    throw new Error('Codex workspace binding changed or was revoked; restart this Codex task');
+    throw new Error('Pulse workspace binding changed or was revoked; restart this task');
   }
 }
 if (RUNTIME_MODE === 'team-remote') {
@@ -199,9 +190,9 @@ interface MemoryCapsule {
   raw_input_included: false;
 }
 
-interface CodexTurnContext {
-  schema: 'pulse.codex_turn_context.v1';
-  host: 'codex';
+interface HostTurnContext {
+  schema: string;
+  host: 'codex' | 'claude-code';
   session_id: string;
   turn_id: string;
   workspace: string;
@@ -306,36 +297,49 @@ async function pulseFetch<T>(
   return (await resp.json()) as T;
 }
 
-async function consumeCodexTurnContext(toolName: string, toolInput: unknown): Promise<CodexTurnContext> {
-  const moduleURL = process.env.PULSE_CODEX_RUNTIME_MODULE ?? '';
-  if (!moduleURL.startsWith('file:')) {
-    throw new Error('Codex tool lease authority is unavailable; restart this Codex task');
-  }
-  const runtime = await import(moduleURL) as {
-    consumeCodexToolLease(
-      resolved: {
-        binding: {
-          binding_digest: string;
-          resolver_epoch: number;
-          workspace: { canonical_path: string };
-        };
-        runtime: { data_dir: string };
-      },
-      name: string,
-      input: unknown,
-    ): CodexTurnContext;
-  };
-  return runtime.consumeCodexToolLease({
+function productRuntimeResolution() {
+  return {
     binding: {
       binding_digest: process.env.PULSE_BINDING_DIGEST ?? '',
       resolver_epoch: Number(process.env.PULSE_RESOLVER_EPOCH),
-      workspace: { canonical_path: process.env.PULSE_CODEX_WORKSPACE ?? '' },
+      workspace: { canonical_path: process.env.PULSE_HOST_WORKSPACE ?? '' },
     },
     runtime: { data_dir: PULSE_DATA_DIR },
-  }, toolName, toolInput);
+  };
 }
 
-function codexFinalizeBody(capsule: MemoryCapsule, context: CodexTurnContext): Record<string, unknown> {
+interface ProductRuntimeModule {
+  consumeHostToolLease(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code',
+    name: string,
+    input: unknown,
+  ): HostTurnContext;
+  writeHostFinalizeMarker(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    event: HostTurnContext,
+    host: 'codex' | 'claude-code',
+    result: unknown,
+  ): unknown;
+}
+
+async function productRuntimeModule(): Promise<ProductRuntimeModule> {
+  const moduleURL = process.env.PULSE_HOST_RUNTIME_MODULE ?? '';
+  if (!moduleURL.startsWith('file:') || !PRODUCT_HOST) {
+    throw new Error('Pulse tool lease authority is unavailable; restart this task');
+  }
+  return await import(moduleURL) as ProductRuntimeModule;
+}
+
+async function consumeProductTurnContext(toolInput: unknown): Promise<HostTurnContext> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  return runtime.consumeHostToolLease(
+    productRuntimeResolution(), PRODUCT_HOST, 'pulse_remember', toolInput,
+  );
+}
+
+function productFinalizeBody(capsule: MemoryCapsule, context: HostTurnContext): Record<string, unknown> {
   const timestamp = new Date().toISOString();
   return {
     schema: 'pulse.turn_finalize.v1',
@@ -351,7 +355,7 @@ function codexFinalizeBody(capsule: MemoryCapsule, context: CodexTurnContext): R
       kind: 'memory_capsule',
       capsule: {
         schema: 'pulse.memory_capsule.v1',
-        source: { host: 'codex', conversation_scope: 'current_turn', timestamp },
+        source: { host: context.host, conversation_scope: 'current_turn', timestamp },
         items: [item],
         raw_input_included: false,
       },
@@ -359,35 +363,10 @@ function codexFinalizeBody(capsule: MemoryCapsule, context: CodexTurnContext): R
   };
 }
 
-function writeCodexFinalizeMarker(context: CodexTurnContext, value: unknown): void {
-  const result = value as Record<string, unknown>;
-  const finalize = result.finalize_receipt as Record<string, unknown>;
-  const digest = createHash('sha256')
-    .update('pulse-codex-finalize-marker-v1\x1f')
-    .update(context.session_id)
-    .update('\x1f')
-    .update(context.turn_id)
-    .digest('hex');
-  const directory = join(PULSE_DATA_DIR, 'codex-turn-finalized');
-  const path = join(directory, `${digest}.json`);
-  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  try {
-    writeFileSync(temporary, `${JSON.stringify({
-      schema: 'pulse.codex_finalize_marker.v1',
-      session_id: context.session_id,
-      turn_id: context.turn_id,
-      source_event_key: context.source_event_key,
-      binding_digest: context.binding_digest,
-      ledger_id: result.ledger_id,
-      receipt_id: finalize.receipt_id,
-      status: result.status,
-      observed_at: new Date().toISOString(),
-    })}\n`, { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+async function writeProductFinalizeMarker(context: HostTurnContext, value: unknown): Promise<void> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  runtime.writeHostFinalizeMarker(productRuntimeResolution(), context, PRODUCT_HOST, value);
 }
 
 function jsonText(value: unknown) {
@@ -942,7 +921,7 @@ export function createPulseMcpServer(
     },
       ];
     return {
-      tools: CODEX_HOST_ADAPTER
+      tools: PRODUCT_HOST_ADAPTER
         ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
         : tools,
     };
@@ -953,7 +932,7 @@ export function createPulseMcpServer(
 	const invocationKey = mcpRequestIdempotencyKey(extra.sessionId, extra.requestId);
 
     try {
-      await assertCodexBindingCurrent();
+      await assertProductBindingCurrent();
       if (runtimeMode === 'team-remote') {
         if (!teamContext) throw new Error('team request context is unavailable');
         const contracts = await loadTeamRemoteContracts();
@@ -1094,15 +1073,15 @@ function resolveStandaloneStore(): StandaloneStore {
 
 async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
-    if (CODEX_HOST_ADAPTER) {
-      const context = await consumeCodexTurnContext('mcp__pulse-product__pulse_remember', args);
-      const body = codexFinalizeBody(args as unknown as MemoryCapsule, context);
+    if (PRODUCT_HOST_ADAPTER) {
+      const context = await consumeProductTurnContext(args);
+      const body = productFinalizeBody(args as unknown as MemoryCapsule, context);
       const out = await pulseFetch<unknown>(
         '/turn/finalize', body, 'POST', String(body.idempotency_key),
       );
       assertTruthfulWriteResponse(out);
       try {
-        writeCodexFinalizeMarker(context, out);
+        await writeProductFinalizeMarker(context, out);
       } catch {
         // The durable daemon receipt is authoritative. A missing local marker
         // only causes Stop to perform the bounded server-side idempotency check.
@@ -1130,7 +1109,7 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_graph_delta') {
-    if (CODEX_HOST_ADAPTER) throw new Error('Codex graph writes require the governed candidate path');
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Product-host graph writes require the governed candidate path');
     const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody, 'POST', invocationKey);
     assertTruthfulWriteResponse(out);
     return jsonText(out);
@@ -1154,14 +1133,14 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_forget') {
-    if (CODEX_HOST_ADAPTER) throw new Error('Pulse deletion is user-controlled through Viewer or the explicit CLI');
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product deletion requires the privileged OS-backed user-presence surface, which is not active');
     const out = await pulseFetch('/memory/delete', { id: args?.id }, 'POST', invocationKey);
     assertTruthfulDeletionReceipt(out, String(args?.id || ''));
     return jsonText(out);
   }
 
   if (name === 'pulse_wipe') {
-    if (CODEX_HOST_ADAPTER) throw new Error('Pulse wipe is user-controlled through Viewer or the explicit CLI');
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product wipe requires the privileged OS-backed user-presence surface, which is not active');
     if (args?.confirm !== 'wipe pulse memory') {
       throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
     }

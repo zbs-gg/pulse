@@ -14,6 +14,7 @@
     "src/cli-idempotency.js",
     "src/host-adapter.js",
     "src/codex-hooks.js",
+    "src/claude-hooks.js",
     "src/codex-install.js",
     "src/codex-runtime.js",
     "src/remote-auth.js",
@@ -33,6 +34,7 @@
     "check": "node src/cli.js --help",
     "test": "node --test src/*.test.js",
     "test:codex-product": "node scripts/codex-product-e2e.mjs",
+    "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
   },

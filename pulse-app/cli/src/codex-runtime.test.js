@@ -1,15 +1,61 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+	acquireVaultActivationLock,
   consumeCodexToolLease,
+	readProductActivation,
   readCodexTurnContext,
   writeCodexToolLease,
   writeCodexTurnContext,
 } from './codex-runtime.js';
+
+test('connect and lazy reconciliation serialize on one vault activation lock', async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-vault-activation-lock.'));
+	const runtime = { data_dir: dataDir };
+	const releaseFirst = await acquireVaultActivationLock(runtime);
+	try {
+		await assert.rejects(acquireVaultActivationLock(runtime), /vault_activation_lock_(?:failed|timeout)/);
+	} finally {
+		await releaseFirst();
+	}
+	const releaseSecond = await acquireVaultActivationLock(runtime);
+	await releaseSecond();
+});
+
+test('product activation admits only one exact runtime and daemon digest pair', () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-test.'));
+	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
+	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
+	const daemonPath = join(dataDir, 'bin', 'pulse-product-daemon-test');
+	mkdirSync(join(runtimeRoot, 'src'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(dataDir, 'bin'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+	writeFileSync(runtimePath, '#!/usr/bin/env node\n', { mode: 0o700 });
+	const runtimeDigest = 'a'.repeat(64);
+	writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify({
+		schema: 'pulse.codex_runtime.v1', tree_digest: runtimeDigest, entrypoint: 'src/cli.js',
+	}), { mode: 0o600 });
+	writeFileSync(daemonPath, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+	chmodSync(daemonPath, 0o700);
+	const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+	const activation = {
+		schema: 'pulse.product_activation.v2', runtime_path: runtimePath,
+		runtime_tree_digest: runtimeDigest, daemon_path: daemonPath,
+		daemon_digest: createHash('sha256').update('#!/bin/sh\nexit 0\n').digest('hex'),
+		activated_at: '2026-07-14T10:00:00Z',
+	};
+	writeFileSync(activationPath, JSON.stringify(activation), { mode: 0o600 });
+	assert.equal(readProductActivation(dataDir).daemon_digest, activation.daemon_digest);
+	writeFileSync(activationPath, JSON.stringify({ ...activation, extra_authority: true }), { mode: 0o600 });
+	assert.throws(() => readProductActivation(dataDir), /product_activation_invalid/);
+	writeFileSync(activationPath, JSON.stringify({ ...activation, daemon_digest: 'b'.repeat(64) }), { mode: 0o600 });
+	assert.throws(() => readProductActivation(dataDir), /product_activation_daemon_digest_mismatch/);
+});
 
 function fixture() {
   const dataDir = mkdtempSync(join(tmpdir(), 'pulse-codex-runtime-test.'));

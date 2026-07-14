@@ -11,7 +11,7 @@ import { buildPulseRequestHeaders, requireLoopbackPulseIPC } from './remote-auth
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
-  'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.';
+	'Pulse keeps the thread: structured memories, never raw transcripts, deletion stays human-controlled.';
 
 function productReceipt(overrides = {}) {
   return {
@@ -616,11 +616,11 @@ test('stop removes the preview daemon pid file when process is absent', () => {
   assert.equal(existsSync(join(dataDir, 'pulse-preview-daemon.pid')), false);
 });
 
-test('init does not write project .mcp.json fallback without explicit flag', () => {
+test('product init fails closed before writing config when Claude Code is unavailable', () => {
   const { cwd, result } = run(['init', 'claude-code']);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--write-project-mcp/);
+  assert.match(result.stderr, /automatic lifecycle unavailable: missing/);
 
   const list = spawnSync('find', [cwd, '-maxdepth', '1', '-name', '.mcp.json'], {
     encoding: 'utf8',
@@ -628,40 +628,29 @@ test('init does not write project .mcp.json fallback without explicit flag', () 
   assert.equal(list.stdout.trim(), '');
 });
 
-test('explicit project MCP fallback writes gitignore entry', () => {
-  const { cwd, result } = run(['init', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(readFileSync(join(cwd, '.mcp.json'), 'utf8'), /PULSE_API_KEY/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.mcp\.json/);
-});
-
-test('connect claude-code dry run includes MCP and continuity hooks', () => {
+test('connect claude-code dry run exposes the pinned secret-free product lifecycle', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run']);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /MCP command:/);
-  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
-  assert.match(result.stdout, /mcp\/dist\/index\.js/);
-  assert.match(result.stdout, /SessionStart/);
-  assert.match(result.stdout, /UserPromptSubmit/);
-  assert.match(result.stdout, /PostToolUse/);
-  assert.match(result.stdout, /Stop/);
-  assert.match(result.stdout, /hook session-start/);
-  assert.match(result.stdout, /PULSE_BASE_URL=/);
+  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
+  for (const event of [
+    'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact',
+    'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop',
+  ]) assert.match(result.stdout, new RegExp(`claude-hook ${event}`));
+  assert.match(result.stdout, /startup\|resume\|clear\|compact/);
   assert.match(result.stdout, /PULSE_DATA_DIR=/);
-  assert.match(result.stdout, new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(result.stdout, new RegExp(CLI.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.doesNotMatch(result.stdout, /"command": "pulse hook/);
+  assert.doesNotMatch(result.stdout, /PULSE_CLAUDE_HOOKS_DIGEST=/);
+  assert.doesNotMatch(result.stdout, /PULSE_API_KEY|\bnpx\b|@zbs-gg\/pulse@preview/);
 });
 
-test('connect claude-code dry run falls back to preview npm package outside local repo', () => {
+test('connect claude-code never falls back to mutable preview npm registration', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run'], {
     PULSE_MCP_ENTRYPOINT: '/tmp/pulse-mcp-missing/dist/index.js',
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /MCP command: npx -y @zbs-gg\/pulse@preview mcp/);
+  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
+  assert.doesNotMatch(result.stdout, /\bnpx\b|@zbs-gg\/pulse@preview/);
 });
 
 test('pulse mcp serves stdio MCP tools with the standalone store', () => {
@@ -702,110 +691,6 @@ test('pulse mcp serves stdio MCP tools with the standalone store', () => {
   assert.match(result.stdout, /standalone_lite/);
   assert.match(result.stderr, /standalone lite store/);
   assert.equal(existsSync(join(home, '.pulse', 'standalone', 'store.json')), true);
-});
-
-test('init claude-code uses preview first-run flow', () => {
-  const { result } = run(['init', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Pulse is breathing locally/);
-  assert.match(result.stdout, /memory proof first, import later/);
-  assert.match(result.stdout, /Thank you for installing Pulse MCP/);
-  assert.match(result.stdout, /Try first memory/);
-  assert.match(result.stdout, /Dashboard:/);
-  assert.doesNotMatch(result.stdout, /host-extracted memory via Claude Code/);
-});
-
-test('init claude-code starts vendored preview runtime before configuring Claude Code', () => {
-  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
-  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
-  const tools = mkdtempSync(join(tmpdir(), 'pulse-cli-test-tools.'));
-  const vendor = mkdtempSync(join(tmpdir(), 'pulse-cli-test-vendor.'));
-  const dataDir = join(home, '.pulse');
-  const log = join(home, 'tools.log');
-  mkdirSync(join(vendor, 'pulse-app', 'cmd', 'pulse'), { recursive: true });
-  mkdirSync(join(vendor, 'mcp'), { recursive: true });
-  writeFileSync(join(vendor, 'mcp', 'package.json'), '{"name":"fake-pulse-mcp"}\n');
-
-  writeExecutable(join(tools, 'go'), `#!${process.execPath}
-const fs = require('node:fs');
-const path = require('node:path');
-fs.appendFileSync(${JSON.stringify(log)}, 'go ' + process.argv.slice(2).join(' ') + '\\n');
-const out = process.argv[process.argv.indexOf('-o') + 1];
-fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, '#!${process.execPath}\\n' + ${JSON.stringify(`
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
-const args = process.argv.slice(2);
-const addr = args[args.indexOf('-addr') + 1];
-const dataDir = args[args.indexOf('-data-dir') + 1];
-fs.mkdirSync(dataDir, { recursive: true });
-fs.writeFileSync(path.join(dataDir, 'secret.key'), 'fake-secret');
-const server = http.createServer((req, res) => {
-  let body = '';
-  req.on('data', (chunk) => { body += chunk; });
-  req.on('end', () => {
-    res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/memory/status') {
-      res.end(JSON.stringify({ billing_mode: 'host-extracted', backend_llm_enabled: false }));
-      return;
-    }
-    if (req.url === '/memory/remember') {
-      res.end(JSON.stringify({ ok: true, ids: ['pulse:first-memory'] }));
-      return;
-    }
-    res.end(JSON.stringify({ ok: true }));
-  });
-});
-const [host, port] = addr.split(':');
-server.listen(Number(port), host);
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-`)});
-fs.chmodSync(out, 0o755);
-`);
-  writeExecutable(join(tools, 'npm'), `#!${process.execPath}
-const fs = require('node:fs');
-const path = require('node:path');
-fs.appendFileSync(${JSON.stringify(log)}, 'npm ' + process.argv.slice(2).join(' ') + ' cwd=' + process.cwd() + '\\n');
-if (process.argv.includes('run') && process.argv.includes('build')) {
-  fs.mkdirSync(path.join(process.cwd(), 'dist'), { recursive: true });
-  fs.writeFileSync(path.join(process.cwd(), 'dist', 'index.js'), '#!/usr/bin/env node\\n');
-}
-process.exit(0);
-`);
-  writeExecutable(join(tools, 'claude'), `#!${process.execPath}
-const fs = require('node:fs');
-fs.appendFileSync(${JSON.stringify(log)}, 'claude ' + process.argv.slice(2).join(' ') + ' cwd=' + process.cwd() + '\\n');
-process.exit(0);
-`);
-
-  const result = runInWorkspace(['init', 'claude-code'], cwd, home, {
-    PATH: `${tools}:/usr/bin:/bin`,
-    PULSE_BASE_URL: 'http://127.0.0.1:18899',
-    PULSE_PREVIEW_SOURCE_DIR: vendor,
-    PULSE_PREVIEW_RUNTIME_SETUP: '1',
-    PULSE_CLI_ANIMATION: '0',
-  });
-
-  const pidPath = join(dataDir, 'pulse-preview-daemon.pid');
-  if (existsSync(pidPath)) {
-    try {
-      process.kill(Number(readFileSync(pidPath, 'utf8').trim()), 'SIGTERM');
-    } catch {
-      // The fake daemon may already be gone if the test failed late.
-    }
-  }
-
-  assert.equal(result.status, 0, result.stderr);
-  const toolLog = readFileSync(log, 'utf8');
-  assert.match(toolLog, /go build -o .*pulse-preview-daemon .*\.\/cmd\/pulse/);
-  assert.match(toolLog, /npm ci cwd=.*mcp/);
-  assert.match(toolLog, /npm run build cwd=.*mcp/);
-  assert.match(toolLog, /claude mcp add-json --scope local pulse/);
-  assert.match(result.stdout, /Pulse daemon: +running locally/);
-  assert.match(result.stdout, /First memory saved locally/);
-  assert.equal(existsSync(join(cwd, '.claude', 'settings.local.json')), true);
 });
 
 test('connect claude-code remote-control dry run prints mobile start path', () => {
@@ -859,187 +744,13 @@ test('connect chatgpt dry run prints generic connector handoff via the one packa
   assert.doesNotMatch(result.stdout, /pulse-mcp/);
 });
 
-test('connect claude-code writes local hook config and gitignore entry', () => {
-  const { cwd, result } = run(['connect', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /pulse  \.  :  o  ♥  o  :  \./);
-  assert.match(result.stdout, /Pulse wave:/);
-  assert.match(result.stdout, /breathing locally/);
-  assert.match(result.stdout, /memory proof first/);
-  assert.match(result.stdout, /Pulse is breathing locally/);
-  assert.match(result.stdout, /No backend model is running by default/);
-  assert.match(result.stdout, /No emotion is stored until you choose it/);
-  assert.match(result.stdout, /Source import waits until after the first proof/);
-  assert.match(result.stdout, /Thank you for installing Pulse MCP/);
-  assert.match(result.stdout, /Pulse helps Claude Code remember what actually mattered/);
-  assert.match(result.stdout, /Save one small memory/);
-  assert.match(result.stdout, /Recall it in a fresh session/);
-  assert.match(result.stdout, /Keep the thread across AI chats/);
-  assert.match(result.stdout, /backend LLM off/);
-  assert.match(result.stdout, /raw transcript capture off/);
-  assert.match(result.stdout, /What Pulse will tell Claude next/);
-  assert.match(result.stdout, /Try first memory/);
-  assert.match(result.stdout, /Pulse keeps the thread: structured memories/);
-  assert.match(result.stdout, /What did we decide about how Pulse stores memory/);
-  assert.match(result.stdout, /Explore your universe and yourself with Claude Code \+ Pulse/);
-  assert.match(result.stdout, /Dashboard:/);
-  assert.match(result.stdout, /first_run=1/);
-  assert.match(result.stdout, /Import old chats later/);
-  assert.doesNotMatch(result.stdout, /What Claude will get next/);
-  const settingsPath = join(cwd, '.claude', 'settings.local.json');
-  assert.equal(existsSync(settingsPath), true);
-  const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8')).mcpServers.pulse;
-  assert.equal(mcp.command, process.execPath);
-  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
-  assert.match(mcp.args[0], /mcp\/dist\/index\.js/);
-  assert.equal(mcp.env.PULSE_BASE_URL, 'http://127.0.0.1:18789');
-  const settings = readFileSync(settingsPath, 'utf8');
-  assert.match(settings, /SessionStart/);
-  assert.match(settings, /hook stop/);
-  assert.match(settings, /PULSE_BASE_URL=/);
-  assert.match(settings, /PULSE_DATA_DIR=/);
-  assert.doesNotMatch(settings, /"command": "pulse hook/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.claude\/settings\.local\.json/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.mcp\.json/);
-});
-
-test('connect claude-code best-effort writes private first install memory when daemon is available', async () => {
-  const stub = await withPulseStub((req, body) => {
-    assert.equal(req.method, 'POST');
-    assert.equal(req.url, '/memory/remember');
-    assert.equal(body.schema, 'pulse.memory_capsule.v1');
-    assert.equal(body.source.host, 'pulse-cli');
-    assert.equal(body.source.conversation_scope, 'install_event');
-    assert.equal(body.raw_input_included, false);
-    assert.equal(body.items[0].kind, 'system_event');
-    assert.equal(body.items[0].redacted_summary, 'User installed Pulse MCP and connected it to Claude Code.');
-    assert.equal(body.items[0].privacy_tier, 'private');
-    assert.equal(body.items[0].retention, 'project');
-    assert.deepEqual(body.items[0].tags, ['pulse_install', 'first_memory', 'claude_code']);
-    return { body: { ok: true, ids: ['pulse:first-memory'] } };
-  });
-  try {
-    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
-      PULSE_BASE_URL: stub.baseUrl,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /First memory saved locally/);
-    assert.equal(stub.requests.length, 1);
-  } finally {
-    await stub.close();
-  }
-});
-
-test('connect claude-code calls a product pending receipt visible and never saved', async () => {
-  const stub = await withPulseStub(() => ({
-    body: {
-      ledger_id: 'turn_install',
-      status: 'candidates',
-      receipts: [productReceipt({
-        receipt_id: 'receipt_install_pending', candidate_id: 'candidate_install',
-      })],
-    },
-  }));
-  try {
-    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
-      PULSE_BASE_URL: stub.baseUrl,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /visible in Memory Tray and not saved yet: receipt_install_pending/);
-    assert.doesNotMatch(result.stdout, /First memory saved locally/);
-  } finally {
-    await stub.close();
-  }
-});
-
-test('connect claude-code reports a terminal rejected receipt as not saved', async () => {
-  const stub = await withPulseStub(() => ({
-    body: {
-      ledger_id: 'turn_install_rejected',
-      status: 'rejected',
-      receipts: [productReceipt({
-        receipt_id: 'receipt_install_rejected', status: 'rejected', reason_code: 'unsafe_payload',
-      })],
-    },
-  }));
-  try {
-    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
-      PULSE_BASE_URL: stub.baseUrl,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /First memory was not saved \(rejected: unsafe_payload\); receipt receipt_install_rejected/);
-    assert.doesNotMatch(result.stdout, /First memory saved locally/);
-    assert.doesNotMatch(result.stdout, /daemon is running/);
-  } finally {
-    await stub.close();
-  }
-});
-
-test('connect claude-code never calls empty or malformed product receipts saved', async () => {
-  for (const body of [
-    {},
-    { ledger_id: 'turn_empty', receipts: [] },
-    { ledger_id: 'turn_created', receipts: [{ status: 'created' }] },
-    { ledger_id: 'turn_pending', receipts: [{ status: 'pending' }] },
-  ]) {
-    const stub = await withPulseStub(() => ({ body }));
-    try {
-      const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
-        PULSE_BASE_URL: stub.baseUrl,
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, /First memory was not saved \(invalid_receipt:/);
-      assert.doesNotMatch(result.stdout, /First memory saved locally/);
-    } finally {
-      await stub.close();
-    }
-  }
-});
-
-test('connect claude-code preserves existing hooks and writes local-auto mode marker', () => {
-  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
-  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
-  const settingsPath = join(cwd, '.claude', 'settings.local.json');
-  mkdirSync(join(cwd, '.claude'), { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify({
-    hooks: {
-      SessionStart: [{
-        matcher: 'startup',
-        hooks: [
-          { type: 'command', command: 'echo existing-session-start', timeout: 10 },
-          { type: 'command', command: 'pulse hook session-start', timeout: 60 },
-        ],
-      }],
-      Stop: [{
-        hooks: [{ type: 'command', command: 'pulse hook stop', timeout: 60 }],
-      }],
-    },
-  }, null, 2));
-
-  const result = runInWorkspace(['connect', 'claude-code', '--write-project-mcp'], cwd, home);
-
-  assert.equal(result.status, 0, result.stderr);
-  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  const commands = settings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command));
-  assert.deepEqual(commands.includes('echo existing-session-start'), true);
-  assert.deepEqual(commands.some((command) => /hook session-start/.test(command)), true);
-  assert.deepEqual(commands.some((command) => /^pulse hook session-start$/.test(command)), false);
-  const stopCommands = settings.hooks.Stop.flatMap((entry) => entry.hooks.map((hook) => hook.command));
-  assert.deepEqual(stopCommands.some((command) => /^pulse hook stop$/.test(command)), false);
-  assert.deepEqual(stopCommands.some((command) => /hook stop/.test(command)), true);
-  assert.equal(readFileSync(join(home, '.pulse', 'mode'), 'utf8').trim(), 'local-auto');
-});
-
 test('disconnect claude-code removes Pulse hooks and project MCP fallback', () => {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
   const settingsPath = join(cwd, '.claude', 'settings.local.json');
   mkdirSync(join(cwd, '.claude'), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify({
+    permissions: { allow: ['Bash(git status)'] },
     hooks: {
       SessionStart: [{
         matcher: 'startup',
@@ -1049,8 +760,13 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
         ],
       }],
       Stop: [{
-        hooks: [{ type: 'command', command: 'pulse hook stop', timeout: 60 }],
+        hooks: [{
+          type: 'command',
+          command: `PULSE_DATA_DIR='${join(home, '.pulse')}' '${process.execPath}' '${join(home, '.pulse', 'runtime', 'codex', 'current', 'src', 'cli.js')}' claude-hook Stop`,
+          timeout: 60,
+        }],
       }],
+      Notification: [{ hooks: [{ type: 'command', command: 'echo keep-notification' }] }],
     },
   }, null, 2));
   writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({
@@ -1068,16 +784,32 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Claude Code disconnected/);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(settings.permissions, { allow: ['Bash(git status)'] });
   assert.deepEqual(settings.hooks.SessionStart[0].hooks.map((hook) => hook.command), ['echo keep-me']);
   assert.equal(settings.hooks.Stop, undefined);
+  assert.equal(settings.hooks.Notification[0].hooks[0].command, 'echo keep-notification');
   const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8'));
   assert.equal(mcp.mcpServers.pulse, undefined);
   assert.equal(mcp.mcpServers.keep.command, 'keep-mcp');
 	const captureState = JSON.parse(readFileSync(join(dataDir, 'capture-state.json'), 'utf8'));
 	assert.equal(captureState.schema, 'pulse.capture_state.v1');
 	assert.equal(captureState.enabled, false);
-	assert.equal(captureState.reason, 'host_disconnected');
+	assert.equal(captureState.hosts['claude-code'].reason, 'host_disconnected');
 	assert.equal(readFileSync(join(dataDir, 'memory.keep'), 'utf8'), 'committed memory remains');
+});
+
+test('disconnect claude-code never overwrites invalid hook JSON', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
+  const settingsPath = join(cwd, '.claude', 'settings.local.json');
+  mkdirSync(join(cwd, '.claude'), { recursive: true });
+  const invalid = '{"hooks":{"Stop":[';
+  writeFileSync(settingsPath, invalid);
+
+  const result = runInWorkspace(['disconnect', 'claude-code'], cwd, home);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(settingsPath, 'utf8'), invalid);
 });
 
 test('viewer prints local authenticated viewer URL', () => {
@@ -1085,6 +817,40 @@ test('viewer prints local authenticated viewer URL', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\/viewer\?key=/);
+});
+
+test('viewer fails closed when product activation evidence exists but binding trust is broken', () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-cwd.'));
+	spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+	mkdirSync(join(cwd, '.claude'), { recursive: true });
+	writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
+		hooks: { Stop: [{ hooks: [{
+			type: 'command',
+			command: "'/Users/example/.pulse/runtime/codex/current/src/cli.js' claude-hook Stop",
+		}] }] },
+	}));
+
+	const result = runInWorkspace(['viewer', '--print-url'], cwd, home);
+
+	assert.equal(result.status, 1);
+	assert.match(`${result.stdout}${result.stderr}`, /product activation exists, but its bound vault cannot be trusted/);
+	assert.doesNotMatch(result.stdout, /127\.0\.0\.1:18789\/viewer/);
+});
+
+test('viewer keeps legacy Claude hooks on Local Preview when no product activation exists', () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-viewer-preview-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-viewer-preview-cwd.'));
+	spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+	mkdirSync(join(cwd, '.claude'), { recursive: true });
+	writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
+		hooks: { Stop: [{ hooks: [{ type: 'command', command: 'pulse hook stop' }] }] },
+	}));
+
+	const result = runInWorkspace(['viewer', '--print-url'], cwd, home);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /127\.0\.0\.1:18789\/viewer\?key=/);
 });
 
 test('viewer can target an explicit live server data dir and base URL', () => {
@@ -3205,7 +2971,7 @@ test('migrate commit can open the memory viewer after import', async () => {
     assert.match(result.stdout, /opened browser:/);
     assert.match(result.stdout, /\/viewer\?key=/);
     assert.match(result.stdout, /thread_id=archive-import/);
-    assert.match(result.stdout, /Shows what Pulse will tell Claude next time/);
+		assert.match(result.stdout, /Shows the bounded continuity pack for the next connected harness session/);
     assert.equal(stub.requests.length, 1);
   } finally {
     await stub.close();

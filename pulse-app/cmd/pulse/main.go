@@ -262,8 +262,8 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	healthProvider := health.NewFixtureProvider(time.Now())
 
 	billingHost := strings.TrimSpace(os.Getenv("PULSE_HOST"))
-	if billingHost != "codex" && billingHost != "claude-code" {
-		billingHost = "claude-code"
+	if billingHost != "codex" && billingHost != "claude-code" && billingHost != "pulse-product" {
+		billingHost = "pulse-product"
 	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,

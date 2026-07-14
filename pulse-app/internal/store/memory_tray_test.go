@@ -1348,6 +1348,48 @@ func TestDuplicateContentDeduplicatesToExistingCanonicalObject(t *testing.T) {
 	}
 }
 
+func TestEquivalentCrossHarnessContentDeduplicatesDespiteDifferentProvenance(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	firstRequest := trayFinalizeRequest("One durable decision must stay one object across harnesses.")
+	first, err := s.FinalizeTurn(firstRequest, now, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CommitMemoryTrayCandidate(first.Receipts[0].CandidateID, 1, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secondRequest := firstRequest
+	secondRequest.Host = "claude-code"
+	secondRequest.SessionID = "claude_session_01"
+	secondRequest.TurnID = "prompt_01"
+	secondRequest.SourceEventKey = "claude:claude_session_01:prompt_01:stop"
+	secondRequest.IdempotencyKey = "claude_finalize_01"
+	secondCapsule := *secondRequest.Candidates[0].Capsule
+	secondCapsule.Source.Host = "claude-code"
+	secondCapsule.Source.Timestamp = "2026-07-14T10:05:00Z"
+	secondRequest.Candidates = []PrivateMemoryCandidate{{
+		Kind: PrivateMemoryCandidateCapsule, Capsule: &secondCapsule,
+	}}
+	second, err := s.FinalizeTurn(secondRequest, now.Add(time.Minute), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Receipts[0].ContentDigest != first.Receipts[0].ContentDigest {
+		t.Fatalf("semantic identity drifted by provenance: codex=%s claude=%s",
+			first.Receipts[0].ContentDigest, second.Receipts[0].ContentDigest)
+	}
+	deduplicated, err := s.CommitMemoryTrayCandidate(second.Receipts[0].CandidateID, 1, now.Add(61*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deduplicated.Status != MemoryWriteDeduplicated || deduplicated.ObjectID != created.ObjectID {
+		t.Fatalf("cross-harness dedup receipt created=%#v dedup=%#v", created, deduplicated)
+	}
+}
+
 func TestConcurrentDuplicateFinalizeConvergesOnOneLedgerAndReceipt(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	req := trayFinalizeRequest("Concurrent Stop hooks converge on one pending receipt.")

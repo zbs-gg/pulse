@@ -116,7 +116,7 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		billing.Mode = "host-extracted"
 	}
 	if billing.Host == "" {
-		billing.Host = "claude-code"
+		billing.Host = "pulse-product"
 	}
 	if billing.StoragePath == "" {
 		billing.StoragePath = s.cfg.Store.DBPath()
@@ -188,17 +188,16 @@ func (s *Server) handleMemoryImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		http.Error(w, "product memory deletion requires fresh OS-backed user presence; the privileged local deletion surface is not active", http.StatusForbidden)
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		var req struct {
 			ID string `json:"id"`
 		}
-		var err error
-		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
-			err = decodeMemoryTrayBody(r, &req)
-		} else {
-			err = json.NewDecoder(r.Body).Decode(&req)
-		}
+		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
@@ -206,16 +205,6 @@ func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 		id = req.ID
 	}
 	id = strings.TrimSpace(id)
-	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
-		receipt, err := s.cfg.Store.DeleteCommittedMemory(id, "delete:"+id, time.Now().UTC())
-		if err != nil {
-			writeMemoryTrayError(w, err)
-			return
-		}
-		s.refreshProductRetrieval(receipt)
-		writeJSON(w, receipt)
-		return
-	}
 	if err := s.cfg.Store.DeleteMemory(id); err != nil {
 		http.Error(w, "memory delete error: "+err.Error(), http.StatusBadRequest)
 		return
@@ -250,15 +239,19 @@ func (s *Server) handleMemoryConsolidate(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleMemoryWipe(w http.ResponseWriter, r *http.Request) {
+	// A confirmation phrase carried by the same HTTP caller is not user
+	// presence. Agents can type it, wrap the CLI in a pseudo-terminal, or call
+	// this route directly. Product vaults therefore fail closed until the
+	// privileged local surface wires a fresh OS-backed vault.wipe assertion.
+	// Local Preview retains its explicit confirmation contract below.
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		http.Error(w, "product memory wipe requires fresh OS-backed user presence; the privileged local wipe surface is not active", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		Confirm string `json:"confirm"`
 	}
-	var decodeErr error
-	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
-		decodeErr = decodeMemoryTrayBody(r, &req)
-	} else {
-		decodeErr = json.NewDecoder(r.Body).Decode(&req)
-	}
+	decodeErr := json.NewDecoder(r.Body).Decode(&req)
 	if decodeErr != nil {
 		http.Error(w, "bad request: "+decodeErr.Error(), http.StatusBadRequest)
 		return
@@ -267,12 +260,7 @@ func (s *Server) handleMemoryWipe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "memory wipe requires confirm=\"wipe pulse memory\"", http.StatusBadRequest)
 		return
 	}
-	var wipeErr error
-	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
-		wipeErr = s.cfg.Store.WipeProductMemory()
-	} else {
-		wipeErr = s.cfg.Store.WipeMemory()
-	}
+	wipeErr := s.cfg.Store.WipeMemory()
 	if wipeErr != nil {
 		if errors.Is(wipeErr, store.ErrMemoryTrayRequired) {
 			writeMemoryTrayError(w, wipeErr)

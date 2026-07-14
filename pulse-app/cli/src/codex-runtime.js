@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
+	chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -7,14 +9,126 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  writeFileSync,
+	writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { resolveWorkspaceBinding } from './workspace-binding.js';
-import { vaultRuntimeFromBinding } from './local-supervisor.js';
+import {
+	assertVaultRuntimeHealthy,
+	inspectVaultRuntime,
+	startVaultRuntime,
+	vaultRuntimeFromBinding,
+} from './local-supervisor.js';
+import { captureEnabledForHost } from './capture-state.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
+
+function requirePrivateFile(path, label, maxBytes = 8192, { allowReadOnlyShared = false } = {}) {
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
+		(allowReadOnlyShared ? (info.mode & 0o022) !== 0 : (info.mode & 0o077) !== 0) || info.size > maxBytes) {
+		throw new Error(`${label}_unsafe`);
+	}
+	return { info, currentUID };
+}
+
+export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {
+	if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) throw new Error('product_activation_data_dir_invalid');
+	const path = join(resolve(dataDir), 'runtime', 'product-daemon.json');
+	requirePrivateFile(path, 'product_activation');
+	const activation = JSON.parse(readFileSync(path, 'utf8'));
+	const allowed = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
+	if (activation?.schema !== 'pulse.product_activation.v2' ||
+		Object.keys(activation).length !== allowed.length || Object.keys(activation).some((name) => !allowed.includes(name)) ||
+		![activation.daemon_path, activation.runtime_path].every((value) => typeof value === 'string' && isAbsolute(value)) ||
+		![activation.daemon_digest, activation.runtime_tree_digest].every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
+		typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
+		throw new Error('product_activation_invalid');
+	}
+	const expectedRuntimePath = join(resolve(dataDir), 'runtime', 'codex', 'current', 'src', 'cli.js');
+	if (resolve(activation.runtime_path) !== expectedRuntimePath) throw new Error('product_activation_runtime_mismatch');
+	requirePrivateFile(activation.runtime_path, 'product_runtime', 128 * 1024 * 1024, { allowReadOnlyShared: true });
+	const manifestPath = resolve(activation.runtime_path, '..', '..', 'runtime-manifest.json');
+	requirePrivateFile(manifestPath, 'product_runtime_manifest', 8192, { allowReadOnlyShared: true });
+	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+	if (manifest?.schema !== 'pulse.codex_runtime.v1' ||
+		manifest.tree_digest !== activation.runtime_tree_digest || manifest.entrypoint !== 'src/cli.js') {
+		throw new Error('product_activation_runtime_digest_mismatch');
+	}
+	const { currentUID } = requirePrivateFile(activation.daemon_path, 'product_daemon', 1024 * 1024 * 1024);
+	const daemonInfo = lstatSync(activation.daemon_path);
+	if (daemonInfo.uid !== currentUID || (daemonInfo.mode & 0o111) === 0 ||
+		createHash('sha256').update(readFileSync(activation.daemon_path)).digest('hex') !== activation.daemon_digest) {
+		throw new Error('product_activation_daemon_digest_mismatch');
+	}
+	return activation;
+}
+
+export async function acquireVaultActivationLock(runtime) {
+	const lockf = '/usr/bin/lockf';
+	if (!existsSync(lockf)) throw new Error('vault_activation_lock_unavailable');
+	mkdirSync(runtime.data_dir, { recursive: true, mode: 0o700 });
+	const path = join(runtime.data_dir, 'supervisor-activation.lock');
+	const helper = 'process.stdout.write("ready\\n");process.stdin.resume();process.stdin.on("end",()=>process.exit(0));';
+	const child = spawn(lockf, ['-k', '-t', '3', path, process.execPath, '-e', helper], {
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+	await new Promise((resolveReady, rejectReady) => {
+		const timer = setTimeout(() => {
+			child.kill('SIGTERM');
+			rejectReady(new Error('vault_activation_lock_timeout'));
+		}, 5000);
+		child.stdout.setEncoding('utf8');
+		child.stdout.once('data', (chunk) => {
+			clearTimeout(timer);
+			if (String(chunk).includes('ready')) resolveReady();
+			else rejectReady(new Error('vault_activation_lock_invalid'));
+		});
+		child.once('error', rejectReady);
+		child.once('exit', (status) => rejectReady(new Error(`vault_activation_lock_failed:${status}`)));
+	});
+	chmodSync(path, 0o600);
+	return async () => {
+		child.stdin.end();
+		await new Promise((resolveExit) => child.once('exit', resolveExit));
+	};
+}
+
+function runtimeMatchesActivation(status, activation) {
+	return status.status === 'running' && status.executable === resolve(activation.daemon_path) &&
+		status.executable_digest === activation.daemon_digest;
+}
+
+export async function ensureActivatedVaultRuntime(resolved) {
+	let activation = readProductActivation();
+	let status = inspectVaultRuntime(resolved.runtime);
+	if (runtimeMatchesActivation(status, activation)) {
+		await assertVaultRuntimeHealthy(resolved.runtime);
+		return activation;
+	}
+	if (!['running', 'stopped', 'crashed'].includes(status.status)) {
+		throw new Error(`product_vault_${status.status}`);
+	}
+	const release = await acquireVaultActivationLock(resolved.runtime);
+	try {
+		activation = readProductActivation();
+		status = inspectVaultRuntime(resolved.runtime);
+		if (!runtimeMatchesActivation(status, activation)) {
+			if (!['running', 'stopped', 'crashed'].includes(status.status)) {
+				throw new Error(`product_vault_${status.status}`);
+			}
+			await startVaultRuntime(resolved.runtime, {
+				daemonPath: activation.daemon_path, host: 'pulse-product',
+			});
+		}
+		await assertVaultRuntimeHealthy(resolved.runtime);
+		return activation;
+	} finally {
+		await release();
+	}
+}
 
 function canonicalJSON(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -22,10 +136,24 @@ function canonicalJSON(value) {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
 }
 
-function codexToolInputDigest(toolName, toolInput) {
+function hostSlug(host) {
+  if (host === 'codex') return 'codex';
+  if (host === 'claude-code') return 'claude-code';
+  throw new Error('unsupported_host_adapter');
+}
+
+function productToolAction(toolName) {
+  if (typeof toolName === 'string' && /(?:^|__)pulse_remember$/i.test(toolName)) return 'pulse_remember';
+  throw new Error('invalid_product_tool_action');
+}
+
+function hostToolInputDigest(host, toolName, toolInput) {
+  const action = productToolAction(toolName);
   return createHash('sha256')
-    .update('pulse-codex-tool-input-v1\x1f')
-    .update(toolName)
+    .update('pulse-host-tool-input-v1\x1f')
+    .update(host)
+    .update('\x1f')
+    .update(action)
     .update('\x1f')
     .update(canonicalJSON(toolInput))
     .digest('hex');
@@ -33,21 +161,34 @@ function codexToolInputDigest(toolName, toolInput) {
 
 export function resolveCodexRuntime(input = {}) {
   const cwd = typeof input === 'string' ? input : input.cwd;
-  const options = { cwd };
-  if (process.env.PULSE_BINDING_REGISTRY_PATH) options.registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
-  if (process.env.PULSE_BINDING_PUBLIC_KEY_PATH) options.publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
-  const binding = resolveWorkspaceBinding(options);
+  const binding = resolveProductWorkspaceBinding({ cwd });
   const runtime = vaultRuntimeFromBinding(binding);
   return { binding, runtime };
 }
 
-export function resolveBoundCodexRuntime(input = {}) {
+export function resolveProductWorkspaceBinding({ cwd = process.cwd() } = {}) {
+  const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
+  const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
+  const custom = registryPath !== undefined || publicKeyPath !== undefined;
+  if (custom && process.env.PULSE_TRUST_MODE !== 'test') {
+    throw new Error('caller-controlled Pulse binding authority is forbidden in product mode');
+  }
+  if (process.env.PULSE_TRUST_MODE === 'test' && (!registryPath || !publicKeyPath)) {
+    throw new Error('synthetic test authority requires both registry and public key paths');
+  }
+  return resolveWorkspaceBinding({
+    cwd,
+    ...(process.env.PULSE_TRUST_MODE === 'test' ? { registryPath, publicKeyPath } : {}),
+  });
+}
+
+export function resolveBoundCodexRuntime(input = {}, { host = 'codex' } = {}) {
   const resolved = resolveCodexRuntime(input);
   const { runtime } = resolved;
   const capturePath = join(runtime.data_dir, 'capture-state.json');
   if (!existsSync(capturePath)) throw new Error('capture_state_missing');
   const capture = JSON.parse(readFileSync(capturePath, 'utf8'));
-  if (capture?.schema !== 'pulse.capture_state.v1' || capture.enabled !== true) {
+  if (!captureEnabledForHost(capture, host)) {
     throw new Error('capture_disabled');
   }
   return resolved;
@@ -92,23 +233,40 @@ export async function boundPulseRequest(resolved, path, options = {}) {
   try { return JSON.parse(text); } catch { throw new Error('pulse_response_invalid'); }
 }
 
+export async function activatedBoundPulseRequest(resolved, path, options = {}) {
+	await ensureActivatedVaultRuntime(resolved);
+	return boundPulseRequest(resolved, path, options);
+}
+
 export function codexTurnContextPath(dataDir, sessionID) {
+  return hostTurnContextPath(dataDir, 'codex', sessionID);
+}
+
+export function hostTurnContextPath(dataDir, host, sessionID) {
   if (!STABLE_ID.test(sessionID ?? '')) throw new Error('invalid_session_id');
-  const digest = createHash('sha256').update('pulse-codex-turn-context-v1\x1f').update(sessionID).digest('hex');
-  return join(dataDir, 'codex-turn-context', `${digest}.json`);
+  const slug = hostSlug(host);
+  const digest = createHash('sha256').update('pulse-host-turn-context-v1\x1f').update(host).update('\x1f').update(sessionID).digest('hex');
+  return join(dataDir, `${slug}-turn-context`, `${digest}.json`);
 }
 
 export function codexFinalizeMarkerPath(dataDir, sessionID, turnID) {
+  return hostFinalizeMarkerPath(dataDir, 'codex', sessionID, turnID);
+}
+
+export function hostFinalizeMarkerPath(dataDir, host, sessionID, turnID) {
   if (!STABLE_ID.test(sessionID ?? '') || !STABLE_ID.test(turnID ?? '')) {
     throw new Error('invalid_turn_identity');
   }
+  const slug = hostSlug(host);
   const digest = createHash('sha256')
-    .update('pulse-codex-finalize-marker-v1\x1f')
+    .update('pulse-host-finalize-marker-v1\x1f')
+    .update(host)
+    .update('\x1f')
     .update(sessionID)
     .update('\x1f')
     .update(turnID)
     .digest('hex');
-  return join(dataDir, 'codex-turn-finalized', `${digest}.json`);
+  return join(dataDir, `${slug}-turn-finalized`, `${digest}.json`);
 }
 
 function atomicWriteJSON(path, value) {
@@ -122,10 +280,25 @@ function atomicWriteJSON(path, value) {
   }
 }
 
+function readOwnerJSON(path, maxBytes, unsafeCode) {
+  const info = lstatSync(path);
+  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
+      (info.mode & 0o077) !== 0 || info.size > maxBytes) {
+    throw new Error(unsafeCode);
+  }
+  return JSON.parse(readFileSync(path, 'utf8'));
+}
+
 export function writeCodexTurnContext(resolved, event, now = new Date()) {
+  return writeHostTurnContext(resolved, event, 'codex', now);
+}
+
+export function writeHostTurnContext(resolved, event, host, now = new Date()) {
+  const slug = hostSlug(host).replaceAll('-', '_');
   const context = {
-    schema: 'pulse.codex_turn_context.v1',
-    host: 'codex',
+    schema: `pulse.${slug}_turn_context.v1`,
+    host,
     session_id: event.session_id,
     turn_id: event.turn_id,
     workspace: resolved.binding.workspace.canonical_path,
@@ -136,18 +309,21 @@ export function writeCodexTurnContext(resolved, event, now = new Date()) {
     resolver_epoch: resolved.binding.resolver_epoch,
     expires_at: new Date(now.valueOf() + 6 * 60 * 60 * 1000).toISOString(),
   };
-  atomicWriteJSON(codexTurnContextPath(resolved.runtime.data_dir, event.session_id), context);
+  atomicWriteJSON(hostTurnContextPath(resolved.runtime.data_dir, host, event.session_id), context);
   return context;
 }
 
 export function writeCodexToolLease(resolved, event, toolName, toolInput, toolUseID, now = new Date()) {
-  if (!STABLE_ID.test(toolUseID ?? '') ||
-      toolName !== 'mcp__pulse-product__pulse_remember') {
-    throw new Error('invalid_codex_tool_lease');
-  }
+  return writeHostToolLease(resolved, event, 'codex', toolName, toolInput, toolUseID, now);
+}
+
+export function writeHostToolLease(resolved, event, host, toolName, toolInput, toolUseID, now = new Date()) {
+  const slug = hostSlug(host).replaceAll('-', '_');
+  if (!STABLE_ID.test(toolUseID ?? '')) throw new Error('invalid_host_tool_lease');
+  const action = productToolAction(toolName);
   const lease = {
-    schema: 'pulse.codex_tool_lease.v1',
-    host: 'codex',
+    schema: `pulse.${slug}_tool_lease.v1`,
+    host,
     session_id: event.session_id,
     turn_id: event.turn_id,
     workspace: resolved.binding.workspace.canonical_path,
@@ -156,32 +332,40 @@ export function writeCodexToolLease(resolved, event, toolName, toolInput, toolUs
     binding_digest: resolved.binding.binding_digest,
     policy_epoch: 0,
     resolver_epoch: resolved.binding.resolver_epoch,
-    tool_name: toolName,
-    tool_input_digest: codexToolInputDigest(toolName, toolInput),
+    tool_name: action,
+    tool_input_digest: hostToolInputDigest(host, toolName, toolInput),
     issued_at: now.toISOString(),
     expires_at: new Date(now.valueOf() + 30_000).toISOString(),
   };
   const name = createHash('sha256')
-    .update('pulse-codex-tool-lease-v1\x1f')
+    .update('pulse-host-tool-lease-v1\x1f')
+    .update(host)
+    .update('\x1f')
     .update(event.source_event_key)
     .update('\x1f')
     .update(toolUseID)
     .digest('hex');
   atomicWriteJSON(join(
-    resolved.runtime.data_dir, 'codex-tool-leases', lease.tool_input_digest, `${name}.json`,
+    resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, lease.tool_input_digest, `${name}.json`,
   ), lease);
   return lease;
 }
 
 export function consumeCodexToolLease(resolved, toolName, toolInput, now = new Date()) {
-  const inputDigest = codexToolInputDigest(toolName, toolInput);
-  const directory = join(resolved.runtime.data_dir, 'codex-tool-leases', inputDigest);
-  if (!existsSync(directory)) throw new Error('codex_tool_lease_unavailable');
+  return consumeHostToolLease(resolved, 'codex', toolName, toolInput, now);
+}
+
+export function consumeHostToolLease(resolved, host, toolName, toolInput, now = new Date()) {
+  const slug = hostSlug(host).replaceAll('-', '_');
+  const action = productToolAction(toolName);
+  const inputDigest = hostToolInputDigest(host, toolName, toolInput);
+  const directory = join(resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, inputDigest);
+  if (!existsSync(directory)) throw new Error('host_tool_lease_unavailable');
   const directoryInfo = lstatSync(directory);
   const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : directoryInfo.uid;
   if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || directoryInfo.uid !== currentUID ||
       (directoryInfo.mode & 0o077) !== 0) {
-    throw new Error('codex_tool_lease_directory_unsafe');
+    throw new Error('host_tool_lease_directory_unsafe');
   }
   const matches = [];
   for (const name of readdirSync(directory)) {
@@ -202,22 +386,22 @@ export function consumeCodexToolLease(resolved, toolName, toolInput, now = new D
       rmSync(path, { force: true });
       continue;
     }
-    if (lease?.schema !== 'pulse.codex_tool_lease.v1' || lease.host !== 'codex' ||
+    if (lease?.schema !== `pulse.${slug}_tool_lease.v1` || lease.host !== host ||
         lease.workspace !== resolved.binding.workspace.canonical_path ||
         lease.binding_digest !== resolved.binding.binding_digest || lease.policy_epoch !== 0 ||
-        lease.resolver_epoch !== resolved.binding.resolver_epoch || lease.tool_name !== toolName ||
+        lease.resolver_epoch !== resolved.binding.resolver_epoch || lease.tool_name !== action ||
         lease.tool_input_digest !== inputDigest || !STABLE_ID.test(lease.session_id ?? '') ||
         !STABLE_ID.test(lease.turn_id ?? '') || !/^event_[a-f0-9]{64}$/.test(lease.source_event_key ?? '') ||
         !/^lifecycle:[a-f0-9]{64}$/.test(lease.idempotency_key ?? '') ||
         Number.isNaN(issued) || issued > now.valueOf() + 5_000 || Number.isNaN(expiry)) continue;
     matches.push({ path, lease, issued });
   }
-  if (matches.length === 0) throw new Error('codex_tool_lease_unavailable');
+  if (matches.length === 0) throw new Error('host_tool_lease_unavailable');
   const turnKey = (match) => [
     match.lease.session_id, match.lease.turn_id, match.lease.source_event_key,
     match.lease.idempotency_key,
   ].join('\x1f');
-  if (new Set(matches.map(turnKey)).size !== 1) throw new Error('codex_tool_lease_ambiguous');
+  if (new Set(matches.map(turnKey)).size !== 1) throw new Error('host_tool_lease_ambiguous');
   matches.sort((left, right) => right.issued - left.issued || right.path.localeCompare(left.path));
   const selected = matches[0];
   const consumed = `${selected.path}.${process.pid}.${Date.now()}.consumed`;
@@ -231,15 +415,20 @@ export function consumeCodexToolLease(resolved, toolName, toolInput, now = new D
 }
 
 export function readCodexTurnContext(resolved, event, now = new Date()) {
-  const path = codexTurnContextPath(resolved.runtime.data_dir, event.session_id);
+  return readHostTurnContext(resolved, event, 'codex', now);
+}
+
+export function readHostTurnContext(resolved, event, host, now = new Date()) {
+  const slug = hostSlug(host).replaceAll('-', '_');
+  const path = hostTurnContextPath(resolved.runtime.data_dir, host, event.session_id);
   const info = lstatSync(path);
   const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
   if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
       (info.mode & 0o077) !== 0 || info.size > 8192) {
-    throw new Error('codex_turn_context_unsafe');
+    throw new Error('host_turn_context_unsafe');
   }
   const context = JSON.parse(readFileSync(path, 'utf8'));
-  if (context?.schema !== 'pulse.codex_turn_context.v1' || context.host !== 'codex' ||
+  if (context?.schema !== `pulse.${slug}_turn_context.v1` || context.host !== host ||
       context.session_id !== event.session_id || context.turn_id !== event.turn_id ||
       context.source_event_key !== event.source_event_key ||
       context.idempotency_key !== event.idempotency_key ||
@@ -247,27 +436,53 @@ export function readCodexTurnContext(resolved, event, now = new Date()) {
       context.binding_digest !== resolved.binding.binding_digest ||
       context.resolver_epoch !== resolved.binding.resolver_epoch || context.policy_epoch !== 0 ||
       Number.isNaN(Date.parse(context.expires_at)) || Date.parse(context.expires_at) <= now.valueOf()) {
-    throw new Error('codex_turn_context_stale');
+    throw new Error('host_turn_context_stale');
   }
   return context;
 }
 
 export function readCodexFinalizeMarker(resolved, event) {
-  const path = codexFinalizeMarkerPath(resolved.runtime.data_dir, event.session_id, event.turn_id);
+  return readHostFinalizeMarker(resolved, event, 'codex');
+}
+
+export function writeHostFinalizeMarker(resolved, event, host, result, now = new Date()) {
+  const slug = hostSlug(host).replaceAll('-', '_');
+  const finalize = result?.finalize_receipt;
+  const marker = {
+    schema: `pulse.${slug}_finalize_marker.v1`,
+    host,
+    session_id: event.session_id,
+    turn_id: event.turn_id,
+    source_event_key: event.source_event_key,
+    binding_digest: resolved.binding.binding_digest,
+    ledger_id: result?.ledger_id,
+    receipt_id: finalize?.receipt_id,
+    status: result?.status,
+    observed_at: now.toISOString(),
+  };
+  atomicWriteJSON(hostFinalizeMarkerPath(
+    resolved.runtime.data_dir, host, event.session_id, event.turn_id,
+  ), marker);
+  return marker;
+}
+
+export function readHostFinalizeMarker(resolved, event, host) {
+  const slug = hostSlug(host).replaceAll('-', '_');
+  const path = hostFinalizeMarkerPath(resolved.runtime.data_dir, host, event.session_id, event.turn_id);
   const info = lstatSync(path);
   const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
   if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
       (info.mode & 0o077) !== 0 || info.size > 4096) {
-    throw new Error('codex_finalize_marker_unsafe');
+    throw new Error('host_finalize_marker_unsafe');
   }
   const marker = JSON.parse(readFileSync(path, 'utf8'));
-  if (marker?.schema !== 'pulse.codex_finalize_marker.v1' ||
+  if (marker?.schema !== `pulse.${slug}_finalize_marker.v1` || marker.host !== host ||
       marker.session_id !== event.session_id || marker.turn_id !== event.turn_id ||
       marker.binding_digest !== resolved.binding.binding_digest ||
       marker.source_event_key !== event.source_event_key ||
       !STABLE_ID.test(marker.ledger_id ?? '') || !STABLE_ID.test(marker.receipt_id ?? '') ||
       !['candidates', 'rejected'].includes(marker.status)) {
-    throw new Error('codex_finalize_marker_stale');
+    throw new Error('host_finalize_marker_stale');
   }
   return marker;
 }

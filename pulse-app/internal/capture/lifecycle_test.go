@@ -19,7 +19,6 @@ func TestNormalizeLifecycleEventAcrossHosts(t *testing.T) {
 	}
 	claude, err := NormalizeLifecycleEvent(HostClaudeCode, EventSessionStart, map[string]any{
 		"session_id": "sess-claude-1",
-		"turn_id":    "turn-1",
 		"cwd":        "/workspace/pulse",
 		"model":      "claude-opus",
 		"source":     "startup",
@@ -39,6 +38,9 @@ func TestNormalizeLifecycleEventAcrossHosts(t *testing.T) {
 	if !strings.HasPrefix(codex.TurnID, "session_") {
 		t.Fatalf("Codex SessionStart needs an internal thread-scoped turn sentinel: %#v", codex)
 	}
+	if !strings.HasPrefix(claude.TurnID, "session_") {
+		t.Fatalf("Claude SessionStart needs an internal thread-scoped turn sentinel: %#v", claude)
+	}
 }
 
 func TestOnlySessionStartMayOmitNativeTurnID(t *testing.T) {
@@ -48,8 +50,8 @@ func TestOnlySessionStartMayOmitNativeTurnID(t *testing.T) {
 	if _, err := NormalizeLifecycleEvent(HostCodex, EventSessionStart, input); err != nil {
 		t.Fatalf("SessionStart without native turn id: %v", err)
 	}
-	if _, err := NormalizeLifecycleEvent(HostClaudeCode, EventSessionStart, input); err == nil || !strings.Contains(err.Error(), "invalid_turn_id") {
-		t.Fatalf("Claude SessionStart without native turn id err=%v, want invalid_turn_id", err)
+	if _, err := NormalizeLifecycleEvent(HostClaudeCode, EventSessionStart, input); err != nil {
+		t.Fatalf("Claude SessionStart without native turn id: %v", err)
 	}
 	if _, err := NormalizeLifecycleEvent(HostCodex, EventTurnStart, input); err == nil || !strings.Contains(err.Error(), "invalid_turn_id") {
 		t.Fatalf("turn event without turn id should fail, got %v", err)

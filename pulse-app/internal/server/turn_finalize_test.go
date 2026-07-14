@@ -324,7 +324,7 @@ func TestTurnNoChangeRouteIsDurableAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestProductDeleteReturnsDurableReceiptInsteadOfBareSuccess(t *testing.T) {
+func TestProductDeleteRouteFailsClosedWithoutOSPresence(t *testing.T) {
 	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
 	now := time.Now().UTC()
@@ -347,15 +347,12 @@ func TestProductDeleteReturnsDurableReceiptInsteadOfBareSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := pulseJSON(t, ts, http.MethodPost, "/memory/delete", map[string]any{"id": created.ObjectID})
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("delete status=%d", resp.StatusCode)
 	}
-	var receipt store.MemoryWriteReceipt
-	if err := json.NewDecoder(resp.Body).Decode(&receipt); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Status != store.MemoryWriteUpdated || receipt.ReceiptID == "" || receipt.ObjectID != created.ObjectID || receipt.ReasonCode != "user_deleted" {
-		t.Fatalf("delete receipt: %#v", receipt)
+	status, err := vault.MemoryStatus()
+	if err != nil || status.ItemCount != 1 {
+		t.Fatalf("denied product delete changed memory: status=%#v err=%v", status, err)
 	}
 }
 
@@ -456,10 +453,11 @@ func TestProductCommitRecallDeleteInvalidatesLiveRetrievalImmediately(t *testing
 	}
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	resp := pulseJSON(t, ts, http.MethodPost, "/memory/delete", map[string]any{"id": created.ObjectID})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("delete status=%d", resp.StatusCode)
+	deleted, err := vault.DeleteCommittedMemory(created.ObjectID, "delete:"+created.ObjectID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
 	}
+	srv.refreshProductRetrieval(deleted)
 	after, err := engine.Retrieve(context.Background(), retrieve.RetrieveRequest{Query: "deletion canary", Mode: retrieve.ModeEmpathic, TopK: 3})
 	if err != nil {
 		t.Fatal(err)

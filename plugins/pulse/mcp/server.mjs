@@ -1,14 +1,15 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { resolveProductEnvironment } from '../runtime-locator.mjs';
 
-const dataDir = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
-const cliPath = join(dataDir, 'runtime', 'codex', 'current', 'src', 'cli.js');
+const productEnvironment = resolveProductEnvironment();
+const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted Codex runtime is missing; run `pulse connect codex` again.');
 }
-const child = spawn(process.execPath, [cliPath, 'codex-mcp'], { stdio: 'inherit', env: process.env });
+const child = spawn(process.execPath, [cliPath, 'codex-mcp'], {
+  stdio: 'inherit', env: { ...process.env, ...productEnvironment },
+});
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => child.kill(signal));
