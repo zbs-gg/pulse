@@ -148,7 +148,7 @@ async function waitForVault(runtime, timeoutMs) {
   throw new SupervisorError('vault_start_timeout', 'bound local vault did not become ready');
 }
 
-export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000 } = {}) {
+export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000, host = 'claude-code' } = {}) {
   const status = inspectVaultRuntime(runtime);
   if (status.status === 'running') return status;
   if (status.status === 'stale_or_mismatched') {
@@ -171,6 +171,10 @@ export async function startVaultRuntime(runtime, { daemonPath, timeoutMs = 12000
       PULSE_RESOLVER_EPOCH: String(runtime.resolver_epoch),
       PULSE_DATA_DIR: runtime.data_dir,
       PULSE_CACHE_DIR: runtime.cache_dir,
+      PULSE_HOST: host,
+      PULSE_LOCAL_EMBED_PYTHON: process.env.PULSE_LOCAL_EMBED_PYTHON ?? '',
+      PULSE_LOCAL_EMBED_HELPER: process.env.PULSE_LOCAL_EMBED_HELPER ?? '',
+      PULSE_LOCAL_EMBED_MODEL: process.env.PULSE_LOCAL_EMBED_MODEL ?? '',
       ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '',
     },
   });

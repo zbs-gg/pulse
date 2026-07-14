@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
   "license": "AGPL-3.0-only",
   "author": "Nikita Shilov",
@@ -12,6 +12,10 @@
     "src/cli.js",
     "src/capture-state.js",
     "src/cli-idempotency.js",
+    "src/host-adapter.js",
+    "src/codex-hooks.js",
+    "src/codex-install.js",
+    "src/codex-runtime.js",
     "src/remote-auth.js",
     "src/workspace-binding.js",
     "src/local-supervisor.js",
@@ -28,6 +32,7 @@
   "scripts": {
     "check": "node src/cli.js --help",
     "test": "node --test src/*.test.js",
+    "test:codex-product": "node scripts/codex-product-e2e.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
   },

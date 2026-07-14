@@ -87,10 +87,6 @@ func NormalizeLifecycleEvent(host Host, event LifecycleEventKind, input map[stri
 	if !ok || !stableLifecycleID.MatchString(sessionID) {
 		return LifecycleEvent{}, errors.New("invalid_session_id")
 	}
-	turnID, ok := input["turn_id"].(string)
-	if !ok || !stableLifecycleID.MatchString(turnID) {
-		return LifecycleEvent{}, errors.New("invalid_turn_id")
-	}
 	cwd, ok := input["cwd"].(string)
 	if !ok || cwd == "" || !filepath.IsAbs(cwd) || hasControl(cwd) {
 		return LifecycleEvent{}, errors.New("invalid_workspace")
@@ -102,6 +98,20 @@ func NormalizeLifecycleEvent(host Host, event LifecycleEventKind, input map[stri
 	source, ok := input["source"].(string)
 	if !ok || source == "" || hasControl(source) {
 		return LifecycleEvent{}, errors.New("invalid_source")
+	}
+	turnID, ok := input["turn_id"].(string)
+	if host == HostCodex && event == EventSessionStart {
+		if _, exists := input["turn_id"]; !exists {
+			material := strings.Join([]string{
+				"pulse-thread-scoped-turn-v1", string(host), sessionID, filepath.Clean(cwd), source,
+			}, "\x1f")
+			digest := sha256.Sum256([]byte(material))
+			turnID = "session_" + hex.EncodeToString(digest[:])
+			ok = true
+		}
+	}
+	if !ok || !stableLifecycleID.MatchString(turnID) {
+		return LifecycleEvent{}, errors.New("invalid_turn_id")
 	}
 	stopHookActive := false
 	if raw, exists := input["stop_hook_active"]; exists {

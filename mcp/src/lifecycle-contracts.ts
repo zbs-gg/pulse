@@ -64,12 +64,17 @@ export function normalizeLifecycleEvent(
   }
   const sessionId = requiredString(input, 'session_id', 'invalid_session_id');
   if (!STABLE_ID.test(sessionId)) throw new Error('invalid_session_id');
-  const turnId = requiredString(input, 'turn_id', 'invalid_turn_id');
-  if (!STABLE_ID.test(turnId)) throw new Error('invalid_turn_id');
   const cwd = requiredString(input, 'cwd', 'invalid_workspace');
   if (!cwd.startsWith('/')) throw new Error('invalid_workspace');
   const model = requiredString(input, 'model', 'invalid_model');
   const source = requiredString(input, 'source', 'invalid_source');
+  const rawTurnId = input.turn_id;
+  const turnId = host === 'codex' && event === 'session_start' && rawTurnId === undefined
+    ? `session_${createHash('sha256').update([
+      'pulse-thread-scoped-turn-v1', host, sessionId, posix.normalize(cwd), source,
+    ].join('\x1f')).digest('hex')}`
+    : requiredString(input, 'turn_id', 'invalid_turn_id');
+  if (!STABLE_ID.test(turnId)) throw new Error('invalid_turn_id');
   const stopHook = input.stop_hook_active ?? false;
   if (typeof stopHook !== 'boolean') throw new Error('invalid_stop_hook_active');
   return {

@@ -89,7 +89,8 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	     fi ) \
 	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
 	       cd $(CLI_DIR) \
-	       && $(NPM) test --silent; \
+	       && $(NPM) test --silent \
+	       && $(NPM) run --silent test:codex-product; \
 	     else \
 	       echo "$(CLI_DIR)/package.json not found, skipping CLI checks"; \
 	     fi ) \

@@ -261,6 +261,10 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	// process lifetime.
 	healthProvider := health.NewFixtureProvider(time.Now())
 
+	billingHost := strings.TrimSpace(os.Getenv("PULSE_HOST"))
+	if billingHost != "codex" && billingHost != "claude-code" {
+		billingHost = "claude-code"
+	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,
 		Outbox:       ob,
@@ -270,7 +274,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		Store:        s,
 		Billing: server.BillingStatus{
 			Mode:              pulseMode(localAutoMode),
-			Host:              "claude-code",
+			Host:              billingHost,
 			BackendLLMEnabled: backendLLMEnabled,
 			RawCaptureEnabled: rawCaptureEnabled,
 			StoragePath:       cfg.DBPath,

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   LIFECYCLE_SCHEMA,
   canTransition,
+  lifecycleIdempotencyKey,
   normalizeLifecycleEvent,
   renderInjection,
   validateAirlockApproval,
@@ -23,7 +24,8 @@ const base = {
 };
 
 test('Codex and Claude normalize to one lifecycle schema with distinct provenance', () => {
-  const codex = normalizeLifecycleEvent('codex', 'session_start', base);
+  const { turn_id: _codexTurn, ...codexSessionStart } = base;
+  const codex = normalizeLifecycleEvent('codex', 'session_start', codexSessionStart);
   const claude = normalizeLifecycleEvent('claude-code', 'session_start', { ...base, session_id: 'sess-2' });
   assert.equal(codex.schema, LIFECYCLE_SCHEMA);
   assert.equal(claude.schema, LIFECYCLE_SCHEMA);
@@ -31,6 +33,25 @@ test('Codex and Claude normalize to one lifecycle schema with distinct provenanc
   assert.equal(codex.workspace, claude.workspace);
   assert.notEqual(codex.host, claude.host);
   assert.notEqual(codex.session_id, claude.session_id);
+  assert.match(codex.turn_id, /^session_[a-f0-9]{64}$/);
+});
+
+test('only thread-scoped session_start may omit a native turn id', () => {
+  const { turn_id: _turn, ...withoutTurn } = base;
+  assert.doesNotThrow(() => normalizeLifecycleEvent('codex', 'session_start', withoutTurn));
+  assert.throws(() => normalizeLifecycleEvent('claude-code', 'session_start', withoutTurn), /invalid_turn_id/);
+  assert.throws(() => normalizeLifecycleEvent('codex', 'turn_start', withoutTurn), /invalid_turn_id/);
+});
+
+test('lifecycle idempotency matches the shared Go golden vector', () => {
+  const event = normalizeLifecycleEvent('codex', 'turn_start', {
+    ...base,
+    source: 'prompt_submitted',
+  });
+  assert.equal(
+    lifecycleIdempotencyKey(event),
+    'lifecycle:3300667107dd9ad985d8c1ad5199234a91254067d69e784257cf6c7c29f6b23d',
+  );
 });
 
 test('authority-bearing caller fields are rejected', () => {

@@ -10,7 +10,6 @@ import (
 func TestNormalizeLifecycleEventAcrossHosts(t *testing.T) {
 	codex, err := NormalizeLifecycleEvent(HostCodex, EventSessionStart, map[string]any{
 		"session_id": "sess-codex-1",
-		"turn_id":    "turn-1",
 		"cwd":        "/workspace/pulse",
 		"model":      "gpt-5",
 		"source":     "startup",
@@ -36,6 +35,38 @@ func TestNormalizeLifecycleEventAcrossHosts(t *testing.T) {
 	}
 	if codex.Host == claude.Host || codex.SessionID == claude.SessionID {
 		t.Fatalf("host provenance collapsed: %#v %#v", codex, claude)
+	}
+	if !strings.HasPrefix(codex.TurnID, "session_") {
+		t.Fatalf("Codex SessionStart needs an internal thread-scoped turn sentinel: %#v", codex)
+	}
+}
+
+func TestOnlySessionStartMayOmitNativeTurnID(t *testing.T) {
+	input := map[string]any{
+		"session_id": "sess-1", "cwd": "/workspace/pulse", "model": "gpt-5", "source": "prompt_submitted",
+	}
+	if _, err := NormalizeLifecycleEvent(HostCodex, EventSessionStart, input); err != nil {
+		t.Fatalf("SessionStart without native turn id: %v", err)
+	}
+	if _, err := NormalizeLifecycleEvent(HostClaudeCode, EventSessionStart, input); err == nil || !strings.Contains(err.Error(), "invalid_turn_id") {
+		t.Fatalf("Claude SessionStart without native turn id err=%v, want invalid_turn_id", err)
+	}
+	if _, err := NormalizeLifecycleEvent(HostCodex, EventTurnStart, input); err == nil || !strings.Contains(err.Error(), "invalid_turn_id") {
+		t.Fatalf("turn event without turn id should fail, got %v", err)
+	}
+}
+
+func TestLifecycleIdempotencyMatchesTypeScriptGoldenVector(t *testing.T) {
+	event, err := NormalizeLifecycleEvent(HostCodex, EventTurnStart, map[string]any{
+		"session_id": "sess-1", "turn_id": "turn-1", "cwd": "/workspace/pulse",
+		"model": "gpt-5", "source": "prompt_submitted",
+	})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	const expected = "lifecycle:3300667107dd9ad985d8c1ad5199234a91254067d69e784257cf6c7c29f6b23d"
+	if actual := event.IdempotencyKey(); actual != expected {
+		t.Fatalf("idempotency=%q, want %q", actual, expected)
 	}
 }
 

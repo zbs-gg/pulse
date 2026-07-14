@@ -19,6 +19,8 @@ This document fixes the shared domain contract used by the Go daemon, MCP gatewa
 | `pulse.write_receipt.v1` | Truthful pending and terminal private-write result |
 | `pulse.context_lease.v1` | Short-lived binding, membership, policy, and object-generation capability |
 | `pulse.context.v1` | Structured separation of inert evidence and human-approved practices |
+| `pulse.codex_turn_context.v1` | Content-free host lease binding one Codex turn to its exact vault and finalization ledger |
+| `pulse.codex_tool_lease.v1` | Single-use, 30-second host lease joining exact `pulse_remember` arguments to that turn without MCP environment identity |
 
 Schema changes require a new version. Unknown authority-bearing fields fail closed rather than being stripped.
 
@@ -35,7 +37,19 @@ Native host events normalize to:
 - `turn_finalize`
 - `session_resume`
 
-Every normalized event preserves `host`, `session_id`, `turn_id`, canonical absolute `workspace`, `model`, `source`, and `stop_hook_active`. Codex and Claude provenance remains distinct. The stable idempotency key is the SHA-256 of schema, host, event, session, turn, workspace, and source separated by `0x1f`.
+Every normalized event preserves `host`, `session_id`, canonical absolute `workspace`, `model`, `source`, and `stop_hook_active`. Turn-scoped native events also preserve `turn_id`. Codex `SessionStart` has no native turn ID, so only that thread-scoped event receives an explicit internal `session_<sha256>` sentinel derived from host, session, workspace, and start source; adapters must never claim that sentinel came from the host. Codex and Claude provenance remains distinct. The stable idempotency key is the SHA-256 of schema, host, event, session, normalized turn/sentinel, workspace, and source separated by `0x1f`.
+
+`UserPromptSubmit` writes a private, owner-only, content-free Codex turn context.
+Immediately before `pulse_remember`, `PreToolUse` verifies that exact turn and
+current signed binding, then writes a single-use 30-second lease over the
+canonical tool-argument digest. The plugin-owned MCP consumes that lease and
+sends candidates through `/turn/finalize`; it does not depend on
+`CODEX_THREAD_ID` at stdio startup and cannot manufacture host, session, turn,
+binding, policy, or resolver authority. The first `Stop` requests exactly one bounded
+finalization pass. The recursive Stop records no-change only when the same
+turn was not already finalized with candidates. `PreCompact` never closes the
+turn early. Subagents receive role-specific context but return typed candidate
+proposals to the parent, which owns the single turn ledger.
 
 ## Binding decision table
 
@@ -45,6 +59,11 @@ Every normalized event preserves `host`, `session_id`, `turn_id`, canonical abso
 | Team | Current member Desk + fixed Commons | Desk only | Required and host-owned |
 
 No binding may silently fall back to another Vault, Team, Safe Mode, or standalone storage.
+Codex product mode does not expose `pulse_forget`, `pulse_wipe`, or an
+ungoverned graph-write tool to agents. Deletion remains a direct human action
+through Viewer or the exact-confirmation CLI in a directly attached interactive
+terminal. Agent hooks block Pulse deletion, wipe, local destructive HTTP calls,
+and secret-file reads before shell execution.
 
 ## Write receipts
 

@@ -1,0 +1,23 @@
+{
+  "name": "pulse",
+  "version": "0.7.0",
+  "description": "Local-first, state-aware private and team memory for Codex.",
+  "author": {
+    "name": "ZBS.GG",
+    "url": "https://github.com/zbs-gg/pulse"
+  },
+  "homepage": "https://github.com/zbs-gg/pulse",
+  "repository": "https://github.com/zbs-gg/pulse",
+  "license": "AGPL-3.0-only",
+  "keywords": ["memory", "continuity", "codex", "local-first", "team"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Pulse",
+    "shortDescription": "Private continuity and governed team memory",
+    "longDescription": "Pulse carries inspected, receipt-backed context across Codex sessions while keeping Personal, Desk, and Team memory physically separate.",
+    "developerName": "ZBS.GG",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "Use Pulse to continue this project from its inspected memory and show every proposed private write in Memory Tray."
+  }
+}
