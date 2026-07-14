@@ -67,6 +67,9 @@ type consolidateRow struct {
 // merged row simply stops surfacing once this explicit pass has run. Until a
 // pass runs, every row is 'active' and behavior is unchanged.
 func (s *Store) ConsolidateCapsules(opt ConsolidateOptions) (ConsolidateResult, error) {
+	if s.productTrayRequired() {
+		return ConsolidateResult{}, ErrMemoryTrayRequired
+	}
 	threshold := opt.Threshold
 	if threshold == 0 {
 		threshold = defaultConsolidateThreshold

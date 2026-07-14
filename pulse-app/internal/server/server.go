@@ -51,6 +51,9 @@ type Config struct {
 	Health health.Provider
 	// Billing describes the current Pulse distribution mode for /memory/status.
 	Billing BillingStatus
+	// TrayGracePeriod controls the visible private-write preview window for
+	// Personal/Desk product stores. Zero selects the product default (10s).
+	TrayGracePeriod time.Duration
 }
 
 type BillingStatus struct {
@@ -74,7 +77,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Claude != nil && cfg.DefaultModel == "" {
 		return nil, errors.New("server: Claude set but DefaultModel is empty")
 	}
-	return &Server{cfg: cfg, started: time.Now()}, nil
+	if cfg.TrayGracePeriod == 0 {
+		cfg.TrayGracePeriod = 10 * time.Second
+	}
+	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
+		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
+	}
+	server := &Server{cfg: cfg, started: time.Now()}
+	if err := server.recoverMemoryTray(); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
 // Handler returns the local-only root http.Handler with auth middleware.
@@ -93,7 +106,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/outbox/ack", s.handleOutboxAck)
 	r.Post("/msg", s.handleMsg)
 	if s.cfg.Store != nil {
-		r.Method(http.MethodPost, "/ingest", ingest.NewHandler(s.cfg.Store))
+		if s.cfg.Store.StoreKind() == store.StoreKindLocalPreview {
+			r.Method(http.MethodPost, "/ingest", ingest.NewHandler(s.cfg.Store))
+		}
 		r.Post("/memory/remember", s.handleMemoryRemember)
 		r.Post("/memory/recall", s.handleMemoryRecall)
 		r.Get("/memory/status", s.handleMemoryStatus)
@@ -104,6 +119,14 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/memory/wipe", s.handleMemoryWipe)
 		r.Post("/memory/consolidate", s.handleMemoryConsolidate)
 		r.Post("/graph/delta", s.handleGraphDelta)
+		r.Post("/turn/finalize", s.handleTurnFinalize)
+		r.Post("/turn/no-change", s.handleTurnNoChange)
+		r.Get("/memory/tray", s.handleMemoryTrayList)
+		r.Get("/memory/receipts/{id}", s.handleMemoryReceiptGet)
+		r.Post("/memory/tray/{id}/edit", s.handleMemoryTrayEdit)
+		r.Post("/memory/tray/{id}/cancel", s.handleMemoryTrayCancel)
+		r.Post("/memory/tray/{id}/commit", s.handleMemoryTrayCommit)
+		r.Post("/memory/{id}/correct", s.handleMemoryCorrect)
 		r.Post("/graph/entity/hide", s.handleGraphEntityHide)
 		r.Post("/graph/entity/restore", s.handleGraphEntityRestore)
 		r.Get("/graph/export", s.handleGraphExport)

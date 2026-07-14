@@ -27,6 +27,7 @@ import {
   resolveRuntimeMode,
   type RuntimeMode,
 } from './runtime-mode.js';
+import { assertTruthfulDeletionReceipt, assertTruthfulWriteResponse, mcpRequestIdempotencyKey } from './write-receipts.js';
 import type {
   BoundTeamDomain,
   GatewaySecurityEventInput,
@@ -222,6 +223,7 @@ async function pulseFetch<T>(
   path: string,
   body?: unknown,
   method = 'POST',
+  idempotencyKey?: string,
 ): Promise<T> {
   const url = `${PULSE_BASE_URL.replace(/\/$/, '')}${path}`;
   const headers: Record<string, string> = {
@@ -231,6 +233,9 @@ async function pulseFetch<T>(
   if (apiKey) {
     headers['X-Pulse-Key'] = apiKey;
   }
+	if (method !== 'GET') {
+		headers['Idempotency-Key'] = idempotencyKey ?? `mcp_${randomUUID().replaceAll('-', '')}`;
+	}
   const resp = await fetch(url, {
     method,
     headers,
@@ -295,7 +300,7 @@ export function createPulseMcpServer(
     {
       name: 'pulse_remember',
       description:
-        'Save a minimal, user-approved Pulse memory capsule. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
+        'Propose a minimal private Pulse memory capsule. Product Personal/Desk mode returns a pending Memory Tray receipt and is saved only after a created, deduplicated, or updated receipt; Local Preview stores immediately. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -462,7 +467,7 @@ export function createPulseMcpServer(
     {
       name: 'pulse_graph_delta',
       description:
-        'Write a host-extracted pulse.semantic_delta.v1 graph delta. Use when the current host model has identified durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
+        'Propose a private host-extracted pulse.semantic_delta.v1 graph delta. Product Personal/Desk mode returns a pending Memory Tray receipt and is saved only after a created, deduplicated, or updated receipt; Local Preview stores immediately. Use for durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -794,8 +799,9 @@ export function createPulseMcpServer(
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+	const invocationKey = mcpRequestIdempotencyKey(extra.sessionId, extra.requestId);
 
     try {
       if (runtimeMode === 'team-remote') {
@@ -872,14 +878,14 @@ export function createPulseMcpServer(
         if (resolvedEngine !== null) {
           return resolvedEngine === 'standalone'
             ? standaloneResult(name, args)
-            : await daemonToolCall(name, args);
+            : await daemonToolCall(name, args, invocationKey);
         }
         firstCallGate = new Promise((resolve) => {
           releaseGate = resolve;
         });
       }
       try {
-        const out = await daemonToolCall(name, args);
+        const out = await daemonToolCall(name, args, invocationKey);
         resolvedEngine = 'daemon';
         return out;
       } catch (err: unknown) {
@@ -936,12 +942,15 @@ function resolveStandaloneStore(): StandaloneStore {
   return standaloneStore;
 }
 
-async function daemonToolCall(name: string, args: Record<string, unknown> | undefined) {
+async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
-    const out = await pulseFetch<{ ok: boolean; ids: string[] }>(
+    const out = await pulseFetch<unknown>(
       '/memory/remember',
       args as unknown as MemoryCapsule,
+      'POST',
+      invocationKey,
     );
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -956,7 +965,8 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_graph_delta') {
-    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody);
+    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody, 'POST', invocationKey);
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -971,7 +981,8 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_forget') {
-    const out = await pulseFetch('/memory/delete', { id: args?.id });
+    const out = await pulseFetch('/memory/delete', { id: args?.id }, 'POST', invocationKey);
+    assertTruthfulDeletionReceipt(out, String(args?.id || ''));
     return jsonText(out);
   }
 
@@ -979,7 +990,7 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
     if (args?.confirm !== 'wipe pulse memory') {
       throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
     }
-    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' });
+    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' }, 'POST', invocationKey);
     return jsonText(out);
   }
 

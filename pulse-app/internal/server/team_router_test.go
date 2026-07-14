@@ -116,6 +116,7 @@ func TestTeamRouterIsExactAllowlistAndLocalHandlerIsUnchanged(t *testing.T) {
 		"/assets/anime.min.js", "/health/snapshot", "/outbox", "/outbox/ack", "/msg", "/ingest",
 		"/memory/remember", "/memory/recall", "/memory/status", "/memory/export", "/memory/import",
 		"/memory/delete", "/memory/wipe", "/memory/consolidate", "/graph/delta", "/graph/export",
+		"/memory/object_01/correct", "/memory/tray", "/turn/finalize", "/turn/no-change",
 		"/continuity/resume", "/continuity/checkpoint", "/continuity/observe", "/viewer", "/viewer/data",
 		"/retrieve", "/context/query", "/feed_signals", "/team/v1/wipe", "/team/v1/unknown",
 	}

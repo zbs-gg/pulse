@@ -19,6 +19,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildPulseRequestHeaders } from './remote-auth.js';
 import { BindingError, resolveWorkspaceBinding } from './workspace-binding.js';
+import { writeCaptureStateFiles } from './capture-state.js';
+import { acquireCLIInvocation, consumeCLIResponse } from './cli-idempotency.js';
 import {
   SupervisorError,
   inspectVaultRuntime,
@@ -200,6 +202,13 @@ async function pulseFetch(path, options = {}) {
     ipcSecret: secret,
     remoteBearer,
   });
+	let invocation;
+  if ((options.method ?? 'POST') !== 'GET') {
+		invocation = options.idempotencyKey
+			? { key: options.idempotencyKey }
+			: acquireCLIInvocation(DATA_DIR, path, options.body);
+		headers['Idempotency-Key'] = invocation.key;
+	}
   const controller = options.timeoutMs ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
   let response;
@@ -215,13 +224,7 @@ async function pulseFetch(path, options = {}) {
       clearTimeout(timer);
     }
   }
-  if (!response.ok) {
-    throw new Error(`Pulse HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  }
-  if (response.status === 204) {
-    return { ok: true };
-  }
-  return response.json();
+	return consumeCLIResponse(response, invocation);
 }
 
 function mcpConfig(secret) {
@@ -611,7 +614,18 @@ function disconnectClaudeCode() {
     writeFileSync(mcpPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
   }
 
+	writeCaptureState(false, 'host_disconnected');
+
   console.log('[pulse] Claude Code disconnected from Pulse in this project');
+}
+
+function writeCaptureState(enabled, reason) {
+	let binding;
+	const registryPath = join(DATA_DIR, 'supervisor', 'workspace-bindings.json');
+	if (existsSync(registryPath)) {
+		binding = resolveWorkspaceBinding({ cwd: process.cwd(), registryPath });
+	}
+	writeCaptureStateFiles({ globalDataDir: DATA_DIR, binding, enabled, reason });
 }
 
 function safeReadJSON(path) {
@@ -997,6 +1011,52 @@ async function showPulseConnectAnimation() {
   await pulseBreath({ cycles: 2 });
 }
 
+const PRODUCT_WRITE_STATUSES = new Set(['pending', 'created', 'updated', 'deduplicated', 'canceled', 'rejected', 'failed']);
+const PRODUCT_OBJECT_STATUSES = new Set(['created', 'updated', 'deduplicated']);
+
+function validateProductWriteReceipt(receipt) {
+  const stableID = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+  if (!receipt || typeof receipt !== 'object' || receipt.schema !== 'pulse.write_receipt.v1' ||
+      !stableID(receipt.receipt_id) || !stableID(receipt.ledger_id) ||
+      !PRODUCT_WRITE_STATUSES.has(receipt.status) ||
+      !['personal', 'desk'].includes(receipt.destination) ||
+      typeof receipt.destination_store_id !== 'string' || !/^store_[a-z0-9][a-z0-9_]{2,127}$/.test(receipt.destination_store_id) ||
+      !receipt.safe_provenance || typeof receipt.safe_provenance !== 'object' ||
+      typeof receipt.safe_provenance.host !== 'string' || !receipt.safe_provenance.host ||
+      !stableID(receipt.safe_provenance.session_id) || !stableID(receipt.safe_provenance.turn_id) ||
+      !stableID(receipt.safe_provenance.source_event_key) ||
+      !Number.isInteger(receipt.policy_epoch) || receipt.policy_epoch < 0 ||
+      !Number.isInteger(receipt.resolver_epoch) || receipt.resolver_epoch < 0 ||
+      typeof receipt.measurement_method !== 'string' || !receipt.measurement_method ||
+      typeof receipt.created_at !== 'string' || Number.isNaN(Date.parse(receipt.created_at))) {
+    throw new Error('invalid product write receipt');
+  }
+  const hasObject = typeof receipt.object_id === 'string' && receipt.object_id.length > 0;
+  if (hasObject && !stableID(receipt.object_id)) {
+    throw new Error('invalid product write receipt object identity');
+  }
+  if (PRODUCT_OBJECT_STATUSES.has(receipt.status) !== hasObject) {
+    throw new Error('invalid product write receipt object identity');
+  }
+  if (receipt.status === 'pending' &&
+      (typeof receipt.candidate_id !== 'string' || !receipt.candidate_id ||
+       !Number.isInteger(receipt.candidate_version) || receipt.candidate_version < 1 ||
+       typeof receipt.content_digest !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.content_digest))) {
+    throw new Error('invalid pending product write receipt');
+  }
+  if (['canceled', 'rejected', 'failed'].includes(receipt.status) &&
+      (typeof receipt.reason_code !== 'string' || !receipt.reason_code)) {
+    throw new Error('invalid terminal product write receipt');
+  }
+  return receipt;
+}
+
+function productWriteReceipts(out) {
+  if (!Array.isArray(out?.receipts)) return null;
+  if (out.receipts.length === 0) throw new Error('product write response has no item receipt');
+  return out.receipts.map(validateProductWriteReceipt);
+}
+
 async function rememberInstallMemory(host = 'claude-code') {
   const display = harnessDisplayName(host);
   const capsule = {
@@ -1019,9 +1079,41 @@ async function rememberInstallMemory(host = 'claude-code') {
   };
   try {
     const out = await pulseFetch('/memory/remember', { body: capsule, timeoutMs: 2500 });
-    return { ok: true, ids: Array.isArray(out.ids) ? out.ids : [] };
+    let receipts;
+    try {
+      receipts = productWriteReceipts(out) || [];
+    } catch (error) {
+      return { ok: false, status: 'invalid_receipt', reason: error.message, ids: [], receiptIds: [] };
+    }
+    const pending = receipts.find((receipt) => receipt?.status === 'pending');
+    const materialized = receipts.find((receipt) => ['created', 'deduplicated', 'updated'].includes(receipt?.status));
+    const terminalFailure = receipts.find((receipt) => ['canceled', 'rejected', 'failed'].includes(receipt?.status));
+    if (terminalFailure) {
+      return {
+        ok: false,
+        status: terminalFailure.status,
+        reason: terminalFailure.reason_code || 'write_not_materialized',
+        ids: [],
+        receiptIds: [terminalFailure.receipt_id].filter(Boolean),
+      };
+    }
+    if (receipts.length > 0 && !pending && !materialized) {
+      return { ok: false, status: 'invalid_receipt', reason: 'unknown_receipt_status', ids: [], receiptIds: [] };
+    }
+    if (pending || materialized) {
+      return {
+        ok: true,
+        status: pending ? 'pending' : materialized.status,
+        ids: materialized?.object_id ? [materialized.object_id] : [],
+        receiptIds: receipts.map((receipt) => receipt?.receipt_id).filter(Boolean),
+      };
+    }
+    if (out?.ok === true && Array.isArray(out.ids)) {
+      return { ok: true, status: 'preview_created', ids: out.ids, receiptIds: [] };
+    }
+    return { ok: false, status: 'invalid_receipt', reason: 'missing_write_receipt', ids: [], receiptIds: [] };
   } catch {
-    return { ok: false, ids: [] };
+    return { ok: false, status: 'unavailable', reason: 'daemon_unavailable', ids: [], receiptIds: [] };
   }
 }
 
@@ -1041,6 +1133,7 @@ async function connectClaudeCode() {
 	writeLocalAutoMode();
 	installClaudeCode();
 	installClaudeCodeHooks();
+	writeCaptureState(true, 'host_connected');
   const firstMemory = await rememberInstallMemory('claude-code');
   const dashboard = firstRunViewerURL('claude-code');
   await showPulseConnectAnimation();
@@ -1088,9 +1181,17 @@ Import old chats later:
   pulse migrate start --open
 `);
   if (firstMemory.ok) {
-    console.log(`[pulse] First memory saved locally${firstMemory.ids.length > 0 ? `: ${firstMemory.ids[0]}` : '.'}`);
+    if (firstMemory.status === 'pending') {
+      console.log(`[pulse] First memory is visible in Memory Tray and not saved yet${firstMemory.receiptIds.length > 0 ? `: ${firstMemory.receiptIds[0]}` : '.'}`);
+    } else {
+      console.log(`[pulse] First memory saved locally${firstMemory.ids.length > 0 ? `: ${firstMemory.ids[0]}` : '.'}`);
+    }
   } else {
-    console.log('[pulse] First memory will save when the local Pulse daemon is running.');
+    if (['canceled', 'rejected', 'failed', 'invalid_receipt'].includes(firstMemory.status)) {
+      console.log(`[pulse] First memory was not saved (${firstMemory.status}${firstMemory.reason ? `: ${firstMemory.reason}` : ''})${firstMemory.receiptIds.length > 0 ? `; receipt ${firstMemory.receiptIds[0]}` : ''}.`);
+    } else {
+      console.log('[pulse] First memory will save when the local Pulse daemon is running.');
+    }
   }
 	if (remoteControl) {
 		printRemoteControlNextSteps();
@@ -5840,7 +5941,20 @@ async function commitMigrationPreview(previewPath, rest) {
     throw new Error('preview has no safe graph candidates to commit');
   }
   const out = await pulseFetch('/graph/delta', { body: delta });
-  console.log('[pulse] committed Pulse graph delta');
+  const receipts = productWriteReceipts(out) || [];
+  const pendingReceipts = receipts.filter((receipt) => receipt?.status === 'pending');
+  const materializedReceipts = receipts.filter((receipt) => ['created', 'deduplicated', 'updated'].includes(receipt?.status));
+  const failedReceipt = receipts.find((receipt) => ['canceled', 'rejected', 'failed'].includes(receipt?.status));
+  if (failedReceipt) {
+    throw new Error(`Pulse graph delta was not committed (${failedReceipt.status}: ${failedReceipt.reason_code || 'write_not_materialized'}; receipt ${failedReceipt.receipt_id || 'unknown'})`);
+  }
+  if (pendingReceipts.length > 0) {
+    console.log(`[pulse] Pulse graph delta is visible in Memory Tray and not committed yet (${pendingReceipts.length} receipt${pendingReceipts.length === 1 ? '' : 's'})`);
+  } else if (materializedReceipts.length > 0 || (receipts.length === 0 && out?.ok === true)) {
+    console.log('[pulse] committed Pulse graph delta');
+  } else {
+    throw new Error('Pulse graph delta returned no truthful pending or committed receipt');
+  }
   console.log(`nodes: ${delta.nodes.length}`);
   console.log(`edges: ${delta.edges.length}`);
   console.log(`facts: ${delta.facts.length}`);
@@ -6583,8 +6697,14 @@ async function main() {
   if (command === 'delete') {
     const id = getArg('--id');
     if (!id) throw new Error('pulse delete requires --id <pulse:id>');
-    await pulseFetch('/memory/delete', { body: { id } });
-    console.log(`[pulse] deleted ${id}`);
+    const result = await pulseFetch('/memory/delete', { body: { id } });
+    if (result?.status === 'updated' && result?.reason_code === 'user_deleted' && result?.object_id === id && result?.receipt_id) {
+      console.log(`[pulse] deleted ${id}; receipt ${result.receipt_id}`);
+    } else if (result?.ok === true && result?.deleted_id === id && Object.keys(result).length === 2) {
+      console.log(`[pulse] deleted ${id} (Local Preview)`);
+    } else {
+      throw new Error('Pulse delete returned no truthful deletion receipt');
+    }
     return;
   }
 

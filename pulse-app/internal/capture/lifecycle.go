@@ -132,16 +132,16 @@ const (
 	DestinationDesk     Destination = "desk"
 )
 
-type ReceiptStatus string
+type WriteReceiptStatus string
 
 const (
-	ReceiptPending      ReceiptStatus = "pending"
-	ReceiptCreated      ReceiptStatus = "created"
-	ReceiptUpdated      ReceiptStatus = "updated"
-	ReceiptDeduplicated ReceiptStatus = "deduplicated"
-	ReceiptCanceled     ReceiptStatus = "canceled"
-	ReceiptRejected     ReceiptStatus = "rejected"
-	ReceiptFailed       ReceiptStatus = "failed"
+	ReceiptPending      WriteReceiptStatus = "pending"
+	ReceiptCreated      WriteReceiptStatus = "created"
+	ReceiptUpdated      WriteReceiptStatus = "updated"
+	ReceiptDeduplicated WriteReceiptStatus = "deduplicated"
+	ReceiptCanceled     WriteReceiptStatus = "canceled"
+	ReceiptRejected     WriteReceiptStatus = "rejected"
+	ReceiptFailed       WriteReceiptStatus = "failed"
 )
 
 type MeasurementKind string
@@ -157,13 +157,13 @@ type TokenMeasurement struct {
 }
 
 type WriteReceipt struct {
-	Schema            string            `json:"schema"`
-	Status            ReceiptStatus     `json:"status"`
-	ReceiptID         string            `json:"receipt_id"`
-	Destination       Destination       `json:"destination"`
-	ObjectID          string            `json:"object_id,omitempty"`
-	ActualInputTokens int               `json:"actual_input_tokens,omitempty"`
-	Measurement       *TokenMeasurement `json:"measurement,omitempty"`
+	Schema            string             `json:"schema"`
+	Status            WriteReceiptStatus `json:"status"`
+	ReceiptID         string             `json:"receipt_id"`
+	Destination       Destination        `json:"destination"`
+	ObjectID          string             `json:"object_id,omitempty"`
+	ActualInputTokens int                `json:"actual_input_tokens,omitempty"`
+	Measurement       *TokenMeasurement  `json:"measurement,omitempty"`
 }
 
 func ValidateWriteReceipt(receipt WriteReceipt) error {

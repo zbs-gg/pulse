@@ -13,6 +13,28 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
   'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.';
 
+function productReceipt(overrides = {}) {
+  return {
+    schema: 'pulse.write_receipt.v1',
+    receipt_id: 'receipt_test',
+    ledger_id: 'turn_test',
+    candidate_id: 'candidate_test',
+    candidate_version: 1,
+    status: 'pending',
+    destination: 'desk',
+    destination_store_id: 'store_desk_test',
+    safe_provenance: {
+      host: 'pulse-cli', session_id: 'session:test', turn_id: 'turn:test', source_event_key: 'event:test',
+    },
+    content_digest: 'a'.repeat(64),
+    policy_epoch: 0,
+    resolver_epoch: 0,
+    measurement_method: 'host_structured_v1',
+    created_at: '2026-07-14T09:00:00Z',
+    ...overrides,
+  };
+}
+
 function run(args, env = {}) {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
@@ -900,6 +922,74 @@ test('connect claude-code best-effort writes private first install memory when d
   }
 });
 
+test('connect claude-code calls a product pending receipt visible and never saved', async () => {
+  const stub = await withPulseStub(() => ({
+    body: {
+      ledger_id: 'turn_install',
+      status: 'candidates',
+      receipts: [productReceipt({
+        receipt_id: 'receipt_install_pending', candidate_id: 'candidate_install',
+      })],
+    },
+  }));
+  try {
+    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
+      PULSE_BASE_URL: stub.baseUrl,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /visible in Memory Tray and not saved yet: receipt_install_pending/);
+    assert.doesNotMatch(result.stdout, /First memory saved locally/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('connect claude-code reports a terminal rejected receipt as not saved', async () => {
+  const stub = await withPulseStub(() => ({
+    body: {
+      ledger_id: 'turn_install_rejected',
+      status: 'rejected',
+      receipts: [productReceipt({
+        receipt_id: 'receipt_install_rejected', status: 'rejected', reason_code: 'unsafe_payload',
+      })],
+    },
+  }));
+  try {
+    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
+      PULSE_BASE_URL: stub.baseUrl,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /First memory was not saved \(rejected: unsafe_payload\); receipt receipt_install_rejected/);
+    assert.doesNotMatch(result.stdout, /First memory saved locally/);
+    assert.doesNotMatch(result.stdout, /daemon is running/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('connect claude-code never calls empty or malformed product receipts saved', async () => {
+  for (const body of [
+    {},
+    { ledger_id: 'turn_empty', receipts: [] },
+    { ledger_id: 'turn_created', receipts: [{ status: 'created' }] },
+    { ledger_id: 'turn_pending', receipts: [{ status: 'pending' }] },
+  ]) {
+    const stub = await withPulseStub(() => ({ body }));
+    try {
+      const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
+        PULSE_BASE_URL: stub.baseUrl,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /First memory was not saved \(invalid_receipt:/);
+      assert.doesNotMatch(result.stdout, /First memory saved locally/);
+    } finally {
+      await stub.close();
+    }
+  }
+});
+
 test('connect claude-code preserves existing hooks and writes local-auto mode marker', () => {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
@@ -959,6 +1049,9 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
       keep: { command: 'keep-mcp' },
     },
   }, null, 2));
+	const dataDir = join(home, '.pulse');
+	mkdirSync(dataDir, { recursive: true });
+	writeFileSync(join(dataDir, 'memory.keep'), 'committed memory remains');
 
   const result = runInWorkspace(['disconnect', 'claude-code'], cwd, home);
 
@@ -970,6 +1063,11 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
   const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8'));
   assert.equal(mcp.mcpServers.pulse, undefined);
   assert.equal(mcp.mcpServers.keep.command, 'keep-mcp');
+	const captureState = JSON.parse(readFileSync(join(dataDir, 'capture-state.json'), 'utf8'));
+	assert.equal(captureState.schema, 'pulse.capture_state.v1');
+	assert.equal(captureState.enabled, false);
+	assert.equal(captureState.reason, 'host_disconnected');
+	assert.equal(readFileSync(join(dataDir, 'memory.keep'), 'utf8'), 'committed memory remains');
 });
 
 test('viewer prints local authenticated viewer URL', () => {
@@ -2553,6 +2651,46 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     assert.match(result.stdout, /--thread-id archive-import/);
     assert.match(result.stdout, new RegExp(stub.baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.equal(stub.requests.length, 1);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('migrate commit fails closed on a rejected terminal receipt', async () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-rejected-preview.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    ok: true,
+    source: 'chatgpt',
+    conversations: 1,
+    messages: 2,
+    people_candidates: ['Vitaly'],
+    thread_candidates: ['Garden launch'],
+    memory_candidates: ['Garden launch: 2 safe message signals'],
+    relationship_candidates: [],
+    raw_text_written: false,
+  }));
+  const stub = await withPulseStub(() => ({
+    body: {
+      ledger_id: 'turn_migrate_rejected',
+      status: 'rejected',
+      receipts: [productReceipt({
+        receipt_id: 'receipt_migrate_rejected', status: 'rejected', reason_code: 'unsafe_payload',
+      })],
+    },
+  }));
+  try {
+    const result = await runAsync([
+      'migrate',
+      'commit',
+      previewPath,
+      '--confirm',
+      'import pulse graph',
+    ], { PULSE_BASE_URL: stub.baseUrl });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /was not committed \(rejected: unsafe_payload; receipt receipt_migrate_rejected\)/);
+    assert.doesNotMatch(result.stdout, /committed Pulse graph delta/);
   } finally {
     await stub.close();
   }

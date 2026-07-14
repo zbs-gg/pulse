@@ -22,8 +22,8 @@ func TestMigrations034Through039InstallTeamObjectSemanticDeletionAndOwnerSchema(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 40 || latest.Name != "040_store_identity.sql" {
-		t.Fatalf("latest migration = %+v, want 039_team_owner_activation.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 41 || latest.Name != "041_memory_tray_receipts.sql" {
+		t.Fatalf("latest migration = %+v, want 041_memory_tray_receipts.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)

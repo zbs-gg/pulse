@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 )
 
 var ErrStoreIdentityMismatch = errors.New("store identity does not match the requested vault")
+var productStoreIDPattern = regexp.MustCompile(`^store_[a-z0-9][a-z0-9_]{2,127}$`)
 
 type storeOpenProfile struct {
 	Kind            StoreKind
@@ -37,6 +39,9 @@ type Store struct {
 	storeID               string
 	expectedBootstrapRoot *teamauth.BootstrapRoot
 	clock                 func() time.Time
+	expectedBindingDigest string
+	expectedPolicyEpoch   int64
+	expectedResolverEpoch int64
 
 	// Claim-resolution config (default off). See claim_resolver.go.
 	claimMode      string                          // "off" | "shadow" | "on"
@@ -61,6 +66,23 @@ func (s *Store) DBPath() string {
 func (s *Store) StoreKind() StoreKind { return s.storeKind }
 
 func (s *Store) StoreID() string { return s.storeID }
+
+func (s *Store) ConfigureProductRuntimeAuthority(bindingDigest string, policyEpoch, resolverEpoch int64) error {
+	if s.storeKind != StoreKindPersonal && s.storeKind != StoreKindDesk {
+		return errors.New("runtime authority applies only to Personal or Desk stores")
+	}
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || policyEpoch < 0 || resolverEpoch < 0 {
+		return errors.New("product runtime authority is invalid")
+	}
+	s.expectedBindingDigest = bindingDigest
+	s.expectedPolicyEpoch = policyEpoch
+	s.expectedResolverEpoch = resolverEpoch
+	return nil
+}
+
+func (s *Store) productRuntimeAuthority() (string, int64, int64) {
+	return s.expectedBindingDigest, s.expectedPolicyEpoch, s.expectedResolverEpoch
+}
 
 // Close closes the underlying database.
 func (s *Store) Close() error {
@@ -173,7 +195,7 @@ func Open(path string) (*Store, error) {
 }
 
 func OpenVault(path string, kind StoreKind, storeID string) (*Store, error) {
-	if (kind != StoreKindPersonal && kind != StoreKindDesk) || storeID == "" {
+	if (kind != StoreKindPersonal && kind != StoreKindDesk) || !productStoreIDPattern.MatchString(storeID) {
 		return nil, errors.New("product local store requires personal or desk kind and exact store ID")
 	}
 	return openStore(path, false, TeamOpenOptions{}, storeOpenProfile{Kind: kind, ExpectedStoreID: storeID})
@@ -199,7 +221,7 @@ func openStore(path string, team bool, options TeamOpenOptions, profile storeOpe
 		synchronous = "FULL"
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(%s)", path, synchronous)
-	if team {
+	if team || profile.Kind == StoreKindPersonal || profile.Kind == StoreKindDesk {
 		dsn += "&_txlock=immediate"
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -267,6 +289,9 @@ func openStore(path string, team bool, options TeamOpenOptions, profile storeOpe
 		}
 	}
 	store := &Store{db: db, path: path, storeKind: identity.Kind, storeID: identity.StoreID, clock: clock}
+	if identity.Kind == StoreKindPersonal || identity.Kind == StoreKindDesk {
+		store.expectedBindingDigest = localStoreBindingDigest(identity.StoreID)
+	}
 	if team {
 		expected := options.ExpectedBootstrapRoot
 		store.expectedBootstrapRoot = &expected
@@ -292,6 +317,10 @@ type persistedStoreIdentity struct {
 }
 
 func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStoreIdentity, error) {
+	return validateStoreIdentityForVersion(db, profile, 41)
+}
+
+func validateStoreIdentityForVersion(db *sql.DB, profile storeOpenProfile, schemaVersion int) (persistedStoreIdentity, error) {
 	var identity persistedStoreIdentity
 	var readerFloor, writerFloor int
 	err := db.QueryRow(`
@@ -304,7 +333,13 @@ func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStore
 	if identity.Kind != profile.Kind || (profile.ExpectedStoreID != "" && identity.StoreID != profile.ExpectedStoreID) {
 		return persistedStoreIdentity{}, ErrStoreIdentityMismatch
 	}
-	if readerFloor > 40 || writerFloor > 40 || readerFloor < 40 || writerFloor < readerFloor {
+	expectedFloor := 40
+	for version, policy := range postFoundationMigrationPolicies {
+		if version <= schemaVersion && policy.StoreKinds[profile.Kind] && policy.MinWriterVersion > expectedFloor {
+			expectedFloor = policy.MinWriterVersion
+		}
+	}
+	if readerFloor != expectedFloor || writerFloor != expectedFloor {
 		return persistedStoreIdentity{}, errors.New("store schema floor is incompatible with this binary")
 	}
 	return identity, nil

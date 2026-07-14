@@ -111,16 +111,17 @@ type TokenEconomy struct {
 }
 
 type ViewerData struct {
-	NextResume       ResumeBlock          `json:"next_resume"`
-	FirstMemory      ViewerFirstMemory    `json:"first_memory"`
-	RecentSessions   []ContinuitySession  `json:"recent_sessions"`
-	Activity         []ViewerActivityItem `json:"activity"`
-	OpenLoops        []string             `json:"open_loops"`
-	SavedDecisions   []string             `json:"saved_decisions"`
-	EmotionalAnchors []string             `json:"emotional_anchors"`
-	GraphProfile     ViewerGraphProfile   `json:"graph_profile"`
-	MaterialGraph    MaterialGraph        `json:"material_graph"`
-	HiddenEntities   []ViewerHiddenEntity `json:"hidden_entities"`
+	NextResume       ResumeBlock               `json:"next_resume"`
+	FirstMemory      ViewerFirstMemory         `json:"first_memory"`
+	RecentSessions   []ContinuitySession       `json:"recent_sessions"`
+	Activity         []ViewerActivityItem      `json:"activity"`
+	OpenLoops        []string                  `json:"open_loops"`
+	SavedDecisions   []string                  `json:"saved_decisions"`
+	EmotionalAnchors []string                  `json:"emotional_anchors"`
+	GraphProfile     ViewerGraphProfile        `json:"graph_profile"`
+	MaterialGraph    MaterialGraph             `json:"material_graph"`
+	HiddenEntities   []ViewerHiddenEntity      `json:"hidden_entities"`
+	MemoryTray       []MemoryTrayCandidateView `json:"memory_tray"`
 }
 
 type ViewerActivityItem struct {
@@ -166,6 +167,9 @@ type ViewerHiddenEntity struct {
 }
 
 func (s *Store) SaveCheckpoint(cp ContinuityCheckpoint) error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	cp.ThreadID = normalizeThreadID(cp.ThreadID, cp.ProjectID, cp.SessionID)
 	cp.SessionID = strings.TrimSpace(cp.SessionID)
 	cp.Host = strings.TrimSpace(cp.Host)
@@ -255,6 +259,9 @@ func (s *Store) SaveCheckpoint(cp ContinuityCheckpoint) error {
 }
 
 func (s *Store) SaveObservation(obs ContinuityObservation, rawRefsEnabled bool) error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	obs.ThreadID = normalizeThreadID(obs.ThreadID, "", obs.SessionID)
 	obs.SessionID = strings.TrimSpace(obs.SessionID)
 	obs.Host = strings.TrimSpace(obs.Host)
@@ -484,6 +491,13 @@ func (s *Store) ViewerData(q ResumeQuery) (ViewerData, error) {
 	if err != nil {
 		return ViewerData{}, err
 	}
+	var memoryTray []MemoryTrayCandidateView
+	if s.productTrayRequired() {
+		memoryTray, err = s.ListMemoryTray(50)
+		if err != nil {
+			return ViewerData{}, err
+		}
+	}
 	return ViewerData{
 		NextResume:       resume,
 		FirstMemory:      firstMemory,
@@ -495,6 +509,7 @@ func (s *Store) ViewerData(q ResumeQuery) (ViewerData, error) {
 		GraphProfile:     graph,
 		MaterialGraph:    materialGraph,
 		HiddenEntities:   hidden,
+		MemoryTray:       memoryTray,
 	}, nil
 }
 
@@ -895,6 +910,9 @@ func (s *Store) viewerPersonFacts(entityID int64, limit int) ([]string, error) {
 }
 
 func (s *Store) HideGraphEntity(entityID int64) error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	if entityID <= 0 {
 		return fmt.Errorf("id is required")
 	}
@@ -916,6 +934,9 @@ func (s *Store) HideGraphEntity(entityID int64) error {
 }
 
 func (s *Store) RestoreGraphEntity(entityID int64) error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	if entityID <= 0 {
 		return fmt.Errorf("id is required")
 	}
@@ -1183,6 +1204,9 @@ func (s *Store) RecentContinuitySessions(threadID string, limit int) ([]Continui
 }
 
 func (s *Store) WipeContinuity() error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	_, err := s.db.Exec(`
 		DELETE FROM continuity_observations;
 		DELETE FROM continuity_checkpoints;

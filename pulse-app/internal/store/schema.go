@@ -40,6 +40,14 @@ var postFoundationMigrationPolicies = map[int]migrationPolicy{
 		MinReaderVersion: 40,
 		MinWriterVersion: 40,
 	},
+	41: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindPersonal: true,
+			StoreKindDesk:     true,
+		},
+		MinReaderVersion: 41,
+		MinWriterVersion: 41,
+	},
 }
 
 func loadMigrationSet(fsys fs.FS) ([]migrationDescriptor, error) {
@@ -127,7 +135,7 @@ func migrateForProfile(db *sql.DB, profile storeOpenProfile) error {
 		return err
 	}
 	if current >= 40 {
-		if _, err := validateStoreIdentity(db, profile); err != nil {
+		if _, err := validateStoreIdentityForVersion(db, profile, current); err != nil {
 			return err
 		}
 	}

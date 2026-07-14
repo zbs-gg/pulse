@@ -40,6 +40,10 @@ func newMemoryServerWithBilling(t *testing.T, billing BillingStatus) (*store.Sto
 }
 
 func pulseJSON(t *testing.T, ts *httptest.Server, method, path string, body any) *http.Response {
+	return pulseJSONWithIdempotency(t, ts, method, path, body, "")
+}
+
+func pulseJSONWithIdempotency(t *testing.T, ts *httptest.Server, method, path string, body any, idempotencyKey string) *http.Response {
 	t.Helper()
 	var reader *bytes.Reader
 	if body == nil {
@@ -57,6 +61,9 @@ func pulseJSON(t *testing.T, ts *httptest.Server, method, path string, body any)
 	}
 	req.Header.Set("X-Pulse-Key", "secret")
 	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)

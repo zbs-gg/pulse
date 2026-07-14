@@ -70,6 +70,7 @@ func (s *Server) handleContinuityObserve(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleViewerData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	budget, _ := strconv.Atoi(r.URL.Query().Get("token_budget"))
 	data, err := s.cfg.Store.ViewerData(store.ResumeQuery{
 		ThreadID:    r.URL.Query().Get("thread_id"),
@@ -210,6 +211,11 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
     .action-card { padding:16px; border-radius:var(--radius); background:rgba(255,255,255,.58); border:1px solid rgba(86,70,86,.10); }
     .action-card h3 { font-size:17px; }
     .action-card p { margin-top:7px; font-size:14px; }
+	.tray-grid { display:grid; gap:10px; }
+	.tray-card { padding:14px; border-radius:var(--radius); background:rgba(255,255,255,.62); border:1px solid rgba(86,70,86,.12); }
+	.tray-card pre { margin:10px 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; border-radius:var(--radius); background:rgba(255,255,255,.72); }
+	.tray-meta, .tray-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+	.tray-actions button { margin-top:0; }
 	    .action-card button, .action-card a { display:inline-flex; align-items:center; justify-content:center; min-height:40px; margin-top:12px; padding:8px 13px; border-radius:999px; border:1px solid rgba(141,111,131,.22); background:rgba(255,255,255,.84); color:#5f4f5b; text-decoration:none; }
 	    .action-card.primary-action { background:linear-gradient(135deg,rgba(255,255,255,.72),rgba(223,241,229,.54)); }
 	    .action-card.primary-action button { background:#6f5d69; border-color:#6f5d69; color:white; box-shadow:0 8px 14px rgba(111,93,105,.14); }
@@ -319,6 +325,11 @@ Pulse will show the next resume block here before it is injected.</pre>
 	    </section>
 	  </header>
 ` + firstRunHTML + `
+
+	<section class="surface section-gap" id="memory-tray-panel">
+	  <div class="panel-head"><div><h2>Memory Tray</h2><p>Exact private candidates appear here before canonical commit. Destination is fixed by workspace binding.</p></div><span class="label" id="memory-tray-count">0 candidates</span></div>
+	  <div id="memory-tray" class="tray-grid"><p>No private writes are waiting.</p></div>
+	</section>
 
 	  <details class="surface onboarding-path">
     <summary>Onboarding path <span class="path-summary">Connected -> Try first memory -> Import later</span></summary>
@@ -731,7 +742,7 @@ async function saveEmotionFeedback(value) {
   const label = emotionLabel(value);
   status.textContent = "Saving confirmed feedback locally...";
   try {
-    await postJSON("/memory/remember", {
+    const result = await postJSON("/memory/remember", {
       schema: "pulse.memory_capsule.v1",
       source: {
         host: "pulse-cli",
@@ -749,7 +760,10 @@ async function saveEmotionFeedback(value) {
       }],
       raw_input_included: false
     });
-    status.textContent = "Saved as emotional feedback. You can edit or delete it anytime.";
+    const pending = safeArray(result?.receipts).find(receipt => receipt.status === "pending");
+    status.textContent = pending
+      ? "Visible in Memory Tray and not saved yet. Receipt " + pending.receipt_id + "."
+      : "Saved as emotional feedback. You can edit or delete it anytime.";
   } catch (err) {
     status.textContent = "Could not persist yet. This stays local to the preview until Pulse accepts feedback.";
   }
@@ -907,7 +921,79 @@ function renderGraphProfile(data) {
   const status = document.getElementById("graph-filter-status");
   status.textContent = query ? 'Filtered graph memory by "' + query + '".' : "Showing reviewed graph memory.";
 }
+function renderMemoryTray(candidates) {
+  const root = document.getElementById("memory-tray");
+  const count = document.getElementById("memory-tray-count");
+  const items = safeArray(candidates);
+  count.textContent = String(items.length) + (items.length === 1 ? " candidate" : " candidates");
+  root.replaceChildren();
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No private writes are waiting.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const card = document.createElement("article");
+    card.className = "tray-card";
+    const meta = document.createElement("div");
+    meta.className = "tray-meta";
+	    for (const text of [item.latest_receipt?.status || item.state, item.operation, item.current ? "current" : "historical", item.destination_class, item.projection_status, "v" + item.version, item.latest_receipt?.receipt_id || "no receipt"]) {
+      const tag = document.createElement("span");
+      tag.className = "label";
+      tag.textContent = text;
+      meta.appendChild(tag);
+    }
+    const exact = document.createElement("pre");
+    exact.textContent = JSON.stringify(item.candidate, null, 2);
+    card.append(meta, exact);
+    const history = safeArray(item.receipt_history);
+    const historyDetails = document.createElement("details");
+    const historySummary = document.createElement("summary");
+    historySummary.textContent = "Receipt history (" + history.length + ")";
+    const historyList = document.createElement("ul");
+    for (const receipt of history) {
+      const row = document.createElement("li");
+      row.textContent = [receipt.status, receipt.receipt_id, receipt.object_id || "no object", receipt.reason_code || ""].filter(Boolean).join(" / ");
+      historyList.appendChild(row);
+    }
+    historyDetails.append(historySummary, historyList);
+    card.appendChild(historyDetails);
+    if (item.state === "pending") {
+      const actions = document.createElement("div");
+      actions.className = "tray-actions";
+	      const edit = document.createElement("button");
+	      edit.type = "button";
+	      edit.textContent = "Edit exact candidate";
+	      edit.dataset.trayEdit = item.candidate_id;
+	      edit.dataset.version = String(item.version);
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.dataset.trayCancel = item.candidate_id;
+      cancel.dataset.version = String(item.version);
+	      actions.appendChild(edit);
+	      actions.appendChild(cancel);
+      card.appendChild(actions);
+    }
+	    if (item.state === "committed" && item.current && item.latest_receipt?.object_id && item.latest_receipt?.reason_code !== "user_deleted" && (item.candidate?.capsule || item.candidate?.semantic_delta)) {
+	      const actions = document.createElement("div");
+	      actions.className = "tray-actions";
+	      const correct = document.createElement("button");
+	      correct.type = "button";
+	      correct.textContent = "Correct committed memory";
+	      correct.dataset.memoryCorrect = item.latest_receipt.object_id;
+	      correct.dataset.candidateId = item.candidate_id;
+	      actions.appendChild(correct);
+	      card.appendChild(actions);
+	    }
+    root.appendChild(card);
+  }
+}
+let viewerLoadInFlight = false;
 async function loadViewerData() {
+  if (viewerLoadInFlight) return;
+  viewerLoadInFlight = true;
   try {
     const resp = await fetch("/viewer/data?key=" + encodeURIComponent(key) + "&thread_id=" + encodeURIComponent(thread));
     if (!resp.ok) throw new Error(await resp.text());
@@ -929,12 +1015,64 @@ async function loadViewerData() {
 	    list("activity-log", data.activity, activityLabel, "No activity yet. Save one memory or start a new session to see what Pulse did.");
 	    updateActivityState(data);
 	    renderGraphProfile(data);
+    renderMemoryTray(data.memory_tray);
     renderHiddenEntities(data.hidden_entities);
   } catch (err) {
     document.getElementById("resume").textContent = "Viewer error: " + err.message;
+  } finally {
+    viewerLoadInFlight = false;
   }
 }
 loadViewerData();
+const viewerRefreshTimer = window.setInterval(() => {
+  if (!document.hidden) loadViewerData();
+}, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) loadViewerData();
+});
+window.addEventListener("beforeunload", () => window.clearInterval(viewerRefreshTimer));
+document.getElementById("memory-tray").addEventListener("click", async event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+	if (button.dataset.memoryCorrect) {
+	  const item = safeArray(viewerData?.memory_tray).find(value => value.candidate_id === button.dataset.candidateId);
+	  if (!item) return;
+	  const currentJSON = JSON.stringify(item.candidate, null, 2);
+	  const replacementJSON = window.prompt("Correct the exact structured memory. It returns to the Tray for 10 seconds before replacing the same object ID.", currentJSON);
+	  if (replacementJSON === null || replacementJSON === currentJSON) return;
+	  let candidate;
+	  try { candidate = JSON.parse(replacementJSON); } catch { window.alert("Correction must be valid JSON."); return; }
+	  await postJSON("/memory/" + encodeURIComponent(button.dataset.memoryCorrect) + "/correct", { candidate });
+	  await loadViewerData();
+	  return;
+	}
+  const candidateID = button.dataset.trayCancel || button.dataset.trayEdit;
+  const version = Number(button.dataset.version || 0);
+  if (!candidateID || version < 1) return;
+  if (button.dataset.trayCancel) {
+    await postJSON("/memory/tray/" + encodeURIComponent(candidateID) + "/cancel", { expected_version: version });
+    await loadViewerData();
+    return;
+  }
+  const item = safeArray(viewerData?.memory_tray).find(value => value.candidate_id === candidateID);
+  if (!item) return;
+	let candidate;
+	if (item.candidate?.capsule) {
+	  const current = item.candidate.capsule.items?.[0]?.redacted_summary;
+	  if (typeof current !== "string") return;
+	  const replacement = window.prompt("Edit the exact redacted summary. The 10 second grace period restarts.", current);
+	  if (replacement === null || replacement === current) return;
+	  candidate = JSON.parse(JSON.stringify(item.candidate));
+	  candidate.capsule.items[0].redacted_summary = replacement;
+	} else {
+	  const currentJSON = JSON.stringify(item.candidate, null, 2);
+	  const replacementJSON = window.prompt("Edit the exact structured semantic candidate. The 10 second grace period restarts.", currentJSON);
+	  if (replacementJSON === null || replacementJSON === currentJSON) return;
+	  try { candidate = JSON.parse(replacementJSON); } catch { window.alert("Candidate must be valid JSON."); return; }
+	}
+  await postJSON("/memory/tray/" + encodeURIComponent(candidateID) + "/edit", { expected_version: version, candidate });
+  await loadViewerData();
+});
 document.getElementById("graph-filter").addEventListener("input", () => renderGraphProfile(viewerData));
 document.getElementById("graph-filter-clear").addEventListener("click", () => {
   document.getElementById("graph-filter").value = "";

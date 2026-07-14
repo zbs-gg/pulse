@@ -124,6 +124,17 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		return err
 	}
 	defer s.Close()
+	if kind != "" {
+		bindingDigest := os.Getenv("PULSE_BINDING_DIGEST")
+		policyEpoch, policyErr := strconv.ParseInt(os.Getenv("PULSE_POLICY_EPOCH"), 10, 64)
+		resolverEpoch, resolverErr := strconv.ParseInt(os.Getenv("PULSE_RESOLVER_EPOCH"), 10, 64)
+		if policyErr != nil || resolverErr != nil || resolverEpoch < 1 {
+			return errors.New("product local vault requires valid runtime authority epochs")
+		}
+		if err := s.ConfigureProductRuntimeAuthority(bindingDigest, policyEpoch, resolverEpoch); err != nil {
+			return fmt.Errorf("configure product runtime authority: %w", err)
+		}
+	}
 
 	ob := outbox.New(s.DB(), 30*time.Second)
 

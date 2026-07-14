@@ -48,6 +48,7 @@ async function startFakePulseBackend() {
     method: string | undefined;
     url: string | undefined;
     pulseKey: string | undefined;
+    idempotencyKey?: string;
     body?: unknown;
   }> = [];
   const server = createServer(async (req, res) => {
@@ -72,6 +73,7 @@ async function startFakePulseBackend() {
         method: req.method,
         url: req.url,
         pulseKey: req.headers['x-pulse-key']?.toString(),
+        idempotencyKey: req.headers['idempotency-key']?.toString(),
         body,
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -700,6 +702,10 @@ test('http mode can call Pulse backend tools over Streamable HTTP', async () => 
     );
     assert.ok(
       pulse.requests.some((request) => request.url === '/graph/delta' && request.body),
+    );
+    assert.match(
+      pulse.requests.find((request) => request.url === '/graph/delta')?.idempotencyKey ?? '',
+      /^mcp_[a-f0-9]{64}$/,
     );
     await client.close();
   } finally {

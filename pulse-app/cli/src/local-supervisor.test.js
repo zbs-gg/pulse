@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -89,6 +89,11 @@ const dataDir = value('-data-dir');
 const [host, port] = value('-addr').split(':');
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
+writeFileSync(dataDir + '/authority.json', JSON.stringify({
+  binding_digest: process.env.PULSE_BINDING_DIGEST,
+  policy_epoch: process.env.PULSE_POLICY_EPOCH,
+  resolver_epoch: process.env.PULSE_RESOLVER_EPOCH,
+}), { mode: 0o600 });
 const server = createServer((request, response) => {
   if (request.url === '/health' && request.headers['x-pulse-key'] === 'a'.repeat(64)) {
     response.end('{"status":"ok"}');
@@ -108,6 +113,9 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   const started = await startVaultRuntime(runtime, { daemonPath: daemon, timeoutMs: 5000 });
   assert.equal(started.status, 'running');
   assert.equal(started.fallback, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(runtime.data_dir, 'authority.json'), 'utf8')), {
+    binding_digest: 'a'.repeat(64), policy_epoch: '0', resolver_epoch: '3',
+  });
   assert.equal(inspectVaultRuntime(runtime).status, 'running');
   assert.equal(stopVaultRuntime(runtime).status, 'stopped');
 });
