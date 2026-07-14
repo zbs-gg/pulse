@@ -122,6 +122,17 @@ type teamObjectWriteTransaction struct {
 
 type teamObjectWriteExtension func(context.Context, *teamObjectWriteTransaction) error
 
+// teamObjectWriteHooks is package-private because only audited store domains
+// may join privileged preflight or receipt state to the canonical object
+// transaction. Ordinary domain writers continue to receive only the narrow
+// content extension facade above.
+type teamObjectWriteHooks struct {
+	Content              teamObjectWriteExtension
+	RootOwnerPrincipalID string
+	BeforeCreate         func(context.Context, *sql.Tx, normalizedTeamObjectWrite) error
+	AfterCreate          func(context.Context, *sql.Tx, *teamObjectWriteTransaction, string, []TeamProjectionJobResult) error
+}
+
 func newTeamObjectWriteTransaction(tx *sql.Tx, now time.Time, write teamObjectWriteTransaction) *teamObjectWriteTransaction {
 	write.execDML = func(ctx context.Context, statement string, args ...any) (sql.Result, error) {
 		if !validTeamObjectExtensionStatement(statement, false) {
@@ -281,9 +292,22 @@ func (s *Store) storeTeamObjectWithExtension(
 	request TeamObjectWriteRequest,
 	extension teamObjectWriteExtension,
 ) (TeamObjectWriteResult, error) {
+	return s.storeTeamObjectWithHooks(ctx, request, teamObjectWriteHooks{Content: extension})
+}
+
+func (s *Store) storeTeamObjectWithHooks(
+	ctx context.Context,
+	request TeamObjectWriteRequest,
+	hooks teamObjectWriteHooks,
+) (TeamObjectWriteResult, error) {
 	normalized, err := s.normalizeTeamObjectWrite(request)
 	if err != nil {
 		return TeamObjectWriteResult{}, err
+	}
+	if hooks.RootOwnerPrincipalID != "" {
+		if err := overrideTeamObjectRootOwner(&normalized, hooks.RootOwnerPrincipalID); err != nil {
+			return TeamObjectWriteResult{}, err
+		}
 	}
 
 	// Team Open adds _txlock=immediate to every connection, so BeginTx takes
@@ -311,6 +335,11 @@ func (s *Store) storeTeamObjectWithExtension(
 			return TeamObjectWriteResult{}, teamObjectCommitError(err)
 		}
 		return replayed, nil
+	}
+	if hooks.BeforeCreate != nil {
+		if err := hooks.BeforeCreate(ctx, tx, normalized); err != nil {
+			return TeamObjectWriteResult{}, err
+		}
 	}
 
 	now := s.clock().UTC()
@@ -353,15 +382,18 @@ func (s *Store) storeTeamObjectWithExtension(
 		return TeamObjectWriteResult{}, teamObjectCommitError(err)
 	}
 
-	if extension != nil {
-		write := newTeamObjectWriteTransaction(tx, now, teamObjectWriteTransaction{
+	var write *teamObjectWriteTransaction
+	if hooks.Content != nil || hooks.AfterCreate != nil {
+		write = newTeamObjectWriteTransaction(tx, now, teamObjectWriteTransaction{
 			ObjectID: objectID,
 			StoreID:  normalized.attribution.StoreID, TeamID: normalized.attribution.TeamID,
 			AuthorID:       normalized.attribution.ActorPrincipalID,
 			OAuthClientKey: normalized.clientKey, BodyDigest: normalized.bodyDigest,
 			Scope: normalized.target,
 		})
-		if err := extension(ctx, write); err != nil {
+	}
+	if hooks.Content != nil {
+		if err := hooks.Content(ctx, write); err != nil {
 			return TeamObjectWriteResult{}, teamObjectCommitError(err)
 		}
 	}
@@ -406,6 +438,11 @@ func (s *Store) storeTeamObjectWithExtension(
 		}
 		jobs = append(jobs, TeamProjectionJobResult{Kind: kind, JobID: jobID, State: TeamProjectionStatePending})
 	}
+	if hooks.AfterCreate != nil {
+		if err := hooks.AfterCreate(ctx, tx, write, auditEventID, append([]TeamProjectionJobResult(nil), jobs...)); err != nil {
+			return TeamObjectWriteResult{}, teamObjectCommitError(err)
+		}
+	}
 	if err := s.RecheckTeamWriterLeaseTx(ctx, tx, normalized.writer.WriterID, normalized.writer.Token); err != nil {
 		return TeamObjectWriteResult{}, err
 	}
@@ -438,6 +475,24 @@ func (s *Store) storeTeamObjectWithExtension(
 		Status: TeamObjectStatusStored, ProjectionState: TeamProjectionStatePending,
 		ProjectionJobs: jobs, FullyProjected: false, Replayed: false,
 	}, nil
+}
+
+// overrideTeamObjectRootOwner is a package-private seam for domains whose
+// human approval contract owns the shared root. Ordinary writes never set it.
+// The effective scope and every authorization fact remain permit-derived; only
+// the project root's durable Owner changes, and the operation digest is rebuilt
+// so an idempotent replay cannot silently cross Owner authority.
+func overrideTeamObjectRootOwner(write *normalizedTeamObjectWrite, ownerPrincipalID string) error {
+	if write == nil || write.target.Type != teamauth.ScopeProject ||
+		!validExactIdentityValue(ownerPrincipalID) {
+		return ErrTeamObjectInvalid
+	}
+	write.target.OwnerPrincipalID = ownerPrincipalID
+	if !validTeamObjectScope(write.target) {
+		return ErrTeamObjectInvalid
+	}
+	write.operationDigest = canonicalTeamObjectOperationDigest(*write)
+	return nil
 }
 
 func (s *Store) normalizeTeamObjectWrite(request TeamObjectWriteRequest) (normalizedTeamObjectWrite, error) {

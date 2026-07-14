@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
@@ -192,7 +193,7 @@ func (repository *authorizedRepository) LoadAuthorizedContinuity(
 	if err != nil {
 		return nil, err
 	}
-	documents := make([]retrieve.TeamContinuityDocument, 0, len(rows))
+	documents := make([]retrieve.TeamContinuityDocument, 0, len(rows)+query.Limit)
 	for _, row := range rows {
 		updatedAt, err := time.Parse(time.RFC3339Nano, row.CreatedAt)
 		if err != nil {
@@ -218,6 +219,41 @@ func (repository *authorizedRepository) LoadAuthorizedContinuity(
 		}
 		documents = append(documents, document)
 	}
+	if query.ProjectID != "" {
+		memories, err := repository.store.QueryAuthorizedTeamMemoryCapsules(
+			ctx, repository.filter, store.TeamTextReadQuery{Limit: query.Limit},
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, memory := range memories {
+			if memory.PublicationID == "" {
+				continue
+			}
+			updatedAt, err := time.Parse(time.RFC3339Nano, memory.PublicationCreatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid publication timestamp", ErrInvalidRequest)
+			}
+			publicationThreadID := query.ThreadID
+			if publicationThreadID == "" {
+				publicationThreadID = "publication:" + memory.PublicationID
+			}
+			document := retrieve.TeamContinuityDocument{
+				RootObjectID: memory.RootObjectID, ObjectID: memory.PublicationEventObjectID,
+				PartitionKey: memory.PartitionKey, ThreadID: publicationThreadID,
+				ProjectID: query.ProjectID, SessionID: query.SessionID,
+				Summary: memory.RedactedSummary, UpdatedAtUnixMilli: updatedAt.UnixMilli(),
+			}
+			if memory.Kind == "decision" {
+				document.Decisions = []string{memory.RedactedSummary}
+			}
+			documents = append(documents, document)
+		}
+	}
+	documents, err = dedupeAuthorizedContinuityDocuments(documents)
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(documents, func(left, right int) bool {
 		if documents[left].UpdatedAtUnixMilli != documents[right].UpdatedAtUnixMilli {
 			return documents[left].UpdatedAtUnixMilli > documents[right].UpdatedAtUnixMilli
@@ -227,7 +263,48 @@ func (repository *authorizedRepository) LoadAuthorizedContinuity(
 		}
 		return documents[left].RootObjectID < documents[right].RootObjectID
 	})
+	if len(documents) > query.Limit {
+		documents = documents[:query.Limit]
+	}
 	return documents, nil
+}
+
+func dedupeAuthorizedContinuityDocuments(
+	documents []retrieve.TeamContinuityDocument,
+) ([]retrieve.TeamContinuityDocument, error) {
+	unique := make([]retrieve.TeamContinuityDocument, 0, len(documents))
+	indexes := make(map[string]int, len(documents))
+	for _, document := range documents {
+		key := document.RootObjectID + "\x00" + document.ObjectID
+		index, duplicate := indexes[key]
+		if !duplicate {
+			indexes[key] = len(unique)
+			unique = append(unique, document)
+			continue
+		}
+		current := unique[index]
+		if current.PartitionKey != document.PartitionKey || current.ThreadID != document.ThreadID ||
+			current.ProjectID != document.ProjectID || current.SessionID != document.SessionID {
+			return nil, fmt.Errorf("%w: conflicting continuity authority", ErrInvalidRequest)
+		}
+		if document.UpdatedAtUnixMilli > current.UpdatedAtUnixMilli ||
+			(document.UpdatedAtUnixMilli == current.UpdatedAtUnixMilli &&
+				continuityDocumentTieKey(document) < continuityDocumentTieKey(current)) {
+			unique[index] = document
+		}
+	}
+	return unique, nil
+}
+
+func continuityDocumentTieKey(document retrieve.TeamContinuityDocument) string {
+	return strings.Join([]string{
+		document.Summary,
+		strings.Join(document.Decisions, "\x1f"),
+		strings.Join(document.OpenLoops, "\x1f"),
+		strings.Join(document.DoNotRepeat, "\x1f"),
+		strings.Join(document.EmotionalStateContext, "\x1f"),
+		document.SuggestedNextStep,
+	}, "\x1e")
 }
 
 func (repository *authorizedRepository) RecheckAuthorizedRoots(

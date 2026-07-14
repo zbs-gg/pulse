@@ -118,3 +118,43 @@ func TestOwnerStepUpVerifierRejectsStaleWrongRootAndNearRouteAssertions(t *testi
 		})
 	}
 }
+
+func TestOwnerStepUpVerifierBindsAirlockAssertionToExactPublicationEnvelope(t *testing.T) {
+	fixture := newPrincipalFixture(t)
+	verifier := newOwnerStepUpVerifierFixture(t, fixture)
+	body := []byte(`{"schema":"pulse.team.airlock_envelope.v1","action":"team.commons.publish"}`)
+	digest := sha256.Sum256(body)
+	claims := ownerStepUpClaims(fixture, "owner-step-up-publication", body)
+	claims["path"] = TeamPublicationAirlockRoutePath
+	claims["action"] = "team.commons.publish"
+	claims["body_sha256"] = fmt.Sprintf("%x", digest)
+	assertion := signPrincipalAssertion(
+		t, fixture.private, "active", map[string]any{"typ": OwnerStepUpAssertionVersion}, claims,
+	)
+	request := TeamPublicationStepUpVerificationRequest{
+		Assertion: assertion, RequestID: "req-owner-step-up-publication",
+		Method: http.MethodPost, Path: TeamPublicationAirlockRoutePath,
+		CanonicalEnvelope: body, EnvelopeDigest: fmt.Sprintf("%x", digest),
+		StoreID: fixture.storeID, TeamID: fixture.teamID,
+		PublisherPrincipalID: fixture.agentID,
+	}
+
+	stepUp, err := verifier.VerifyTeamPublication(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepUp.Identity.OwnerPrincipalID != fixture.ownerID || stepUp.AssertionJTI != "owner-step-up-publication" {
+		t.Fatalf("publication step-up = %+v", stepUp)
+	}
+
+	tampered := request
+	tampered.CanonicalEnvelope = append(append([]byte(nil), body...), ' ')
+	if _, err := verifier.VerifyTeamPublication(context.Background(), tampered); !errors.Is(err, ErrOwnerStepUpRequestMismatch) {
+		t.Fatalf("tampered publication error = %v", err)
+	}
+	wrongPath := request
+	wrongPath.Path = OwnerApprovalRoutePath
+	if _, err := verifier.VerifyTeamPublication(context.Background(), wrongPath); !errors.Is(err, ErrOwnerStepUpInvalid) {
+		t.Fatalf("wrong publication path error = %v", err)
+	}
+}

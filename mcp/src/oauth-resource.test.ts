@@ -5,6 +5,10 @@ import { test } from 'node:test';
 import { exportJWK, SignJWT } from 'jose';
 
 import {
+  AIRLOCK_HUMAN_PRESENCE_ACR,
+  AIRLOCK_HUMAN_PRESENCE_CLAIM,
+  AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+  AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
   OAuthResourceError,
   OAuthResourceVerifier,
   protectedResourceMetadata,
@@ -67,10 +71,33 @@ async function fixture(issuer = ISSUER, resolvedAddresses: readonly string[] = [
       .setProtectedHeader({ alg: 'RS256', kid: 'issuer-key-1', typ: 'at+jwt', ...header })
       .sign(privateKey);
   };
+  const idToken = async (overrides: Record<string, unknown> = {}, header: Record<string, unknown> = {}) => {
+    const claims: Record<string, unknown> = {
+      iss: issuer,
+      sub: 'human-subject-1',
+      aud: 'owner-browser-client',
+      exp: NOW + 3600,
+      iat: NOW,
+      auth_time: NOW - 30,
+      nonce: 'n'.repeat(43),
+      acr: AIRLOCK_HUMAN_PRESENCE_ACR,
+      amr: ['pwd', 'mfa'],
+      [AIRLOCK_HUMAN_PRESENCE_CLAIM]: {
+        schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+        factor: AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
+        verified_at: NOW - 30,
+      },
+      ...overrides,
+    };
+    return new SignJWT(claims)
+      .setProtectedHeader({ alg: 'RS256', kid: 'issuer-key-1', typ: 'JWT', ...header })
+      .sign(privateKey);
+  };
   return {
     calls,
     setJwksAvailable(value: boolean) { jwksAvailable = value; },
     setJwks(value: { keys: typeof jwks.keys }) { jwks = value; },
+    idToken,
     token,
     verifier,
   };
@@ -185,6 +212,154 @@ test('preserves externally verified auth_time only for recent Owner enforcement'
     ),
     OAuthResourceError,
   );
+});
+
+test('preserves only an exact P-256 DPoP confirmation thumbprint from the access token', async () => {
+  const f = await fixture();
+  const thumbprint = 'a'.repeat(43);
+  const identity = await f.verifier.verifyAuthorization(
+    `Bearer ${await f.token({ cnf: { jkt: thumbprint } })}`,
+    ['pulse:connect'],
+  );
+  assert.equal(identity.confirmationKeyThumbprint, thumbprint);
+  for (const cnf of [
+    { jkt: 'short' },
+    { jkt: thumbprint, other: true },
+    { x5t: thumbprint },
+  ]) {
+    await assert.rejects(
+      f.verifier.verifyAuthorization(`Bearer ${await f.token({ cnf })}`, ['pulse:connect']),
+      OAuthResourceError,
+    );
+  }
+});
+
+test('browser authorization requires current-flow platform WebAuthn, one subject/client, and a nonce-bound ID token', async () => {
+  const f = await fixture();
+  const accessToken = await f.token({
+    scope: 'pulse:owner',
+    client_id: 'owner-browser-client',
+    auth_time: NOW - 30,
+  });
+  const idToken = await f.idToken();
+  assert.deepEqual(await f.verifier.verifyBrowserAuthorization({
+    accessToken,
+    idToken,
+    clientId: 'owner-browser-client',
+    nonce: 'n'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), {
+    issuer: ISSUER,
+    subject: 'human-subject-1',
+    clientId: 'owner-browser-client',
+    capabilities: ['pulse:owner'],
+    authTime: NOW - 30,
+    authenticationContext: AIRLOCK_HUMAN_PRESENCE_ACR,
+    authenticationMethods: ['pwd', 'mfa'],
+    humanPresence: {
+      schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+      factor: AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
+      verifiedAt: NOW - 30,
+    },
+    tokenExpiresAt: NOW + 3600,
+  });
+
+  await assert.rejects(f.verifier.verifyBrowserAuthorization({
+    accessToken,
+    idToken,
+    clientId: 'owner-browser-client',
+    nonce: 'x'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), OAuthResourceError);
+  await assert.rejects(f.verifier.verifyBrowserAuthorization({
+    accessToken: await f.token({
+      scope: 'pulse:owner', client_id: 'other-browser-client', auth_time: NOW - 30,
+    }),
+    idToken,
+    clientId: 'owner-browser-client',
+    nonce: 'n'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), OAuthResourceError);
+  await assert.rejects(f.verifier.verifyBrowserAuthorization({
+    accessToken,
+    idToken: await f.idToken({ azp: 'other-browser-client' }),
+    clientId: 'owner-browser-client',
+    nonce: 'n'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), OAuthResourceError);
+  await assert.rejects(f.verifier.verifyBrowserAuthorization({
+    accessToken,
+    idToken: await f.idToken({ sub: 'other-subject' }),
+    clientId: 'owner-browser-client',
+    nonce: 'n'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), OAuthResourceError);
+  await assert.rejects(f.verifier.verifyBrowserAuthorization({
+    accessToken,
+    idToken: await f.idToken({ auth_time: NOW - 301 }),
+    clientId: 'owner-browser-client',
+    nonce: 'n'.repeat(43),
+    requiredCapabilities: ['pulse:owner'],
+    authorizationStartedAt: NOW - 40,
+  }), OAuthResourceError);
+});
+
+test('browser authorization rejects silent SSO, ordinary MFA, wrong factors, stale evidence, and ambiguous claims', async (t) => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['silent but otherwise recent SSO predating this flow', { auth_time: NOW - 60 }],
+    ['fresh ordinary SSO without MFA', { amr: ['pwd'], [AIRLOCK_HUMAN_PRESENCE_CLAIM]: undefined }],
+    ['generic MFA without the platform factor claim', { [AIRLOCK_HUMAN_PRESENCE_CLAIM]: undefined }],
+    ['OTP is not platform WebAuthn', {
+      [AIRLOCK_HUMAN_PRESENCE_CLAIM]: {
+        schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA, factor: 'otp', verified_at: NOW,
+      },
+    }],
+    ['email is not platform WebAuthn', {
+      [AIRLOCK_HUMAN_PRESENCE_CLAIM]: {
+        schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA, factor: 'email', verified_at: NOW,
+      },
+    }],
+    ['stale platform WebAuthn evidence', {
+      [AIRLOCK_HUMAN_PRESENCE_CLAIM]: {
+        schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+        factor: AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
+        verified_at: NOW - 60,
+      },
+    }],
+    ['wrong ACR', { acr: 'https://attacker.example/acr/mfa' }],
+    ['duplicated authentication method', { amr: ['pwd', 'mfa', 'mfa'] }],
+    ['duplicated ACR copy', { acr: [AIRLOCK_HUMAN_PRESENCE_ACR, AIRLOCK_HUMAN_PRESENCE_ACR] }],
+    ['tampered factor claim with an extra field', {
+      [AIRLOCK_HUMAN_PRESENCE_CLAIM]: {
+        schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+        factor: AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
+        verified_at: NOW,
+        copied_from: 'older-session',
+      },
+    }],
+  ];
+  for (const [name, overrides] of cases) {
+    await t.test(name, async () => {
+      const f = await fixture();
+      const authTime = typeof overrides.auth_time === 'number' ? overrides.auth_time : NOW;
+      const accessToken = await f.token({
+        scope: 'pulse:owner', client_id: 'owner-browser-client', auth_time: authTime,
+      });
+      await assert.rejects(f.verifier.verifyBrowserAuthorization({
+        accessToken,
+        idToken: await f.idToken({ auth_time: NOW, ...overrides }),
+        clientId: 'owner-browser-client',
+        nonce: 'n'.repeat(43),
+        requiredCapabilities: ['pulse:owner'],
+        authorizationStartedAt: NOW,
+      }), OAuthResourceError);
+    });
+  }
 });
 
 test('rejects malformed RFC9068-style claims, headers, lifetime, and exact audience violations', async (t) => {

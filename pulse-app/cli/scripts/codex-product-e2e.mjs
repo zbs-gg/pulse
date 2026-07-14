@@ -18,7 +18,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { canonicalJSONStringify, canonicalizeWorkspace } from '../src/workspace-binding.js';
+import {
+  bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
+} from '../src/workspace-binding.js';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -60,6 +62,7 @@ function writeSignedPersonalBindings(root, fixtures) {
   mkdirSync(supervisor, { recursive: true, mode: 0o700 });
   const registryPath = join(supervisor, 'workspace-bindings.json');
   const publicKeyPath = join(supervisor, 'workspace-bindings.pub.pem');
+  const anchorPath = join(supervisor, 'workspace-bindings.anchor.json');
   const payload = {
     schema: 'pulse.workspace-binding-registry.v1',
     epoch: 1,
@@ -84,11 +87,13 @@ function writeSignedPersonalBindings(root, fixtures) {
   };
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const signature = sign(null, Buffer.from(canonicalJSONStringify(payload)), privateKey).toString('base64');
-  writeFileSync(registryPath, JSON.stringify({ algorithm: 'ed25519', payload, signature }), { mode: 0o600 });
+  const registryBytes = Buffer.from(JSON.stringify({ algorithm: 'ed25519', payload, signature }));
+  writeFileSync(registryPath, registryBytes, { mode: 0o600 });
   writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o600 });
+  writeFileSync(anchorPath, `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, payload.epoch))}\n`, { mode: 0o600 });
   chmodSync(registryPath, 0o600);
   chmodSync(publicKeyPath, 0o600);
-  return { registryPath, publicKeyPath };
+  return { registryPath, publicKeyPath, anchorPath };
 }
 
 function initializeRepository(path) {
@@ -100,7 +105,14 @@ function initializeRepository(path) {
 }
 
 function packedTarball(root) {
-  run('npm', ['pack', '--json', '--pack-destination', root], { cwd: cliRoot, timeout: 180_000 });
+	const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
+	const [command, args] = process.platform === 'darwin'
+		? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
+		: ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]];
+	run(command, args, {
+		cwd: cliRoot, timeout: 330_000,
+		env: { ...process.env, PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW: '1' },
+	});
   const tarballs = readdirSync(root).filter((name) => name.endsWith('.tgz'));
   assert.equal(tarballs.length, 1);
   return join(root, tarballs[0]);
@@ -153,6 +165,7 @@ try {
     PULSE_GO_BIN: daemon,
     PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
+    PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
     PULSE_TRUST_MODE: 'test',
     PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
     PULSE_LOCAL_EMBED_PYTHON: process.execPath,

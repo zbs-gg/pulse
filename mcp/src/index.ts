@@ -36,6 +36,12 @@ import type {
   TeamPrincipalContext,
 } from './principal-context.js';
 
+export {
+  ENROLLMENT_REGISTRY_SCHEMA,
+  INSTALLATION_ENROLLMENT_REGISTRY_JSON_SCHEMA,
+  validateInstallationEnrollmentRegistry,
+} from './sender-constrained-auth.js';
+
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path.
@@ -53,6 +59,7 @@ const PRODUCT_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex' ||
 const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
   ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code'
   : undefined;
+const PRODUCT_TEAM_BINDING = PRODUCT_HOST_ADAPTER && process.env.PULSE_PRODUCT_BINDING_MODE === 'team';
 
 async function assertProductBindingCurrent(): Promise<void> {
   if (!PRODUCT_HOST_ADAPTER) return;
@@ -321,6 +328,12 @@ interface ProductRuntimeModule {
     host: 'codex' | 'claude-code',
     result: unknown,
   ): unknown;
+  callBoundTeamTool(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code',
+    name: string,
+    input: unknown,
+  ): Promise<unknown>;
 }
 
 async function productRuntimeModule(): Promise<ProductRuntimeModule> {
@@ -369,6 +382,12 @@ async function writeProductFinalizeMarker(context: HostTurnContext, value: unkno
   runtime.writeHostFinalizeMarker(productRuntimeResolution(), context, PRODUCT_HOST, value);
 }
 
+async function callProductTeamTool(name: string, input: unknown): Promise<unknown> {
+  if (!PRODUCT_HOST || !PRODUCT_TEAM_BINDING) throw new Error('Pulse Team binding is unavailable');
+  const runtime = await productRuntimeModule();
+  return runtime.callBoundTeamTool(productRuntimeResolution(), PRODUCT_HOST, name, input);
+}
+
 function jsonText(value: unknown) {
   return {
     content: [
@@ -378,6 +397,33 @@ function jsonText(value: unknown) {
       },
     ],
   };
+}
+
+function exactProductTeamDomainToolResult(
+  error: unknown,
+  isAllowedCode: (value: unknown) => boolean,
+): { isError: true; content: [{ type: 'text'; text: string }] } | null {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return null;
+  const candidate = error as Record<string, unknown>;
+  if (candidate.name !== 'TeamRemoteDomainError' || candidate.code !== 'domain_error' ||
+      !isAllowedCode(candidate.domainCode)) return null;
+  const result = candidate.toolResult;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const record = result as Record<string, unknown>;
+  if (Object.keys(record).sort().join('\0') !== 'content\0isError' || record.isError !== true ||
+      !Array.isArray(record.content) || record.content.length !== 1) return null;
+  const item = record.content[0];
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const text = item as Record<string, unknown>;
+  if (Object.keys(text).sort().join('\0') !== 'text\0type' || text.type !== 'text' ||
+      typeof text.text !== 'string') return null;
+  let payload: unknown;
+  try { payload = JSON.parse(text.text); } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const body = payload as Record<string, unknown>;
+  if (Object.keys(body).sort().join('\0') !== 'error\0fallback' ||
+      body.error !== candidate.domainCode || body.fallback !== false) return null;
+  return result as { isError: true; content: [{ type: 'text'; text: string }] };
 }
 
 function redactStatusForMcp(value: unknown): unknown {
@@ -408,8 +454,8 @@ export function createPulseMcpServer(
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     if (runtimeMode === 'team-remote') {
       if (!teamContext) throw new Error('team request context is unavailable');
-      const { TEAM_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
-      return { tools: TEAM_TOOL_DESCRIPTORS };
+      const { TEAM_PRODUCT_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
+      return { tools: TEAM_PRODUCT_TOOL_DESCRIPTORS };
     }
     const tools = [
     {
@@ -920,11 +966,12 @@ export function createPulseMcpServer(
       },
     },
       ];
-    return {
-      tools: PRODUCT_HOST_ADAPTER
-        ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
-        : tools,
-    };
+    const localTools = PRODUCT_HOST_ADAPTER
+      ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
+      : tools;
+    if (!PRODUCT_TEAM_BINDING) return { tools: localTools };
+    const { TEAM_INSTALLED_READ_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
+    return { tools: [...localTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -936,23 +983,17 @@ export function createPulseMcpServer(
       if (runtimeMode === 'team-remote') {
         if (!teamContext) throw new Error('team request context is unavailable');
         const contracts = await loadTeamRemoteContracts();
-        const { isTeamToolName, teamNotReadyResult } = contracts;
-        if (!isTeamToolName(name)) {
+        const { isTeamProductToolName, teamNotReadyResult } = contracts;
+        if (!isTeamProductToolName(name)) {
           throw new Error('Unknown team tool');
         }
         if (
-          name === 'pulse_team_status' || name === 'pulse_team_remember' ||
-          name === 'pulse_team_graph_delta' ||
+          name === 'pulse_team_status' ||
           name === 'pulse_team_recall' || name === 'pulse_team_context_query' ||
           name === 'pulse_team_resume' || name === 'pulse_team_inspect' ||
-          name === 'pulse_team_audit' || name === 'pulse_team_delete' ||
-          name === 'pulse_team_delete_status'
+          name === 'pulse_team_audit' || name === 'pulse_team_delete_status'
         ) {
-          const methodClass: 'read' | 'write' | 'delete' = name === 'pulse_team_delete'
-            ? 'delete'
-            : name === 'pulse_team_remember' || name === 'pulse_team_graph_delta'
-              ? 'write'
-              : 'read';
+          const methodClass: 'read' | 'write' | 'delete' = 'read';
           if (!teamDomain) {
             reportTeamDomainFailure(
               teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable', methodClass,
@@ -962,14 +1003,11 @@ export function createPulseMcpServer(
           try {
             let result: unknown;
             if (name === 'pulse_team_status') result = await teamDomain.status(args);
-            else if (name === 'pulse_team_remember') result = await teamDomain.remember(args);
-            else if (name === 'pulse_team_graph_delta') result = await teamDomain.graphDelta(args);
             else if (name === 'pulse_team_recall') result = await teamDomain.recall(args);
             else if (name === 'pulse_team_context_query') result = await teamDomain.contextQuery(args);
             else if (name === 'pulse_team_resume') result = await teamDomain.resume(args);
             else if (name === 'pulse_team_inspect') result = await teamDomain.inspect(args);
             else if (name === 'pulse_team_audit') result = await teamDomain.audit(args);
-            else if (name === 'pulse_team_delete') result = await teamDomain.delete(args);
             else result = await teamDomain.deleteStatus(args);
             return jsonText(result);
           } catch (error) {
@@ -992,6 +1030,21 @@ export function createPulseMcpServer(
           }
         }
         return teamNotReadyResult(name);
+      }
+      if (PRODUCT_TEAM_BINDING && name.startsWith('pulse_team_')) {
+        const contracts = await loadTeamRemoteContracts();
+        if (!contracts.isTeamInstalledReadToolName(name)) {
+          throw new Error('Team Commons writes are Airlock-only and destructive Team tools are human-controlled');
+        }
+        try {
+          return jsonText(await callProductTeamTool(name, args));
+        } catch (error) {
+          const remoteResult = exactProductTeamDomainToolResult(
+            error, contracts.isTeamClosedErrorCode,
+          );
+          if (remoteResult) return remoteResult;
+          throw error;
+        }
       }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);
@@ -1235,6 +1288,10 @@ async function startHttpMode(): Promise<void> {
       writeJSON(res, { error: 'invalid_request' }, 400);
       return;
     }
+    if (teamSecurity?.airlockGateway?.matches(path)) {
+      await teamSecurity.airlockGateway.handle(req, res, requestURL);
+      return;
+    }
     if (teamSecurity && hasDuplicateHeader(req, 'origin')) {
       recordTeamSecurityEvent(teamSecurity, {
         eventType: 'authentication_denied', reasonCode: 'invalid_credential',
@@ -1334,6 +1391,7 @@ async function startHttpMode(): Promise<void> {
         return;
       }
       teamRequestsInFlight++;
+      let refreshableOAuthFailure = false;
       try {
         if (
           hasDuplicateHeader(req, 'authorization') || hasDuplicateHeader(req, 'content-type') ||
@@ -1343,9 +1401,22 @@ async function startHttpMode(): Promise<void> {
         ) {
           throw new teamSecurity.OAuthError('invalid_token');
         }
-        const identity = await teamSecurity.verifier.verifyAuthorization(
-          req.headers.authorization, ['pulse:owner'],
-        );
+        const senderHeaders = teamSecurity.requireSenderConstrainedHeaders(req);
+        let identity;
+        try {
+          identity = await teamSecurity.senderVerifier.verifyAuthorization(
+            {
+              ...senderHeaders,
+              method: req.method ?? '',
+              targetURL: `${publicBaseURL}${path}`,
+            },
+            ['pulse:owner'],
+          );
+        } catch (error) {
+          refreshableOAuthFailure =
+            teamSecurity.isOAuthError(error) && error.code === 'invalid_token';
+          throw error;
+        }
         teamSecurity.ownerGateway.verifyRecentStepUp(identity);
         const contentEncoding = singleHeader(req.headers['content-encoding']);
         if (contentEncoding !== '' && contentEncoding.toLowerCase() !== 'identity') {
@@ -1363,8 +1434,13 @@ async function startHttpMode(): Promise<void> {
         const result = await teamSecurity.ownerGateway.call(path, identity, requestId, body);
         writeJSON(res, result);
       } catch (error) {
-        if (teamSecurity.isOAuthError(error)) {
-          writeTeamOAuthChallenge(res, publicBaseURL, error);
+        if (teamSecurity.isOAuthError(error) || teamSecurity.isInstallationProofError(error)) {
+          writeTeamOAuthChallenge(
+            res,
+            publicBaseURL,
+            teamSecurity.isOAuthError(error) ? error : new teamSecurity.OAuthError('invalid_token'),
+            refreshableOAuthFailure,
+          );
         } else if (teamSecurity.isOwnerGatewayError(error)) {
           writeJSON(res, { error: error.code, fallback: false }, error.status);
         } else if (error instanceof RequestBodyTooLargeError) {
@@ -1407,14 +1483,28 @@ async function startHttpMode(): Promise<void> {
       }
       teamRequestsInFlight++;
       let methodClass: 'read' | 'write' | 'delete' | 'other' = 'other';
+      let refreshableOAuthFailure = false;
       try {
         if (hasDuplicateHeader(req, 'authorization')) {
           throw new teamSecurity.OAuthError('invalid_token');
         }
         // Baseline validation happens before reading or parsing the request body.
-        const identity = await teamSecurity.requestSecurity.authenticateBeforeBody(
-          req.headers.authorization,
-        );
+        const senderHeaders = teamSecurity.requireSenderConstrainedHeaders(req);
+        let identity;
+        try {
+          identity = await teamSecurity.senderVerifier.verifyAuthorization(
+            {
+              ...senderHeaders,
+              method: req.method ?? '',
+              targetURL: `${publicBaseURL}${path}`,
+            },
+            ['pulse:connect'],
+          );
+        } catch (error) {
+          refreshableOAuthFailure =
+            teamSecurity.isOAuthError(error) && error.code === 'invalid_token';
+          throw error;
+        }
         if (req.method !== 'POST' && hasUnexpectedRequestBody(req)) {
           res.setHeader('Connection', 'close');
           writeTeamCors(res, requestOrigin);
@@ -1440,9 +1530,8 @@ async function startHttpMode(): Promise<void> {
           const required = teamSecurity.requiredCapabilities(parsedBody);
           methodClass = methodClassForCapabilities(required);
           teamContext = await teamSecurity.requestSecurity.resolveAfterBody({
-            authorization: req.headers.authorization,
             baseline: identity,
-            body: parsedBody,
+            requiredCapabilities: required,
             requestId,
           });
           if (required.some((capability) => capability !== 'pulse:connect')) {
@@ -1459,20 +1548,23 @@ async function startHttpMode(): Promise<void> {
       } catch (error) {
         if (terminateStartedResponse(res)) return;
         writeTeamCors(res, requestOrigin);
-        if (teamSecurity.isOAuthError(error)) {
-          if (error.code === 'insufficient_scope') {
+        if (teamSecurity.isOAuthError(error) || teamSecurity.isInstallationProofError(error)) {
+          const oauthError = teamSecurity.isOAuthError(error)
+            ? error
+            : new teamSecurity.OAuthError('invalid_token');
+          if (oauthError.code === 'insufficient_scope') {
             recordTeamSecurityEvent(teamSecurity, {
               eventType: 'authorization_denied', reasonCode: 'insufficient_scope', methodClass, requestId,
             });
           } else {
             recordTeamSecurityEvent(teamSecurity, {
               eventType: 'authentication_denied',
-              reasonCode: error.reasonCode === 'insufficient_scope' ? 'invalid_credential' : error.reasonCode,
+              reasonCode: oauthError.reasonCode === 'insufficient_scope' ? 'invalid_credential' : oauthError.reasonCode,
               methodClass,
               requestId,
             });
           }
-          writeTeamOAuthChallenge(res, publicBaseURL, error);
+          writeTeamOAuthChallenge(res, publicBaseURL, oauthError, refreshableOAuthFailure);
         } else if (teamSecurity.isPrincipalError(error)) {
           if (error.code === 'principal_revoked') {
             recordTeamSecurityEvent(teamSecurity, {
@@ -1729,11 +1821,15 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
     principal,
     contracts,
     owner,
+    sender,
+    airlock,
   ] = await Promise.all([
     import('./oauth-resource.js'),
     import('./principal-context.js'),
     import('./team-contracts.js'),
     import('./owner-approval.js'),
+    import('./sender-constrained-auth.js'),
+    import('./airlock-browser-gateway.js'),
   ]);
   const required = (name: string): string => {
     const value = process.env[name] ?? '';
@@ -1747,6 +1843,18 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
     issuer: authIssuer,
     resource,
     maxTokenLifetimeSeconds: parseBoundedEnvInt('PULSE_REMOTE_MAX_TOKEN_LIFETIME_SECONDS', 900, 1, 900),
+  });
+  const enrollmentRegistry = new sender.InstallationEnrollmentRegistry({
+    file: required('PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE'),
+    issuer: authIssuer,
+  });
+  enrollmentRegistry.assertReady();
+  const installationProofVerifier = new sender.InstallationProofVerifier({
+    registry: enrollmentRegistry,
+  });
+  const senderVerifier = new sender.SenderConstrainedOAuthVerifier({
+    oauthVerifier: verifier,
+    proofVerifier: installationProofVerifier,
   });
   const signer = principal.loadPrincipalSigner({
     privateKeyFile: required('PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE'),
@@ -1769,20 +1877,49 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
       'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
     ),
   });
+  const airlockConfig = [
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_CLIENT_ID ?? '',
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_AUTHORIZATION_ENDPOINT ?? '',
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_TOKEN_ENDPOINT ?? '',
+  ];
+  const airlockConfigured = airlockConfig.filter((value) => value !== '').length;
+  if (airlockConfig.some((value) => value !== value.trim()) ||
+      (airlockConfigured !== 0 && airlockConfigured !== airlockConfig.length)) {
+    throw new Error('team-remote requires complete exact Airlock OIDC configuration');
+  }
+  const airlockGateway = airlockConfigured === airlockConfig.length
+    ? new airlock.TeamPublicationBrowserGateway({
+        publicBaseURL,
+        authIssuer,
+        clientId: airlockConfig[0]!,
+        authorizationEndpoint: airlockConfig[1]!,
+        tokenEndpoint: airlockConfig[2]!,
+        daemonBaseURL: PULSE_BASE_URL,
+        verifier,
+        signer,
+      })
+    : undefined;
   return {
     verifier,
+    senderVerifier,
+    requireSenderConstrainedHeaders: sender.requireSenderConstrainedHeaders,
     principalClient,
     securityReporter,
     requestSecurity: new principal.TeamRequestSecurity({ verifier, principalClient }),
     ownerGateway,
+    airlockGateway,
     isOwnerPublicPath: owner.isOwnerPublicPath,
     isExactOwnerBrowserRequest: owner.isExactOwnerBrowserRequest,
     isOwnerGatewayError: (error: unknown): error is InstanceType<typeof owner.OwnerGatewayError> =>
       error instanceof owner.OwnerGatewayError,
-    requiredCapabilities: contracts.requiredTeamCapabilities,
+    requiredCapabilities: contracts.requiredTeamProductCapabilities,
     metadata: teamMetadata(resource, authIssuer),
     isOAuthError: (error: unknown): error is InstanceType<typeof OAuthResourceError> =>
       error instanceof OAuthResourceError,
+    isInstallationProofError: (
+      error: unknown,
+    ): error is InstanceType<typeof sender.InstallationProofError> =>
+      error instanceof sender.InstallationProofError,
     OAuthError: OAuthResourceError,
     isPrincipalError: (error: unknown): error is InstanceType<typeof principal.PrincipalCheckError> =>
       error instanceof principal.PrincipalCheckError,
@@ -1813,7 +1950,10 @@ function writeTeamCors(res: ServerResponse, origin: string): void {
     res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Accept, Content-Type, Authorization, DPoP, X-Pulse-Enrollment, Mcp-Session-Id, MCP-Protocol-Version',
+  );
   res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
 }
 
@@ -1821,7 +1961,7 @@ function writeOwnerCors(res: ServerResponse, origin: string): void {
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, DPoP, X-Pulse-Enrollment');
 }
 
 function singleHeader(value: string | string[] | undefined): string {
@@ -1840,14 +1980,18 @@ function writeTeamOAuthChallenge(
   res: ServerResponse,
   publicBaseURL: string,
   error: { status: 401 | 403; code: string; requiredCapabilities: string[] },
+  refreshable = false,
 ): void {
   const metadataURL = `${publicBaseURL}/.well-known/oauth-protected-resource/mcp`;
   const scope = error.requiredCapabilities.length > 0
     ? `, scope="${error.requiredCapabilities.join(' ')}"`
     : '';
+  const reauth = refreshable && error.code === 'invalid_token'
+    ? ', pulse_reauth="refresh"'
+    : '';
   res.writeHead(error.status, {
     'Content-Type': 'application/json',
-    'WWW-Authenticate': `Bearer resource_metadata="${metadataURL}", error="${error.code}"${scope}`,
+    'WWW-Authenticate': `DPoP resource_metadata="${metadataURL}", error="${error.code}"${scope}${reauth}`,
   });
   res.end(JSON.stringify({ error: error.code }));
 }

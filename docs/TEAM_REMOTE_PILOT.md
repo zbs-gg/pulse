@@ -2,9 +2,17 @@
 
 ## Status
 
-This repository contains the security foundation for a synthetic-data team-remote pilot. It is not a production deployment and it is not yet the shared workspace for Nikita, Dima, or other real team members.
+This repository contains the security foundation and current U7 product path for a synthetic-data team-remote pilot. It is not a production deployment and it is not yet the shared workspace for Nikita, Dima, or other real team members.
 
-The current increment proves identity separation, scoped storage, revocation, contribution-aware deletion, metadata-only audit, and fail-closed remote behavior with synthetic principals and content. Real client onboarding, a hosted pilot repository, a human review UI, Krisp ingestion, and production operations remain separate follow-up work.
+The current worktree adds a sender-constrained, read-only Commons path to the installed Codex product; independent Desk and Commons continuity composition; safe OAuth refresh; an Owner-only publication Airlock; projection workers and readiness; and default-off deployment templates. Those paths have automated and synthetic coverage. A fresh-machine package install, a live Auth0 tenant, external HTTPS ingress, and a real two-person deployment have not been verified. No real team content is authorized by this document.
+
+`npm run test:codex-team-packaging-contract` is deliberately narrower than a product E2E: it proves that the packed artifact contains the signed helper and MCP runtime, that both Codex and Claude composition use the exact signed Commons `project_id`, that the Codex package exposes the Desk plus read-only Commons registry, and that it carries the Airlock-only publication flag. It mocks binding authority, OAuth, remote transport, and the daemon. It is not evidence of a fresh-user install, a packaged Claude onboarding, or live Team continuity. `make verify` runs this contract.
+
+The current local helper is Developer-ID signed and targets Apple Silicon macOS 13+, but it has not been notarized. Packaging therefore fails by default, and npm publication fails even with an override. An explicit `PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW=1` is accepted only for an unquarantined internal checkout build and must not be redistributed. A notarized artifact is a blocker for ordinary colleague installation.
+
+The release-only `make team-race-release` gate invokes the Team Go packages with `-race -count=1 -timeout 20m`; a default ten-minute timeout is not a passing substitute. `make release-verify` combines normal verification, that explicit race gate, and portable static validation of the deployment templates. It does not claim that systemd units or Caddy have been validated on Linux.
+
+`npm publish` runs `make release-verify` from the repository root before package artifacts are prepared. A publish therefore cannot use the narrower packaging preparation step as a substitute for the packaging contract, Team race suite, or deployment-template verification; ordinary `npm test` and `npm pack` remain bounded development checks.
 
 ## Product Activation Base
 
@@ -19,22 +27,56 @@ The product branch begins at `codex/pulse-codex-team-memory`. New migrations sta
 | Mode | Intended use | Data boundary |
 |---|---|---|
 | Local Preview | One person's local development and memory | Local `~/.pulse`; no team sharing |
-| Team remote foundation | Synthetic verification of multi-principal policy | Dedicated team database; no local fallback |
+| Team remote foundation | Synthetic verification of multi-principal policy plus the U7 read/Airlock product path | Dedicated team database; no local fallback |
 | Real pilot deployment | A separately approved hosted pilot | New deployment, real IdP, named members, explicit connector consent |
 
 Starting team mode never upgrades or adopts an existing local database. A remote outage never falls back to local storage.
 
 ## Interfaces
 
-### Team members and agents
+### Installed Codex member client
 
-Agents use the versioned `pulse_team_*` MCP tools through one canonical HTTPS MCP resource. OAuth grants only a coarse capability; current team membership, client binding, project grants, object scope, and revocation are checked by Pulse on every request.
+The installed Codex MCP composes the bound private Desk with one fixed Team Commons. The two stores are queried independently and are labeled separately in continuity output; a Commons outage is visible and never causes a local fallback or changes the Desk boundary.
 
-Legacy local tools are not advertised in team mode. Team responses carry `fallback=false`.
+Team onboarding is an explicit human binding action. `pulse binding create-team` requires the exact `--commons-project-id project_...` alongside team/store/resource identifiers and the confirmation phrase. That project ID is inside the root-anchored signed binding and is used for Commons status and resume authorization. The local Desk continues to use the canonical `workspace_id`; it is not substituted for the shared project grant. Binding replacement is a journaled, fsynced transition. On startup or the next create, the root anchor deterministically chooses completion or rollback under the same registry lock; malformed or unrelated journal state fails closed.
+
+The installation authorization profile is exactly:
+
+```text
+openid offline_access pulse:connect pulse:status pulse:read pulse:audit
+```
+
+It rejects `pulse:write`, `pulse:delete`, and `pulse:owner`. The installed MCP exposes only `pulse_team_status`, `pulse_team_recall`, `pulse_team_context_query`, `pulse_team_resume`, `pulse_team_inspect`, and `pulse_team_audit` for Commons. Direct `pulse_team_remember` and `pulse_team_graph_delta` publication is absent from the product tool registry and dispatch; delete is also absent from the installed Codex proxy.
+
+Each installation has a P-256 key, a distinct enrollment, a DPoP-bound access token, and a protected credential reference. The gateway validates the access token, exact installation enrollment, proof target/method/token hash, replay state, current membership, client binding, project grant, and object scope on every request. Team responses carry `fallback=false`.
+
+`pulse team status` reports `ready`, `degraded`, `pending`, `missing`, or `stale`. A failed projection cycle is retryable work and therefore reports `pending` while retaining the exact `projection_state=failed` and sorted degradation reasons. Only `ready` exits successfully; enrollment alone is not readiness.
 
 ### Human Owner
 
-Membership changes, client registration, grants, revocation, shared deletion, activation, and broader audit are not MCP tools. They require a separate browser step-up and a one-time approval bound to the exact store, team, action, and target. Possession of a shell, loopback access, or the daemon IPC key is not human approval.
+Membership changes, installation enrollment, grants, revocation, shared deletion, activation, broader audit, and publication approval are not ordinary member MCP tools. Publication is possible only through the browser Airlock: it shows the exact canonical envelope, requires fresh Owner authentication with platform WebAuthn, and binds approval to the exact store, team, publisher, request, and envelope digest. Possession of a shell, loopback access, token, or daemon IPC key is not human approval.
+
+The Airlock starts Authorization Code + PKCE with `prompt=login`, `max_age=0`, `scope=openid pulse:owner`, and this exact ACR:
+
+```text
+https://pulse.zbs.gg/acr/airlock-human-presence/v1
+```
+
+The Authorization Server must return an ID token whose `acr` equals that value, whose unique `amr` includes `mfa`, and whose exact namespaced claim is:
+
+```json
+{
+  "https://pulse.zbs.gg/claims/airlock-human-presence/v1": {
+    "schema": "pulse.airlock_human_presence.v1",
+    "factor": "webauthn-platform",
+    "verified_at": 1770000000
+  }
+}
+```
+
+`verified_at` is an integer NumericDate for the platform-WebAuthn ceremony that occurred in this authorization transaction. It is not login time copied from a previous session, enrollment status, a generic MFA flag, or the time an Action happened to execute. The ID token must also bind the exact nonce, client, subject, `auth_time`, and expiry; the access token remains the `pulse:owner` capability authority for the exact `/mcp` audience.
+
+An Auth0 Action/policy is conformant only when it verifies that platform WebAuthn actually completed in the current transaction before emitting the exact ACR and custom claim. If Auth0 cannot prove that fact or cannot emit the exact claims, it must deny the Airlock transaction. SMS, TOTP, email OTP, a remembered browser session, or merely having a passkey enrolled cannot be translated into `factor=webauthn-platform`. The repository tests this claim contract, but it has not yet been verified against a live Auth0 tenant and Action; that live check is an activation blocker.
 
 ### Internal daemon
 
@@ -58,6 +100,9 @@ Real content stays blocked until all of these are demonstrated against a tempora
 - metadata-only audit with no bearer token, prompt, transcript, summary, secret, or local path;
 - daemon outage returns `shared_memory_unavailable` with `fallback=false`;
 - negative smoke rejects legacy auth, fallback, route, tool, migration, assertion, and approval settings.
+- installed Codex lists only the six read/status/audit Commons tools and receives a sender-constrained token with no write, delete, or Owner scope;
+- an Airlock approval succeeds only with the exact fresh platform-WebAuthn ACR/claim contract and the exact human-reviewed envelope;
+- a Team-specific embedder is configured and its projection-worker heartbeat is ready; Personal `COHERE_API_KEY` discovery is never reused for Commons.
 
 Activation is explicit. Passing migrations or starting an empty daemon cannot activate a store automatically.
 
@@ -73,20 +118,24 @@ The prebootstrap process cannot activate or perform post-bootstrap mutations. An
 
 ## What the Real Pilot Still Needs
 
-1. Create a separate private pilot repository or deployment configuration; do not put deployment secrets in this public source tree.
-2. Select and configure the external Authorization Server, HTTPS resource URI, team/store identity, signing-key rotation, backups, and operational owner.
-3. Enroll Nikita and Dima as named humans, then register each agent installation as a distinct client binding.
+The repository now includes [`deploy/team/`](../deploy/team/README.md) as a reviewed shape for two locked OS accounts, systemd credentials, loopback Caddy, health checks, and backup/restore and rollback rehearsals. These assets are default-off and contain negative tripwires for external access, real reads, real publication, and real content. `make team-deploy-static-verify` checks this shape without installing anything. Real systemd/Caddy execution and external deployment remain U10 work; these templates do not deploy or activate those capabilities.
+
+1. Create a separate private pilot repository or deployment configuration based on the reviewed shape; do not put deployment secrets in this public source tree.
+2. Configure and live-verify the external Authorization Server, exact HTTPS `/mcp` resource, DPoP issuance, Airlock platform-WebAuthn Action contract, team/store identity, signing-key rotation, backups, and operational owner.
+3. Verify the packed fresh-machine Codex onboarding path, then enroll Nikita and Dima as named humans and approve each installation as a distinct sender-constrained client binding.
 4. Define project scopes and grant only the projects each participant needs.
 5. Run the synthetic acceptance suite in the target deployment before any real content is enabled.
 6. Connect Krisp only after meeting selection, consent, retention, and structured-extraction rules are approved.
-7. Add a human review surface and real two-member dogfood before making availability or production claims.
+7. Exercise the Airlock UI with labeled synthetic candidates, then run real two-member dogfood under a separate explicit authorization before making availability or production claims.
 
 ## Explicitly Deferred
 
 - automatic ingestion of every call or chat;
 - raw transcript storage;
 - team-wide wipe;
-- direct writes or promotion to team scope;
-- a hosted Viewer or review UI;
+- direct agent writes or publication outside the exact human-approved Airlock envelope;
+- a hosted memory Viewer beyond the bounded Airlock review surface;
+- live Auth0/DPoP/Airlock interoperability and external deployment verification;
+- a verified fresh-machine Codex package onboarding;
 - production SLOs, incident response, billing, or compliance claims;
 - a completed two-person pilot.

@@ -5,7 +5,13 @@ import LocalAuthentication
 import Security
 
 private let applicationTag = Data("gg.zbs.pulse.userpresence.v1".utf8)
-private let accessGroup = "44N4NZ86S5.gg.zbs.pulse.userpresence"
+private let dpopApplicationTagPrefix = Data("gg.zbs.pulse.dpop.v1.".utf8)
+private let dpopMetadataService = "gg.zbs.pulse.dpop.metadata.v1"
+private let helperContractVersion = 2
+private let helperCapabilities = [
+    "dpop-create", "dpop-delete", "dpop-proof", "dpop-public",
+    "prove", "public-key", "self-test", "sign-binding-registry",
+]
 private let allowedActions: Set<String> = [
     "binding.change", "vault.wipe", "airlock.approve",
     "mandatory.activate", "membership.change",
@@ -17,6 +23,11 @@ private enum HelperFailure: Error {
     case keyUnavailable
     case signingFailed
 }
+
+private let safeDPoPKeyRef = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$")
+private let safeDPoPIdentity = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._|:@/-]{0,255}$")
+private let safeBase64URL = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]+$")
+private let safeNonce = try! NSRegularExpression(pattern: "^[A-Za-z0-9._~-]{1,512}$")
 
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("pulse-presence-helper: \(message)\n".utf8))
@@ -98,6 +109,440 @@ private func digestHex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+private func base64URL(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+private func decodeBase64URL(_ value: Any?, maximumBytes: Int) throws -> Data {
+    guard let string = value as? String, !string.isEmpty,
+          string.count <= ((maximumBytes + 2) / 3) * 4,
+          string.unicodeScalars.allSatisfy({
+              ($0.value >= 48 && $0.value <= 57) ||
+              ($0.value >= 65 && $0.value <= 90) ||
+              ($0.value >= 97 && $0.value <= 122) || $0 == "-" || $0 == "_"
+          }) else { throw HelperFailure.invalidRequest }
+    let remainder = string.count % 4
+    guard remainder != 1 else { throw HelperFailure.invalidRequest }
+    let standard = string.replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/") + String(repeating: "=", count: (4 - remainder) % 4)
+    guard let decoded = Data(base64Encoded: standard), decoded.count <= maximumBytes,
+          base64URL(decoded) == string else { throw HelperFailure.invalidRequest }
+    return decoded
+}
+
+private func validatedDPoPKeyRef(_ value: Any?) throws -> String {
+    guard let keyRef = value as? String, keyRef.utf8.count <= 512,
+          safeDPoPKeyRef.firstMatch(
+              in: keyRef, range: NSRange(keyRef.startIndex..<keyRef.endIndex, in: keyRef)
+          ) != nil else { throw HelperFailure.invalidRequest }
+    return keyRef
+}
+
+private func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+    expression.firstMatch(
+        in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)
+    ) != nil
+}
+
+private func validatedIdentity(_ value: Any?) throws -> String {
+    guard let text = value as? String, text.utf8.count <= 256,
+          matches(safeDPoPIdentity, text) else { throw HelperFailure.invalidRequest }
+    return text
+}
+
+private func validatedHTTPSURL(_ value: Any?, requireMCP: Bool) throws -> String {
+    guard let text = value as? String, text.utf8.count <= 2048,
+          let components = URLComponents(string: text), components.scheme == "https",
+          components.user == nil, components.password == nil,
+          components.query == nil, components.fragment == nil,
+          let host = components.host, !host.isEmpty,
+          let url = components.url, url.absoluteString == text,
+          (!requireMCP || components.path == "/mcp") else {
+        throw HelperFailure.invalidRequest
+    }
+    return text
+}
+
+private func validatedBase64URL(_ value: Any?, exactCount: Int? = nil, maximumCount: Int = 512) throws -> String {
+    guard let text = value as? String, !text.isEmpty, text.count <= maximumCount,
+          exactCount == nil || text.count == exactCount,
+          matches(safeBase64URL, text) else { throw HelperFailure.invalidRequest }
+    return text
+}
+
+private func dpopApplicationTag(_ keyRef: String) -> Data {
+    dpopApplicationTagPrefix + Data(SHA256.hash(data: Data(keyRef.utf8)))
+}
+
+private func dpopPrivateKey(keyRef: String, create: Bool) throws -> SecKey {
+    let tag = dpopApplicationTag(keyRef)
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassKey,
+        kSecAttrApplicationTag as String: tag,
+        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+        kSecReturnRef as String: true,
+        kSecUseDataProtectionKeychain as String: true,
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecSuccess, let key = item as! SecKey? { return key }
+    guard status == errSecItemNotFound, create else { throw HelperFailure.keyUnavailable }
+
+    var accessError: Unmanaged<CFError>?
+    guard let control = SecAccessControlCreateWithFlags(
+        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage], &accessError
+    ) else { throw HelperFailure.keyUnavailable }
+    let attributes: [String: Any] = [
+        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+        kSecAttrKeySizeInBits as String: 256,
+        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+        kSecUseDataProtectionKeychain as String: true,
+        kSecPrivateKeyAttrs as String: [
+            kSecAttrIsPermanent as String: true,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrAccessControl as String: control,
+        ],
+    ]
+    var keyError: Unmanaged<CFError>?
+    guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError) else {
+        throw HelperFailure.keyUnavailable
+    }
+    return key
+}
+
+private func dpopMetadataQuery(_ keyRef: String) -> [String: Any] {
+    [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: dpopMetadataService,
+        kSecAttrAccount as String: keyRef,
+        kSecUseDataProtectionKeychain as String: true,
+    ]
+}
+
+private func dpopMetadata(_ keyRef: String) throws -> [String: Any] {
+    var query = dpopMetadataQuery(keyRef)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+          let data = item as? Data else { throw HelperFailure.keyUnavailable }
+    return try exactDictionary(
+        data, keys: ["client_id", "resource", "schema", "subject", "token_endpoint"]
+    )
+}
+
+private func storeDPoPMetadata(_ keyRef: String, _ metadata: [String: Any]) throws {
+    let data = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
+    var query = dpopMetadataQuery(keyRef)
+    query[kSecValueData as String] = data
+    query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecDuplicateItem {
+        let existing = try dpopMetadata(keyRef)
+        let existingData = try JSONSerialization.data(withJSONObject: existing, options: [.sortedKeys])
+        guard existingData == data else { throw HelperFailure.invalidRequest }
+        return
+    }
+    guard status == errSecSuccess else { throw HelperFailure.keyUnavailable }
+}
+
+private func dpopPublicJWK(_ privateKey: SecKey) throws -> [String: String] {
+    guard let publicKey = SecKeyCopyPublicKey(privateKey) else { throw HelperFailure.keyUnavailable }
+    var error: Unmanaged<CFError>?
+    guard let raw = SecKeyCopyExternalRepresentation(publicKey, &error) as Data?,
+          raw.count == 65, raw.first == 0x04 else { throw HelperFailure.keyUnavailable }
+    return [
+        "crv": "P-256",
+        "kty": "EC",
+        "x": base64URL(raw.subdata(in: 1..<33)),
+        "y": base64URL(raw.subdata(in: 33..<65)),
+    ]
+}
+
+private func emitJSON(_ value: [String: Any]) throws {
+    let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    FileHandle.standardOutput.write(bytes)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+}
+
+private func dpopPublicResult(keyRef: String, privateKey: SecKey) throws -> [String: Any] {
+    [
+        "key_ref": keyRef,
+        "public_jwk": try dpopPublicJWK(privateKey),
+        "schema": "pulse.dpop.public.v1",
+    ]
+}
+
+private func readDERLength(_ bytes: [UInt8], _ index: inout Int) throws -> Int {
+    guard index < bytes.count else { throw HelperFailure.signingFailed }
+    let first = Int(bytes[index]); index += 1
+    if first < 0x80 { return first }
+    let count = first & 0x7f
+    guard count > 0, count <= 2, index + count <= bytes.count, bytes[index] != 0 else {
+        throw HelperFailure.signingFailed
+    }
+    var length = 0
+    for _ in 0..<count { length = (length << 8) | Int(bytes[index]); index += 1 }
+    guard length >= 0x80 else { throw HelperFailure.signingFailed }
+    return length
+}
+
+private func readDERInteger(_ bytes: [UInt8], _ index: inout Int) throws -> [UInt8] {
+    guard index < bytes.count, bytes[index] == 0x02 else { throw HelperFailure.signingFailed }
+    index += 1
+    let length = try readDERLength(bytes, &index)
+    guard length > 0, length <= 33, index + length <= bytes.count else { throw HelperFailure.signingFailed }
+    var value = Array(bytes[index..<(index + length)]); index += length
+    guard (value[0] & 0x80) == 0 else { throw HelperFailure.signingFailed }
+    if value.count == 33 {
+        guard value[0] == 0, (value[1] & 0x80) != 0 else { throw HelperFailure.signingFailed }
+        value.removeFirst()
+    } else if value.count > 1, value[0] == 0, (value[1] & 0x80) == 0 {
+        throw HelperFailure.signingFailed
+    }
+    return Array(repeating: 0, count: 32 - value.count) + value
+}
+
+private func p1363Signature(_ der: Data) throws -> Data {
+    let bytes = [UInt8](der)
+    var index = 0
+    guard index < bytes.count, bytes[index] == 0x30 else { throw HelperFailure.signingFailed }
+    index += 1
+    let sequenceLength = try readDERLength(bytes, &index)
+    guard index + sequenceLength == bytes.count else { throw HelperFailure.signingFailed }
+    let r = try readDERInteger(bytes, &index)
+    let s = try readDERInteger(bytes, &index)
+    guard index == bytes.count else { throw HelperFailure.signingFailed }
+    return Data(r + s)
+}
+
+private func runPureSelfTest() throws {
+    let small = Data([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02])
+    let smallExpected = Data(Array(repeating: 0, count: 31) + [0x01] +
+        Array(repeating: 0, count: 31) + [0x02])
+    guard try p1363Signature(small) == smallExpected else { throw HelperFailure.signingFailed }
+
+    let highR = [UInt8]([0x30, 0x45, 0x02, 0x21, 0x00, 0x80] +
+        Array(repeating: 0, count: 31) + [0x02, 0x20, 0x7f] +
+        Array(repeating: 0, count: 31))
+    let highExpected = Data([0x80] + Array(repeating: 0, count: 31) +
+        [0x7f] + Array(repeating: 0, count: 31))
+    guard try p1363Signature(Data(highR)) == highExpected else { throw HelperFailure.signingFailed }
+
+    let malformed = [
+        Data([0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 0x01]),
+        Data([0x30, 0x07, 0x02, 0x02, 0x00, 0x01, 0x02, 0x01, 0x01]),
+        Data([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02, 0x00]),
+    ]
+    for value in malformed {
+        var rejected = false
+        do {
+            _ = try p1363Signature(value)
+        } catch HelperFailure.signingFailed {
+            rejected = true
+        }
+        guard rejected else { throw HelperFailure.signingFailed }
+    }
+
+	let policyNow: Int64 = 1_784_064_000
+	let metadata: [String: Any] = [
+		"client_id": "client-pulse",
+		"resource": "https://team.example/mcp",
+		"schema": "pulse.dpop.metadata.v1",
+		"subject": "principal-nik",
+		"token_endpoint": "https://issuer.example/oauth/token",
+	]
+	func policyData(_ value: [String: Any]) throws -> Data {
+		try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+	}
+	func policyRejects(_ value: [String: Any]) -> Bool {
+		do {
+			_ = try validateDPoPProofPolicy(try policyData(value), metadata: metadata, now: policyNow)
+			return false
+		} catch HelperFailure.invalidRequest {
+			return true
+		} catch {
+			return false
+		}
+	}
+	let resourceRequest: [String: Any] = [
+		"ath": String(repeating: "a", count: 43),
+		"client_id": "client-pulse",
+		"enrollment_generation": 1,
+		"enrollment_id": "enrollment-1",
+		"htm": "POST",
+		"htu": "https://team.example/mcp",
+		"iat": policyNow,
+		"jti": "resource-jti",
+		"key_ref": "team/deployment/client/principal",
+		"nonce": "",
+		"purpose": "resource",
+		"schema": "pulse.dpop.proof.v1",
+		"sub": "principal-nik",
+	]
+	let resource = try validateDPoPProofPolicy(
+		try policyData(resourceRequest), metadata: metadata, now: policyNow
+	)
+	guard resource.keyRef == "team/deployment/client/principal",
+		  resource.payload["htu"] as? String == "https://team.example/mcp" else {
+		throw HelperFailure.signingFailed
+	}
+	var tokenRequest = resourceRequest
+	tokenRequest["ath"] = ""
+	tokenRequest["enrollment_generation"] = 0
+	tokenRequest["enrollment_id"] = ""
+	tokenRequest["htu"] = "https://issuer.example/oauth/token"
+	tokenRequest["nonce"] = "token-nonce"
+	tokenRequest["purpose"] = "token"
+	let token = try validateDPoPProofPolicy(
+		try policyData(tokenRequest), metadata: metadata, now: policyNow
+	)
+	guard token.payload["htu"] as? String == "https://issuer.example/oauth/token",
+		  token.payload["nonce"] as? String == "token-nonce" else {
+		throw HelperFailure.signingFailed
+	}
+
+	var invalid = resourceRequest
+	invalid["htu"] = "https://other.example/mcp"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	invalid = tokenRequest
+	invalid["htu"] = "https://issuer.example/other"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	invalid = resourceRequest
+	invalid["client_id"] = "client-other"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	invalid = resourceRequest
+	invalid["sub"] = "principal-other"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	invalid = resourceRequest
+	invalid["htm"] = "PATCH"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	invalid = tokenRequest
+	invalid["htm"] = "GET"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+}
+
+private func deleteDPoPKey(_ keyRef: String) throws {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassKey,
+        kSecAttrApplicationTag as String: dpopApplicationTag(keyRef),
+        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+        kSecUseDataProtectionKeychain as String: true,
+    ]
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else { throw HelperFailure.keyUnavailable }
+    let metadataStatus = SecItemDelete(dpopMetadataQuery(keyRef) as CFDictionary)
+    guard metadataStatus == errSecSuccess || metadataStatus == errSecItemNotFound else {
+        throw HelperFailure.keyUnavailable
+    }
+}
+
+private struct ValidatedDPoPProof {
+    let keyRef: String
+    let payload: [String: Any]
+}
+
+// validateDPoPProofPolicy is deliberately pure: native self-tests can exercise
+// the exact resource, token-endpoint, client, subject, and method pins without
+// touching Keychain or Secure Enclave state.
+private func validateDPoPProofPolicy(
+    _ data: Data,
+    metadata: [String: Any],
+    now: Int64
+) throws -> ValidatedDPoPProof {
+    let keys: Set<String> = [
+        "ath", "client_id", "enrollment_generation", "enrollment_id", "htm", "htu",
+        "iat", "jti", "key_ref", "nonce", "purpose", "schema", "sub",
+    ]
+    let object = try exactDictionary(data, keys: keys)
+    guard object["schema"] as? String == "pulse.dpop.proof.v1" else {
+        throw HelperFailure.invalidRequest
+    }
+    let keyRef = try validatedDPoPKeyRef(object["key_ref"])
+    guard metadata["schema"] as? String == "pulse.dpop.metadata.v1",
+          let pinnedResource = metadata["resource"] as? String,
+          let pinnedTokenEndpoint = metadata["token_endpoint"] as? String,
+          let pinnedClientID = metadata["client_id"] as? String,
+          let pinnedSubject = metadata["subject"] as? String else {
+        throw HelperFailure.invalidRequest
+    }
+    let clientID = try validatedIdentity(object["client_id"])
+    let subject = try validatedIdentity(object["sub"])
+    guard clientID == pinnedClientID, subject == pinnedSubject,
+          let purpose = object["purpose"] as? String,
+          let method = object["htm"] as? String,
+          let issuedAt = object["iat"] as? NSNumber,
+          CFGetTypeID(issuedAt) != CFBooleanGetTypeID(),
+          issuedAt.doubleValue == Double(issuedAt.int64Value),
+          abs(now - issuedAt.int64Value) <= 300 else {
+        throw HelperFailure.invalidRequest
+    }
+    let jti = try validatedBase64URL(object["jti"], maximumCount: 128)
+    var payload: [String: Any] = [
+        "client_id": clientID,
+        "htm": method,
+        "iat": issuedAt.int64Value,
+        "jti": jti,
+        "sub": subject,
+    ]
+    if purpose == "resource" {
+        guard method == "GET" || method == "POST" || method == "DELETE",
+              object["htu"] as? String == pinnedResource,
+              object["nonce"] as? String == "" else { throw HelperFailure.invalidRequest }
+        payload["htu"] = pinnedResource
+        payload["ath"] = try validatedBase64URL(object["ath"], exactCount: 43)
+        payload["enrollment_id"] = try validatedIdentity(object["enrollment_id"])
+        guard let generation = object["enrollment_generation"] as? NSNumber,
+              CFGetTypeID(generation) != CFBooleanGetTypeID(),
+              generation.doubleValue == Double(generation.uint64Value), generation.uint64Value >= 1 else {
+            throw HelperFailure.invalidRequest
+        }
+        payload["enrollment_generation"] = generation.uint64Value
+    } else if purpose == "token" {
+        guard method == "POST", object["htu"] as? String == pinnedTokenEndpoint,
+              object["ath"] as? String == "", object["enrollment_id"] as? String == "",
+              (object["enrollment_generation"] as? NSNumber)?.intValue == 0 else {
+            throw HelperFailure.invalidRequest
+        }
+        payload["htu"] = pinnedTokenEndpoint
+        if let nonce = object["nonce"] as? String, !nonce.isEmpty {
+            guard matches(safeNonce, nonce) else { throw HelperFailure.invalidRequest }
+            payload["nonce"] = nonce
+        }
+    } else {
+        throw HelperFailure.invalidRequest
+    }
+    return ValidatedDPoPProof(keyRef: keyRef, payload: payload)
+}
+
+private func dpopProof(_ data: Data) throws -> [String: Any] {
+    let keys: Set<String> = [
+        "ath", "client_id", "enrollment_generation", "enrollment_id", "htm", "htu",
+        "iat", "jti", "key_ref", "nonce", "purpose", "schema", "sub",
+    ]
+    let object = try exactDictionary(data, keys: keys)
+    let keyRef = try validatedDPoPKeyRef(object["key_ref"])
+    let metadata = try dpopMetadata(keyRef)
+    let validated = try validateDPoPProofPolicy(
+        data, metadata: metadata, now: Int64(Date().timeIntervalSince1970)
+    )
+    let key = try dpopPrivateKey(keyRef: validated.keyRef, create: false)
+    let publicJWK = try dpopPublicJWK(key)
+    let header: [String: Any] = ["alg": "ES256", "jwk": publicJWK, "typ": "dpop+jwt"]
+    let headerBytes = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+    let payloadBytes = try JSONSerialization.data(withJSONObject: validated.payload, options: [.sortedKeys])
+    let signingInput = "\(base64URL(headerBytes)).\(base64URL(payloadBytes))"
+    var error: Unmanaged<CFError>?
+    guard let der = SecKeyCreateSignature(
+        key, .ecdsaSignatureMessageX962SHA256, Data(signingInput.utf8) as CFData, &error
+    ) as Data? else { throw HelperFailure.signingFailed }
+    let proof = "\(signingInput).\(base64URL(try p1363Signature(der)))"
+    return ["key_ref": validated.keyRef, "proof": proof, "schema": "pulse.dpop.proof_result.v1"]
+}
+
 @MainActor
 private func reviewExactBytes(title: String, summary: String, data: Data) throws {
     let alert = NSAlert()
@@ -136,7 +581,6 @@ private func privateKey(reason: String) throws -> SecKey {
         kSecClass as String: kSecClassKey,
         kSecAttrApplicationTag as String: applicationTag,
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrAccessGroup as String: accessGroup,
         kSecReturnRef as String: true,
         kSecUseAuthenticationContext as String: context,
     ]
@@ -161,7 +605,6 @@ private func privateKey(reason: String) throws -> SecKey {
         kSecPrivateKeyAttrs as String: [
             kSecAttrIsPermanent as String: true,
             kSecAttrApplicationTag as String: applicationTag,
-            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccessControl as String: control,
         ],
     ]
@@ -218,6 +661,23 @@ private func emitResult(signature: Data, publicKey: SecKey) throws {
 private func run() async throws {
     guard CommandLine.arguments.count >= 2 else { throw HelperFailure.invalidRequest }
     let command = CommandLine.arguments[1]
+    if command == "contract" {
+        try emitJSON([
+            "capabilities": helperCapabilities,
+            "schema": "pulse.presence_helper.contract.v1",
+            "version": helperContractVersion,
+        ])
+        return
+    }
+    if command == "self-test" {
+        try runPureSelfTest()
+        try emitJSON([
+            "schema": "pulse.presence_helper.self_test.v1",
+            "status": "pass",
+            "vectors": 13,
+        ])
+        return
+    }
     if command == "public-key" {
         let key = try privateKey(reason: "Install the Pulse user-presence trust key")
         guard let publicKey = SecKeyCopyPublicKey(key) else { throw HelperFailure.keyUnavailable }
@@ -226,6 +686,39 @@ private func run() async throws {
     }
 
     let data = try readPayload()
+    if command == "dpop-create" || command == "dpop-public" || command == "dpop-delete" {
+        let expectedSchema = command == "dpop-create"
+            ? "pulse.dpop.create.v2"
+            : command == "dpop-public" ? "pulse.dpop.key_ref.v1" : "pulse.dpop.delete.v1"
+        let expectedKeys: Set<String> = command == "dpop-create"
+            ? ["client_id", "key_ref", "resource", "schema", "subject", "token_endpoint"]
+            : ["key_ref", "schema"]
+        let object = try exactDictionary(data, keys: expectedKeys)
+        guard object["schema"] as? String == expectedSchema else { throw HelperFailure.invalidRequest }
+        let keyRef = try validatedDPoPKeyRef(object["key_ref"])
+        if command == "dpop-delete" {
+            try deleteDPoPKey(keyRef)
+            try emitJSON(["key_ref": keyRef, "schema": "pulse.dpop.deleted.v1"])
+        } else {
+            let key = try dpopPrivateKey(keyRef: keyRef, create: command == "dpop-create")
+            if command == "dpop-create" {
+                let metadata: [String: Any] = [
+                    "client_id": try validatedIdentity(object["client_id"]),
+                    "resource": try validatedHTTPSURL(object["resource"], requireMCP: true),
+                    "schema": "pulse.dpop.metadata.v1",
+                    "subject": try validatedIdentity(object["subject"]),
+                    "token_endpoint": try validatedHTTPSURL(object["token_endpoint"], requireMCP: false),
+                ]
+                try storeDPoPMetadata(keyRef, metadata)
+            }
+            try emitJSON(dpopPublicResult(keyRef: keyRef, privateKey: key))
+        }
+        return
+    }
+    if command == "dpop-proof" {
+        try emitJSON(dpopProof(data))
+        return
+    }
     let digest = digestHex(data)
     switch command {
     case "prove":

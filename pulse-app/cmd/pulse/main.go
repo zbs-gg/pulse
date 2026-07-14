@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -43,18 +44,24 @@ const (
 	defaultModel = "claude-opus-4-6"
 	defaultAlias = "anthropic/opus"
 
-	teamWriterLeaseTTL        = 60 * time.Second
-	teamWriterRenewalInterval = 20 * time.Second
-	teamHandlerQuiesceTimeout = 5 * time.Second
-	teamDeletionLeaseTTL      = 30 * time.Second
-	teamDeletionPollInterval  = time.Second
-	teamDeletionBaseBackoff   = time.Second
-	teamDeletionMaxBackoff    = 5 * time.Minute
+	teamWriterLeaseTTL              = 60 * time.Second
+	teamWriterRenewalInterval       = 20 * time.Second
+	teamHandlerQuiesceTimeout       = 5 * time.Second
+	teamBackgroundPeerJoinTimeout   = 250 * time.Millisecond
+	teamDeletionLeaseTTL            = 30 * time.Second
+	teamDeletionPollInterval        = time.Second
+	teamDeletionBaseBackoff         = time.Second
+	teamDeletionMaxBackoff          = 5 * time.Minute
+	teamProjectionLeaseTTL          = 30 * time.Second
+	teamProjectionPollInterval      = time.Second
+	teamProjectionHeartbeatInterval = 10 * time.Second
+	teamProjectionBaseBackoff       = time.Second
+	teamProjectionMaxBackoff        = 5 * time.Minute
 )
 
 var (
-	errTeamWriterLeaseChanged        = errors.New("team writer lease changed during renewal")
-	errTeamDeletionWorkerStopTimeout = errors.New("team deletion worker did not stop before timeout")
+	errTeamWriterLeaseChanged          = errors.New("team writer lease changed during renewal")
+	errTeamBackgroundWorkerStopTimeout = errors.New("team background workers did not stop before timeout")
 )
 
 func main() {
@@ -422,17 +429,30 @@ func runTeam(dataDir, addr string) error {
 	if err != nil {
 		return err
 	}
+	publicationAirlock, err := newSyntheticTeamPublicationAirlock(
+		s, cfg, lease, ownerStepUpVerifier,
+	)
+	if err != nil {
+		return err
+	}
+	teamEmbedder, _, err := teamEmbedderFromEnv()
+	if err != nil {
+		return fmt.Errorf("team embedding dependency: %w", err)
+	}
+	if closer, ok := teamEmbedder.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				slog.Warn("team embedding dependency close failed")
+			}
+		}()
+	}
 
 	teamServer, err := server.NewTeam(server.TeamServerConfig{
 		IPCSecret:         cfg.IPCSecret,
 		Store:             s,
 		PrincipalVerifier: verifier,
-		// Team retrieval is a separate no-cache engine. The foundation starts
-		// lexical-only so team mode never discovers or reuses a personal Cohere
-		// key from ~/.pulse; deployments may inject an explicit team embedder in
-		// a later activation unit without touching the local retrieval stack.
 		ReadService: teamread.New(
-			s, retrieve.NewTeamRetrievalEngine(retrieve.TeamRetrievalConfig{}),
+			s, retrieve.NewTeamRetrievalEngine(retrieve.TeamRetrievalConfig{Embedder: teamEmbedder}),
 		),
 		ExpectedStoreID: cfg.ExpectedTeamStoreID,
 		ExpectedTeamID:  cfg.ExpectedTeamID,
@@ -453,6 +473,28 @@ func runTeam(dataDir, addr string) error {
 	if err != nil {
 		return err
 	}
+	embeddingProcessor, err := newTeamEmbeddingProjectionProcessor(s, teamEmbedder)
+	if err != nil {
+		return err
+	}
+	projectionProcessor, err := teamjobs.NewStoreProjectionProcessor(s, embeddingProcessor)
+	if err != nil {
+		return err
+	}
+	projectionWorker, err := teamjobs.NewProjectionWorker(teamjobs.ProjectionWorkerConfig{
+		Store: s, Processor: projectionProcessor,
+		Writer: store.TeamWriterLeaseIdentity{
+			WriterID: lease.WriterID, Token: lease.Token,
+		},
+		ProjectionKind: "", ClaimLimit: 1, LeaseTTL: teamProjectionLeaseTTL,
+		PollInterval:      teamProjectionPollInterval,
+		HeartbeatInterval: teamProjectionHeartbeatInterval,
+		WorkerInstanceID:  lease.WriterID + "-projection",
+		BaseBackoff:       teamProjectionBaseBackoff, MaxBackoff: teamProjectionMaxBackoff,
+	})
+	if err != nil {
+		return err
+	}
 	listener, err := listenTeamDaemon(addr)
 	if err != nil {
 		return fmt.Errorf("team-remote listen: %w", err)
@@ -461,7 +503,7 @@ func runTeam(dataDir, addr string) error {
 
 	httpSrv := &http.Server{
 		Addr:              listener.Addr().String(),
-		Handler:           composeTeamRuntimeHandler(teamServer.Handler(), ownerAdminServer.Handler()),
+		Handler:           composeTeamRuntimeHandler(teamServer.Handler(), ownerAdminServer.Handler(), publicationAirlock),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -474,14 +516,29 @@ func runTeam(dataDir, addr string) error {
 	defer signal.Stop(sigCh)
 	slog.Info("pulse team daemon listening", "addr", listener.Addr().String())
 	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
-		Signals:           sigCh,
-		RenewLease:        func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
-		RunDeletionWorker: deletionWorker.Run,
-		ShutdownTimeout:   10 * time.Second,
-		QuiesceTimeout:    teamHandlerQuiesceTimeout,
+		Signals:    sigCh,
+		RenewLease: func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
+		RunBackgroundWorkers: func(ctx context.Context) error {
+			return runTeamBackgroundWorkers(ctx, teamBackgroundPeerJoinTimeout,
+				teamRuntimeWorker{Name: "deletion", Run: deletionWorker.Run},
+				teamRuntimeWorker{Name: "projection", Run: projectionWorker.Run},
+			)
+		},
+		ShutdownTimeout: 10 * time.Second,
+		QuiesceTimeout:  teamHandlerQuiesceTimeout,
 	})
 	releaseLease = runtimeResult.ReleaseLease
 	return runtimeResult.Err
+}
+
+func newTeamEmbeddingProjectionProcessor(
+	projectionStore teamjobs.TeamEmbeddingProjectionStore,
+	embedder retrieve.Embedder,
+) (*teamjobs.TeamEmbeddingProjectionProcessor, error) {
+	if embedder == nil {
+		return nil, nil
+	}
+	return teamjobs.NewTeamEmbeddingProjectionProcessor(projectionStore, embedder)
 }
 
 func runTeamOwnerAdmin(cfg *config.Config, addr string) error {
@@ -580,11 +637,79 @@ func runTeamOwnerAdmin(cfg *config.Config, addr string) error {
 	return runtimeResult.Err
 }
 
-func composeTeamRuntimeHandler(teamHandler, ownerHandler http.Handler) http.Handler {
+func composeTeamRuntimeHandler(teamHandler, ownerHandler http.Handler, airlock ...http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/team/v1/owner/", ownerHandler)
+	if len(airlock) == 1 && airlock[0] != nil {
+		mux.Handle(server.TeamPublicationAirlockRoutePath, airlock[0])
+	}
 	mux.Handle("/", teamHandler)
 	return mux
+}
+
+func newSyntheticTeamPublicationAirlock(
+	teamStore *store.Store,
+	cfg *config.Config,
+	lease store.TeamWriterLease,
+	stepUpVerifier *server.OwnerStepUpVerifier,
+) (http.Handler, error) {
+	deploymentID := os.Getenv("PULSE_TEAM_PUBLICATION_DEPLOYMENT_ID")
+	projectID := os.Getenv("PULSE_TEAM_SHARED_PROJECT_ID")
+	origin := os.Getenv("PULSE_TEAM_AIRLOCK_ORIGIN")
+	candidatePath := os.Getenv("PULSE_TEAM_AIRLOCK_SYNTHETIC_CANDIDATE_FILE")
+	syntheticOnly := os.Getenv("PULSE_TEAM_PUBLICATION_SYNTHETIC_ONLY")
+	values := []string{deploymentID, projectID, origin, candidatePath, syntheticOnly}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+		if strings.TrimSpace(value) != value {
+			return nil, errors.New("team publication Airlock configuration contains surrounding whitespace")
+		}
+	}
+	if configured == 0 {
+		return nil, nil
+	}
+	if configured != len(values) || syntheticOnly != "1" || teamStore == nil || cfg == nil ||
+		stepUpVerifier == nil || cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" {
+		return nil, errors.New("team publication Airlock requires a complete synthetic-only configuration")
+	}
+	if err := teamStore.ConfigureTeamPublicationTarget(store.TeamPublicationTarget{
+		DeploymentID: deploymentID, ProjectID: projectID, SyntheticOnly: true,
+	}); err != nil {
+		return nil, fmt.Errorf("team publication target: %w", err)
+	}
+	canonical, err := readTeamCredentialFile(candidatePath, 64<<10)
+	if err != nil {
+		return nil, errors.New("team publication Airlock candidate is unavailable or unsafe")
+	}
+	candidate, err := server.ParseTeamPublicationAirlockCandidate([]byte(canonical))
+	if err != nil || candidate.StoreID != cfg.ExpectedTeamStoreID || candidate.TeamID != cfg.ExpectedTeamID {
+		return nil, errors.New("team publication Airlock candidate does not match the pinned Team")
+	}
+	owner, err := teamStore.ResolveOwnerStepUpIdentity(context.Background(), *cfg.TeamBootstrapRoot)
+	if err != nil || owner.Bootstrap || owner.StoreID != cfg.ExpectedTeamStoreID ||
+		owner.TeamID != cfg.ExpectedTeamID || owner.OwnerPrincipalID == "" || owner.ClientKey == "" {
+		return nil, errors.New("team publication Airlock Owner identity is unavailable")
+	}
+	airlockServer, err := server.NewTeamPublicationAirlockServer(server.TeamPublicationAirlockServerConfig{
+		Store:                     teamStore,
+		ExpectedOrigin:            origin,
+		Candidate:                 candidate,
+		ApprovingOwnerPrincipalID: owner.OwnerPrincipalID,
+		ApprovingClientKey:        owner.ClientKey,
+		StepUpVerifier:            stepUpVerifier,
+		WriterLeaseProvider: server.TeamPublicationWriterLeaseProviderFunc(
+			func(context.Context) (store.TeamWriterLeaseIdentity, error) {
+				return store.TeamWriterLeaseIdentity{WriterID: lease.WriterID, Token: lease.Token}, nil
+			},
+		),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return airlockServer.Handler(), nil
 }
 
 type teamWriterLeaseRenewer interface {
@@ -616,242 +741,6 @@ func renewTeamWriterLeaseAtInterval(ctx context.Context, renewer teamWriterLease
 				return errTeamWriterLeaseChanged
 			}
 		}
-	}
-}
-
-type teamRuntimeOptions struct {
-	Signals           <-chan os.Signal
-	RenewLease        func(context.Context) error
-	RunDeletionWorker func(context.Context) error
-	ShutdownTimeout   time.Duration
-	QuiesceTimeout    time.Duration
-}
-
-type teamRuntimeResult struct {
-	Err          error
-	ReleaseLease bool
-}
-
-type teamRequestTracker struct {
-	mu        sync.Mutex
-	accepting bool
-	active    int
-	drained   chan struct{}
-}
-
-func newTeamRequestTracker() *teamRequestTracker {
-	return &teamRequestTracker{accepting: true, drained: make(chan struct{})}
-}
-
-func (tracker *teamRequestTracker) wrap(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tracker.mu.Lock()
-		if !tracker.accepting {
-			tracker.mu.Unlock()
-			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		tracker.active++
-		tracker.mu.Unlock()
-		defer func() {
-			tracker.mu.Lock()
-			tracker.active--
-			if !tracker.accepting && tracker.active == 0 {
-				select {
-				case <-tracker.drained:
-				default:
-					close(tracker.drained)
-				}
-			}
-			tracker.mu.Unlock()
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (tracker *teamRequestTracker) stop() {
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	tracker.accepting = false
-	if tracker.active == 0 {
-		select {
-		case <-tracker.drained:
-		default:
-			close(tracker.drained)
-		}
-	}
-}
-
-func (tracker *teamRequestTracker) wait(timeout time.Duration) bool {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-tracker.drained:
-		return true
-	case <-timer.C:
-		return false
-	}
-}
-
-func serveTeamRuntime(httpSrv *http.Server, listener net.Listener, options teamRuntimeOptions) teamRuntimeResult {
-	tracker := newTeamRequestTracker()
-	handler := httpSrv.Handler
-	if handler == nil {
-		handler = http.DefaultServeMux
-	}
-	httpSrv.Handler = tracker.wrap(handler)
-	requestsCtx, cancelRequests := context.WithCancel(context.Background())
-	defer cancelRequests()
-	httpSrv.BaseContext = func(net.Listener) context.Context { return requestsCtx }
-
-	leaseCtx, cancelLease := context.WithCancel(context.Background())
-	leaseResult := make(chan error, 1)
-	go func() { leaseResult <- options.RenewLease(leaseCtx) }()
-	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	runDeletionWorker := options.RunDeletionWorker
-	if runDeletionWorker == nil {
-		runDeletionWorker = func(ctx context.Context) error {
-			<-ctx.Done()
-			return nil
-		}
-	}
-	workerResult := make(chan error, 1)
-	go func() { workerResult <- runDeletionWorker(workerCtx) }()
-	serveResult := make(chan error, 1)
-	go func() {
-		err := httpSrv.Serve(listener)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		serveResult <- err
-	}()
-
-	select {
-	case leaseErr := <-leaseResult:
-		tracker.stop()
-		cancelRequests()
-		_ = httpSrv.Close()
-		<-serveResult
-		_, _ = stopTeamDeletionWorker(workerCtx, cancelWorker, workerResult, options.QuiesceTimeout)
-		cancelLease()
-		tracker.wait(options.QuiesceTimeout)
-		if leaseErr == nil {
-			leaseErr = errors.New("team writer lease renewal stopped")
-		}
-		return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
-	case workerErr := <-workerResult:
-		tracker.stop()
-		cancelRequests()
-		_ = httpSrv.Close()
-		<-serveResult
-		cancelWorker()
-		cancelLease()
-		_ = normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
-		tracker.wait(options.QuiesceTimeout)
-		if workerErr == nil {
-			workerErr = errors.New("team deletion worker stopped")
-		}
-		return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
-	case serveErr := <-serveResult:
-		tracker.stop()
-		cancelRequests()
-		_ = httpSrv.Close()
-		workerErr, _ := stopTeamDeletionWorker(
-			workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
-		)
-		cancelLease()
-		leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
-		quiesced := tracker.wait(options.QuiesceTimeout)
-		if workerErr != nil {
-			return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
-		}
-		if leaseErr != nil {
-			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
-		}
-		return teamRuntimeResult{Err: serveErr, ReleaseLease: quiesced}
-	case <-options.Signals:
-		tracker.stop()
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), options.ShutdownTimeout)
-		shutdownResult := make(chan error, 1)
-		go func() { shutdownResult <- httpSrv.Shutdown(shutdownCtx) }()
-		select {
-		case leaseErr := <-leaseResult:
-			cancelRequests()
-			_ = httpSrv.Close()
-			<-shutdownResult
-			cancelShutdown()
-			<-serveResult
-			_, _ = stopTeamDeletionWorker(
-				workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
-			)
-			cancelLease()
-			tracker.wait(options.QuiesceTimeout)
-			if leaseErr == nil {
-				leaseErr = errors.New("team writer lease renewal stopped")
-			}
-			return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
-		case workerErr := <-workerResult:
-			cancelRequests()
-			_ = httpSrv.Close()
-			<-shutdownResult
-			cancelShutdown()
-			<-serveResult
-			cancelWorker()
-			cancelLease()
-			_ = normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
-			tracker.wait(options.QuiesceTimeout)
-			if workerErr == nil {
-				workerErr = errors.New("team deletion worker stopped")
-			}
-			return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
-		case shutdownErr := <-shutdownResult:
-			cancelShutdown()
-			if shutdownErr != nil {
-				cancelRequests()
-				_ = httpSrv.Close()
-			}
-			<-serveResult
-			workerErr, _ := stopTeamDeletionWorker(
-				workerCtx, cancelWorker, workerResult, options.QuiesceTimeout,
-			)
-			cancelLease()
-			leaseErr := normalizeStoppedLeaseError(leaseCtx, <-leaseResult)
-			quiesced := tracker.wait(options.QuiesceTimeout)
-			if workerErr != nil {
-				return teamRuntimeResult{Err: fmt.Errorf("team deletion worker: %w", workerErr)}
-			}
-			if leaseErr != nil {
-				return teamRuntimeResult{Err: fmt.Errorf("team writer lease renewal: %w", leaseErr)}
-			}
-			return teamRuntimeResult{Err: shutdownErr, ReleaseLease: quiesced}
-		}
-	}
-}
-
-func normalizeStoppedLeaseError(ctx context.Context, err error) error {
-	if err == nil || (ctx.Err() != nil && errors.Is(err, context.Canceled)) {
-		return nil
-	}
-	return err
-}
-
-func stopTeamDeletionWorker(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	result <-chan error,
-	timeout time.Duration,
-) (error, bool) {
-	cancel()
-	if timeout <= 0 {
-		return errTeamDeletionWorkerStopTimeout, false
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case err := <-result:
-		return normalizeStoppedLeaseError(ctx, err), true
-	case <-timer.C:
-		return errTeamDeletionWorkerStopTimeout, false
 	}
 }
 
@@ -971,6 +860,106 @@ func embedderFromEnv() (retrieve.Embedder, string, error) {
 	}
 
 	return nil, "", nil
+}
+
+// teamEmbedderFromEnv deliberately ignores the Personal/Local Preview
+// COHERE_API_KEY and ~/.pulse/cohere-key.txt discovery paths. A Commons
+// deployment must receive a separately provisioned credential file or a
+// separately named local helper configuration; otherwise Team readiness stays
+// degraded instead of silently sending shared content through a personal
+// dependency.
+func teamEmbedderFromEnv() (retrieve.Embedder, string, error) {
+	keyPath := os.Getenv("PULSE_TEAM_COHERE_KEY_FILE")
+	if strings.TrimSpace(keyPath) != keyPath {
+		return nil, "", errors.New("PULSE_TEAM_COHERE_KEY_FILE must not contain surrounding whitespace")
+	}
+	if keyPath != "" {
+		key, err := readTeamCredentialFile(keyPath, 4096)
+		if err != nil {
+			return nil, "", errors.New("team Cohere credential file is unavailable or unsafe")
+		}
+		key = strings.TrimSpace(key)
+		if key == "" || strings.ContainsAny(key, "\r\n\x00") {
+			return nil, "", errors.New("team Cohere credential file is invalid")
+		}
+		client := embed.NewCohere(key, "", "")
+		return client, client.Model(), nil
+	}
+
+	pythonExe := os.Getenv("PULSE_TEAM_LOCAL_EMBED_PYTHON")
+	helperPath := os.Getenv("PULSE_TEAM_LOCAL_EMBED_HELPER")
+	modelPath := os.Getenv("PULSE_TEAM_LOCAL_EMBED_MODEL")
+	configured := 0
+	for _, value := range []string{pythonExe, helperPath, modelPath} {
+		if value != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil, "", nil
+	}
+	if configured != 3 {
+		return nil, "", errors.New("team local embedding dependency must set python, helper, and model together")
+	}
+	if err := validateTeamEmbeddingFile(pythonExe, true); err != nil {
+		return nil, "", errors.New("team local embedding python is unavailable or unsafe")
+	}
+	if err := validateTeamEmbeddingFile(helperPath, false); err != nil {
+		return nil, "", errors.New("team local embedding helper is unavailable or unsafe")
+	}
+	if strings.TrimSpace(modelPath) != modelPath || !filepath.IsAbs(modelPath) {
+		return nil, "", errors.New("team local embedding model path is invalid")
+	}
+	modelInfo, err := os.Stat(modelPath)
+	if err != nil || (!modelInfo.Mode().IsRegular() && !modelInfo.IsDir()) {
+		return nil, "", errors.New("team local embedding model is unavailable")
+	}
+	client := embed.NewLocal(pythonExe, helperPath, modelPath, "bge-m3-mlx-fp16")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		return nil, "", errors.New("team local embedding dependency failed to start")
+	}
+	return client, client.Model(), nil
+}
+
+func validateTeamEmbeddingFile(path string, executable bool) error {
+	if strings.TrimSpace(path) != path || !filepath.IsAbs(path) {
+		return errors.New("invalid path")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	if executable && info.Mode().Perm()&0111 == 0 {
+		return errors.New("not executable")
+	}
+	return nil
+}
+
+func readTeamCredentialFile(path string, maximum int64) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
+		return "", errors.New("invalid team credential path")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return "", errors.New("unsafe team credential file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || (stat.Uid != uint32(os.Geteuid()) && stat.Uid != 0) {
+		return "", errors.New("team credential file has an unexpected owner")
+	}
+	value, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(value)) > maximum {
+		return "", errors.New("team credential file is too large")
+	}
+	return string(value), nil
 }
 
 func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {

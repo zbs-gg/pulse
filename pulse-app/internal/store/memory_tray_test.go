@@ -114,7 +114,7 @@ func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	}
 }
 
-func TestMigration041UpgradesExistingVersion40DeskBeforeRaisingFloor(t *testing.T) {
+func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk-v40.db")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)")
 	if err != nil {
@@ -190,7 +190,7 @@ func TestMigration041UpgradesExistingVersion40DeskBeforeRaisingFloor(t *testing.
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 41 || writer != 41 {
+	if reader != 42 || writer != 42 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }

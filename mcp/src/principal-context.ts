@@ -16,7 +16,7 @@ import {
 
 import { SignJWT } from 'jose';
 
-import { OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
+import { OAuthResourceError, OAuthResourceVerifier, type VerifiedOAuthIdentity } from './oauth-resource.js';
 import {
   canonicalTeamAuditBody,
   canonicalTeamDeleteBody,
@@ -28,7 +28,6 @@ import {
   canonicalTeamRememberBody,
   canonicalTeamResumeBody,
   canonicalTeamStatusBody,
-  requiredTeamCapabilities,
   TEAM_CAPABILITIES,
   TeamDomainError,
   validateTeamAuditResult,
@@ -114,10 +113,8 @@ export interface PrincipalCheckBodyInput {
   capabilities: readonly TeamCapability[];
 }
 
-export interface OwnerStepUpSignInput {
+interface OwnerStepUpSignCommon {
   requestId: string;
-  path: '/team/v1/owner/approval';
-  action: 'team.bootstrap' | 'team.activation.synthetic';
   body: Uint8Array;
   storeId: string;
   teamId: string;
@@ -126,6 +123,17 @@ export interface OwnerStepUpSignInput {
   oauthClientId: string;
   authTime: number;
 }
+
+export type OwnerStepUpSignInput = OwnerStepUpSignCommon & (
+  | {
+      path: '/team/v1/owner/approval';
+      action: 'team.bootstrap' | 'team.activation.synthetic';
+    }
+  | {
+      path: '/airlock/team-publication';
+      action: 'team.commons.publish';
+    }
+);
 
 export interface PrincipalVerificationKeyring {
   active: { kid: string; public_key: string };
@@ -312,17 +320,17 @@ export class TeamRequestSecurity {
   }
 
   async resolveAfterBody(input: {
-    authorization: string | string[] | undefined;
     baseline: VerifiedOAuthIdentity;
-    body: unknown;
+    requiredCapabilities: readonly TeamCapability[];
     requestId: string;
   }): Promise<Readonly<TeamPrincipalContext>> {
-    const required = requiredTeamCapabilities(input.body);
-    const verified = await this.verifier.verifyAuthorization(input.authorization, required);
-    if (!sameOAuthIdentity(input.baseline, verified)) {
-      throw new PrincipalCheckError('invalid_principal');
+    const required = [...new Set(input.requiredCapabilities)].sort();
+    if (required.some((capability) => !TEAM_CAPABILITIES.includes(capability))) {
+      throw new OAuthResourceError('insufficient_scope', []);
     }
-    return this.principalClient.check(verified, input.requestId);
+    const missing = required.filter((capability) => !input.baseline.capabilities.includes(capability));
+    if (missing.length > 0) throw new OAuthResourceError('insufficient_scope', missing);
+    return this.principalClient.check(input.baseline, input.requestId);
   }
 
   resolveBaseline(
@@ -865,9 +873,14 @@ export class PrincipalSigner {
 
   async signOwnerStepUp(input: OwnerStepUpSignInput): Promise<string> {
     const now = this.now();
+    const exactActionPath = (
+      input.path === '/team/v1/owner/approval' &&
+      ['team.bootstrap', 'team.activation.synthetic'].includes(input.action)
+    ) || (
+      input.path === '/airlock/team-publication' && input.action === 'team.commons.publish'
+    );
     if (
-      input.path !== '/team/v1/owner/approval' ||
-      !['team.bootstrap', 'team.activation.synthetic'].includes(input.action) ||
+      !exactActionPath ||
       !Number.isInteger(input.authTime) || input.authTime <= 0 || input.authTime > now ||
       now - input.authTime > 300
     ) {
@@ -1247,10 +1260,4 @@ function deepFreeze<T>(value: T): Readonly<T> {
     Object.freeze(value);
   }
   return value;
-}
-
-function sameOAuthIdentity(left: VerifiedOAuthIdentity, right: VerifiedOAuthIdentity): boolean {
-  return left.issuer === right.issuer && left.subject === right.subject &&
-    left.clientId === right.clientId && left.authTime === right.authTime &&
-    JSON.stringify(left.capabilities) === JSON.stringify(right.capabilities);
 }

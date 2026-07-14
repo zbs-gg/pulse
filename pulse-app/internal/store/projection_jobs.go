@@ -18,6 +18,7 @@ import (
 var (
 	ErrInvalidProjectionJobRequest     = errors.New("invalid projection job request")
 	ErrProjectionMaterializationFailed = errors.New("projection materialization failed")
+	ErrTeamProjectionQueueLagging      = errors.New("team projection queue is not ready")
 )
 
 const (
@@ -66,6 +67,19 @@ type TeamProjectionJobClaim struct {
 	ProjectionKind string
 	AttemptCount   int
 	LeaseToken     string
+	LeaseExpiresAt time.Time
+}
+
+type TeamProjectionLeaseRenewalRequest struct {
+	WriterID    string
+	WriterToken string
+	JobID       string
+	LeaseToken  string
+	LeaseTTL    time.Duration
+}
+
+type TeamProjectionLeaseRenewalResult struct {
+	JobID          string
 	LeaseExpiresAt time.Time
 }
 
@@ -331,6 +345,79 @@ func (s *Store) ClaimTeamProjectionJobs(ctx context.Context, request TeamProject
 		return nil, err
 	}
 	return claims, nil
+}
+
+// RenewTeamProjectionJobLease extends only the exact, still-active claim.
+// Once a lease expires or another worker reclaims it, the old token remains
+// fenced and cannot renew or complete the job.
+func (s *Store) RenewTeamProjectionJobLease(
+	ctx context.Context,
+	request TeamProjectionLeaseRenewalRequest,
+) (TeamProjectionLeaseRenewalResult, error) {
+	if !validProjectionLeaseRenewalRequest(request) {
+		return TeamProjectionLeaseRenewalResult{}, ErrInvalidProjectionJobRequest
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	defer tx.Rollback()
+	if err := s.RecheckTeamWriterLeaseTx(ctx, tx, request.WriterID, request.WriterToken); err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	info, err := readTeamStoreInfo(ctx, tx)
+	if err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	if _, err := readTeamPolicyState(ctx, tx); err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	now := s.clock().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	requestedExpiry := now.Add(request.LeaseTTL).Format(time.RFC3339Nano)
+	var jobID, expiryText string
+	err = tx.QueryRowContext(ctx, `
+		UPDATE team_projection_jobs
+		   SET lease_expires_at = CASE
+		           WHEN julianday(lease_expires_at) > julianday(?) THEN lease_expires_at
+		           ELSE ?
+		       END,
+		       updated_at = ?
+		 WHERE job_id = ? AND store_id = ? AND team_id = ?
+		   AND state = 'leased' AND lease_token_hash = ?
+		   AND julianday(lease_expires_at) > julianday(?)
+		   AND EXISTS (
+		       SELECT 1 FROM team_object_registry root
+		        WHERE root.object_id = team_projection_jobs.root_object_id
+		          AND root.store_id = team_projection_jobs.store_id
+		          AND root.team_id = team_projection_jobs.team_id
+		          AND root.scope_type = team_projection_jobs.scope_type
+		          AND root.scope_id = team_projection_jobs.scope_id
+		          AND root.generation = team_projection_jobs.root_generation
+		          AND root.lifecycle = 'active'
+		          AND (root.expires_at IS NULL OR julianday(root.expires_at) > julianday(?))
+		   )
+		 RETURNING job_id, lease_expires_at`,
+		requestedExpiry, requestedExpiry, nowText,
+		request.JobID, info.StoreID, info.TeamID, projectionLeaseTokenHash(request.LeaseToken),
+		nowText, nowText).Scan(&jobID, &expiryText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TeamProjectionLeaseRenewalResult{}, ErrConcealedNotFound
+	}
+	if err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	expires, err := time.Parse(time.RFC3339Nano, expiryText)
+	if err != nil {
+		return TeamProjectionLeaseRenewalResult{}, ErrConcealedNotFound
+	}
+	if err := s.RecheckTeamWriterLeaseTx(ctx, tx, request.WriterID, request.WriterToken); err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TeamProjectionLeaseRenewalResult{}, err
+	}
+	return TeamProjectionLeaseRenewalResult{JobID: jobID, LeaseExpiresAt: expires}, nil
 }
 
 func (s *Store) FailTeamProjectionJob(ctx context.Context, request TeamProjectionFailureRequest) error {
@@ -919,6 +1006,12 @@ func validProjectionClaimRequest(request TeamProjectionClaimRequest) bool {
 		request.Limit <= maxProjectionClaimBatch && request.LeaseTTL > 0 &&
 		request.LeaseTTL <= maxProjectionLeaseTTL &&
 		(request.ProjectionKind == "" || validProjectionOpaque(request.ProjectionKind, 64))
+}
+
+func validProjectionLeaseRenewalRequest(request TeamProjectionLeaseRenewalRequest) bool {
+	return request.WriterID != "" && request.WriterToken != "" &&
+		validProjectionOpaque(request.JobID, 255) && request.LeaseToken != "" &&
+		request.LeaseTTL > 0 && request.LeaseTTL <= maxProjectionLeaseTTL
 }
 
 func validProjectionFailureRequest(request TeamProjectionFailureRequest) bool {

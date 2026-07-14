@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const REGISTRY_SCHEMA = 'pulse.workspace-binding-registry.v1';
+const ANCHOR_SCHEMA = 'pulse.workspace-binding-anchor.v1';
 
 export class BindingError extends Error {
   constructor(code, message) {
@@ -110,7 +111,54 @@ export function defaultBindingPaths(home = homedir()) {
   return {
     registryPath: join(home, '.pulse', 'supervisor', 'workspace-bindings.json'),
     publicKeyPath: '/Library/Application Support/Pulse/trust/workspace-bindings.pub.pem',
+    anchorPath: '/Library/Application Support/Pulse/trust/workspace-bindings.anchor.json',
   };
+}
+
+export function bindingRegistryAnchor(registryBytes, epoch) {
+  if (!Buffer.isBuffer(registryBytes) || registryBytes.length < 1 ||
+      !Number.isSafeInteger(epoch) || epoch < 1) {
+    throw new BindingError('binding_anchor_invalid', 'binding registry anchor input is invalid');
+  }
+  return {
+    schema: ANCHOR_SCHEMA,
+    epoch,
+    registry_sha256: createHash('sha256').update(registryBytes).digest('hex'),
+  };
+}
+
+export function verifyBindingRegistryAnchor({
+  registryPath,
+  anchorPath,
+  registryEpoch,
+  rootAnchor = false,
+}) {
+  const safeRegistryPath = requireOwnerIntegrityFile(registryPath, 'binding_registry_unsafe');
+  const safeAnchorPath = requireOwnerIntegrityFile(anchorPath, 'binding_anchor_unsafe', { rootOnly: rootAnchor });
+  const registryBytes = readFileSync(safeRegistryPath);
+  const anchorBytes = readFileSync(safeAnchorPath);
+  let anchor;
+  try {
+    anchor = JSON.parse(anchorBytes);
+  } catch {
+    throw new BindingError('binding_anchor_invalid', 'binding registry anchor is not valid JSON');
+  }
+  const expectedKeys = ['epoch', 'registry_sha256', 'schema'];
+  if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor) ||
+      Object.keys(anchor).sort().join('\0') !== expectedKeys.join('\0') ||
+      anchor.schema !== ANCHOR_SCHEMA || !Number.isSafeInteger(anchor.epoch) || anchor.epoch < 1 ||
+      !/^[a-f0-9]{64}$/.test(anchor.registry_sha256 ?? '')) {
+    throw new BindingError('binding_anchor_invalid', 'binding registry anchor has an unsupported schema');
+  }
+  const canonicalBytes = Buffer.from(`${canonicalJSONStringify(anchor)}\n`);
+  if (!anchorBytes.equals(canonicalBytes)) {
+    throw new BindingError('binding_anchor_invalid', 'binding registry anchor is not canonical');
+  }
+  const expected = bindingRegistryAnchor(registryBytes, registryEpoch);
+  if (anchor.epoch !== registryEpoch || anchor.registry_sha256 !== expected.registry_sha256) {
+    throw new BindingError('binding_anchor_mismatch', 'binding registry does not match its root-owned anti-rollback anchor');
+  }
+  return anchor;
 }
 
 export function verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey = false }) {
@@ -168,17 +216,25 @@ function requireLocalEndpoint(value) {
 
 function requireRemoteEndpoint(value) {
   const url = new URL(requireString(value, 'Commons resource'));
-  if (url.protocol !== 'https:' || ['127.0.0.1', '[::1]', '::1', 'localhost'].includes(url.hostname) || url.username || url.password) {
-    throw new BindingError('binding_topology_invalid', 'Commons resource must be a dedicated HTTPS deployment');
+  if (url.protocol !== 'https:' || ['127.0.0.1', '[::1]', '::1', 'localhost'].includes(url.hostname) ||
+      url.username || url.password || url.pathname !== '/mcp' || url.search || url.hash) {
+    throw new BindingError('binding_topology_invalid', 'Commons resource must be an exact dedicated HTTPS /mcp endpoint');
   }
+}
+
+function requireProjectID(value) {
+  if (typeof value !== 'string' || !/^project_[a-z0-9][a-z0-9_]{0,119}$/.test(value)) {
+    throw new BindingError('binding_topology_invalid', 'Commons project_id must be an exact project_ identifier');
+  }
+  return value;
 }
 
 function validateBinding(binding, registryEpoch) {
   requireString(binding.binding_id, 'binding_id');
   requireString(binding.receipt_id, 'receipt_id');
   requireString(binding.principal_ref, 'principal_ref');
-  if (!Number.isSafeInteger(binding.resolver_epoch) || binding.resolver_epoch < 1 || binding.resolver_epoch !== registryEpoch) {
-    throw new BindingError('binding_topology_invalid', 'binding resolver epoch does not match the registry');
+  if (!Number.isSafeInteger(binding.resolver_epoch) || binding.resolver_epoch < 1 || binding.resolver_epoch > registryEpoch) {
+    throw new BindingError('binding_topology_invalid', 'binding resolver epoch is outside the registry history');
   }
   if (!binding.workspace || typeof binding.workspace !== 'object') {
     throw new BindingError('binding_topology_invalid', 'binding workspace identity is missing');
@@ -201,6 +257,7 @@ function validateBinding(binding, registryEpoch) {
     }
     for (const name of ['store_id', 'data_dir', 'credential_ref', 'cache_dir']) requireString(binding.desk[name], `desk ${name}`);
     for (const name of ['store_id', 'team_id', 'credential_ref', 'cache_partition']) requireString(binding.commons[name], `commons ${name}`);
+    requireProjectID(binding.commons.project_id);
     requireLocalEndpoint(binding.desk.base_url);
     requireRemoteEndpoint(binding.commons.resource);
     if (binding.desk.store_id === binding.commons.store_id || binding.desk.credential_ref === binding.commons.credential_ref ||
@@ -213,18 +270,32 @@ function validateBinding(binding, registryEpoch) {
   return binding;
 }
 
-export function resolveWorkspaceBinding({ cwd = process.cwd(), registryPath, publicKeyPath } = {}) {
+export function resolveWorkspaceBinding({
+  cwd = process.cwd(),
+  registryPath,
+  publicKeyPath,
+  anchorPath,
+  rootAnchor = anchorPath === undefined,
+} = {}) {
   const workspace = canonicalizeWorkspace(cwd);
   const defaults = defaultBindingPaths();
   const selectedRegistry = realpathSync(resolve(registryPath ?? defaults.registryPath));
   const selectedPublicKey = realpathSync(resolve(publicKeyPath ?? defaults.publicKeyPath));
-  if (pathInside(selectedRegistry, workspace.canonical_path) || pathInside(selectedPublicKey, workspace.canonical_path)) {
-    throw new BindingError('binding_registry_in_workspace', 'binding registry and trust key must live outside the workspace');
+  const selectedAnchor = realpathSync(resolve(anchorPath ?? defaults.anchorPath));
+  if (pathInside(selectedRegistry, workspace.canonical_path) || pathInside(selectedPublicKey, workspace.canonical_path) ||
+      pathInside(selectedAnchor, workspace.canonical_path)) {
+    throw new BindingError('binding_registry_in_workspace', 'binding registry, trust key, and anti-rollback anchor must live outside the workspace');
   }
   const registry = verifyBindingRegistry({
     registryPath: selectedRegistry,
     publicKeyPath: selectedPublicKey,
     rootPublicKey: publicKeyPath === undefined,
+  });
+  verifyBindingRegistryAnchor({
+    registryPath: selectedRegistry,
+    anchorPath: selectedAnchor,
+    registryEpoch: registry.epoch,
+    rootAnchor,
   });
   const matches = registry.bindings.filter((item) => item?.workspace?.workspace_id === workspace.workspace_id);
   if (matches.length === 0) {

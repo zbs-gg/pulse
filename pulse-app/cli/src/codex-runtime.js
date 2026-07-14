@@ -21,6 +21,7 @@ import {
 	vaultRuntimeFromBinding,
 } from './local-supervisor.js';
 import { captureEnabledForHost } from './capture-state.js';
+import { callTeamRemoteTool, isReadOnlyTeamTool } from './team-remote-client.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
@@ -169,17 +170,71 @@ export function resolveCodexRuntime(input = {}) {
 export function resolveProductWorkspaceBinding({ cwd = process.cwd() } = {}) {
   const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
   const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
-  const custom = registryPath !== undefined || publicKeyPath !== undefined;
+  const anchorPath = process.env.PULSE_BINDING_ANCHOR_PATH;
+  const custom = registryPath !== undefined || publicKeyPath !== undefined || anchorPath !== undefined;
   if (custom && process.env.PULSE_TRUST_MODE !== 'test') {
     throw new Error('caller-controlled Pulse binding authority is forbidden in product mode');
   }
-  if (process.env.PULSE_TRUST_MODE === 'test' && (!registryPath || !publicKeyPath)) {
-    throw new Error('synthetic test authority requires both registry and public key paths');
+  if (process.env.PULSE_TRUST_MODE === 'test' && (!registryPath || !publicKeyPath || !anchorPath)) {
+    throw new Error('synthetic test authority requires registry, public key, and anti-rollback anchor paths');
   }
   return resolveWorkspaceBinding({
     cwd,
-    ...(process.env.PULSE_TRUST_MODE === 'test' ? { registryPath, publicKeyPath } : {}),
+    ...(process.env.PULSE_TRUST_MODE === 'test' ? { registryPath, publicKeyPath, anchorPath } : {}),
   });
+}
+
+function bindTeamActiveContext(binding, input) {
+	if (!input || typeof input !== 'object' || Array.isArray(input)) {
+		throw new Error('product_team_context_invalid');
+	}
+	const supplied = input.active_context ?? {};
+	if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied) ||
+		Object.keys(supplied).some((field) => !['project_id', 'repo_id', 'agent_id', 'session_id'].includes(field))) {
+		throw new Error('product_team_context_invalid');
+	}
+	const fixed = {
+		project_id: binding?.commons?.project_id,
+		repo_id: binding?.workspace?.repository_id,
+		agent_id: binding?.principal_ref,
+	};
+	if (Object.values(fixed).some((value) => typeof value !== 'string' || !STABLE_ID.test(value))) {
+		throw new Error('product_team_binding_invalid');
+	}
+	for (const [field, value] of Object.entries(fixed)) {
+		if (supplied[field] !== undefined && supplied[field] !== value) {
+			throw new Error('product_team_context_mismatch');
+		}
+	}
+	if (supplied.session_id !== undefined &&
+		(typeof supplied.session_id !== 'string' || !STABLE_ID.test(supplied.session_id))) {
+		throw new Error('product_team_context_invalid');
+	}
+	return {
+		...input,
+		active_context: {
+			...fixed,
+			...(supplied.session_id === undefined ? {} : { session_id: supplied.session_id }),
+		},
+	};
+}
+
+export async function callBoundTeamTool(resolved, host, name, input, {
+	resolveBinding = resolveProductWorkspaceBinding,
+	teamRequest = callTeamRemoteTool,
+} = {}) {
+	if (!['codex', 'claude-code'].includes(host) || !isReadOnlyTeamTool(name) ||
+		!resolved?.binding || !/^[a-f0-9]{64}$/.test(resolved.binding.binding_digest ?? '') ||
+		!Number.isSafeInteger(resolved.binding.resolver_epoch) || resolved.binding.resolver_epoch < 1) {
+		throw new Error('product_team_tool_forbidden');
+	}
+	const binding = resolveBinding({ cwd: process.cwd() });
+	if (binding.mode !== 'team' || binding.fallback !== false ||
+		binding.binding_digest !== resolved.binding.binding_digest ||
+		binding.resolver_epoch !== resolved.binding.resolver_epoch) {
+		throw new Error('product_team_binding_changed');
+	}
+	return teamRequest(binding, name, bindTeamActiveContext(binding, input));
 }
 
 export function resolveBoundCodexRuntime(input = {}, { host = 'codex' } = {}) {

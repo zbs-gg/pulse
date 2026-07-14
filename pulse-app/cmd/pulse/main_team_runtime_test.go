@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/embed"
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
@@ -22,7 +24,11 @@ func TestComposeTeamRuntimeHandlerKeepsOwnerAdministrationOnItsOwnRouter(t *test
 		w.Header().Set("X-Handler", "owner")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := composeTeamRuntimeHandler(team, owner)
+	airlock := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Handler", "airlock")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := composeTeamRuntimeHandler(team, owner, airlock)
 
 	for _, test := range []struct {
 		path string
@@ -31,6 +37,8 @@ func TestComposeTeamRuntimeHandlerKeepsOwnerAdministrationOnItsOwnRouter(t *test
 		{path: "/team/v1/status", want: "team"},
 		{path: "/team/v1/owner/approval", want: "owner"},
 		{path: "/team/v1/owner/not-registered", want: "owner"},
+		{path: "/airlock/team-publication", want: "airlock"},
+		{path: "/airlock/team-publication/near", want: "team"},
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, test.path, nil))
@@ -170,7 +178,7 @@ func TestServeTeamRuntimeDeletionWorkerFailureCancelsRequestsAndIsFatal(t *testi
 				<-ctx.Done()
 				return nil
 			},
-			RunDeletionWorker: func(context.Context) error {
+			RunBackgroundWorkers: func(context.Context) error {
 				<-started
 				return workerLostLease
 			},
@@ -215,7 +223,7 @@ func TestServeTeamRuntimeStopsDeletionWorkerBeforeReleasingLease(t *testing.T) {
 					<-ctx.Done()
 					return nil
 				},
-				RunDeletionWorker: func(ctx context.Context) error {
+				RunBackgroundWorkers: func(ctx context.Context) error {
 					<-ctx.Done()
 					close(workerStopped)
 					return nil
@@ -255,7 +263,7 @@ func TestServeTeamRuntimeBoundsDeletionWorkerShutdownAndLeavesLeaseToExpire(t *t
 					<-ctx.Done()
 					return nil
 				},
-				RunDeletionWorker: func(context.Context) error {
+				RunBackgroundWorkers: func(context.Context) error {
 					close(workerStarted)
 					<-releaseWorker
 					return nil
@@ -269,7 +277,7 @@ func TestServeTeamRuntimeBoundsDeletionWorkerShutdownAndLeavesLeaseToExpire(t *t
 	signals <- os.Interrupt
 	select {
 	case result := <-resultCh:
-		if !errors.Is(result.Err, errTeamDeletionWorkerStopTimeout) || result.ReleaseLease {
+		if !errors.Is(result.Err, errTeamBackgroundWorkerStopTimeout) || result.ReleaseLease {
 			t.Fatalf("stuck worker result = %+v", result)
 		}
 		close(releaseWorker)
@@ -505,5 +513,201 @@ func TestServeTeamRuntimeDoesNotReleaseWhenRenewalReportsFailureWhileStopping(t 
 	}
 	if result.ReleaseLease {
 		t.Fatal("runtime allowed lease release after renewal reported failure while stopping")
+	}
+}
+
+func TestRunTeamBackgroundWorkersCancelsPeerAfterProjectionFailure(t *testing.T) {
+	projectionFailure := errors.New("projection writer lease lost")
+	peerCanceled := make(chan struct{})
+	err := runTeamBackgroundWorkers(context.Background(), time.Second,
+		teamRuntimeWorker{Name: "deletion", Run: func(ctx context.Context) error {
+			<-ctx.Done()
+			close(peerCanceled)
+			return nil
+		}},
+		teamRuntimeWorker{Name: "projection", Run: func(context.Context) error {
+			return projectionFailure
+		}},
+	)
+	if !errors.Is(err, projectionFailure) {
+		t.Fatalf("background worker error = %v, want projection failure", err)
+	}
+	select {
+	case <-peerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("projection failure did not cancel deletion peer")
+	}
+}
+
+func TestRunTeamBackgroundWorkersBoundsCanceledPeerJoinAfterFailure(t *testing.T) {
+	projectionFailure := errors.New("projection writer lease lost")
+	peerCanceled := make(chan struct{})
+	releasePeer := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- runTeamBackgroundWorkers(context.Background(), 20*time.Millisecond,
+			teamRuntimeWorker{Name: "deletion", Run: func(ctx context.Context) error {
+				<-ctx.Done()
+				close(peerCanceled)
+				<-releasePeer
+				return nil
+			}},
+			teamRuntimeWorker{Name: "projection", Run: func(context.Context) error {
+				return projectionFailure
+			}},
+		)
+	}()
+	select {
+	case <-peerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("projection failure did not cancel deletion peer")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, projectionFailure) {
+			t.Fatalf("background worker error = %v, want projection failure", err)
+		}
+		if !errors.Is(err, errTeamBackgroundWorkerStopTimeout) {
+			t.Fatalf("background worker error = %v, want bounded peer-stop timeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background workers did not return after bounded peer join")
+	}
+	close(releasePeer)
+}
+
+func TestRunTeamBackgroundWorkersWaitsForEveryWorkerOnGracefulStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan string, 2)
+	result := make(chan error, 1)
+	worker := func(name string) teamRuntimeWorker {
+		return teamRuntimeWorker{Name: name, Run: func(ctx context.Context) error {
+			<-ctx.Done()
+			stopped <- name
+			return nil
+		}}
+	}
+	go func() {
+		result <- runTeamBackgroundWorkers(ctx, time.Second, worker("deletion"), worker("projection"))
+	}()
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatalf("graceful worker stop = %v", err)
+	}
+	got := map[string]bool{<-stopped: true, <-stopped: true}
+	if !got["deletion"] || !got["projection"] {
+		t.Fatalf("stopped workers = %v", got)
+	}
+}
+
+type teamRuntimeEmbedderFake struct{}
+
+func (teamRuntimeEmbedderFake) Model() string { return "bge-m3:test" }
+
+func (teamRuntimeEmbedderFake) Embed(
+	context.Context,
+	[]string,
+	embed.InputType,
+) ([][]float32, error) {
+	return [][]float32{{1, 0}}, nil
+}
+
+type teamRuntimeEmbeddingStoreFake struct{}
+
+func (*teamRuntimeEmbeddingStoreFake) ReadTeamEmbeddingProjectionInput(
+	context.Context,
+	store.TeamEmbeddingProjectionInputRequest,
+) (store.TeamEmbeddingProjectionInput, error) {
+	return store.TeamEmbeddingProjectionInput{}, nil
+}
+
+func (*teamRuntimeEmbeddingStoreFake) CompleteTeamMemoryEmbeddingProjection(
+	context.Context,
+	store.TeamMemoryEmbeddingProjectionRequest,
+) (store.TeamProjectionCompletionResult, error) {
+	return store.TeamProjectionCompletionResult{}, nil
+}
+
+func (*teamRuntimeEmbeddingStoreFake) CompleteTeamSemanticEmbeddingProjection(
+	context.Context,
+	store.TeamSemanticEmbeddingProjectionRequest,
+) (store.TeamProjectionCompletionResult, error) {
+	return store.TeamProjectionCompletionResult{}, nil
+}
+
+func TestTeamEmbeddingProjectionProcessorWiringIsExplicitlyOptional(t *testing.T) {
+	missing, err := newTeamEmbeddingProjectionProcessor(nil, nil)
+	if err != nil || missing != nil {
+		t.Fatalf("missing dependency = %#v, %v", missing, err)
+	}
+	configured, err := newTeamEmbeddingProjectionProcessor(
+		&teamRuntimeEmbeddingStoreFake{}, teamRuntimeEmbedderFake{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := configured.ProjectionDependencyHealth()
+	if health.State != store.TeamProjectionDependencyReady || health.Reason != "" {
+		t.Fatalf("configured health = %+v", health)
+	}
+}
+
+func TestTeamEmbedderNeverDiscoversPersonalCredentialPaths(t *testing.T) {
+	t.Setenv("COHERE_API_KEY", "personal-key-must-be-ignored")
+	t.Setenv("PULSE_TEAM_COHERE_KEY_FILE", "")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_PYTHON", "")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_HELPER", "")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_MODEL", "")
+	embedder, name, err := teamEmbedderFromEnv()
+	if err != nil || embedder != nil || name != "" {
+		t.Fatalf("team embedder discovered personal config: embedder=%T name=%q err=%v", embedder, name, err)
+	}
+}
+
+func TestTeamEmbedderRequiresSeparatePrivateCredentialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "team-cohere-key")
+	if err := os.WriteFile(path, []byte("team-only-key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PULSE_TEAM_COHERE_KEY_FILE", path)
+	if _, _, err := teamEmbedderFromEnv(); err == nil {
+		t.Fatal("team embedder accepted group/world-readable credential")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embedder, name, err := teamEmbedderFromEnv()
+	if err != nil || embedder == nil || name != "embed-v4.0" {
+		t.Fatalf("team credential embedder=%T name=%q err=%v", embedder, name, err)
+	}
+}
+
+func TestTeamEmbedderRejectsPartialLocalDependency(t *testing.T) {
+	t.Setenv("PULSE_TEAM_COHERE_KEY_FILE", "")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_PYTHON", "/usr/bin/python3")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_HELPER", "")
+	t.Setenv("PULSE_TEAM_LOCAL_EMBED_MODEL", "")
+	if _, _, err := teamEmbedderFromEnv(); err == nil {
+		t.Fatal("team embedder accepted a partial local dependency")
+	}
+}
+
+func TestSyntheticPublicationAirlockIsDefaultOffAndRejectsPartialConfiguration(t *testing.T) {
+	for _, name := range []string{
+		"PULSE_TEAM_PUBLICATION_DEPLOYMENT_ID",
+		"PULSE_TEAM_SHARED_PROJECT_ID",
+		"PULSE_TEAM_AIRLOCK_ORIGIN",
+		"PULSE_TEAM_AIRLOCK_SYNTHETIC_CANDIDATE_FILE",
+		"PULSE_TEAM_PUBLICATION_SYNTHETIC_ONLY",
+	} {
+		t.Setenv(name, "")
+	}
+	handler, err := newSyntheticTeamPublicationAirlock(nil, nil, store.TeamWriterLease{}, nil)
+	if err != nil || handler != nil {
+		t.Fatalf("default-off Airlock handler=%v err=%v", handler, err)
+	}
+	t.Setenv("PULSE_TEAM_PUBLICATION_DEPLOYMENT_ID", "deployment_partial")
+	if _, err := newSyntheticTeamPublicationAirlock(nil, nil, store.TeamWriterLease{}, nil); err == nil {
+		t.Fatal("partial Airlock configuration was accepted")
 	}
 }

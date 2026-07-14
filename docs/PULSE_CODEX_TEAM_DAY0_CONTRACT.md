@@ -60,6 +60,21 @@ role-scoped retrieval is a later activation gate and is not claimed here.
 | Team | Current member Desk + fixed Commons | Desk only | Required and host-owned |
 
 No binding may silently fall back to another Vault, Team, Safe Mode, or standalone storage.
+The Team binding includes an exact `commons.project_id` matching
+`^project_[a-z0-9][a-z0-9_]{0,119}$`. It is covered by the signed registry and
+root anti-rollback anchor and is the only project identifier sent to Commons
+status/resume calls. `workspace.workspace_id` remains the local Desk identity.
+Creating or replacing a Team binding is an explicit confirmed human action.
+The transition journal contains verified previous and candidate signed
+registry/anchor bytes; it is fsynced before the root-anchor transition and is
+recovered under the registry lock. The observed root anchor chooses completion
+or rollback. Unknown, corrupt, or cross-transaction state fails closed.
+
+Team installation health has six operator-visible states: `ready`, `degraded`,
+`pending`, `failed`, `missing`, and `stale`. Only `ready` is a successful CLI
+readiness result. Worker-heartbeat missing/stale reasons take precedence over
+generic pending projection state; no state may be collapsed to `active`.
+
 Codex product mode does not expose `pulse_forget`, `pulse_wipe`, or an
 ungoverned graph-write tool to agents. Deletion remains a direct human action
 through the local product surface. Whole-vault product wipe requires a fresh

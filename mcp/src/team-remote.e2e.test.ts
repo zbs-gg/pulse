@@ -36,6 +36,7 @@ import {
   type TeamPrincipalContext,
 } from './principal-context.js';
 import {
+  requiredTeamCapabilities,
   TeamDomainError,
   type TeamCapability,
 } from './team-contracts.js';
@@ -542,9 +543,8 @@ test('synthetic team-remote proof composes OAuth, principal binding, scoped doma
     const authorization = `Bearer ${bearer}`;
     const identity = await security.authenticateBeforeBody(authorization);
     const context = await security.resolveAfterBody({
-      authorization,
       baseline: identity,
-      body: { method: 'tools/call', params: { name: toolName } },
+      requiredCapabilities: requiredTeamCapabilities({ method: 'tools/call', params: { name: toolName } }),
       requestId,
     });
     return { identity, context, domain: principalClient.bindDomain(identity, context) };

@@ -26,7 +26,7 @@ func (s *TeamServer) handleTeamHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *TeamServer) handleTeamReadiness(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := s.CheckReadiness(ctx); err != nil {
+	if _, err := s.checkOperationalReadiness(ctx); err != nil {
 		writeTeamError(w, http.StatusServiceUnavailable, teamErrorNotReady, true)
 		return
 	}

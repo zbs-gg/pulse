@@ -25,12 +25,16 @@ import {
   canonicalTeamRememberBody,
   canonicalTeamResumeBody,
   expectedTeamGraphProjectionKinds,
+  isTeamInstalledReadToolName,
   isTeamToolName,
+  requiredTeamProductCapabilities,
   requiredTeamCapabilities,
   TEAM_BASELINE_CAPABILITY,
   TeamContractError,
   TeamDomainError,
   TEAM_TOOL_DESCRIPTORS,
+  TEAM_PRODUCT_TOOL_DESCRIPTORS,
+  TEAM_INSTALLED_READ_TOOL_DESCRIPTORS,
   teamNotReadyResult,
   validateTeamGraphDeltaInput,
   validateTeamGraphDeltaResult,
@@ -40,6 +44,19 @@ import {
   validateTeamRememberInput,
   validateTeamResumeResult,
 } from './team-contracts.js';
+
+test('installed Desk compositor exposes only non-destructive Commons reads', () => {
+  assert.deepEqual(TEAM_INSTALLED_READ_TOOL_DESCRIPTORS.map(({ name }) => name), [
+    'pulse_team_status', 'pulse_team_recall', 'pulse_team_context_query',
+    'pulse_team_resume', 'pulse_team_inspect',
+  ]);
+  for (const name of [
+    'pulse_team_remember', 'pulse_team_graph_delta', 'pulse_team_delete', 'pulse_team_delete_status',
+    'pulse_team_audit',
+  ]) {
+    assert.equal(isTeamInstalledReadToolName(name), false);
+  }
+});
 
 function validateTeamRemember(input: unknown): Record<string, unknown> {
   return validateTeamRememberInput(input) as unknown as Record<string, unknown>;
@@ -369,6 +386,11 @@ const EXPECTED_TEAM_TOOLS = [
   ['pulse_team_delete_status', 'pulse.team.delete_status.v1'],
 ] as const;
 
+const EXPECTED_PRODUCT_TEAM_TOOLS = EXPECTED_TEAM_TOOLS.filter(
+  ([name]) => name !== 'pulse_team_remember' && name !== 'pulse_team_graph_delta' &&
+    name !== 'pulse_team_delete',
+);
+
 test('team capabilities are derived from the allowlisted MCP operation', () => {
   assert.deepEqual(requiredTeamCapabilities({ method: 'initialize' }), [TEAM_BASELINE_CAPABILITY]);
   assert.deepEqual(requiredTeamCapabilities({ method: 'tools/list' }), [TEAM_BASELINE_CAPABILITY]);
@@ -393,7 +415,31 @@ test('team capabilities are derived from the allowlisted MCP operation', () => {
   );
 });
 
-function teamContext(principalId: string): Readonly<TeamPrincipalContext> {
+test('product Team capability gate rejects direct Commons mutations even for mutation-scoped callers', () => {
+  for (const name of ['pulse_team_remember', 'pulse_team_graph_delta']) {
+    assert.deepEqual(requiredTeamCapabilities({
+      method: 'tools/call', params: { name },
+    }), ['pulse:connect', 'pulse:write']);
+    assert.throws(
+      () => requiredTeamProductCapabilities({ method: 'tools/call', params: { name } }),
+      /unknown team tool/i,
+    );
+  }
+  assert.deepEqual(requiredTeamCapabilities({
+    method: 'tools/call', params: { name: 'pulse_team_delete' },
+  }), ['pulse:connect', 'pulse:delete']);
+  assert.throws(
+    () => requiredTeamProductCapabilities({
+      method: 'tools/call', params: { name: 'pulse_team_delete' },
+    }),
+    /unknown team tool/i,
+  );
+});
+
+function teamContext(
+  principalId: string,
+  capabilities: TeamPrincipalContext['capabilities'] = ['pulse:connect', 'pulse:read'],
+): Readonly<TeamPrincipalContext> {
   return Object.freeze({
     version: 'pulse.team.principal_context.v1',
     request_id: `request-${principalId}`,
@@ -410,13 +456,14 @@ function teamContext(principalId: string): Readonly<TeamPrincipalContext> {
     principal_auth_epoch: 1,
     binding_auth_epoch: 1,
     membership_auth_epoch: 1,
-    capabilities: ['pulse:connect', 'pulse:read'],
+    capabilities,
   });
 }
 
 async function startTeamRegistryServer(
   domainFactory?: (context: Readonly<TeamPrincipalContext>) => Readonly<BoundTeamDomain>,
   securityEventSink?: (event: GatewaySecurityEventInput) => void,
+  capabilities?: TeamPrincipalContext['capabilities'],
 ) {
   const seenPrincipals: string[] = [];
   const httpServer = createServer(async (req, res) => {
@@ -424,7 +471,7 @@ async function startTeamRegistryServer(
       ? req.headers['x-test-principal']
       : 'missing';
     seenPrincipals.push(requestedPrincipal);
-    const context = teamContext(requestedPrincipal);
+    const context = teamContext(requestedPrincipal, capabilities);
     const requestServer = createPulseMcpServer(
       'team-remote', context, domainFactory?.(context), securityEventSink,
     );
@@ -1171,7 +1218,7 @@ test('team remember uses Unicode code-point limits and canonical unique tag orde
   assertTeamRememberRejected(duplicate, /duplicate|tags/i);
 });
 
-test('team StreamableHTTP registry exposes only exact descriptors and request-local domains', async () => {
+test('team product StreamableHTTP registry exposes only exact descriptors and request-local domains', async () => {
   assert.deepEqual(
     TEAM_TOOL_DESCRIPTORS.map((tool) => tool.name),
     EXPECTED_TEAM_TOOLS.map(([name]) => name),
@@ -1209,7 +1256,10 @@ test('team StreamableHTTP registry exposes only exact descriptors and request-lo
     });
     await client.connect(transport);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(({ name }) => name), EXPECTED_TEAM_TOOLS.map(([name]) => name));
+    assert.deepEqual(
+      tools.tools.map(({ name }) => name),
+      EXPECTED_PRODUCT_TEAM_TOOLS.map(([name]) => name),
+    );
     assert.equal(tools.tools.some(({ name }) => name === 'pulse_status' || !name.startsWith('pulse_team_')), false);
     const status = await client.callTool({ name: 'pulse_team_status', arguments: baseTeamStatus() });
     assert.deepEqual(toolJSON(status), storedTeamStatusResult(teamContext(principalId)));
@@ -1222,6 +1272,61 @@ test('team StreamableHTTP registry exposes only exact descriptors and request-lo
     await Promise.all([exercise('principal-a'), exercise('principal-b')]);
     assert.ok(server.seenPrincipals.includes('principal-a'));
     assert.ok(server.seenPrincipals.includes('principal-b'));
+  } finally {
+    await server.stop();
+  }
+});
+
+test('product Team deployment neither advertises nor executes agent-controlled Commons mutations', async () => {
+  const forbidden = ['pulse_team_remember', 'pulse_team_graph_delta', 'pulse_team_delete'] as const;
+  const advertised = TEAM_PRODUCT_TOOL_DESCRIPTORS.map(({ name }) => name);
+  for (const name of forbidden) {
+    assert.equal(advertised.includes(name), false, `${name} must stay behind the Airlock`);
+  }
+  assert.ok(advertised.includes('pulse_team_recall'));
+  assert.ok(advertised.includes('pulse_team_resume'));
+
+  const executed: string[] = [];
+  const server = await startTeamRegistryServer(() => Object.freeze({
+    remember: async () => {
+      executed.push('pulse_team_remember');
+      return storedTeamRememberResult();
+    },
+    graphDelta: async () => {
+      executed.push('pulse_team_graph_delta');
+      return storedTeamGraphDeltaResult();
+    },
+    delete: async () => {
+      executed.push('pulse_team_delete');
+      return { schema: 'pulse.team.delete_result.v1' } as never;
+    },
+  }) as Readonly<BoundTeamDomain>, undefined, [
+    'pulse:connect', 'pulse:read', 'pulse:write',
+  ]);
+  try {
+    const client = new Client({ name: 'write-scoped-agent', version: '0.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { 'X-Test-Principal': 'write-scoped-agent' } },
+    });
+    await client.connect(transport);
+    const listed = await client.listTools();
+    for (const name of forbidden) {
+      assert.equal(listed.tools.some((tool) => tool.name === name), false);
+    }
+    for (const [name, args] of [
+      ['pulse_team_remember', baseTeamRemember()],
+      ['pulse_team_graph_delta', baseTeamGraphDelta()],
+      ['pulse_team_delete', {
+        schema: 'pulse.team.delete.v1', object_id: 'team_object_001',
+        active_context: { project_id: 'project-pulse' }, idempotency_key: 'delete-human-only-001',
+      }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, `${name} must be denied server-side`);
+      assert.match(JSON.stringify(result.content), /Unknown team tool/i);
+    }
+    assert.deepEqual(executed, []);
+    await client.close();
   } finally {
     await server.stop();
   }
@@ -1274,100 +1379,6 @@ test('team inspect and own-audit dispatch only through their request-bound domai
     ]);
   } finally {
     await client.close();
-    await server.stop();
-  }
-});
-
-test('pulse_team_remember dispatches only through its request-bound domain closure', async () => {
-  const seen: Array<{ principal: string; input: unknown }> = [];
-  const stored = {
-    schema: 'pulse.team.memory_result.v1' as const,
-    object_id: 'team_object_001',
-    audit_event_id: 'team_audit_001',
-    capsule_ids: ['team_capsule_001'],
-    status: 'stored' as const,
-    projection_state: 'pending' as const,
-    projection_jobs: [
-      { kind: 'embedding' as const, job_id: 'team_job_embedding', state: 'pending' as const },
-      { kind: 'event' as const, job_id: 'team_job_event', state: 'pending' as const },
-    ],
-    fully_projected: false as const,
-    replayed: false,
-    fallback: false as const,
-  };
-  const server = await startTeamRegistryServer((context) => Object.freeze({
-    remember: async (input: unknown) => {
-      canonicalTeamRememberBody(input);
-      seen.push({ principal: context.principal_id, input });
-      return stored;
-    },
-  }));
-  const client = new Client({ name: 'team-remember', version: '0.0.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-  });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({ name: 'pulse_team_remember', arguments: baseTeamRemember() });
-    assert.notEqual(result.isError, true);
-    assert.deepEqual(toolJSON(result), stored);
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].principal, 'principal-writer');
-
-    assert.equal(seen.length, 1, 'status and other domain calls must not be synthesized');
-  } finally {
-    await client.close();
-    await server.stop();
-  }
-});
-
-test('pulse_team_graph_delta uses isolated request-bound graph closures without local fallback', async () => {
-  const calls: Array<{ principal: string; idempotencyKey: string }> = [];
-  let rememberCalls = 0;
-  const server = await startTeamRegistryServer((context) => Object.freeze({
-    remember: async () => {
-      rememberCalls++;
-      throw new Error('memory domain must not receive graph calls');
-    },
-    graphDelta: async (input: unknown) => {
-      const canonical = canonicalTeamGraphDeltaBody(input);
-      calls.push({
-        principal: context.principal_id,
-        idempotencyKey: canonical.value.idempotency_key,
-      });
-      return storedTeamGraphDeltaResult(context.principal_id);
-    },
-  }));
-
-  const exercise = async (principal: string) => {
-    const client = new Client({ name: `team-graph-${principal}`, version: '0.0.0' });
-    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-      requestInit: { headers: { 'X-Test-Principal': principal } },
-    });
-    try {
-      await client.connect(transport);
-      const input = baseTeamGraphDelta();
-      input.idempotency_key = `graph-request-${principal}`;
-      const result = await client.callTool({ name: 'pulse_team_graph_delta', arguments: input });
-      assert.notEqual(result.isError, true);
-      assert.deepEqual(toolJSON(result), storedTeamGraphDeltaResult(principal));
-
-      const legacy = await client.callTool({ name: 'pulse_graph_delta', arguments: input });
-      assert.equal(legacy.isError, true);
-      assert.equal(calls.filter((call) => call.principal === principal).length, 1);
-    } finally {
-      await client.close();
-    }
-  };
-
-  try {
-    await Promise.all([exercise('principal-a'), exercise('principal-b')]);
-    assert.deepEqual(calls.sort((left, right) => left.principal.localeCompare(right.principal)), [
-      { principal: 'principal-a', idempotencyKey: 'graph-request-principal-a' },
-      { principal: 'principal-b', idempotencyKey: 'graph-request-principal-b' },
-    ]);
-    assert.equal(rememberCalls, 0);
-  } finally {
     await server.stop();
   }
 });
@@ -1445,297 +1456,5 @@ test('team read tools return closed errors and never reach local fallback', asyn
       await client.close();
       await server.stop();
     }
-  }
-});
-
-test('pulse_team_graph_delta returns typed closed errors and fixed content-free security metadata', async () => {
-  const cases = [
-    {
-      name: 'invalid-contract',
-      failure: new TeamContractError('secret graph field detail'),
-      error: 'invalid_team_contract',
-      event: {
-        eventType: 'operation_denied', reasonCode: 'invalid_contract',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'invalid-graph',
-      failure: new TeamDomainError('invalid_team_graph_delta'),
-      error: 'invalid_team_graph_delta',
-      event: {
-        eventType: 'operation_denied', reasonCode: 'invalid_contract',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'policy',
-      failure: new TeamDomainError('policy_denied'),
-      error: 'policy_denied',
-      event: {
-        eventType: 'authorization_denied', reasonCode: 'policy_denied',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'revoked',
-      failure: new TeamDomainError('principal_revoked'),
-      error: 'principal_revoked',
-      event: {
-        eventType: 'authorization_denied', reasonCode: 'principal_revoked',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'stale',
-      failure: new TeamDomainError('authorization_stale'),
-      error: 'authorization_stale',
-      event: {
-        eventType: 'authorization_denied', reasonCode: 'stale_generation',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'idempotency-conflict',
-      failure: new TeamDomainError('idempotency_conflict'),
-      error: 'idempotency_conflict',
-      event: {
-        eventType: 'operation_denied', reasonCode: 'idempotency_conflict',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'idempotency-in-progress',
-      failure: new TeamDomainError('idempotency_in_progress'),
-      error: 'idempotency_in_progress',
-      event: {
-        eventType: 'operation_denied', reasonCode: 'operation_in_progress',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'store-outage',
-      failure: new TeamDomainError('shared_memory_unavailable'),
-      error: 'shared_memory_unavailable',
-      event: {
-        eventType: 'audit_degraded', reasonCode: 'store_unavailable',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'idempotency-failed',
-      failure: new TeamDomainError('idempotency_failed'),
-      error: 'idempotency_failed',
-      event: {
-        eventType: 'audit_degraded', reasonCode: 'internal_failure',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'unexpected',
-      failure: new Error('secret graph daemon failure'),
-      error: 'shared_memory_unavailable',
-      event: {
-        eventType: 'audit_degraded', reasonCode: 'internal_failure',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-  ] as const;
-
-  for (const testCase of cases) {
-    const events: GatewaySecurityEventInput[] = [];
-    let graphCalls = 0;
-    const server = await startTeamRegistryServer(() => Object.freeze({
-      remember: async () => { throw new Error('memory fallback must remain unreachable'); },
-      graphDelta: async () => {
-        graphCalls++;
-        throw testCase.failure;
-      },
-    }), (event) => events.push(event));
-    const client = new Client({ name: `team-graph-error-${testCase.name}`, version: '0.0.0' });
-    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-      requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-    });
-    try {
-      await client.connect(transport);
-      const result = await client.callTool({
-        name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
-      });
-      assert.equal(result.isError, true);
-      assert.deepEqual(toolJSON(result), { error: testCase.error, fallback: false });
-      assert.deepEqual(events, [testCase.event]);
-      assert.equal(graphCalls, 1, 'domain failures must not retry or fall back locally');
-      assert.doesNotMatch(
-        JSON.stringify({ result: toolJSON(result), events }),
-        /secret|graph daemon|principal_id|oauth_subject|bearer/i,
-      );
-    } finally {
-      await client.close();
-      await server.stop();
-    }
-  }
-});
-
-test('pulse_team_graph_delta fails closed when its request-bound domain is unavailable', async () => {
-  const events: GatewaySecurityEventInput[] = [];
-  const server = await startTeamRegistryServer(undefined, (event) => events.push(event));
-  const client = new Client({ name: 'team-graph-missing-domain', version: '0.0.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-  });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({
-      name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
-    });
-    assert.equal(result.isError, true);
-    assert.deepEqual(toolJSON(result), { error: 'shared_memory_unavailable', fallback: false });
-    assert.deepEqual(events, [{
-      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
-      methodClass: 'write', requestId: 'request-principal-writer',
-    }]);
-  } finally {
-    await client.close();
-    await server.stop();
-  }
-});
-
-test('pulse_team_graph_delta stays denied when security reporting fails', async () => {
-  let graphCalls = 0;
-  const server = await startTeamRegistryServer(() => Object.freeze({
-    remember: async () => { throw new Error('memory fallback must remain unreachable'); },
-    graphDelta: async () => {
-      graphCalls++;
-      throw new TeamDomainError('policy_denied');
-    },
-  }), () => { throw new Error('synthetic security sink outage'); });
-  const client = new Client({ name: 'team-graph-audit-failure', version: '0.0.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-  });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({
-      name: 'pulse_team_graph_delta', arguments: baseTeamGraphDelta(),
-    });
-    assert.equal(result.isError, true);
-    assert.deepEqual(toolJSON(result), { error: 'policy_denied', fallback: false });
-    assert.equal(graphCalls, 1);
-  } finally {
-    await client.close();
-    await server.stop();
-  }
-});
-
-test('pulse_team_remember returns closed typed errors without leaking domain failures', async () => {
-  for (const [failure, expected] of [
-    [new TeamContractError('secret invalid field detail'), 'invalid_team_contract'],
-    [new TeamDomainError('policy_denied'), 'policy_denied'],
-    [new Error('secret daemon failure'), 'shared_memory_unavailable'],
-  ] as const) {
-    const server = await startTeamRegistryServer(() => Object.freeze({
-      remember: async () => { throw failure; },
-    }));
-    const client = new Client({ name: `team-error-${expected}`, version: '0.0.0' });
-    const transport = new StreamableHTTPClientTransport(new URL(server.url));
-    try {
-      await client.connect(transport);
-      const result = await client.callTool({ name: 'pulse_team_remember', arguments: baseTeamRemember() });
-      assert.equal(result.isError, true);
-      assert.deepEqual(toolJSON(result), { error: expected, fallback: false });
-      assert.doesNotMatch(result.content[0]?.type === 'text' ? result.content[0].text : '', /secret/i);
-    } finally {
-      await client.close();
-      await server.stop();
-    }
-  }
-});
-
-test('pulse_team_remember reports fixed metadata for authoritative denials and audit degradation', async () => {
-  const cases = [
-    {
-      name: 'policy',
-      failure: new TeamDomainError('policy_denied'),
-      expected: {
-        eventType: 'authorization_denied', reasonCode: 'policy_denied',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'revoked',
-      failure: new TeamDomainError('principal_revoked'),
-      expected: {
-        eventType: 'authorization_denied', reasonCode: 'principal_revoked',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'invalid-contract',
-      failure: new TeamContractError('secret rejected field'),
-      expected: {
-        eventType: 'operation_denied', reasonCode: 'invalid_contract',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'store-outage',
-      failure: new TeamDomainError('shared_memory_unavailable'),
-      expected: {
-        eventType: 'audit_degraded', reasonCode: 'store_unavailable',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-    {
-      name: 'unexpected-failure',
-      failure: new Error('secret unexpected failure'),
-      expected: {
-        eventType: 'audit_degraded', reasonCode: 'internal_failure',
-        methodClass: 'write', requestId: 'request-principal-writer',
-      },
-    },
-  ] as const;
-
-  for (const testCase of cases) {
-    const events: GatewaySecurityEventInput[] = [];
-    const server = await startTeamRegistryServer(() => Object.freeze({
-      remember: async () => { throw testCase.failure; },
-    }), (event) => events.push(event));
-    const client = new Client({ name: `team-audit-${testCase.name}`, version: '0.0.0' });
-    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-      requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-    });
-    try {
-      await client.connect(transport);
-      const result = await client.callTool({ name: 'pulse_team_remember', arguments: baseTeamRemember() });
-      assert.equal(result.isError, true);
-      assert.deepEqual(events, [testCase.expected]);
-      assert.doesNotMatch(JSON.stringify(events), /dedicated team store|bearer|oauth_subject|principal_id/i);
-    } finally {
-      await client.close();
-      await server.stop();
-    }
-  }
-
-  const unavailableEvents: GatewaySecurityEventInput[] = [];
-  const unavailable = await startTeamRegistryServer(
-    undefined, (event) => unavailableEvents.push(event),
-  );
-  const unavailableClient = new Client({ name: 'team-audit-missing-domain', version: '0.0.0' });
-  const unavailableTransport = new StreamableHTTPClientTransport(new URL(unavailable.url), {
-    requestInit: { headers: { 'X-Test-Principal': 'principal-writer' } },
-  });
-  try {
-    await unavailableClient.connect(unavailableTransport);
-    const result = await unavailableClient.callTool({
-      name: 'pulse_team_remember', arguments: baseTeamRemember(),
-    });
-    assert.equal(result.isError, true);
-    assert.deepEqual(unavailableEvents, [{
-      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
-      methodClass: 'write', requestId: 'request-principal-writer',
-    }]);
-  } finally {
-    await unavailableClient.close();
-    await unavailable.stop();
   }
 });

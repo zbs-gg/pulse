@@ -21,6 +21,7 @@ import {
   writeHostToolLease,
   writeHostTurnContext,
 } from './codex-runtime.js';
+import { composeBoundResumeEvidence } from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
 const HOST = 'claude-code';
@@ -106,15 +107,16 @@ function additionalContext(resolved, evidence, now) {
 	].join('\n');
 }
 
-async function resumeContext(resolved, event, request, now) {
-  const result = await request(resolved, '/continuity/resume', {
-    body: {
-      ...threadContext(resolved, event),
-      token_budget: Math.min(4000, Math.max(256, Number.parseInt(process.env.PULSE_RESUME_TOKENS ?? '1200', 10) || 1200)),
-    },
-    idempotencyKey: event.idempotency_key,
+async function resumeContext(resolved, event, request, now, dependencies = {}) {
+  const composed = await (dependencies.composeResume ?? composeBoundResumeEvidence)(resolved, event, {
+    host: HOST,
+    request,
+    teamRequest: dependencies.teamRequest,
+    localTokenBudget: Math.min(2000, Math.max(
+      256, Number.parseInt(process.env.PULSE_RESUME_TOKENS ?? '1200', 10) || 1200,
+    )),
   });
-  return additionalContext(resolved, [result?.resume_markdown ?? ''], now);
+  return additionalContext(resolved, composed.evidence, now);
 }
 
 function noChangeBody(resolved, event) {
@@ -191,7 +193,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: await resumeContext(resolved, event, request, now),
+          additionalContext: await resumeContext(resolved, event, request, now, dependencies),
         },
       };
     }
@@ -242,7 +244,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       return {
         hookSpecificOutput: {
           hookEventName: 'SubagentStart',
-          additionalContext: await resumeContext(resolved, nativeEvent, request, now),
+          additionalContext: await resumeContext(resolved, nativeEvent, request, now, dependencies),
         },
 		systemMessage: 'Pulse subagent boundary: return typed durable-memory candidates to the parent; the parent finalizes the turn once. Role-scoped retrieval is not active.',
       };

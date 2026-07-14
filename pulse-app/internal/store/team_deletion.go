@@ -1403,6 +1403,8 @@ func dischargeTeamDeletionRoot(
 
 func purgeTeamObjectPayload(ctx context.Context, tx *sql.Tx, objectID string) error {
 	statements := []string{
+		`DELETE FROM team_publication_receipt_payloads WHERE publication_id IN (
+			SELECT publication_id FROM team_publication_receipts WHERE object_id = ?)`,
 		`DELETE FROM team_semantic_embeddings WHERE intent_id IN (
 			SELECT intent_id FROM team_semantic_materializations
 			 WHERE root_object_id = ? OR derivative_object_id = ?)`,
@@ -1442,6 +1444,9 @@ func purgeTeamObjectPayload(ctx context.Context, tx *sql.Tx, objectID string) er
 
 func verifyTeamDeletionCompletionBarrier(ctx context.Context, tx *sql.Tx, rootID string) error {
 	queries := []string{
+		`SELECT count(*) FROM team_publication_receipt_payloads payload
+		  JOIN team_publication_receipts receipt USING(publication_id)
+		 WHERE receipt.object_id = ?`,
 		`SELECT count(*) FROM team_memory_capsules WHERE root_object_id = ?`,
 		`SELECT count(*) FROM team_memory_events WHERE root_object_id = ? OR derivative_object_id = ?`,
 		`SELECT count(*) FROM team_memory_embeddings WHERE root_object_id = ? OR derivative_object_id = ?`,

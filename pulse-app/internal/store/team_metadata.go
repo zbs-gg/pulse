@@ -8,24 +8,29 @@ import (
 )
 
 type TeamStatusMetadata struct {
-	StoreID             string
-	TeamID              string
-	PolicyVersion       int
-	SchemaVersion       int
-	AuthEpoch           int64
-	PolicyEpoch         int64
-	RealContentState    string
-	ActivationState     string
-	PublicEnabled       bool
-	PrincipalID         string
-	PrincipalKind       string
-	HumanPrincipalID    string
-	BindingID           string
-	MembershipID        string
-	MembershipRole      string
-	PrincipalAuthEpoch  int64
-	BindingAuthEpoch    int64
-	MembershipAuthEpoch int64
+	StoreID                string
+	TeamID                 string
+	PolicyVersion          int
+	SchemaVersion          int
+	AuthEpoch              int64
+	PolicyEpoch            int64
+	RealContentState       string
+	ActivationState        string
+	PublicEnabled          bool
+	PrincipalID            string
+	PrincipalKind          string
+	HumanPrincipalID       string
+	BindingID              string
+	MembershipID           string
+	MembershipRole         string
+	PrincipalAuthEpoch     int64
+	BindingAuthEpoch       int64
+	MembershipAuthEpoch    int64
+	ProjectionPending      bool
+	ProjectionFailed       bool
+	ProjectionWorkerState  string
+	ProjectionWorkerReason string
+	ProjectionHeartbeatAt  *time.Time
 }
 
 type TeamObjectMetadata struct {
@@ -101,6 +106,25 @@ func (s *Store) ReadTeamStatusMetadata(ctx context.Context, principalID string) 
 		PrincipalAuthEpoch: principal.PrincipalEpoch, BindingAuthEpoch: principal.BindingEpoch,
 		MembershipAuthEpoch: principal.MembershipEpoch,
 	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+		           SELECT 1 FROM team_projection_jobs
+		            WHERE store_id = ? AND team_id = ? AND state IN ('pending', 'leased')
+		       ),
+		       EXISTS(
+		           SELECT 1 FROM team_projection_jobs
+		            WHERE store_id = ? AND team_id = ? AND state = 'failed'
+		       )`, policy.StoreID, policy.TeamID, policy.StoreID, policy.TeamID).
+		Scan(&result.ProjectionPending, &result.ProjectionFailed); err != nil {
+		return TeamStatusMetadata{}, err
+	}
+	workerHealth, err := s.ReadTeamProjectionWorkerHealth(ctx)
+	if err != nil {
+		return TeamStatusMetadata{}, err
+	}
+	result.ProjectionWorkerState = workerHealth.State
+	result.ProjectionWorkerReason = workerHealth.Reason
+	result.ProjectionHeartbeatAt = workerHealth.HeartbeatAt
 	current, err := s.ResolveTeamPrincipal(ctx, principalID)
 	if err != nil {
 		return TeamStatusMetadata{}, err
@@ -110,6 +134,33 @@ func (s *Store) ReadTeamStatusMetadata(ctx context.Context, principalID string) 
 		return TeamStatusMetadata{}, ErrTeamPolicyEpochChanged
 	}
 	return result, nil
+}
+
+// CheckTeamProjectionQueueReadiness is the operational readiness gate used by
+// the daemon's public /ready endpoint. Protected requests retain their bounded
+// policy gate so status can still explain projection lag while workers catch up.
+func (s *Store) CheckTeamProjectionQueueReadiness(ctx context.Context) error {
+	info, err := readTeamStoreInfo(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	var lagging bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+		    SELECT 1 FROM team_projection_jobs
+		     WHERE store_id = ? AND team_id = ?
+		       AND state IN ('pending', 'leased', 'failed')
+		)`, info.StoreID, info.TeamID).Scan(&lagging); err != nil {
+		return err
+	}
+	if lagging {
+		return ErrTeamProjectionQueueLagging
+	}
+	health, err := s.ReadTeamProjectionWorkerHealth(ctx)
+	if err != nil {
+		return err
+	}
+	return projectionWorkerHealthError(health)
 }
 
 // InspectAuthorizedTeamObject applies the same pre-candidate policy predicate

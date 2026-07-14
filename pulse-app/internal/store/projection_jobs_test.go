@@ -262,6 +262,76 @@ func TestProjectionLeaseTokenIsFreshRandom256BitAndNotWriterDerived(t *testing.T
 	}
 }
 
+func TestRenewTeamProjectionJobLeaseExtendsCurrentClaimAndFencesStaleToken(t *testing.T) {
+	fixture := newProjectionLifecycleFixture(t)
+	defer fixture.store.Close()
+	writer := fixture.acquireWriter(t)
+	insertProjectionLifecycleRoot(t, fixture, "renew-root")
+	insertProjectionLifecycleJob(t, fixture, "renew-job", "renew-root", "embedding", "pending", 0, fixture.now.Add(-time.Second))
+
+	claimRequest := TeamProjectionClaimRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		ProjectionKind: "embedding", Limit: 1, LeaseTTL: 30 * time.Second,
+	}
+	claims, err := fixture.store.ClaimTeamProjectionJobs(context.Background(), claimRequest)
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("initial claim = %+v, %v", claims, err)
+	}
+	first := claims[0]
+	fixture.now = fixture.now.Add(20 * time.Second)
+	renewed, err := fixture.store.RenewTeamProjectionJobLease(context.Background(), TeamProjectionLeaseRenewalRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: first.JobID, LeaseToken: first.LeaseToken, LeaseTTL: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("renew current claim: %v", err)
+	}
+	if !renewed.LeaseExpiresAt.Equal(fixture.now.Add(30 * time.Second)) {
+		t.Fatalf("renewed expiry = %s, want %s", renewed.LeaseExpiresAt, fixture.now.Add(30*time.Second))
+	}
+
+	fixture.now = fixture.now.Add(20 * time.Second)
+	if _, err := fixture.store.CompleteTeamProjectionJob(context.Background(), TeamProjectionCompletionRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: first.JobID, LeaseToken: first.LeaseToken,
+	}); err != nil {
+		t.Fatalf("complete after original lease window: %v", err)
+	}
+
+	insertProjectionLifecycleRoot(t, fixture, "reclaimed-root")
+	insertProjectionLifecycleJob(t, fixture, "reclaimed-job", "reclaimed-root", "embedding", "pending", 0, fixture.now.Add(-time.Second))
+	claimRequest.LeaseTTL = 10 * time.Second
+	claims, err = fixture.store.ClaimTeamProjectionJobs(context.Background(), claimRequest)
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("stale-token initial claim = %+v, %v", claims, err)
+	}
+	stale := claims[0]
+	fixture.now = fixture.now.Add(11 * time.Second)
+	claims, err = fixture.store.ClaimTeamProjectionJobs(context.Background(), claimRequest)
+	if err != nil || len(claims) != 1 || claims[0].LeaseToken == stale.LeaseToken {
+		t.Fatalf("reclaimed claim = %+v, %v", claims, err)
+	}
+	current := claims[0]
+	if _, err := fixture.store.RenewTeamProjectionJobLease(context.Background(), TeamProjectionLeaseRenewalRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: stale.JobID, LeaseToken: stale.LeaseToken, LeaseTTL: 30 * time.Second,
+	}); !errors.Is(err, ErrConcealedNotFound) {
+		t.Fatalf("stale renewal error = %v", err)
+	}
+	if _, err := fixture.store.CompleteTeamProjectionJob(context.Background(), TeamProjectionCompletionRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: stale.JobID, LeaseToken: stale.LeaseToken,
+	}); !errors.Is(err, ErrConcealedNotFound) {
+		t.Fatalf("stale completion error = %v", err)
+	}
+	if _, err := fixture.store.CompleteTeamProjectionJob(context.Background(), TeamProjectionCompletionRequest{
+		WriterID: writer.WriterID, WriterToken: writer.Token,
+		JobID: current.JobID, LeaseToken: current.LeaseToken,
+	}); err != nil {
+		t.Fatalf("current completion after stale attempts: %v", err)
+	}
+}
+
 func TestProjectionClaimOrdersMixedRFC3339PrecisionByInstant(t *testing.T) {
 	fixture := newProjectionLifecycleFixture(t)
 	defer fixture.store.Close()

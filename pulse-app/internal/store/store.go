@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/teamauth"
@@ -42,6 +43,8 @@ type Store struct {
 	expectedBindingDigest string
 	expectedPolicyEpoch   int64
 	expectedResolverEpoch int64
+	publicationTargetMu   sync.RWMutex
+	publicationTarget     *TeamPublicationTarget
 
 	// Claim-resolution config (default off). See claim_resolver.go.
 	claimMode      string                          // "off" | "shadow" | "on"
@@ -317,7 +320,7 @@ type persistedStoreIdentity struct {
 }
 
 func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStoreIdentity, error) {
-	return validateStoreIdentityForVersion(db, profile, 41)
+	return validateStoreIdentityForVersion(db, profile, 44)
 }
 
 func validateStoreIdentityForVersion(db *sql.DB, profile storeOpenProfile, schemaVersion int) (persistedStoreIdentity, error) {

@@ -15,13 +15,13 @@ func TestTeamStoreSchemaFloorsCannotDecrease(t *testing.T) {
 	}{
 		{
 			name:       "reader floor",
-			raise:      `UPDATE team_stores SET min_reader_version = 41, min_writer_version = 41 WHERE singleton = 1`,
-			regression: `UPDATE team_stores SET min_reader_version = 40 WHERE singleton = 1`,
+			raise:      `UPDATE team_stores SET min_reader_version = 45, min_writer_version = 45 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_reader_version = 44 WHERE singleton = 1`,
 		},
 		{
 			name:       "writer floor",
-			raise:      `UPDATE team_stores SET min_writer_version = 41 WHERE singleton = 1`,
-			regression: `UPDATE team_stores SET min_writer_version = 40 WHERE singleton = 1`,
+			raise:      `UPDATE team_stores SET min_writer_version = 45 WHERE singleton = 1`,
+			regression: `UPDATE team_stores SET min_writer_version = 44 WHERE singleton = 1`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -67,6 +67,14 @@ mcp-build: ## Build MCP server (mcp/)
 cli-test: ## Run published CLI contract tests (pulse-app/cli/)
 	cd $(CLI_DIR) && $(NPM) test
 
+team-deploy-static-verify: ## Validate default-off Team deployment templates on any development host
+	./deploy/team/verify-templates.mjs
+
+team-race-release: ## Run the Team Go release suites under the race detector exactly once
+	cd $(APP_DIR) && $(GO) test -race -count=1 -timeout 20m ./internal/store ./internal/server ./internal/teamread ./internal/teamjobs ./internal/teamauth ./cmd/pulse
+
+release-verify: verify team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
+
 verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
 	@status=pass; \
 	( cd $(APP_DIR) \
@@ -91,10 +99,12 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	       cd $(CLI_DIR) \
 	       && $(NPM) test --silent \
 	       && $(NPM) run --silent test:codex-product \
-	       && $(NPM) run --silent test:claude-product; \
+	       && $(NPM) run --silent test:claude-product \
+	       && $(NPM) run --silent test:codex-team-packaging-contract; \
 	     else \
 	       echo "$(CLI_DIR)/package.json not found, skipping CLI checks"; \
 	     fi ) \
+	&& ./deploy/team/verify-templates.mjs \
 	|| status=fail; \
 	ts=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
 	ref=$$(git rev-parse HEAD 2>/dev/null || echo "$(CURDIR)"); \

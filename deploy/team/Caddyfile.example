@@ -1,0 +1,38 @@
+# LOCAL SYNTHETIC ENTRYPOINT ONLY.
+#
+# This site binds to loopback even if DNS points elsewhere. It does not make
+# Pulse public. Keep `tls internal`; trust Caddy's local CA only on the machine
+# used for the synthetic acceptance run.
+
+{
+	admin 127.0.0.1:2019
+}
+
+pulse-team.synthetic.invalid {
+	bind 127.0.0.1
+	tls internal
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
+
+	reverse_proxy 127.0.0.1:8787 {
+		health_uri /health
+		health_interval 30s
+		health_timeout 3s
+	}
+}
+
+# EXTERNAL INGRESS IS INTENTIONALLY ABSENT.
+#
+# A later, reviewed deployment must provide a separate external site snippet
+# only after the external/read/publication/real-content security contracts have
+# implementations and approvals. Do not remove `bind 127.0.0.1`, replace
+# `tls internal`, or add a public site block to this synthetic file.
+#
+# Caddy provides TLS and reverse proxying only. Pulse gateway remains the OAuth
+# resource server; never replace its JWT validation with trusted proxy headers.

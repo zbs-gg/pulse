@@ -22,7 +22,22 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildPulseRequestHeaders } from './remote-auth.js';
+import {
+  buildSenderConstrainedRemoteHeaders,
+  createOSCredentialStore,
+} from './remote-auth.js';
+import {
+  buildPulseRequestHeaders,
+  isLoopbackPulseBase,
+} from './remote-auth-network.js';
+import { readTeamAuthProfile, runTeamLogin } from './team-login.js';
+import { inspectTeamInstallation, setTeamStatusExitCode } from './team-status.js';
+import { createWorkspaceBinding, recoverWorkspaceBindingTransaction } from './binding-admin.js';
+import {
+  inspectPresenceTrust,
+  installPresenceTrust,
+  INSTALL_CONFIRMATION as TRUST_INSTALL_CONFIRMATION,
+} from './trust-helper.js';
 import { BindingError, canonicalizeWorkspace, defaultBindingPaths, resolveWorkspaceBinding } from './workspace-binding.js';
 import { captureEnabledForHost, captureStatePaths, writeCaptureStateFiles } from './capture-state.js';
 import { acquireCLIInvocation, consumeCLIResponse } from './cli-idempotency.js';
@@ -102,8 +117,14 @@ Usage:
   pulse doctor codex
   pulse doctor claude-code
   pulse doctor --json
+  pulse trust status [--json]
+  pulse trust install --confirm "install pulse presence helper"
   pulse binding resolve [--cwd <path>] [--json]
+  pulse binding create-personal --principal-id <id> [--cwd <path>] [--port <port>] --confirm "bind pulse personal workspace"
+  pulse binding create-team --principal-id <id> --team-id <id> --commons-store-id <id> --commons-project-id <project_id> --commons-resource <https-url/mcp> [--cwd <path>] [--port <port>] --confirm "bind pulse team workspace"
   pulse supervisor start|status|stop [--cwd <path>] [--json]
+  pulse team login --profile <root-owned-json> [--out <json>] [--no-open]
+  pulse team status [--json]
   pulse connect claude-code [--remote-control]
   pulse connect codex
   pulse connect chatgpt|claude-chat --base <https-origin-or-mcp-url> [--open]
@@ -236,16 +257,25 @@ function readSecretFromDataDir(dataDir, { create = false } = {}) {
 
 async function pulseFetch(path, options = {}) {
   const secret = existsSync(SECRET_PATH) ? readSecret() : '';
-  // Remote (hosted) Pulse: send a bearer token. The reverse proxy validates it
-  // and injects the daemon's X-Pulse-Key internally, so the daemon secret never
-  // leaves the host. Lets the same hooks capture into the hosted store.
-  const remoteBearer = process.env.PULSE_REMOTE_BEARER;
-  const headers = buildPulseRequestHeaders(DEFAULT_BASE_URL, {
-    ipcSecret: secret,
-    remoteBearer,
-  });
+  const method = options.method ?? 'POST';
+  const requestURL = `${DEFAULT_BASE_URL.replace(/\/$/, '')}${path}`;
+  let headers;
+  if (isLoopbackPulseBase(DEFAULT_BASE_URL)) {
+    headers = buildPulseRequestHeaders(DEFAULT_BASE_URL, { ipcSecret: secret });
+  } else {
+    if (process.env.PULSE_REMOTE_BEARER?.trim()) {
+      throw new Error('remote_auth_static_bearer_forbidden');
+    }
+    const credentialRef = process.env.PULSE_REMOTE_CREDENTIAL_REF?.trim();
+    if (!credentialRef) throw new Error('remote_auth_credential_ref_required');
+    headers = buildSenderConstrainedRemoteHeaders(requestURL, {
+      method,
+      credentialStore: createOSCredentialStore(),
+      credentialRef,
+    });
+  }
 	let invocation;
-  if ((options.method ?? 'POST') !== 'GET') {
+  if (method !== 'GET') {
 		invocation = options.idempotencyKey
 			? { key: options.idempotencyKey }
 			: acquireCLIInvocation(DATA_DIR, path, options.body);
@@ -255,8 +285,8 @@ async function pulseFetch(path, options = {}) {
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
   let response;
   try {
-    response = await fetch(`${DEFAULT_BASE_URL.replace(/\/$/, '')}${path}`, {
-      method: options.method ?? 'POST',
+    response = await fetch(requestURL, {
+      method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller?.signal,
@@ -341,6 +371,7 @@ async function runMcpServer() {
 
 async function runProductMcpServer(host) {
   if (!['codex', 'claude-code'].includes(host)) throw new Error('unsupported product MCP host');
+  await recoverBindingAuthority();
   const resolved = resolveCodexMcpRuntime(process.cwd());
   // Binding resolution intentionally accepts a nested launch directory. The
   // MCP process then pins itself to the signed canonical root so every tool
@@ -360,6 +391,7 @@ async function runProductMcpServer(host) {
   process.env.PULSE_BINDING_DIGEST = resolved.binding.binding_digest;
   process.env.PULSE_RESOLVER_EPOCH = String(resolved.binding.resolver_epoch);
   process.env.PULSE_HOST_WORKSPACE = resolved.binding.workspace.canonical_path;
+  process.env.PULSE_PRODUCT_BINDING_MODE = resolved.binding.mode;
   process.env.PULSE_HOST_AUTHORITY_MODULE = pathToFileURL(
     join(CLI_PACKAGE_ROOT, 'src', 'codex-runtime.js'),
   ).href;
@@ -367,6 +399,23 @@ async function runProductMcpServer(host) {
     join(CLI_PACKAGE_ROOT, 'src', 'codex-runtime.js'),
   ).href;
   await runMcpServer();
+}
+
+async function recoverBindingAuthority() {
+  const testAuthority = process.env.PULSE_TRUST_MODE === 'test';
+  const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
+  const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
+  const anchorPath = process.env.PULSE_BINDING_ANCHOR_PATH;
+  if (testAuthority) {
+    if (!registryPath || !publicKeyPath || !anchorPath) {
+      throw new Error('synthetic test authority requires registry, public key, and anti-rollback anchor paths');
+    }
+    await recoverWorkspaceBindingTransaction({
+      registryPath, publicKeyPath, anchorPath, rootPublicKey: false, rootAnchor: false,
+    });
+    return;
+  }
+  await recoverWorkspaceBindingTransaction();
 }
 
 async function runCodexMcpServer() {
@@ -556,6 +605,7 @@ async function connectCodex() {
 
 async function connectCodexActivation() {
   requireCommand('codex');
+  await recoverBindingAuthority();
   const resolved = resolveCodexMcpRuntime(process.cwd());
 	const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
 	try {
@@ -626,6 +676,7 @@ async function connectCodexActivation() {
 	  codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
       registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
       publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+      anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
       trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
     });
     finalizeCodexRuntimeInstall(DATA_DIR);
@@ -765,6 +816,9 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 
 async function codexDoctorReport() {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
+  const presenceTrust = syntheticAuthority
+    ? { ready: true, status: 'synthetic_test_authority', issues: [] }
+    : inspectPresenceTrust({ probePublicKey: true });
   const codex = checkCommandVersion('codex', ['--version']);
   const plugin = codex.ok ? codexPluginStatus() : { enabled: false, path: undefined };
   const shadowFiles = pulseProductMcpShadowFiles({ cwd: process.cwd(), codexHome: codexHomePath() });
@@ -779,6 +833,7 @@ async function codexDoctorReport() {
   let runtime;
   let bindingError;
   try {
+	await recoverBindingAuthority();
     binding = resolveCodexMcpRuntime(process.cwd()).binding;
     runtime = vaultRuntimeFromBinding(binding);
   } catch (error) {
@@ -795,9 +850,11 @@ async function codexDoctorReport() {
 			const expectedMode = syntheticAuthority ? 'test' : 'production';
 			const expectedRegistry = syntheticAuthority ? process.env.PULSE_BINDING_REGISTRY_PATH : defaults.registryPath;
 			const expectedKey = syntheticAuthority ? process.env.PULSE_BINDING_PUBLIC_KEY_PATH : defaults.publicKeyPath;
+			const expectedAnchor = syntheticAuthority ? process.env.PULSE_BINDING_ANCHOR_PATH : defaults.anchorPath;
 			const matches = entry.trust_mode === expectedMode && entry.data_dir === resolve(DATA_DIR) &&
 				entry.registry_path === resolve(expectedRegistry ?? '') &&
-				entry.public_key_path === resolve(expectedKey ?? '');
+				entry.public_key_path === resolve(expectedKey ?? '') &&
+				entry.anchor_path === resolve(expectedAnchor ?? '');
 			const persistedAuthorityMode = entry.trust_mode === 'test' ? 'synthetic-test' :
 				entry.trust_mode === 'production' ? 'production' : 'invalid';
 			locatorAuthority = matches
@@ -849,6 +906,9 @@ async function codexDoctorReport() {
     liveStatus.capture_enabled === true && liveStatus.raw_capture_enabled === false;
 
   const checks = {
+		presence_trust: presenceTrust.ready
+			? { ok: true, detail: presenceTrust.status }
+			: { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
 		authority: locatorAuthority,
     codex,
     plugin: plugin.enabled
@@ -917,6 +977,7 @@ async function runCodexDoctor(rest = []) {
     console.log(`\nPrivacy: backend LLM ${report.trust.backend_llm_enabled === false ? 'off' : 'unknown'}; raw transcript capture ${rawCapture}; external embedding API ${report.trust.external_embedding_api ? 'on' : 'off'}`);
     console.log(`Retrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
     console.log(`Verdict: ${report.verdict}`);
+    if (!report.checks.presence_trust.ok) console.log('Next: pulse trust install --confirm "install pulse presence helper"');
     if (!report.checks.hooks.ok) console.log('Next: start a new Codex task, open /hooks, and trust the Pulse hook bundle.');
   }
   if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
@@ -1037,11 +1098,16 @@ function checkClaudeProductHooks(installedRuntime, runtime, binding) {
 }
 
 async function claudeProductDoctorReport() {
+  const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
+  const presenceTrust = syntheticAuthority
+    ? { ready: true, status: 'synthetic_test_authority', issues: [] }
+    : inspectPresenceTrust({ probePublicKey: true });
   const version = claudeProductVersionCheck();
   let binding;
   let runtime;
   let bindingError;
   try {
+	await recoverBindingAuthority();
     binding = resolveCodexMcpRuntime(process.cwd()).binding;
     runtime = vaultRuntimeFromBinding(binding);
   } catch (error) {
@@ -1077,6 +1143,9 @@ async function claudeProductDoctorReport() {
 	const expectedAuthorityMode = process.env.PULSE_TRUST_MODE === 'test' ? 'synthetic-test' : 'production';
 	const authorityMatches = mcp.authority_mode === expectedAuthorityMode;
 	const checks = {
+		presence_trust: presenceTrust.ready
+			? { ok: true, detail: presenceTrust.status }
+			: { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
 		authority: authorityMatches
 			? { ok: true, detail: mcp.authority_mode === 'synthetic-test'
 				? 'synthetic test authority; never production-trusted'
@@ -1135,6 +1204,7 @@ async function runClaudeProductDoctor(rest = []) {
     for (const [label, check] of Object.entries(report.checks)) printDoctorLine(label, check);
     console.log(`\nRetrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
     console.log(`Verdict: ${report.verdict}`);
+    if (!report.checks.presence_trust.ok) console.log('Next: pulse trust install --confirm "install pulse presence helper"');
   }
   if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
 }
@@ -1388,7 +1458,7 @@ function claudeProductMcpEnvironment() {
   const env = { PULSE_DATA_DIR: DATA_DIR };
   if (process.env.PULSE_TRUST_MODE === 'test') {
     env.PULSE_TRUST_MODE = 'test';
-    for (const name of ['PULSE_BINDING_REGISTRY_PATH', 'PULSE_BINDING_PUBLIC_KEY_PATH']) {
+    for (const name of ['PULSE_BINDING_REGISTRY_PATH', 'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_BINDING_ANCHOR_PATH']) {
       if (process.env[name]) env[name] = process.env[name];
     }
   }
@@ -1478,7 +1548,7 @@ function pulseHookCommand(eventName, runtimePath) {
   ];
   if (process.env.PULSE_TRUST_MODE === 'test') {
     environment.push(`PULSE_TRUST_MODE=${shellQuote('test')}`);
-    for (const name of ['PULSE_BINDING_REGISTRY_PATH', 'PULSE_BINDING_PUBLIC_KEY_PATH']) {
+    for (const name of ['PULSE_BINDING_REGISTRY_PATH', 'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_BINDING_ANCHOR_PATH']) {
       if (process.env[name]) environment.push(`${name}=${shellQuote(process.env[name])}`);
     }
   }
@@ -2176,6 +2246,7 @@ async function connectClaudeCodeActivation(remoteControl) {
   ]) {
     if (existsSync(path)) JSON.parse(readFileSync(path, 'utf8'));
   }
+  await recoverBindingAuthority();
   const resolved = resolveCodexMcpRuntime(process.cwd());
 	const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
 	try {
@@ -2226,6 +2297,7 @@ async function connectClaudeCodeActivation(remoteControl) {
 				codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
 					registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
 					publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+					anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
 				trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
 			});
 		}
@@ -5216,6 +5288,63 @@ function openExternalURL(url) {
   }
 }
 
+async function loginTeam() {
+	const profilePath = getArg('--profile');
+	if (!profilePath) {
+		throw new Error('pulse team login requires --profile <root-owned-json>');
+	}
+	await recoverBindingAuthority();
+	const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	if (binding.mode !== 'team') {
+		throw new Error('pulse team login requires a trusted Team workspace binding');
+	}
+	const profile = readTeamAuthProfile(resolve(profilePath));
+	const outputPath = getArg('--out')
+		? resolve(getArg('--out'))
+		: join(
+			DATA_DIR,
+			'supervisor',
+			'enrollment-requests',
+			`${binding.commons.team_id}-${Date.now()}-${randomBytes(6).toString('hex')}.json`,
+		);
+	const noOpen = args.includes('--no-open');
+	const result = await runTeamLogin({
+		profile,
+		binding,
+		credentialStore: createOSCredentialStore(),
+		outputPath,
+		openAuthorizationURL: async (url) => {
+			if (noOpen) {
+				console.log(`[pulse] Open this exact sign-in URL in your browser:\n${url}`);
+				return;
+			}
+			openExternalURL(url);
+			console.log('[pulse] Opened the Team sign-in in your browser.');
+		},
+	});
+	console.log(`[pulse] Team installation authenticated: ${result.enrollmentID}`);
+	console.log(`[pulse] Public enrollment request: ${result.requestPath}`);
+	console.log(`[pulse] Request digest: ${result.requestDigest}`);
+	console.log('[pulse] Status: pending Owner approval. Remote Commons stays blocked until the exact public entry is installed in the protected gateway registry.');
+}
+
+async function teamStatus() {
+	await recoverBindingAuthority();
+	const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	const result = await inspectTeamInstallation(binding);
+	setTeamStatusExitCode(result);
+	if (args.includes('--json')) {
+		console.log(JSON.stringify(result, null, 2));
+		return;
+	}
+	console.log(`[pulse] Team Commons readiness: ${result.status}`);
+	console.log(`[pulse] Team/store: ${result.team_id} / ${result.store_id}`);
+	console.log(`[pulse] Membership: ${result.membership_role}; capabilities=${result.capabilities.join(',')}`);
+	console.log(`[pulse] Projection: ${result.projection_state}; degraded=${result.degraded}; reasons=${result.degraded_reasons.join(',') || 'none'}.`);
+	console.log('[pulse] Enrollment accepted; DPoP sender constraint verified; refresh is configured; fallback=false.');
+	console.log('[pulse] Agent writes to Commons: disabled. Publication: exact-envelope human Airlock only.');
+}
+
 function parsePulseDataDirFromCommand(command) {
   const text = String(command ?? '');
   const match = text.match(/(?:^|\s)-{1,2}data-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/);
@@ -5304,6 +5433,7 @@ async function runViewer(rest) {
 	let product;
 	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
 		try {
+			await recoverBindingAuthority();
 			product = resolveCodexMcpRuntime(process.cwd());
 		} catch (error) {
 			if (productActivationEvidenceForViewer()) {
@@ -7636,6 +7766,70 @@ function getRestArg(rest, name) {
   return i >= 0 ? rest[i + 1] : undefined;
 }
 
+function optionalLocalPort() {
+	const value = getArg('--port');
+	if (value === undefined) return undefined;
+	if (!/^[0-9]{4,5}$/.test(value)) throw new Error('pulse binding --port must be an integer from 1024 to 65535');
+	const port = Number.parseInt(value, 10);
+	if (port < 1024 || port > 65535) throw new Error('pulse binding --port must be an integer from 1024 to 65535');
+	return port;
+}
+
+function requiredBindingArg(name) {
+	const value = getArg(name);
+	if (!value) throw new Error(`pulse binding requires ${name} <id>`);
+	return value;
+}
+
+async function createBinding(subcommand) {
+	const team = subcommand === 'create-team';
+	const confirmation = team ? 'bind pulse team workspace' : 'bind pulse personal workspace';
+	if (getArg('--confirm') !== confirmation) {
+		throw new Error(`pulse binding ${subcommand} requires --confirm "${confirmation}"`);
+	}
+	const binding = await createWorkspaceBinding({
+		cwd: getArg('--cwd') ?? process.cwd(),
+		mode: team ? 'team' : 'personal',
+		port: optionalLocalPort(),
+		principalID: requiredBindingArg('--principal-id'),
+		teamID: team ? requiredBindingArg('--team-id') : undefined,
+		commonsStoreID: team ? requiredBindingArg('--commons-store-id') : undefined,
+		commonsProjectID: team ? requiredBindingArg('--commons-project-id') : undefined,
+		commonsResource: team ? requiredBindingArg('--commons-resource') : undefined,
+	});
+	console.log(`[pulse] trusted ${binding.mode} binding created: ${binding.binding_id}`);
+	console.log(`[pulse] workspace ${binding.workspace.workspace_id}; resolver epoch ${binding.resolver_epoch}; fallback=false`);
+	if (binding.mode === 'team') {
+		console.log(`[pulse] private Desk ${binding.desk.store_id} -> ${binding.desk.base_url}`);
+		console.log(`[pulse] Team Commons ${binding.commons.team_id}/${binding.commons.store_id}; project ${binding.commons.project_id} -> ${binding.commons.resource}`);
+		console.log('[pulse] Commons is read-only to the installed agent. Publication requires the human Airlock.');
+	} else {
+		console.log(`[pulse] private Personal Vault ${binding.personal.store_id} -> ${binding.personal.base_url}`);
+	}
+}
+
+async function trustCommand() {
+	const subcommand = args[1];
+	if (subcommand === 'status') {
+		const result = inspectPresenceTrust({ probePublicKey: true });
+		if (args.includes('--json')) console.log(JSON.stringify(result, null, 2));
+		else {
+			console.log(`[pulse] presence trust: ${result.status}; ready=${result.ready}`);
+			console.log(`[pulse] helper: ${result.helper.path}`);
+			console.log(`[pulse] binding key: ${result.public_key.path}`);
+			if (result.issues.length > 0) console.log(`[pulse] issues: ${result.issues.join(', ')}`);
+		}
+		return;
+	}
+	if (subcommand === 'install') {
+		const result = await installPresenceTrust({ confirmation: getArg('--confirm') });
+		console.log(`[pulse] presence trust ready; installed=${result.installed}`);
+		console.log('[pulse] workspace binding changes now require review of the exact registry bytes and macOS user presence.');
+		return;
+	}
+	throw new Error(`pulse trust supports: pulse trust status | pulse trust install --confirm "${TRUST_INSTALL_CONFIRMATION}"`);
+}
+
 async function main() {
   if (command === 'mcp') {
     // Stdio MCP server: nothing may touch stdout before the JSON-RPC handshake.
@@ -7656,11 +7850,13 @@ async function main() {
   }
 
   if (command === 'codex-hook') {
+    await recoverBindingAuthority();
     await runCodexHookCLI(args[1]);
     return;
   }
 
   if (command === 'claude-hook') {
+    await recoverBindingAuthority();
     await runClaudeHookCLI(args[1]);
     return;
   }
@@ -7698,12 +7894,22 @@ async function main() {
     return;
   }
 
+  if (command === 'trust') {
+	await trustCommand();
+	return;
+  }
+
   if (command === 'binding') {
 	const subcommand = args[1];
+	if (subcommand === 'create-personal' || subcommand === 'create-team') {
+		await createBinding(subcommand);
+		return;
+	}
 	if (subcommand !== 'resolve' && subcommand !== 'status') {
-	  throw new Error('pulse binding supports only read-only resolve or status');
+	  throw new Error('pulse binding supports resolve, status, create-personal, or create-team');
 	}
 	try {
+	  await recoverBindingAuthority();
 	  const binding = resolveWorkspaceBinding({
 		cwd: getArg('--cwd') ?? process.cwd(),
 	  });
@@ -7728,6 +7934,7 @@ async function main() {
 	  throw new Error('pulse supervisor supports start, status, or stop');
 	}
 	try {
+	  await recoverBindingAuthority();
 	  const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
 	  const runtime = vaultRuntimeFromBinding(binding);
 	  let result;
@@ -7750,6 +7957,13 @@ async function main() {
 	  }
 	  throw error;
 	}
+	return;
+  }
+
+  if (command === 'team') {
+	if (args[1] === 'login') await loginTeam();
+	else if (args[1] === 'status') await teamStatus();
+	else throw new Error('pulse team supports: pulse team login | pulse team status');
 	return;
   }
 

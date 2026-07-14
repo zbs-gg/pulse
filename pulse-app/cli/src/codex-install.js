@@ -116,12 +116,12 @@ export function readCodexProductLocator({ codexHome, binding }) {
 		throw new Error('Codex product locator is invalid');
 	}
 	const entry = locator.entries[workspaceDigest];
-	const allowed = ['data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
 	if (!entry) throw new Error('Codex product locator is missing for this workspace');
 	if (entry.workspace_digest !== workspaceDigest ||
 		Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
 		!['production', 'test'].includes(entry.trust_mode) ||
-		![entry.data_dir, entry.registry_path, entry.public_key_path]
+		![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
 			.every((value) => typeof value === 'string' && isAbsolute(value))) {
 		throw new Error('Codex product locator is invalid for this workspace');
 	}
@@ -129,9 +129,10 @@ export function readCodexProductLocator({ codexHome, binding }) {
 }
 
 export function writeCodexProductLocator({
-	codexHome, binding, dataDir, registryPath, publicKeyPath, trustMode = 'production',
+	codexHome, binding, dataDir, registryPath, publicKeyPath, anchorPath, trustMode = 'production',
 }) {
-	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode)) {
+	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode) ||
+		![dataDir, registryPath, publicKeyPath, anchorPath].every((value) => typeof value === 'string' && isAbsolute(value))) {
     throw new Error('Codex product locator input is invalid');
   }
   const directory = join(resolve(codexHome), 'pulse');
@@ -155,6 +156,7 @@ export function writeCodexProductLocator({
     data_dir: resolve(dataDir),
 		registry_path: resolve(registryPath),
 		public_key_path: resolve(publicKeyPath),
+		anchor_path: resolve(anchorPath),
 		trust_mode: trustMode,
   };
   atomicWriteJSON(path, current);

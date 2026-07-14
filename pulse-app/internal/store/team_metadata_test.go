@@ -36,8 +36,12 @@ func TestTeamMetadataStatusInspectAndOwnAuditAreScopedAndContentFree(t *testing.
 		status.PrincipalID != fixture.actor.binding.AgentPrincipalID || status.PrincipalKind != "agent" ||
 		status.HumanPrincipalID != fixture.actor.member.PrincipalID ||
 		status.BindingID != fixture.actor.binding.BindingID || status.PublicEnabled ||
-		status.ActivationState != TeamActivationInactive {
+		status.ActivationState != TeamActivationInactive || !status.ProjectionPending ||
+		status.ProjectionFailed {
 		t.Fatalf("status metadata = %+v", status)
+	}
+	if err := fixture.store.CheckTeamProjectionQueueReadiness(ctx); !errors.Is(err, ErrTeamProjectionQueueLagging) {
+		t.Fatalf("projection queue readiness = %v, want lagging", err)
 	}
 
 	filterRequest := CandidateFilterRequest{

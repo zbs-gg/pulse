@@ -270,7 +270,7 @@ func TestServiceResumeBuildsAuthorizedContinuityWithoutLocalState(t *testing.T) 
 	if len(fake.filterRequests) != 1 || fake.filterRequests[0].PrivacyCeiling != "normal" ||
 		fake.filterRequests[0].Context.SessionID != "session-pulse" ||
 		len(fake.continuityQueries) != 1 || len(fake.graphQueries) != 0 ||
-		len(fake.memoryQueries) != 0 {
+		len(fake.memoryQueries) != 1 || fake.memoryQueries[0].Limit != 32 {
 		t.Fatalf("resume authorization/calls = filter:%+v continuity:%v",
 			fake.filterRequests, fake.continuityQueries)
 	}

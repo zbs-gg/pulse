@@ -60,20 +60,23 @@ type TeamMemoryEmbeddingReadQuery struct {
 }
 
 type TeamAuthorizedMemoryCapsule struct {
-	RootObjectID      string
-	CapsuleID         string
-	PartitionKey      string
-	Kind              string
-	RedactedSummary   string
-	Confidence        float64
-	EvidenceHint      string
-	PrivacyTier       string
-	Retention         string
-	Tags              []string
-	SourceHost        string
-	ConversationScope string
-	SourceTimestamp   string
-	CreatedAt         string
+	RootObjectID             string
+	CapsuleID                string
+	PartitionKey             string
+	Kind                     string
+	RedactedSummary          string
+	Confidence               float64
+	EvidenceHint             string
+	PrivacyTier              string
+	Retention                string
+	Tags                     []string
+	SourceHost               string
+	ConversationScope        string
+	SourceTimestamp          string
+	CreatedAt                string
+	PublicationID            string
+	PublicationEventObjectID string
+	PublicationCreatedAt     string
 }
 
 type TeamAuthorizedMemoryEmbedding struct {
@@ -174,7 +177,10 @@ func (s *Store) QueryAuthorizedTeamMemoryCapsules(
 			       capsule.evidence_hint, root.privacy_tier, root.retention,
 			       capsule.tags_json, capsule.source_host,
 			       capsule.conversation_scope, capsule.source_timestamp,
-			       capsule.created_at
+			       capsule.created_at,
+			       COALESCE(publication.publication_id, '') publication_id,
+			       COALESCE(publication.event_object_id, '') event_object_id,
+			       COALESCE(publication.publication_created_at, '') publication_created_at
 			  FROM team_memory_capsules capsule
 			  JOIN team_object_registry root
 			    ON root.object_id = capsule.root_object_id
@@ -183,12 +189,29 @@ func (s *Store) QueryAuthorizedTeamMemoryCapsules(
 			   AND root.scope_id = capsule.scope_id
 			   AND root.generation = capsule.root_generation
 			   AND root.object_kind = 'memory'
+			  LEFT JOIN (
+			      SELECT receipt.object_id, receipt.capsule_id, receipt.publication_id,
+			             receipt.created_at AS publication_created_at,
+			             event.derivative_object_id AS event_object_id
+			        FROM team_publication_receipts receipt
+			        JOIN team_projection_jobs job
+			          ON job.job_id = receipt.event_projection_job_id
+			         AND job.root_object_id = receipt.object_id
+			         AND job.projection_kind = 'event' AND job.state = 'ready'
+			        JOIN team_memory_events event
+			          ON event.job_id = job.job_id
+			         AND event.root_object_id = receipt.object_id
+			         AND event.capsule_id = receipt.capsule_id
+			  ) publication
+			    ON publication.object_id = capsule.root_object_id
+			   AND publication.capsule_id = capsule.capsule_id
 			 WHERE `+predicate+`
 		)
 		SELECT root_object_id, capsule_id, team_id, scope_type, scope_id,
 		       kind, redacted_summary, confidence, evidence_hint,
 		       privacy_tier, retention, tags_json,
-		       source_host, conversation_scope, source_timestamp, created_at
+		       source_host, conversation_scope, source_timestamp, created_at,
+		       publication_id, event_object_id, publication_created_at
 		  FROM authorized
 		 WHERE ? = '' OR instr(
 		       lower(redacted_summary || ' ' || kind || ' ' || tags_json), ?
@@ -209,7 +232,8 @@ func (s *Store) QueryAuthorizedTeamMemoryCapsules(
 			&item.Kind, &item.RedactedSummary, &item.Confidence, &item.EvidenceHint,
 			&item.PrivacyTier, &item.Retention, &tagsJSON,
 			&item.SourceHost, &item.ConversationScope,
-			&item.SourceTimestamp, &item.CreatedAt,
+			&item.SourceTimestamp, &item.CreatedAt, &item.PublicationID,
+			&item.PublicationEventObjectID, &item.PublicationCreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -221,6 +245,12 @@ func (s *Store) QueryAuthorizedTeamMemoryCapsules(
 			math.IsNaN(item.Confidence) || math.IsInf(item.Confidence, 0) ||
 			item.Confidence < 0 || item.Confidence > 1 ||
 			!validAuthorizedReadTime(item.SourceTimestamp) || !validAuthorizedReadTime(item.CreatedAt) {
+			return nil, ErrTeamPolicyNotReady
+		}
+		if item.PublicationID != "" &&
+			(!validProjectionOpaque(item.PublicationID, 255) ||
+				!validProjectionOpaque(item.PublicationEventObjectID, 255) ||
+				!validAuthorizedReadTime(item.PublicationCreatedAt)) {
 			return nil, ErrTeamPolicyNotReady
 		}
 		item.Tags = tags

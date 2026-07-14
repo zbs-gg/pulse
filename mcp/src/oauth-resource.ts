@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 
@@ -18,6 +19,38 @@ export interface VerifiedOAuthIdentity {
   clientId: string;
   capabilities: TeamCapability[];
   authTime?: number;
+  confirmationKeyThumbprint?: string;
+}
+
+export const AIRLOCK_HUMAN_PRESENCE_ACR =
+  'https://pulse.zbs.gg/acr/airlock-human-presence/v1';
+export const AIRLOCK_HUMAN_PRESENCE_CLAIM =
+  'https://pulse.zbs.gg/claims/airlock-human-presence/v1';
+export const AIRLOCK_HUMAN_PRESENCE_SCHEMA = 'pulse.airlock_human_presence.v1';
+export const AIRLOCK_PLATFORM_WEBAUTHN_FACTOR = 'webauthn-platform';
+
+export interface AirlockHumanPresence {
+  schema: typeof AIRLOCK_HUMAN_PRESENCE_SCHEMA;
+  factor: typeof AIRLOCK_PLATFORM_WEBAUTHN_FACTOR;
+  verifiedAt: number;
+}
+
+export interface VerifiedBrowserAuthorization extends VerifiedOAuthIdentity {
+  authTime: number;
+  authenticationContext: typeof AIRLOCK_HUMAN_PRESENCE_ACR;
+  authenticationMethods: string[];
+  humanPresence: AirlockHumanPresence;
+  tokenExpiresAt: number;
+}
+
+export interface BrowserAuthorizationInput {
+  accessToken: string;
+  idToken: string;
+  clientId: string;
+  nonce: string;
+  requiredCapabilities: readonly TeamCapability[];
+  maxAuthenticationAgeSeconds?: number;
+  authorizationStartedAt: number;
 }
 
 export type OAuthSecurityReason =
@@ -191,6 +224,119 @@ export class OAuthResourceVerifier {
     return identity;
   }
 
+  /**
+   * Verifies the two-token result of an OIDC Authorization Code + PKCE flow.
+   * The access token remains the capability authority. The ID token supplies
+   * the cryptographically bound nonce and recent human authentication time;
+   * neither token is accepted on its own for an Owner browser session.
+   */
+  async verifyBrowserAuthorization(
+    input: BrowserAuthorizationInput,
+  ): Promise<VerifiedBrowserAuthorization> {
+    if (
+      !isBoundedIdentityString(input.clientId) ||
+      !isBoundedString(input.nonce, 32, 256) ||
+      !/^[A-Za-z0-9_-]+$/.test(input.nonce) ||
+      typeof input.accessToken !== 'string' ||
+      typeof input.idToken !== 'string' ||
+      Buffer.byteLength(input.accessToken, 'utf8') > MAX_AUTHORIZATION_BYTES ||
+      Buffer.byteLength(input.idToken, 'utf8') > MAX_AUTHORIZATION_BYTES ||
+      !Number.isInteger(input.authorizationStartedAt) || input.authorizationStartedAt <= 0 ||
+      input.authorizationStartedAt > this.now() + 5
+    ) {
+      throw new OAuthResourceError('invalid_token', [], 'malformed_credential');
+    }
+    const maxAuthenticationAgeSeconds = boundedInteger(
+      input.maxAuthenticationAgeSeconds ?? 300,
+      30,
+      300,
+      'Owner authentication age',
+    );
+    const identity = await this.verifyAuthorization(
+      `Bearer ${input.accessToken}`,
+      input.requiredCapabilities,
+    );
+    if (identity.clientId !== input.clientId) {
+      throw new OAuthResourceError('invalid_token', [], 'invalid_credential');
+    }
+
+    let header: ReturnType<typeof decodeProtectedHeader>;
+    try {
+      if (Buffer.byteLength(input.idToken.split('.')[0] ?? '', 'utf8') > MAX_TOKEN_HEADER_BYTES) {
+        throw new Error('header too large');
+      }
+      header = decodeProtectedHeader(input.idToken);
+    } catch {
+      throw new OAuthResourceError('invalid_token', [], 'malformed_credential');
+    }
+    if (
+      (header.typ !== undefined && header.typ !== 'JWT') ||
+      typeof header.alg !== 'string' ||
+      !this.algorithms.includes(header.alg) ||
+      typeof header.kid !== 'string' ||
+      header.kid.length < 1 ||
+      header.kid.length > 128
+    ) {
+      throw new OAuthResourceError('invalid_token', [], 'malformed_credential');
+    }
+
+    let payload: JWTPayload;
+    try {
+      const jwks = await this.loadJwks(false);
+      const verified = await jwtVerify(input.idToken, createLocalJWKSet(jwks), {
+        algorithms: this.algorithms,
+        audience: input.clientId,
+        issuer: this.issuer,
+        requiredClaims: [
+          'iss', 'sub', 'aud', 'exp', 'iat', 'nonce', 'auth_time', 'acr', 'amr',
+          AIRLOCK_HUMAN_PRESENCE_CLAIM,
+        ],
+        clockTolerance: this.clockToleranceSeconds,
+        currentDate: new Date(this.now() * 1000),
+      });
+      payload = verified.payload;
+    } catch (error) {
+      throw new OAuthResourceError('invalid_token', [], oauthReasonForError(error));
+    }
+
+    const now = this.now();
+    const methods = exactAuthenticationMethods(payload.amr);
+    const presence = exactAirlockHumanPresence(payload[AIRLOCK_HUMAN_PRESENCE_CLAIM]);
+    if (
+      payload.iss !== this.issuer ||
+      payload.aud !== input.clientId ||
+      !isBoundedIdentityString(payload.sub) ||
+      payload.sub !== identity.subject ||
+      (payload.azp !== undefined && payload.azp !== input.clientId) ||
+      typeof payload.iat !== 'number' || !Number.isInteger(payload.iat) ||
+      typeof payload.exp !== 'number' || !Number.isInteger(payload.exp) ||
+      payload.exp <= payload.iat ||
+      payload.iat > now + this.clockToleranceSeconds ||
+      typeof payload.auth_time !== 'number' || !Number.isInteger(payload.auth_time) ||
+      payload.auth_time <= 0 || payload.auth_time > now + 5 ||
+      now - payload.auth_time > maxAuthenticationAgeSeconds ||
+      payload.auth_time < input.authorizationStartedAt - 5 ||
+      payload.acr !== AIRLOCK_HUMAN_PRESENCE_ACR ||
+      methods === undefined || !methods.includes('mfa') ||
+      presence === undefined ||
+      presence.verifiedAt < input.authorizationStartedAt - 5 ||
+      presence.verifiedAt > now + 5 ||
+      !isBoundedString(payload.nonce, 32, 256) ||
+      !constantTimeStringEqual(payload.nonce, input.nonce) ||
+      (identity.authTime !== undefined && identity.authTime !== payload.auth_time)
+    ) {
+      throw new OAuthResourceError('invalid_token', [], 'invalid_credential');
+    }
+    return {
+      ...identity,
+      authTime: payload.auth_time,
+      authenticationContext: AIRLOCK_HUMAN_PRESENCE_ACR,
+      authenticationMethods: methods,
+      humanPresence: presence,
+      tokenExpiresAt: payload.exp,
+    };
+  }
+
   private async verifyWith(token: string, jwks: JSONWebKeySet) {
     return jwtVerify(token, createLocalJWKSet(jwks), {
       algorithms: this.algorithms,
@@ -232,12 +378,23 @@ export class OAuthResourceVerifier {
       throw new OAuthResourceError('invalid_token');
     }
     const capabilities = [...new Set(scopes.filter(isTeamCapability))].sort() as TeamCapability[];
+    let confirmationKeyThumbprint: string | undefined;
+    if (payload.cnf !== undefined) {
+      const cnf = payload.cnf as Record<string, unknown>;
+      if (!cnf || typeof cnf !== 'object' || Array.isArray(cnf) ||
+          Object.keys(cnf).length !== 1 || typeof cnf.jkt !== 'string' ||
+          !/^[A-Za-z0-9_-]{43}$/.test(cnf.jkt)) {
+        throw new OAuthResourceError('invalid_token');
+      }
+      confirmationKeyThumbprint = cnf.jkt;
+    }
     return {
       issuer: payload.iss,
       subject: payload.sub,
       clientId: payload.client_id,
       capabilities,
       ...(payload.auth_time === undefined ? {} : { authTime: payload.auth_time as number }),
+      ...(confirmationKeyThumbprint === undefined ? {} : { confirmationKeyThumbprint }),
     };
   }
 
@@ -369,6 +526,12 @@ function oauthReasonForError(error: unknown): OAuthSecurityReason {
 
 function isTeamCapability(value: string): value is TeamCapability {
   return (TEAM_CAPABILITIES as readonly string[]).includes(value);
+}
+
+function constantTimeStringEqual(left: string, right: string): boolean {
+  const leftDigest = Buffer.from(left, 'utf8');
+  const rightDigest = Buffer.from(right, 'utf8');
+  return leftDigest.length === rightDigest.length && timingSafeEqual(leftDigest, rightDigest);
 }
 
 function isUnknownKid(error: unknown): boolean {
@@ -665,6 +828,33 @@ function fetchPinnedHTTPSJSON(
     request.on('error', (error) => finish(() => reject(error)));
     request.end();
   });
+}
+
+function exactAuthenticationMethods(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8) return undefined;
+  const methods: string[] = [];
+  for (const method of value) {
+    if (typeof method !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(method)) return undefined;
+    methods.push(method);
+  }
+  if (new Set(methods).size !== methods.length) return undefined;
+  return methods;
+}
+
+function exactAirlockHumanPresence(value: unknown): AirlockHumanPresence | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const claim = value as Record<string, unknown>;
+  if (
+    Object.keys(claim).length !== 3 ||
+    claim.schema !== AIRLOCK_HUMAN_PRESENCE_SCHEMA ||
+    claim.factor !== AIRLOCK_PLATFORM_WEBAUTHN_FACTOR ||
+    !Number.isInteger(claim.verified_at) || (claim.verified_at as number) <= 0
+  ) return undefined;
+  return {
+    schema: AIRLOCK_HUMAN_PRESENCE_SCHEMA,
+    factor: AIRLOCK_PLATFORM_WEBAUTHN_FACTOR,
+    verifiedAt: claim.verified_at as number,
+  };
 }
 
 function boundedInteger(value: number, min: number, max: number, label: string): number {

@@ -35,6 +35,13 @@ func newTeamServerFixture(t *testing.T, activate bool) (*TeamServer, *principalF
 	if err != nil {
 		t.Fatalf("acquire writer lease: %v", err)
 	}
+	if err := f.store.RecordTeamProjectionWorkerHeartbeat(context.Background(), store.TeamProjectionWorkerHeartbeatRequest{
+		WriterID: lease.WriterID, WriterToken: lease.Token,
+		WorkerInstanceID: "projection-router-test",
+		DependencyState:  store.TeamProjectionDependencyReady,
+	}); err != nil {
+		t.Fatalf("record projection worker heartbeat: %v", err)
+	}
 	if activate {
 		activateSyntheticTeamFixture(t, f, lease)
 	}

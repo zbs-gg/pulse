@@ -1272,8 +1272,11 @@ func countLegacyRows(ctx context.Context, q legacyCounter) (int64, error) {
 		"team_deletion_discharges": {},
 		"team_owner_approvals":     {}, "team_remote_activation": {},
 		"team_service_object_grants": {}, "team_writer_leases": {},
-		"team_idempotency_records": {}, "team_projection_jobs": {},
+		"team_publication_approvals": {}, "team_publication_receipts": {},
+		"team_publication_receipt_payloads": {},
+		"team_idempotency_records":          {}, "team_projection_jobs": {},
 		"team_projection_outputs": {}, "team_audit_event_order": {},
+		"team_worker_heartbeats": {},
 	}
 	for _, table := range catalog {
 		if strings.HasPrefix(table.name, "sqlite_") {

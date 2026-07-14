@@ -152,6 +152,84 @@ func TestTeamStatusRouteReturnsOnlyServerDerivedPrincipalState(t *testing.T) {
 	}
 }
 
+func TestTeamReadinessDegradesWhileProjectionQueueLagsAndStatusExplainsWhy(t *testing.T) {
+	srv, fixture, _ := newReadyTeamServer(t)
+	insertServerDeletionRoot(t, fixture, "root-status-projection-lag", fixture.ownerID)
+	if _, err := fixture.store.DB().Exec(`
+		INSERT INTO team_projection_jobs(
+			job_id, store_id, team_id, root_object_id, root_generation,
+			scope_type, scope_id, projection_kind, state, attempt_count,
+			next_attempt_at, created_at, updated_at)
+		VALUES ('job-status-projection-lag', ?, ?, 'root-status-projection-lag', 1,
+			'personal', ?, 'event', 'pending', 0,
+			'2026-07-11T05:00:00Z', '2026-07-11T05:00:00Z', '2026-07-11T05:00:00Z')`,
+		fixture.storeID, fixture.teamID, fixture.ownerID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := serveTeamRequest(
+		srv.Handler(), http.MethodGet, teamReadinessRoutePath,
+		testTeamIPCSecret, "127.0.0.1:49000", nil,
+	)
+	if ready.Code != http.StatusServiceUnavailable ||
+		ready.Body.String() != "{\"error\":\"team_not_ready\",\"fallback\":false}\n" {
+		t.Fatalf("lagging readiness = %d %q", ready.Code, ready.Body.String())
+	}
+
+	body := teamStatusBody(`{"session_id":"session-status-lag"}`)
+	status := serveSignedTeamMetadata(
+		t, srv, fixture, "status-projection-lag", TeamStatusRoutePath, body,
+		[]string{"pulse:connect", "pulse:status"},
+	)
+	if status.Code != http.StatusOK {
+		t.Fatalf("lagging status = %d %q", status.Code, status.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(status.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["projection_state"] != "pending" || result["degraded"] != true ||
+		!reflect.DeepEqual(result["degraded_reasons"], []any{"projection_jobs_pending"}) {
+		t.Fatalf("lagging status result = %v", result)
+	}
+}
+
+func TestTeamStatusPreservesFailedProjectionStateForOperatorDiagnosis(t *testing.T) {
+	srv, fixture, _ := newReadyTeamServer(t)
+	insertServerDeletionRoot(t, fixture, "root-status-projection-failed", fixture.ownerID)
+	if _, err := fixture.store.DB().Exec(`
+		INSERT INTO team_projection_jobs(
+			job_id, store_id, team_id, root_object_id, root_generation,
+			scope_type, scope_id, projection_kind, state, attempt_count,
+			terminal_lease_token_hash, next_attempt_at, last_error_code, created_at, updated_at)
+		VALUES ('job-status-projection-failed', ?, ?, 'root-status-projection-failed', 1,
+			'personal', ?, 'event', 'failed', 1,
+			?, '2026-07-11T05:00:00Z', 'temporary_failure',
+			'2026-07-11T05:00:00Z', '2026-07-11T05:00:00Z')`,
+		fixture.storeID, fixture.teamID, fixture.ownerID, strings.Repeat("a", 64),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	status := serveSignedTeamMetadata(
+		t, srv, fixture, "status-projection-failed", TeamStatusRoutePath,
+		teamStatusBody(`{"session_id":"session-status-failed"}`),
+		[]string{"pulse:connect", "pulse:status"},
+	)
+	if status.Code != http.StatusOK {
+		t.Fatalf("failed projection status = %d %q", status.Code, status.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(status.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["projection_state"] != "failed" || result["degraded"] != true ||
+		!reflect.DeepEqual(result["degraded_reasons"], []any{"projection_jobs_failed"}) {
+		t.Fatalf("failed projection status result = %v", result)
+	}
+}
+
 func TestTeamStatusBecomesReadyOnlyAfterExplicitSyntheticActivation(t *testing.T) {
 	teamServer, fixture, lease := newInactiveTeamServer(t)
 	ready := serveTeamRequest(
@@ -221,6 +299,38 @@ func TestTeamStatusBecomesReadyOnlyAfterExplicitSyntheticActivation(t *testing.T
 	if result["projection_state"] != "ready" || result["degraded"] != false ||
 		!reflect.DeepEqual(result["degraded_reasons"], []any{}) || result["fallback"] != false {
 		t.Fatalf("activated status = %v", result)
+	}
+}
+
+func TestTeamStatusAndReadinessExposeStaleProjectionWorker(t *testing.T) {
+	srv, fixture, _ := newReadyTeamServer(t)
+	stale := fixture.now.Add(-31 * time.Second).UTC().Format(time.RFC3339Nano)
+	if _, err := fixture.store.DB().Exec(`
+		UPDATE team_worker_heartbeats SET heartbeat_at = ? WHERE worker_kind = 'projection'`, stale); err != nil {
+		t.Fatal(err)
+	}
+	ready := serveTeamRequest(
+		srv.Handler(), http.MethodGet, teamReadinessRoutePath,
+		testTeamIPCSecret, "127.0.0.1:49001", nil,
+	)
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stale worker readiness = %d %q", ready.Code, ready.Body.String())
+	}
+	status := serveSignedTeamMetadata(
+		t, srv, fixture, "status-projection-worker-stale", TeamStatusRoutePath,
+		teamStatusBody(`{"session_id":"session-worker-stale"}`),
+		[]string{"pulse:connect", "pulse:status"},
+	)
+	if status.Code != http.StatusOK {
+		t.Fatalf("stale worker status = %d %q", status.Code, status.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(status.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["projection_state"] != "pending" || result["degraded"] != true ||
+		!reflect.DeepEqual(result["degraded_reasons"], []any{store.TeamProjectionWorkerReasonHeartbeatStale}) {
+		t.Fatalf("stale worker status result = %v", result)
 	}
 }
 

@@ -48,6 +48,27 @@ var postFoundationMigrationPolicies = map[int]migrationPolicy{
 		MinReaderVersion: 41,
 		MinWriterVersion: 41,
 	},
+	42: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindDesk: true,
+		},
+		MinReaderVersion: 42,
+		MinWriterVersion: 42,
+	},
+	43: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindCommons: true,
+		},
+		MinReaderVersion: 43,
+		MinWriterVersion: 43,
+	},
+	44: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindCommons: true,
+		},
+		MinReaderVersion: 44,
+		MinWriterVersion: 44,
+	},
 }
 
 func loadMigrationSet(fsys fs.FS) ([]migrationDescriptor, error) {

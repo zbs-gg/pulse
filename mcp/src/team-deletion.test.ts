@@ -514,7 +514,7 @@ test('deletion domains collapse malformed or unavailable success responses witho
   }
 });
 
-test('team deletion tools dispatch once and never reach legacy or local fallback', async () => {
+test('agent-facing Team exposes deletion status but keeps deletion mutation human-controlled', async () => {
   const calls: string[] = [];
   const domain = unavailableDomain();
   domain.delete = async (input: unknown) => {
@@ -530,16 +530,20 @@ test('team deletion tools dispatch once and never reach legacy or local fallback
   const transport = new StreamableHTTPClientTransport(new URL(server.url));
   try {
     await client.connect(transport);
+    const listed = await client.listTools();
+    assert.equal(listed.tools.some(({ name }) => name === 'pulse_team_delete'), false);
+    assert.equal(listed.tools.some(({ name }) => name === 'pulse_team_delete_status'), true);
     const deletion = await client.callTool({ name: 'pulse_team_delete', arguments: deleteInput() });
     const status = await client.callTool({
       name: 'pulse_team_delete_status', arguments: deleteStatusInput(),
     });
-    assert.deepEqual(toolJSON(deletion), deleteResult());
+    assert.equal(deletion.isError, true);
+    assert.match(JSON.stringify(deletion.content), /Unknown team tool/i);
     assert.deepEqual(toolJSON(status), deleteStatusResult());
-    assert.deepEqual(calls, ['delete:team_root_001', 'status:delete_operation_001']);
+    assert.deepEqual(calls, ['status:delete_operation_001']);
     const legacy = await client.callTool({ name: 'pulse_forget', arguments: { id: 'team_root_001' } });
     assert.equal(legacy.isError, true);
-    assert.deepEqual(calls, ['delete:team_root_001', 'status:delete_operation_001']);
+    assert.deepEqual(calls, ['status:delete_operation_001']);
   } finally {
     await client.close();
     await server.stop();
@@ -548,7 +552,6 @@ test('team deletion tools dispatch once and never reach legacy or local fallback
 
 test('team deletion tools fail closed with content-free security metadata', async () => {
   for (const [name, input, methodClass] of [
-    ['pulse_team_delete', deleteInput(), 'delete'],
     ['pulse_team_delete_status', deleteStatusInput(), 'read'],
   ] as const) {
     const events: GatewaySecurityEventInput[] = [];

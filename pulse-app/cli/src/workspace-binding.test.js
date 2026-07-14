@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -15,6 +16,7 @@ import test from 'node:test';
 
 import {
   BindingError,
+  bindingRegistryAnchor,
   canonicalJSONStringify,
   canonicalizeWorkspace,
   resolveWorkspaceBinding,
@@ -46,16 +48,20 @@ function signedRegistry(home, payload, { algorithm = 'ed25519' } = {}) {
   chmodSync(supervisor, 0o700);
   const registryPath = join(supervisor, 'workspace-bindings.json');
   const publicKeyPath = join(supervisor, 'workspace-bindings.pub.pem');
+  const anchorPath = join(supervisor, 'workspace-bindings.anchor.json');
   const signature = sign(
     algorithm === 'es256' ? 'sha256' : null,
     Buffer.from(canonicalJSONStringify(payload)),
     privateKey,
   ).toString('base64');
-  writeFileSync(registryPath, JSON.stringify({ algorithm, payload, signature }), { mode: 0o600 });
+  const registryBytes = Buffer.from(`${JSON.stringify({ algorithm, payload, signature })}\n`);
+  writeFileSync(registryPath, registryBytes, { mode: 0o600 });
+  writeFileSync(anchorPath, `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, payload.epoch))}\n`, { mode: 0o600 });
   writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o600 });
   chmodSync(registryPath, 0o600);
   chmodSync(publicKeyPath, 0o600);
-  return { registryPath, publicKeyPath };
+  chmodSync(anchorPath, 0o600);
+  return { registryPath, publicKeyPath, anchorPath, rootAnchor: false };
 }
 
 function teamBinding(workspace, overrides = {}) {
@@ -79,13 +85,33 @@ function teamBinding(workspace, overrides = {}) {
     commons: {
       store_id: 'store_commons_demo',
       team_id: 'team_demo',
-      resource: 'https://pulse.example.test/team_demo',
+      project_id: 'project_demo',
+      resource: 'https://pulse.example.test/mcp',
       credential_ref: 'keychain:pulse/team/demo/dima',
       cache_partition: 'commons:team_demo:principal_dima',
     },
     ...overrides,
   };
 }
+
+test('Team binding requires an exact root-signed Commons project_id', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-binding-project.'));
+  const repository = makeRepository(root);
+  const workspace = canonicalizeWorkspace(repository);
+  for (const projectID of [undefined, 'workspace_demo', 'project-demo', 'project_../demo']) {
+    const candidate = teamBinding(workspace);
+    candidate.commons = { ...candidate.commons, project_id: projectID };
+    if (projectID === undefined) delete candidate.commons.project_id;
+    const paths = signedRegistry(root, {
+      schema: 'pulse.workspace-binding-registry.v1', epoch: 7, bindings: [candidate],
+    });
+    assert.throws(
+      () => resolveWorkspaceBinding({ cwd: repository, ...paths }),
+      (error) => error instanceof BindingError && error.code === 'binding_topology_invalid',
+    );
+  }
+  rmSync(root, { recursive: true, force: true });
+});
 
 test('canonical workspace collapses nested paths and symlinks, survives rename, and separates clones', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-binding-workspace.'));
@@ -156,11 +182,16 @@ test('tampering, ambiguity, and repo-local registries fail before any Vault can 
 
   const repoRegistry = join(repository, '.pulse-bindings.json');
   const repoKey = join(repository, '.pulse-bindings.pub.pem');
+  const repoAnchor = join(repository, '.pulse-bindings.anchor.json');
   const outside = signedRegistry(home, { ...payload, bindings: [teamBinding(workspace)] });
   writeFileSync(repoRegistry, awaitRead(outside.registryPath), { mode: 0o600 });
   writeFileSync(repoKey, awaitRead(outside.publicKeyPath), { mode: 0o600 });
+  writeFileSync(repoAnchor, awaitRead(outside.anchorPath), { mode: 0o600 });
   assert.throws(
-    () => resolveWorkspaceBinding({ cwd: repository, registryPath: repoRegistry, publicKeyPath: repoKey }),
+    () => resolveWorkspaceBinding({
+      cwd: repository, registryPath: repoRegistry, publicKeyPath: repoKey,
+      anchorPath: repoAnchor, rootAnchor: false,
+    }),
     (error) => error instanceof BindingError && error.code === 'binding_registry_in_workspace',
   );
 });

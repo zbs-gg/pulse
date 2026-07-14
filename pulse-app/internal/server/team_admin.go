@@ -262,11 +262,30 @@ func (s *TeamServer) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 		PolicyVersion: metadata.PolicyVersion, ProjectionState: "ready",
 		DegradedReasons: []string{}, Fallback: false,
 	}
+	var degradedReasons []string
 	if metadata.ActivationState != store.TeamActivationActive || !metadata.PublicEnabled ||
 		metadata.RealContentState != store.TeamContentSynthetic {
-		response.ProjectionState = "pending"
+		degradedReasons = append(degradedReasons, "team_remote_inactive")
+	}
+	if metadata.ProjectionFailed {
+		degradedReasons = append(degradedReasons, "projection_jobs_failed")
+	}
+	if metadata.ProjectionPending {
+		degradedReasons = append(degradedReasons, "projection_jobs_pending")
+	}
+	if metadata.ProjectionWorkerReason != "" {
+		degradedReasons = append(degradedReasons, metadata.ProjectionWorkerReason)
+	}
+	if len(degradedReasons) > 0 {
+		sort.Strings(degradedReasons)
+		if metadata.ProjectionFailed ||
+			metadata.ProjectionWorkerReason == store.TeamProjectionWorkerReasonCycleFailed {
+			response.ProjectionState = "failed"
+		} else {
+			response.ProjectionState = "pending"
+		}
 		response.Degraded = true
-		response.DegradedReasons = []string{"team_remote_inactive"}
+		response.DegradedReasons = degradedReasons
 	}
 	if !validTeamStatusResponse(response) {
 		writeTeamAdminError(w, http.StatusServiceUnavailable, teamErrorSharedMemoryUnavailable)
@@ -484,8 +503,31 @@ func validTeamStatusResponse(response teamStatusResponse) bool {
 		return false
 	}
 	if response.Degraded {
-		if response.ProjectionState != "pending" ||
-			!equalStrings(response.DegradedReasons, []string{"team_remote_inactive"}) {
+		if (response.ProjectionState != "pending" && response.ProjectionState != "failed") ||
+			len(response.DegradedReasons) == 0 {
+			return false
+		}
+		seen := make(map[string]bool, len(response.DegradedReasons))
+		for index, reason := range response.DegradedReasons {
+			switch reason {
+			case "team_remote_inactive", "projection_jobs_failed", "projection_jobs_pending",
+				store.TeamProjectionWorkerReasonHeartbeatMissing,
+				store.TeamProjectionWorkerReasonHeartbeatStale,
+				store.TeamProjectionWorkerReasonHeartbeatInvalid,
+				store.TeamProjectionWorkerReasonLeaseMismatch,
+				store.TeamProjectionWorkerReasonEmbeddingNotConfigured,
+				store.TeamProjectionWorkerReasonCycleFailed:
+			default:
+				return false
+			}
+			if seen[reason] || (index > 0 && response.DegradedReasons[index-1] >= reason) {
+				return false
+			}
+			seen[reason] = true
+		}
+		if response.ProjectionState == "failed" &&
+			!seen["projection_jobs_failed"] &&
+			!seen[store.TeamProjectionWorkerReasonCycleFailed] {
 			return false
 		}
 	} else if response.ProjectionState != "ready" || len(response.DegradedReasons) != 0 {

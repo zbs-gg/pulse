@@ -20,6 +20,7 @@ import {
   TeamRequestSecurity,
 } from './principal-context.js';
 import { drainSecurityReporterForShutdown, terminateStartedResponse } from './index.js';
+import { requiredTeamCapabilities } from './team-contracts.js';
 
 const ENTRYPOINT = new URL('./index.ts', import.meta.url);
 const DEFAULT_BEARER = 'dev-token';
@@ -152,7 +153,7 @@ async function startHttpServer(env: Record<string, string> = {}) {
   throw new Error(`pulse-mcp did not print listening URL:\n${stderr}`);
 }
 
-async function startTeamHttpServer() {
+async function startTeamHttpServer(env: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'pulse-u3-http-'));
   const { privateKey } = generateKeyPairSync('ed25519');
   const privateKeyFile = join(dir, 'principal.pk8.pem');
@@ -162,6 +163,18 @@ async function startTeamHttpServer() {
   const keyringFile = join(dir, 'principal-keyring.json');
   writeFileSync(keyringFile, JSON.stringify({
     active: { kid: 'test-gateway-key', public_key: publicJWK.x }, previous: [],
+  }), { mode: 0o600 });
+  const { publicKey: installationPublicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const installationJWK = installationPublicKey.export({ format: 'jwk' });
+  const enrollmentRegistryFile = join(dir, 'enrollments.json');
+  writeFileSync(enrollmentRegistryFile, JSON.stringify({
+    schema: 'pulse.team.installation_enrollment_registry.v1',
+    issuer: 'https://auth.example.com',
+    enrollments: [{
+      enrollment_id: 'enrollment_test_1', generation: 1,
+      client_id: 'test-client', subject: 'test-subject', status: 'active',
+      public_jwk: installationJWK,
+    }],
   }), { mode: 0o600 });
   const child = spawn(process.execPath, ['--import', 'tsx', ENTRYPOINT.pathname, '--http', '--port', '0'], {
     env: {
@@ -179,12 +192,14 @@ async function startTeamHttpServer() {
       PULSE_REMOTE_AUTH_PROXY_MODE: '',
       PULSE_REMOTE_TRUST_AUTH_HEADER: '',
       PULSE_REMOTE_ALLOW_UNAUTHENTICATED: '',
+      PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE: enrollmentRegistryFile,
       PULSE_TEAM_REMOTE_ACTIVATED: '',
       PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE: privateKeyFile,
       PULSE_TEAM_PRINCIPAL_SIGNING_KID: 'test-gateway-key',
       PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE: keyringFile,
       PULSE_TEAM_EXPECTED_STORE_ID: 'store_test',
       PULSE_TEAM_EXPECTED_TEAM_ID: 'team_test',
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -284,6 +299,10 @@ test('team HTTP keeps public surface minimal and authenticates before parsing ev
     const allowedPreflight = await fetch(server.url, { method: 'OPTIONS', headers: { Origin: 'https://allowed.example' } });
     assert.equal(allowedPreflight.status, 204);
     assert.equal(allowedPreflight.headers.get('access-control-allow-origin'), 'https://allowed.example');
+    assert.equal(
+      allowedPreflight.headers.get('access-control-allow-headers'),
+      'Accept, Content-Type, Authorization, DPoP, X-Pulse-Enrollment, Mcp-Session-Id, MCP-Protocol-Version',
+    );
 
     for (const method of ['POST', 'GET', 'DELETE']) {
       const denied = await fetch(server.url, {
@@ -298,7 +317,26 @@ test('team HTTP keeps public surface minimal and authenticates before parsing ev
       assert.deepEqual(await denied.json(), { error: 'invalid_token' });
       assert.equal(denied.headers.get('access-control-allow-origin'), 'https://allowed.example');
       assert.match(denied.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+      assert.doesNotMatch(denied.headers.get('www-authenticate') ?? '', /pulse_reauth=/);
     }
+
+    const expiredCredential = await fetch(server.url, {
+      method: 'POST',
+      headers: {
+        Origin: 'https://allowed.example',
+        'Content-Type': 'application/json',
+        Authorization: 'DPoP a.b.c',
+        DPoP: 'a.b.c',
+        'X-Pulse-Enrollment': 'enrollment_test_1',
+      },
+      body: '{}',
+    });
+    assert.equal(expiredCredential.status, 401);
+    assert.deepEqual(await expiredCredential.json(), { error: 'invalid_token' });
+    assert.match(
+      expiredCredential.headers.get('www-authenticate') ?? '',
+      /pulse_reauth="refresh"/,
+    );
   } finally {
     await server.stop();
   }
@@ -317,7 +355,10 @@ test('Owner browser gateway requires exact Host Origin CORS and bearer before pa
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers['access-control-allow-origin'], 'https://allowed.example');
     assert.equal(preflight.headers['access-control-allow-methods'], 'POST,OPTIONS');
-    assert.equal(preflight.headers['access-control-allow-headers'], 'Authorization, Content-Type');
+    assert.equal(
+      preflight.headers['access-control-allow-headers'],
+      'Authorization, Content-Type, DPoP, X-Pulse-Enrollment',
+    );
 
     const wrongHost = await directHttpRequest(server.url, 'POST', '/owner/v1/approval', {
       Host: new URL(server.url).host,
@@ -342,6 +383,35 @@ test('Owner browser gateway requires exact Host Origin CORS and bearer before pa
       server.url, 'POST', '/owner/v1/approval/', browserHeaders,
     );
     assert.equal(nearRoute.status, 404);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('Team Airlock browser route is session-authenticated through exact OIDC PKCE redirect', async () => {
+  const server = await startTeamHttpServer({
+    PULSE_TEAM_AIRLOCK_OIDC_CLIENT_ID: 'owner-browser-client',
+    PULSE_TEAM_AIRLOCK_OIDC_AUTHORIZATION_ENDPOINT: 'https://auth.example.com/authorize',
+    PULSE_TEAM_AIRLOCK_OIDC_TOKEN_ENDPOINT: 'https://auth.example.com/oauth/token',
+  });
+  try {
+    const response = await directHttpRequest(
+      server.url,
+      'GET',
+      '/airlock/team-publication',
+      { Host: 'pulse.example.com' },
+    );
+    assert.equal(response.status, 303);
+    const location = new URL(response.headers.location ?? '');
+    assert.equal(location.origin + location.pathname, 'https://auth.example.com/authorize');
+    assert.equal(location.searchParams.get('response_type'), 'code');
+    assert.equal(location.searchParams.get('client_id'), 'owner-browser-client');
+    assert.equal(location.searchParams.get('redirect_uri'), 'https://pulse.example.com/airlock/team-publication/callback');
+    assert.equal(location.searchParams.get('scope'), 'openid pulse:owner');
+    assert.equal(location.searchParams.get('audience'), 'https://pulse.example.com/mcp');
+    assert.equal(location.searchParams.get('code_challenge_method'), 'S256');
+    assert.match(String(response.headers['set-cookie']), /__Host-pulse-airlock-flow=.*Secure; HttpOnly; SameSite=Lax/);
+    assert.doesNotMatch(response.body, /assertion|access_token|id_token|subject/i);
   } finally {
     await server.stop();
   }
@@ -474,8 +544,8 @@ test('in-process team request chain keeps concurrent JWT principals isolated thr
       const authorization = `Bearer ${await makeToken(subject, clientId, scope)}`;
       const baseline = await security.authenticateBeforeBody(authorization);
       const context = await security.resolveAfterBody({
-        authorization, baseline,
-        body: { method: 'tools/call', params: { name: tool } },
+        baseline,
+        requiredCapabilities: requiredTeamCapabilities({ method: 'tools/call', params: { name: tool } }),
         requestId: `request-${index}`,
       });
       dispatched.push(`${context.principal_id}:${context.capabilities.join(',')}`);

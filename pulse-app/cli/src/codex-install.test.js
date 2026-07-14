@@ -90,6 +90,7 @@ test('product locators are exact and workspace removal preserves other connectio
 		const locatorArgs = (binding, suffix) => ({
 			codexHome, binding, dataDir: join(root, `data-${suffix}`),
 			registryPath: join(root, `registry-${suffix}.json`), publicKeyPath: join(root, `key-${suffix}.pem`),
+			anchorPath: join(root, `anchor-${suffix}.json`),
 			trustMode: 'test',
 		});
 		writeCodexProductLocator(locatorArgs(bindingA, 'a'));

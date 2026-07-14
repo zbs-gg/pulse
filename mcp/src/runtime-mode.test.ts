@@ -62,6 +62,17 @@ async function runHttp(options: RunOptions = {}): Promise<RunResult> {
   writeFileSync(keyringFile, JSON.stringify({
     active: { kid: 'runtime-test-key', public_key: publicJWK.x }, previous: [],
   }), { mode: 0o600 });
+  const { publicKey: installationPublicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const enrollmentRegistryFile = join(securityDir, 'enrollments.json');
+  writeFileSync(enrollmentRegistryFile, JSON.stringify({
+    schema: 'pulse.team.installation_enrollment_registry.v1',
+    issuer: options.env?.PULSE_REMOTE_AUTH_ISSUER ?? TEAM_BASELINE.PULSE_REMOTE_AUTH_ISSUER,
+    enrollments: [{
+      enrollment_id: 'enrollment_runtime_1', generation: 1,
+      client_id: 'runtime-client', subject: 'runtime-subject', status: 'active',
+      public_jwk: installationPublicKey.export({ format: 'jwk' }),
+    }],
+  }), { mode: 0o600 });
   const nodeArgs: string[] = [];
   if (options.nodeMajor !== undefined) {
     const patch = `Object.defineProperty(process.versions, 'node', { value: '${options.nodeMajor}.0.0' });`;
@@ -86,6 +97,7 @@ async function runHttp(options: RunOptions = {}): Promise<RunResult> {
       PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE: signingKeyFile,
       PULSE_TEAM_PRINCIPAL_SIGNING_KID: 'runtime-test-key',
       PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE: keyringFile,
+      PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE: enrollmentRegistryFile,
       PULSE_TEAM_EXPECTED_STORE_ID: 'store_test',
       PULSE_TEAM_EXPECTED_TEAM_ID: 'team_test',
       ...options.env,
@@ -193,6 +205,12 @@ test('team-remote static runtime truth table', async (t) => {
       name: 'explicit team runtime selects HTTP without the legacy flag',
       expectedStart: true,
       options: { httpFlag: false },
+    },
+    {
+      name: 'missing installation enrollment registry',
+      expectedStart: false,
+      expectedError: /requires exact non-empty PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE/,
+      options: { env: { PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE: '' } },
     },
     {
       name: 'inferred development HTTP remains supported',

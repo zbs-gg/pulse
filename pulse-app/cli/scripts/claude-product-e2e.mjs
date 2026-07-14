@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { canonicalJSONStringify, canonicalizeWorkspace } from '../src/workspace-binding.js';
+import {
+  bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
+} from '../src/workspace-binding.js';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -60,6 +62,7 @@ function writeSignedPersonalBinding(root, workspace, port) {
   mkdirSync(trust, { recursive: true, mode: 0o700 });
   const registryPath = join(trust, 'workspace-bindings.json');
   const publicKeyPath = join(trust, 'workspace-bindings.pub.pem');
+  const anchorPath = join(trust, 'workspace-bindings.anchor.json');
   const payload = {
     schema: 'pulse.workspace-binding-registry.v1',
     epoch: 1,
@@ -84,13 +87,22 @@ function writeSignedPersonalBinding(root, workspace, port) {
   };
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const signature = sign(null, Buffer.from(canonicalJSONStringify(payload)), privateKey).toString('base64');
-  writeFileSync(registryPath, JSON.stringify({ algorithm: 'ed25519', payload, signature }), { mode: 0o600 });
+  const registryBytes = Buffer.from(JSON.stringify({ algorithm: 'ed25519', payload, signature }));
+  writeFileSync(registryPath, registryBytes, { mode: 0o600 });
   writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o600 });
-  return { registryPath, publicKeyPath };
+  writeFileSync(anchorPath, `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, payload.epoch))}\n`, { mode: 0o600 });
+  return { registryPath, publicKeyPath, anchorPath };
 }
 
 function packedTarball(root) {
-  run('npm', ['pack', '--json', '--pack-destination', root], { cwd: cliRoot, timeout: 180_000 });
+	const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
+	const [command, args] = process.platform === 'darwin'
+		? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
+		: ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]];
+	run(command, args, {
+		cwd: cliRoot, timeout: 330_000,
+		env: { ...process.env, PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW: '1' },
+	});
   const tarballs = readdirSync(root).filter((name) => name.endsWith('.tgz'));
   assert.equal(tarballs.length, 1);
   return join(root, tarballs[0]);
@@ -303,6 +315,7 @@ try {
     PULSE_GO_BIN: daemon,
     PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
+    PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
     PULSE_TRUST_MODE: 'test',
     PULSE_LOCAL_EMBED_PYTHON: process.execPath,
     PULSE_LOCAL_EMBED_HELPER: fakeEmbedHelper,
@@ -467,7 +480,7 @@ try {
   const freshMcpEnv = { ...env };
   for (const name of [
     'PULSE_DATA_DIR', 'PULSE_GO_BIN', 'PULSE_BINDING_REGISTRY_PATH',
-    'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_TRUST_MODE',
+    'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_BINDING_ANCHOR_PATH', 'PULSE_TRUST_MODE',
   ]) delete freshMcpEnv[name];
   const claudeMessages = runProductMcp(
     mcpConfig, mcpRememberInput(claudeMemory), nestedWorkspace, freshMcpEnv,

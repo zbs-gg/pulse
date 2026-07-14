@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { buildPulseRequestHeaders, requireLoopbackPulseIPC } from './remote-auth.js';
+import { buildPulseRequestHeaders, requireLoopbackPulseIPC } from './remote-auth-network.js';
 
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -153,14 +153,43 @@ function runAsync(args, env = {}, stdin = '') {
   });
 }
 
-test('workspace binding CLI exposes verification only and no model-reachable mutation command', () => {
+test('workspace binding CLI exposes human-gated Personal and Team onboarding', () => {
   const help = run(['--help']).result;
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /pulse binding resolve/);
+  assert.match(help.stdout, /pulse binding create-personal/);
+  assert.match(help.stdout, /pulse binding create-team/);
+  assert.match(help.stdout, /--commons-project-id <project_id>/);
+  assert.match(help.stdout, /pulse trust install/);
 
   const mutation = run(['binding', 'bind']).result;
   assert.notEqual(mutation.status, 0);
-  assert.match(mutation.stderr, /supports only read-only resolve or status/);
+	assert.match(mutation.stderr, /supports resolve, status, create-personal, or create-team/);
+
+	const personalWithoutHumanConfirmation = run([
+		'binding', 'create-personal', '--principal-id', 'principal_nik',
+	]).result;
+	assert.notEqual(personalWithoutHumanConfirmation.status, 0);
+	assert.match(personalWithoutHumanConfirmation.stderr, /requires --confirm "bind pulse personal workspace"/);
+
+	const teamWithoutHumanConfirmation = run([
+		'binding', 'create-team', '--principal-id', 'principal_nik', '--team-id', 'team_zbs',
+		'--commons-store-id', 'store_commons_zbs', '--commons-resource', 'https:\/\/pulse.example.test\/mcp',
+	]).result;
+	assert.notEqual(teamWithoutHumanConfirmation.status, 0);
+	assert.match(teamWithoutHumanConfirmation.stderr, /requires --confirm "bind pulse team workspace"/);
+
+	const teamWithoutSignedProject = run([
+		'binding', 'create-team', '--principal-id', 'principal_nik', '--team-id', 'team_zbs',
+		'--commons-store-id', 'store_commons_zbs', '--commons-resource', 'https:\/\/pulse.example.test\/mcp',
+		'--confirm', 'bind pulse team workspace',
+	]).result;
+	assert.notEqual(teamWithoutSignedProject.status, 0);
+	assert.match(teamWithoutSignedProject.stderr, /requires --commons-project-id <id>/);
+
+	const trustWithoutHumanConfirmation = run(['trust', 'install']).result;
+	assert.notEqual(trustWithoutHumanConfirmation.status, 0);
+	assert.match(trustWithoutHumanConfirmation.stderr, /trust_confirmation_required/);
 });
 
 function withPulseStub(handler) {
@@ -298,16 +327,13 @@ function stopChild(child) {
   });
 }
 
-test('remote Pulse requests never carry the loopback IPC secret', () => {
-  assert.deepEqual(
-    buildPulseRequestHeaders('https://pulse.example/team', {
+test('remote Pulse refuses static bearer replay and never carries the loopback IPC secret', () => {
+  assert.throws(
+    () => buildPulseRequestHeaders('https://pulse.example/team', {
       ipcSecret: 'ipc-secret',
       remoteBearer: 'access-token',
     }),
-    {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer access-token',
-    },
+    /remote_auth_static_bearer_forbidden/,
   );
   assert.deepEqual(
     buildPulseRequestHeaders('http://127.0.0.1:18789', {

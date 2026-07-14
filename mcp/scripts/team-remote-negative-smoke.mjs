@@ -25,6 +25,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'pulse-team-negative-smoke-'));
 const dataDir = join(tempRoot, 'data');
 const signingKeyPath = join(tempRoot, 'synthetic-gateway.pk8.pem');
 const keyringPath = join(tempRoot, 'synthetic-keyring.json');
+const enrollmentRegistryPath = join(tempRoot, 'synthetic-enrollments.json');
 const secretSentinel = 'synthetic-ipc-secret-must-not-appear';
 const publicOrigin = 'https://synthetic-pulse.example';
 const allowedOrigin = 'https://synthetic-client.example';
@@ -68,6 +69,7 @@ function spawnEnvironment(overrides = {}) {
     PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE: signingKeyPath,
     PULSE_TEAM_PRINCIPAL_SIGNING_KID: 'synthetic-gateway-key',
     PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE: keyringPath,
+    PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE: enrollmentRegistryPath,
     PULSE_TEAM_EXPECTED_STORE_ID: 'store_synthetic_negative',
     PULSE_TEAM_EXPECTED_TEAM_ID: 'team_synthetic_negative',
     ...overrides,
@@ -158,6 +160,7 @@ function assertNoSensitiveOutput() {
     dataDir,
     signingKeyPath,
     keyringPath,
+    enrollmentRegistryPath,
     'BEGIN PRIVATE KEY',
     '~/.pulse',
   ]) {
@@ -181,6 +184,19 @@ try {
   writeFileSync(keyringPath, JSON.stringify({
     active: { kid: 'synthetic-gateway-key', public_key: publicJWK.x },
     previous: [],
+  }), { mode: 0o600 });
+  const { publicKey: installationPublicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  writeFileSync(enrollmentRegistryPath, JSON.stringify({
+    schema: 'pulse.team.installation_enrollment_registry.v1',
+    issuer: 'https://synthetic-idp.example',
+    enrollments: [{
+      enrollment_id: 'enrollment_negative_smoke_1',
+      generation: 1,
+      client_id: 'negative-smoke-client',
+      subject: 'negative-smoke-subject',
+      status: 'active',
+      public_jwk: installationPublicKey.export({ format: 'jwk' }),
+    }],
   }), { mode: 0o600 });
 
   process.stdout.write('[team-remote-negative-smoke] unsafe startup matrix:\n');
@@ -230,17 +246,14 @@ try {
     { host: '0.0.0.0' },
   );
 
-  const { TEAM_TOOL_DESCRIPTORS } = await import(pathToFileURL(contractsModule).href);
-  const toolNames = TEAM_TOOL_DESCRIPTORS.map(({ name }) => name).sort();
+  const { TEAM_PRODUCT_TOOL_DESCRIPTORS } = await import(pathToFileURL(contractsModule).href);
+  const toolNames = TEAM_PRODUCT_TOOL_DESCRIPTORS.map(({ name }) => name).sort();
   const expectedTools = [
     'pulse_team_audit',
     'pulse_team_context_query',
-    'pulse_team_delete',
     'pulse_team_delete_status',
-    'pulse_team_graph_delta',
     'pulse_team_inspect',
     'pulse_team_recall',
-    'pulse_team_remember',
     'pulse_team_resume',
     'pulse_team_status',
   ].sort();
@@ -250,7 +263,10 @@ try {
   for (const localTool of ['pulse_remember', 'pulse_forget', 'pulse_wipe', 'pulse_status']) {
     if (toolNames.includes(localTool)) fail(`local fallback tool leaked: ${localTool}`);
   }
-  process.stdout.write('  [ok] compiled team tool allowlist excludes local fallback tools\n');
+  for (const mutation of ['pulse_team_remember', 'pulse_team_graph_delta', 'pulse_team_delete']) {
+    if (toolNames.includes(mutation)) fail(`agent-controlled Commons mutation leaked: ${mutation}`);
+  }
+  process.stdout.write('  [ok] compiled team tool allowlist excludes local fallback and agent-controlled Commons mutations\n');
 
   const gateway = await startPreactivationGateway();
   validChild = gateway.child;

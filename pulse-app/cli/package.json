@@ -18,12 +18,22 @@
     "src/codex-install.js",
     "src/codex-runtime.js",
     "src/remote-auth.js",
+    "src/remote-auth-errors.js",
+    "src/remote-auth-network.js",
+    "src/remote-auth-oauth.js",
+    "src/team-login.js",
+    "src/team-remote-client.js",
+    "src/product-compositor.js",
+    "src/team-status.js",
+    "src/binding-admin.js",
+    "src/trust-helper.js",
     "src/workspace-binding.js",
     "src/local-supervisor.js",
     "src/demo-corpus.json",
     "scripts",
     "vendor/pulse-preview-source",
     "vendor/pulse-mcp-dist",
+    "vendor/pulse-presence-helper",
     "README.md",
     "LICENSE"
   ],
@@ -34,9 +44,11 @@
     "check": "node src/cli.js --help",
     "test": "node --test src/*.test.js",
     "test:codex-product": "node scripts/codex-product-e2e.mjs",
+    "test:codex-team-packaging-contract": "node scripts/codex-team-packaging-contract.mjs",
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
+    "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
-    "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
+    "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -84,11 +84,11 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
   const canonical = canonicalWorkspace(cwd);
   const key = workspaceDigest(canonical);
   const entry = locator?.schema === 'pulse.codex_product_locators.v1' ? locator.entries?.[key] : undefined;
-	const allowed = ['data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
   if (!entry || entry.workspace_digest !== key ||
 			Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
       !['production', 'test'].includes(entry.trust_mode) ||
-			![entry.data_dir, entry.registry_path, entry.public_key_path]
+			![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
         .every((value) => typeof value === 'string' && isAbsolute(value))) {
     throw new Error('Pulse product locator is missing or invalid for this workspace; run `pulse connect codex` again.');
   }
@@ -140,6 +140,7 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
     productEnvironment.PULSE_TRUST_MODE = 'test';
     productEnvironment.PULSE_BINDING_REGISTRY_PATH = entry.registry_path;
     productEnvironment.PULSE_BINDING_PUBLIC_KEY_PATH = entry.public_key_path;
+    productEnvironment.PULSE_BINDING_ANCHOR_PATH = entry.anchor_path;
   }
   return productEnvironment;
 }

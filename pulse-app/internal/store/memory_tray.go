@@ -1993,6 +1993,9 @@ func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.
 			 WHERE candidate_id=? AND status='updated' AND reason_code='user_deleted'
 			 ORDER BY rowid DESC LIMIT 1`, candidateID))
 	}
+	if err := s.purgeDeskPublicationIntentsTx(tx, objectID, now, false); err != nil {
+		return MemoryWriteReceipt{}, err
+	}
 	ledgerID, err := s.insertHumanControlLedgerTx(
 		tx, "delete", objectID, idempotencyKey, destination,
 		policyEpoch, resolverEpoch, now,
@@ -2075,6 +2078,9 @@ func (s *Store) WipeProductMemory() error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := s.purgeDeskPublicationIntentsTx(tx, "", s.clock().UTC(), true); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
 		DELETE FROM private_projection_outbox;
 		DELETE FROM memory_write_audit;

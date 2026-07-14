@@ -381,3 +381,39 @@ test('Owner gateway rejects malformed daemon success and collapses denial detail
       error.code === 'owner_service_unavailable',
   );
 });
+
+test('Owner step-up signer allows only the exact Airlock publication action and path pair', async () => {
+  const { signer, publicKey } = signerFixture();
+  const body = Buffer.from('{"action":"team.commons.publish","schema":"pulse.team.airlock_envelope.v1"}');
+  const assertion = await signer.signOwnerStepUp({
+    requestId: 'owner-airlock-request-001',
+    path: '/airlock/team-publication',
+    action: 'team.commons.publish',
+    body,
+    storeId: 'store_test',
+    teamId: 'team_test',
+    oauthIssuer: ownerIdentity().issuer,
+    oauthSubject: ownerIdentity().subject,
+    oauthClientId: ownerIdentity().clientId,
+    authTime: NOW,
+  });
+  const verified = await jwtVerify(assertion, publicKey, {
+    issuer: 'pulse-team-gateway', audience: PRINCIPAL_ASSERTION_AUDIENCE,
+    algorithms: ['EdDSA'], currentDate: new Date(NOW * 1000),
+  });
+  assert.equal(verified.payload.path, '/airlock/team-publication');
+  assert.equal(verified.payload.action, 'team.commons.publish');
+
+  await assert.rejects(signer.signOwnerStepUp({
+    requestId: 'owner-airlock-request-002',
+    path: '/airlock/team-publication/near',
+    action: 'team.commons.publish',
+    body,
+    storeId: 'store_test',
+    teamId: 'team_test',
+    oauthIssuer: ownerIdentity().issuer,
+    oauthSubject: ownerIdentity().subject,
+    oauthClientId: ownerIdentity().clientId,
+    authTime: NOW,
+  } as never), /binding is invalid/);
+});

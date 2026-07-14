@@ -7,12 +7,106 @@ import test from 'node:test';
 
 import {
 	acquireVaultActivationLock,
+  callBoundTeamTool,
   consumeCodexToolLease,
 	readProductActivation,
   readCodexTurnContext,
   writeCodexToolLease,
   writeCodexTurnContext,
 } from './codex-runtime.js';
+
+test('installed runtime proxies only read-only Team tools through the exact current binding', async () => {
+	const binding = {
+		mode: 'team', fallback: false, binding_digest: 'a'.repeat(64), resolver_epoch: 7,
+		principal_ref: 'principal_signed',
+		workspace: { repository_id: 'repository_signed' },
+		commons: {
+			project_id: 'project_signed', resource: 'https://pulse.example.test/mcp',
+			credential_ref: 'credential',
+		},
+	};
+	const resolution = { binding: { binding_digest: binding.binding_digest, resolver_epoch: 7 } };
+	let called;
+	const result = await callBoundTeamTool(resolution, 'codex', 'pulse_team_resume', { schema: 'x' }, {
+		resolveBinding: () => binding,
+		teamRequest: async (...args) => { called = args; return { schema: 'pulse.team.resume_result.v1' }; },
+	});
+	assert.equal(result.schema, 'pulse.team.resume_result.v1');
+	assert.equal(called[0], binding);
+	assert.equal(called[1], 'pulse_team_resume');
+	await assert.rejects(
+		callBoundTeamTool(resolution, 'codex', 'pulse_team_remember', {}, { resolveBinding: () => binding }),
+		/product_team_tool_forbidden/,
+	);
+	await assert.rejects(
+		callBoundTeamTool(resolution, 'codex', 'pulse_team_resume', {}, {
+			resolveBinding: () => ({ ...binding, binding_digest: 'b'.repeat(64) }),
+		}),
+		/product_team_binding_changed/,
+	);
+});
+
+test('read-only Team proxy injects signed active context without mutating Codex or Claude input', async () => {
+	const binding = {
+		mode: 'team', fallback: false, binding_digest: 'a'.repeat(64), resolver_epoch: 7,
+		principal_ref: 'principal_signed',
+		workspace: { repository_id: 'repository_signed' },
+		commons: {
+			project_id: 'project_signed', resource: 'https://pulse.example.test/mcp',
+			credential_ref: 'credential',
+		},
+	};
+	const resolution = { binding: { binding_digest: binding.binding_digest, resolver_epoch: 7 } };
+	for (const host of ['codex', 'claude-code']) {
+		const input = {
+			schema: 'pulse.team.recall.v1', query: 'signed context', privacy_ceiling: 'normal',
+			active_context: { session_id: `session_${host.replace('-', '_')}` },
+		};
+		const original = structuredClone(input);
+		let proxied;
+		await callBoundTeamTool(resolution, host, 'pulse_team_recall', input, {
+			resolveBinding: () => binding,
+			teamRequest: async (_binding, _name, request) => { proxied = request; return {}; },
+		});
+		assert.deepEqual(input, original);
+		assert.notEqual(proxied, input);
+		assert.notEqual(proxied.active_context, input.active_context);
+		assert.deepEqual(proxied.active_context, {
+			project_id: 'project_signed', repo_id: 'repository_signed',
+			agent_id: 'principal_signed', session_id: `session_${host.replace('-', '_')}`,
+		});
+	}
+});
+
+test('read-only Team proxy rejects signed-project drift and fixed-context spoofing before transport', async () => {
+	const binding = {
+		mode: 'team', fallback: false, binding_digest: 'a'.repeat(64), resolver_epoch: 7,
+		principal_ref: 'principal_signed',
+		workspace: { repository_id: 'repository_signed' },
+		commons: {
+			project_id: 'project_signed', resource: 'https://pulse.example.test/mcp',
+			credential_ref: 'credential',
+		},
+	};
+	const resolution = { binding: { binding_digest: binding.binding_digest, resolver_epoch: 7 } };
+	for (const [field, value] of [
+		['project_id', 'project_other_grant'],
+		['repo_id', 'repository_drifted'],
+		['agent_id', 'principal_spoofed'],
+	]) {
+		let calls = 0;
+		await assert.rejects(
+			callBoundTeamTool(resolution, 'codex', 'pulse_team_resume', {
+				schema: 'pulse.team.resume.v1', active_context: { [field]: value, session_id: 'session_agent' },
+			}, {
+				resolveBinding: () => binding,
+				teamRequest: async () => { calls += 1; return {}; },
+			}),
+			/product_team_context_mismatch/,
+		);
+		assert.equal(calls, 0, `${field} drift reached Team transport`);
+	}
+});
 
 test('connect and lazy reconciliation serialize on one vault activation lock', async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-vault-activation-lock.'));

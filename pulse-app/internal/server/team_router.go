@@ -104,6 +104,17 @@ func (s *TeamServer) CheckReadiness(ctx context.Context) (store.TeamPolicyReadin
 	return s.checkDaemonReadiness(ctx)
 }
 
+func (s *TeamServer) checkOperationalReadiness(ctx context.Context) (store.TeamPolicyReadiness, error) {
+	readiness, err := s.CheckReadiness(ctx)
+	if err != nil {
+		return store.TeamPolicyReadiness{}, err
+	}
+	if err := s.cfg.Store.CheckTeamProjectionQueueReadiness(ctx); err != nil {
+		return store.TeamPolicyReadiness{}, err
+	}
+	return readiness, nil
+}
+
 func (s *TeamServer) checkDaemonReadiness(ctx context.Context) (store.TeamPolicyReadiness, error) {
 	return s.cfg.Store.CheckTeamPolicyReadiness(ctx, teamReadinessOptions(s.cfg))
 }

@@ -90,6 +90,81 @@ func TestAuthorizedRepositoryPreservesContinuityAndSemanticContributions(t *test
 	}
 }
 
+func TestAuthorizedRepositoryPromotesProjectedAirlockPublicationIntoNewSessionContinuity(t *testing.T) {
+	fake := &fakeTeamReadStore{memories: []store.TeamAuthorizedMemoryCapsule{{
+		RootObjectID: "published-root", CapsuleID: "published-capsule",
+		PartitionKey: "project:shared", Kind: "decision",
+		RedactedSummary: "Use the approved shared continuity rule.",
+		Confidence:      1, EvidenceHint: "user_confirmed", PrivacyTier: "normal", Retention: "long_term",
+		SourceHost: "pulse-cli", ConversationScope: "user_selected_excerpt",
+		SourceTimestamp: "2026-07-15T03:00:00Z", CreatedAt: "2026-07-15T03:00:00Z",
+		PublicationID: "publication-approved", PublicationEventObjectID: "published-event",
+		PublicationCreatedAt: "2026-07-15T03:00:01Z",
+	}}}
+	repository := &authorizedRepository{store: fake}
+	documents, err := repository.LoadAuthorizedContinuity(context.Background(), retrieve.TeamResumeQuery{
+		ThreadID: "repository-compositor-bound", ProjectID: "project-shared",
+		SessionID: "session-new", Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].RootObjectID != "published-root" ||
+		documents[0].ObjectID != "published-event" || documents[0].ProjectID != "project-shared" ||
+		documents[0].ThreadID != "repository-compositor-bound" ||
+		documents[0].SessionID != "session-new" ||
+		documents[0].Summary != "Use the approved shared continuity rule." ||
+		!reflect.DeepEqual(documents[0].Decisions, []string{"Use the approved shared continuity rule."}) {
+		t.Fatalf("published continuity = %+v", documents)
+	}
+}
+
+func TestAuthorizedRepositoryMergesNewPublicationWhenCheckpointsFillLimit(t *testing.T) {
+	fake := &fakeTeamReadStore{
+		continuity: []store.TeamAuthorizedContinuityCheckpoint{
+			{RootObjectID: "checkpoint-new", DerivativeObjectID: "continuity-new", PartitionKey: "project:shared", Checkpoint: store.TeamGraphContinuity{ThreadID: "thread-new", Summary: "New checkpoint"}, CreatedAt: "2026-07-15T03:00:02Z"},
+			{RootObjectID: "checkpoint-old", DerivativeObjectID: "continuity-old", PartitionKey: "project:shared", Checkpoint: store.TeamGraphContinuity{ThreadID: "thread-old", Summary: "Old checkpoint"}, CreatedAt: "2026-07-15T03:00:01Z"},
+		},
+		memories: []store.TeamAuthorizedMemoryCapsule{{
+			RootObjectID: "publication-newest", CapsuleID: "publication-capsule",
+			PartitionKey: "project:shared", Kind: "decision",
+			RedactedSummary: "Newest approved publication.",
+			PublicationID:   "publication-newest", PublicationEventObjectID: "publication-event",
+			PublicationCreatedAt: "2026-07-15T03:00:03Z",
+		}},
+	}
+	repository := &authorizedRepository{store: fake}
+	documents, err := repository.LoadAuthorizedContinuity(context.Background(), retrieve.TeamResumeQuery{
+		ProjectID: "project-shared", SessionID: "session-new", Limit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := continuityRoots(documents), []string{"publication-newest", "checkpoint-new"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged continuity roots = %v, want %v", got, want)
+	}
+	if len(fake.memoryQueries) != 1 || fake.memoryQueries[0].Limit != 2 {
+		t.Fatalf("publication query = %+v, want independent limit 2", fake.memoryQueries)
+	}
+}
+
+func TestAuthorizedRepositoryDeduplicatesMergedContinuityDeterministically(t *testing.T) {
+	fake := &fakeTeamReadStore{continuity: []store.TeamAuthorizedContinuityCheckpoint{
+		{RootObjectID: "root-duplicate", DerivativeObjectID: "continuity-duplicate", PartitionKey: "project:shared", Checkpoint: store.TeamGraphContinuity{ThreadID: "thread-duplicate", Summary: "Zulu summary"}, CreatedAt: "2026-07-15T03:00:00Z"},
+		{RootObjectID: "root-duplicate", DerivativeObjectID: "continuity-duplicate", PartitionKey: "project:shared", Checkpoint: store.TeamGraphContinuity{ThreadID: "thread-duplicate", Summary: "Alpha summary"}, CreatedAt: "2026-07-15T03:00:00Z"},
+	}}
+	repository := &authorizedRepository{store: fake}
+	documents, err := repository.LoadAuthorizedContinuity(context.Background(), retrieve.TeamResumeQuery{
+		ProjectID: "project-shared", Limit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].Summary != "Alpha summary" {
+		t.Fatalf("deduplicated continuity = %+v", documents)
+	}
+}
+
 func TestAuthorizedRepositoryQueriesSemanticEmbeddingsForExactSelectedGraphSources(t *testing.T) {
 	confidence := 0.9
 	entity := store.TeamGraphNode{

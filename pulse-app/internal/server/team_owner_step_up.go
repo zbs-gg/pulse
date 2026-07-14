@@ -118,7 +118,7 @@ func (v *OwnerStepUpVerifier) VerifyApprovalRequest(
 	if !ok || !ed25519.Verify(key, []byte(signingInput), signature) {
 		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
 	}
-	if err := v.validateClaims(claims); err != nil {
+	if err := v.validateClaims(claims, OwnerApprovalRoutePath, nil); err != nil {
 		return OwnerStepUpContext{}, err
 	}
 	digest := sha256.Sum256(body)
@@ -147,13 +147,93 @@ func (v *OwnerStepUpVerifier) VerifyApprovalRequest(
 	}, nil
 }
 
-func (v *OwnerStepUpVerifier) validateClaims(claims ownerStepUpAssertionClaims) error {
+// VerifyTeamPublication implements TeamPublicationStepUpVerifier. The same
+// gateway signing key and recent OAuth authentication used for Owner actions
+// are reused, but the assertion is bound to the Airlock route, the exact
+// canonical envelope bytes, and the one publication action. This keeps the
+// browser handler from accepting an assertion minted for any other Owner
+// operation.
+func (v *OwnerStepUpVerifier) VerifyTeamPublication(
+	ctx context.Context,
+	request TeamPublicationStepUpVerificationRequest,
+) (OwnerStepUpContext, error) {
+	if v == nil || request.Path != TeamPublicationAirlockRoutePath ||
+		request.Method != http.MethodPost || request.StoreID == "" || request.TeamID == "" ||
+		request.PublisherPrincipalID == "" {
+		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
+	}
+	return v.verifyBoundStepUpAssertion(
+		ctx, request.Assertion, request.RequestID, request.Method, request.Path,
+		request.CanonicalEnvelope,
+		OwnerStepUpBinding{
+			Action: "team.commons.publish", StoreID: request.StoreID, TeamID: request.TeamID,
+		},
+		map[string]bool{"team.commons.publish": true},
+	)
+}
+
+func (v *OwnerStepUpVerifier) verifyBoundStepUpAssertion(
+	ctx context.Context,
+	compact, requestID, method, path string,
+	body []byte,
+	binding OwnerStepUpBinding,
+	allowedActions map[string]bool,
+) (OwnerStepUpContext, error) {
+	if v == nil || len(compact) == 0 || len(compact) > PrincipalAssertionMaxBytes {
+		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
+	}
+	var claims ownerStepUpAssertionClaims
+	header, signingInput, signature, err := decodeCompactAssertion(
+		compact, OwnerStepUpAssertionVersion, &claims,
+	)
+	if err != nil {
+		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
+	}
+	key, ok := v.keys[header.Kid]
+	if !ok || !ed25519.Verify(key, []byte(signingInput), signature) {
+		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
+	}
+	if err := v.validateClaims(claims, path, allowedActions); err != nil {
+		return OwnerStepUpContext{}, err
+	}
+	digest := sha256.Sum256(body)
+	if claims.RequestID != requestID || claims.Method != method || claims.Path != path ||
+		claims.BodySHA256 != hex.EncodeToString(digest[:]) || claims.Action != binding.Action ||
+		claims.StoreID != binding.StoreID || claims.TeamID != binding.TeamID {
+		return OwnerStepUpContext{}, ErrOwnerStepUpRequestMismatch
+	}
+	presented := teamauth.BootstrapRoot{
+		Issuer: claims.OAuthIssuer, Subject: claims.OAuthSubject, AdminClientID: claims.OAuthClientID,
+	}
+	if !v.expectedRoot.Matches(presented) {
+		return OwnerStepUpContext{}, ErrOwnerStepUpInvalid
+	}
+	identity, err := v.store.ResolveOwnerStepUpIdentity(ctx, presented)
+	if err != nil {
+		return OwnerStepUpContext{}, err
+	}
+	if !identity.Bootstrap && (identity.StoreID != binding.StoreID || identity.TeamID != binding.TeamID) {
+		return OwnerStepUpContext{}, ErrOwnerStepUpRequestMismatch
+	}
+	return OwnerStepUpContext{
+		Identity: identity, AuthenticatedAt: time.Unix(claims.AuthTime, 0).UTC(),
+		AssertionKID: header.Kid, AssertionJTI: claims.JTI,
+		AssertionExpiresAt: time.Unix(claims.ExpiresAt, 0).UTC(),
+	}, nil
+}
+
+func (v *OwnerStepUpVerifier) validateClaims(
+	claims ownerStepUpAssertionClaims,
+	expectedPath string,
+	allowedActions map[string]bool,
+) error {
 	now := v.clock().UTC()
 	nowUnix := now.Unix()
 	if claims.Version != OwnerStepUpAssertionVersion || claims.Issuer != ownerStepUpAssertionIssuer ||
 		claims.Audience != ownerStepUpAssertionAudience || !safeOpaque(claims.JTI, 128) ||
 		len(claims.RequestID) < 8 || !safeOpaque(claims.RequestID, 64) ||
-		claims.Method != http.MethodPost || claims.Path != OwnerApprovalRoutePath ||
+		claims.Method != http.MethodPost || claims.Path != expectedPath ||
+		(allowedActions != nil && !allowedActions[claims.Action]) ||
 		len(claims.BodySHA256) != 64 || !validTeamAdminClientKey(claims.BodySHA256) ||
 		!validTeamAdminClass(claims.Action) || !validTeamAdminOpaque(claims.StoreID) ||
 		!validTeamAdminOpaque(claims.TeamID) ||

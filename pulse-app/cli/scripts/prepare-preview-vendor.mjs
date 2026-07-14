@@ -1,4 +1,5 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,31 @@ const appRoot = resolve(cliRoot, '..');
 const pulseRoot = resolve(appRoot, '..');
 const mcpRoot = join(pulseRoot, 'mcp');
 const vendorRoot = join(cliRoot, 'vendor', 'pulse-preview-source');
+const expectedHelperIdentifier = 'gg.zbs.pulse.presence-helper';
+const expectedHelperTeamID = '44N4NZ86S5';
+const nativeHelper = join(appRoot, 'native', 'pulse-presence-helper', 'dist', expectedHelperIdentifier);
+const vendorHelperRoot = join(cliRoot, 'vendor', 'pulse-presence-helper');
+
+// npm pack runs prepack in every product E2E. Two packs must never race while
+// npm ci replaces mcp/node_modules and the generated vendor trees. Re-exec the
+// whole preparation under a kernel-held lock before touching either tree.
+if (process.env.PULSE_PREVIEW_VENDOR_LOCKED !== '1') {
+  const digest = createHash('sha256').update(pulseRoot).digest('hex').slice(0, 20);
+  const lockPath = `/tmp/pulse-preview-vendor-${digest}.lock`;
+  const lockTool = process.platform === 'darwin' ? '/usr/bin/lockf' : '/usr/bin/flock';
+  const lockArgs = process.platform === 'darwin'
+    ? ['-k', '-t', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)]
+    : ['-w', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)];
+  const result = spawnSync(lockTool, lockArgs, {
+    env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
+    stdio: 'inherit',
+    timeout: 330_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`could not acquire the Pulse preview vendor lock (status ${result.status})`);
+  }
+  process.exit(0);
+}
 
 function copyFileList(fromRoot, toRoot, files) {
   mkdirSync(toRoot, { recursive: true });
@@ -41,6 +67,54 @@ function copyTree(from, to) {
 }
 
 rmSync(vendorRoot, { recursive: true, force: true });
+
+if (!existsSync(nativeHelper)) {
+  throw new Error('signed Pulse presence helper is missing; run npm run build:presence-helper before packing');
+}
+if (process.platform === 'darwin') {
+  execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', nativeHelper], {
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  const signature = spawnSync('/usr/bin/codesign', ['-d', '--verbose=4', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const signatureText = `${signature.stdout ?? ''}\n${signature.stderr ?? ''}`;
+  if (signature.status !== 0 || !signatureText.includes(`Identifier=${expectedHelperIdentifier}`) ||
+      !signatureText.includes(`TeamIdentifier=${expectedHelperTeamID}`)) {
+    throw new Error('Pulse presence helper has the wrong code-signing identity');
+  }
+  const buildVersion = spawnSync('/usr/bin/vtool', ['-show-build', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const architectures = spawnSync('/usr/bin/lipo', ['-archs', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const shippedArchitectures = new Set(architectures.stdout.trim().split(/\s+/).filter(Boolean));
+  const minimumVersions = [...buildVersion.stdout.matchAll(/\bminos ([0-9.]+)/g)].map((match) => match[1]);
+  const macOSPlatforms = [...buildVersion.stdout.matchAll(/\bplatform MACOS\b/g)];
+  if (architectures.status !== 0 || !shippedArchitectures.has('arm64') ||
+      [...shippedArchitectures].some((name) => name !== 'arm64' && name !== 'x86_64') ||
+      buildVersion.status !== 0 || macOSPlatforms.length !== shippedArchitectures.size ||
+      minimumVersions.length !== shippedArchitectures.size ||
+      minimumVersions.some((version) => version !== '13.0')) {
+    throw new Error('Pulse presence helper must include Apple Silicon and target macOS 13.0');
+  }
+  const assessment = spawnSync('/usr/sbin/spctl', ['-a', '-vv', '-t', 'exec', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (assessment.status !== 0) {
+    if (process.env.npm_lifecycle_event === 'prepublishOnly') {
+      throw new Error('refusing npm publish: Pulse presence helper has no accepted notarization ticket');
+    }
+    if (process.env.PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW !== '1') {
+      throw new Error('Pulse presence helper is not notarized; only an explicit unquarantined internal preview pack may continue');
+    }
+    console.error('[pulse] explicit internal-preview override: helper is signed but not notarized; do not redistribute this tarball');
+  }
+}
+rmSync(vendorHelperRoot, { recursive: true, force: true });
+mkdirSync(vendorHelperRoot, { recursive: true });
+cpSync(nativeHelper, join(vendorHelperRoot, expectedHelperIdentifier));
 
 const vendorApp = join(vendorRoot, 'pulse-app');
 copyFileList(appRoot, vendorApp, [

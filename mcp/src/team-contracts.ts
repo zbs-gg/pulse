@@ -657,6 +657,38 @@ export type TeamDomainErrorCode =
   | 'authorization_stale'
   | 'shared_memory_unavailable';
 
+export type TeamClosedErrorCode = TeamDomainErrorCode | 'invalid_team_contract';
+
+const TEAM_CLOSED_ERROR_CODES = new Set<TeamClosedErrorCode>([
+  'invalid_team_contract',
+  'invalid_team_memory',
+  'invalid_team_graph_delta',
+  'invalid_team_status',
+  'invalid_team_inspect',
+  'invalid_team_audit',
+  'invalid_team_recall',
+  'invalid_team_context',
+  'invalid_team_resume',
+  'invalid_team_delete',
+  'invalid_team_delete_status',
+  'invalid_principal',
+  'principal_request_mismatch',
+  'principal_replay',
+  'principal_revoked',
+  'policy_denied',
+  'not_found',
+  'concealed_not_found',
+  'idempotency_conflict',
+  'idempotency_in_progress',
+  'idempotency_failed',
+  'authorization_stale',
+  'shared_memory_unavailable',
+]);
+
+export function isTeamClosedErrorCode(value: unknown): value is TeamClosedErrorCode {
+  return typeof value === 'string' && TEAM_CLOSED_ERROR_CODES.has(value as TeamClosedErrorCode);
+}
+
 export class TeamDomainError extends Error {
   readonly code: TeamDomainErrorCode;
 
@@ -2796,8 +2828,46 @@ export const TEAM_TOOL_DESCRIPTORS = TEAM_TOOL_CONTRACTS.map(({ name, contract, 
   };
 });
 
+// Shared-memory mutations are deliberately absent from the agent-facing
+// product surface. They remain internal domain contracts because the Airlock
+// publication service uses the same validated storage spine after a human has
+// reviewed and signed an exact envelope.
+const HUMAN_ONLY_COMMONS_MUTATION_TOOLS = new Set<TeamToolName>([
+  'pulse_team_remember',
+  'pulse_team_graph_delta',
+  'pulse_team_delete',
+]);
+
+export const TEAM_PRODUCT_TOOL_DESCRIPTORS = TEAM_TOOL_DESCRIPTORS.filter(
+  ({ name }) => !HUMAN_ONLY_COMMONS_MUTATION_TOOLS.has(name),
+);
+
+const TEAM_INSTALLED_READ_TOOLS = new Set<TeamToolName>([
+  'pulse_team_status',
+  'pulse_team_recall',
+  'pulse_team_context_query',
+  'pulse_team_resume',
+  'pulse_team_inspect',
+]);
+
+export const TEAM_INSTALLED_READ_TOOL_DESCRIPTORS = TEAM_PRODUCT_TOOL_DESCRIPTORS.filter(
+  ({ name }) => TEAM_INSTALLED_READ_TOOLS.has(name),
+);
+
+const TEAM_PRODUCT_TOOL_NAME_SET = new Set<string>(
+  TEAM_PRODUCT_TOOL_DESCRIPTORS.map(({ name }) => name),
+);
+
 export function isTeamToolName(name: string): name is TeamToolName {
   return TEAM_TOOL_NAME_SET.has(name);
+}
+
+export function isTeamProductToolName(name: string): name is TeamToolName {
+  return TEAM_PRODUCT_TOOL_NAME_SET.has(name);
+}
+
+export function isTeamInstalledReadToolName(name: string): name is TeamToolName {
+  return TEAM_INSTALLED_READ_TOOLS.has(name as TeamToolName);
 }
 
 const TEAM_TOOL_CAPABILITY: Record<TeamToolName, TeamCapability> = {
@@ -2835,6 +2905,25 @@ export function requiredTeamCapabilities(message: unknown): TeamCapability[] {
   return [...required].sort();
 }
 
+export function requiredTeamProductCapabilities(message: unknown): TeamCapability[] {
+  if (Array.isArray(message)) {
+    return [...new Set(message.flatMap(requiredTeamProductCapabilities))].sort();
+  }
+  if (message && typeof message === 'object') {
+    const record = message as Record<string, unknown>;
+    if (record.method === 'tools/call') {
+      const params = record.params;
+      const name = params && typeof params === 'object'
+        ? (params as Record<string, unknown>).name
+        : undefined;
+      if (typeof name !== 'string' || !isTeamProductToolName(name)) {
+        throw new Error('Unknown team tool');
+      }
+    }
+  }
+  return requiredTeamCapabilities(message);
+}
+
 export function teamNotReadyResult(name: TeamToolName) {
   return {
     isError: true,
@@ -2853,7 +2942,7 @@ export function teamNotReadyResult(name: TeamToolName) {
   };
 }
 
-export function teamDomainErrorResult(code: TeamDomainErrorCode | 'invalid_team_contract') {
+export function teamDomainErrorResult(code: TeamClosedErrorCode) {
   return {
     isError: true,
     content: [{

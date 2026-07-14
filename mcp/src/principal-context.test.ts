@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { decodeProtectedHeader, jwtVerify } from 'jose';
+import { OAuthResourceError } from './oauth-resource.js';
 
 import {
   BoundedSecurityEventReporter,
@@ -27,6 +28,7 @@ import {
   TEAM_RECALL_PATH,
   TEAM_RESUME_PATH,
   TeamPrincipalClient,
+  TeamRequestSecurity,
   type TeamPrincipalContext,
 } from './principal-context.js';
 import {
@@ -40,6 +42,48 @@ import {
 } from './team-contracts.js';
 
 const NOW = 1_789_000_000;
+
+test('sender-verified baseline is capability-checked without parsing or replaying authorization twice', async () => {
+  let verifierCalls = 0;
+  let principalCalls = 0;
+  const identity = {
+    issuer: 'https://issuer.example', subject: 'human-a', clientId: 'client-a',
+    capabilities: ['pulse:connect', 'pulse:read'],
+  } as const;
+  const verifier = {
+    async verifyAuthorization() { verifierCalls++; return identity; },
+  };
+  const principalClient = {
+    async check(actual: unknown) {
+      principalCalls++;
+      assert.equal(actual, identity);
+      return { version: 'pulse.team.principal_context.v1' };
+    },
+  };
+  const security = new TeamRequestSecurity({
+    verifier: verifier as never,
+    principalClient: principalClient as never,
+  });
+  const baseline = await security.authenticateBeforeBody('DPoP token');
+  await security.resolveAfterBody({
+    baseline,
+    requiredCapabilities: ['pulse:connect', 'pulse:read'],
+    requestId: 'request-1',
+  });
+  assert.equal(verifierCalls, 1);
+  assert.equal(principalCalls, 1);
+  await assert.rejects(
+    security.resolveAfterBody({
+      baseline,
+      requiredCapabilities: ['pulse:connect', 'pulse:write'],
+      requestId: 'request-2',
+    }),
+    (error: unknown) => error instanceof OAuthResourceError &&
+      error.code === 'insufficient_scope' && error.requiredCapabilities.join(',') === 'pulse:write',
+  );
+  assert.equal(verifierCalls, 1);
+  assert.equal(principalCalls, 1);
+});
 
 function keyFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'pulse-u3-key-'));
