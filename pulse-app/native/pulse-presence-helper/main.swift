@@ -7,7 +7,10 @@ import Security
 private let applicationTag = Data("gg.zbs.pulse.userpresence.v1".utf8)
 private let dpopApplicationTagPrefix = Data("gg.zbs.pulse.dpop.v1.".utf8)
 private let dpopMetadataService = "gg.zbs.pulse.dpop.metadata.v1"
-private let helperContractVersion = 2
+private let helperContractVersion = 3
+private let helperSelfTestSchema = "pulse.presence_helper.self_test.v2"
+private let helperSelfTestSuite = "es256-p1363-policy-v1"
+private let helperSelfTestVectors = 29
 private let helperCapabilities = [
     "dpop-create", "dpop-delete", "dpop-proof", "dpop-public",
     "prove", "public-key", "self-test", "sign-binding-registry",
@@ -723,6 +726,12 @@ private func run() async throws {
         try emitJSON([
             "capabilities": helperCapabilities,
             "schema": "pulse.presence_helper.contract.v1",
+            "self_test": [
+                "contract_version": helperContractVersion,
+                "schema": helperSelfTestSchema,
+                "suite": helperSelfTestSuite,
+                "vectors": helperSelfTestVectors,
+            ],
             "version": helperContractVersion,
         ])
         return
@@ -730,9 +739,11 @@ private func run() async throws {
     if command == "self-test" {
         try runPureSelfTest()
         try emitJSON([
-            "schema": "pulse.presence_helper.self_test.v1",
+            "contract_version": helperContractVersion,
+            "schema": helperSelfTestSchema,
             "status": "pass",
-            "vectors": 29,
+            "suite": helperSelfTestSuite,
+            "vectors": helperSelfTestVectors,
         ])
         return
     }

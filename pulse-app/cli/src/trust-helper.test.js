@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
+  EXPECTED_HELPER_SELF_TEST,
   INSTALL_CONFIRMATION,
   inspectPresenceTrust,
   installPresenceTrust,
@@ -84,15 +85,16 @@ function fixture() {
     if (command.endsWith(EXPECTED_IDENTIFIER) && args[0] === 'contract') {
       return result(0, `${JSON.stringify({
         schema: 'pulse.presence_helper.contract.v1',
-        version: 2,
+        version: 3,
         capabilities: [
           'dpop-create', 'dpop-delete', 'dpop-proof', 'dpop-public',
           'prove', 'public-key', 'self-test', 'sign-binding-registry',
         ],
+        self_test: EXPECTED_HELPER_SELF_TEST,
       })}\n`, '');
     }
     if (command.endsWith(EXPECTED_IDENTIFIER) && args[0] === 'self-test') {
-      return result(0, '{"schema":"pulse.presence_helper.self_test.v1","status":"pass","vectors":13}\n', '');
+      return result(0, `${JSON.stringify({ ...EXPECTED_HELPER_SELF_TEST, status: 'pass' })}\n`, '');
     }
     if (command === '/usr/bin/sudo') {
       const [program, ...sudoArgs] = args;
@@ -249,6 +251,24 @@ test('install rejects an unsigned vendored helper before the first sudo command'
     await assert.rejects(
       installPresenceTrust({ ...f.options, confirmation: INSTALL_CONFIRMATION }),
       /trust_vendored_signature_invalid/,
+    );
+    assert.equal(f.calls.some((call) => call.command === '/usr/bin/sudo'), false);
+  } finally { f.cleanup(); }
+});
+
+test('install rejects the old helper self-test vector contract before the first sudo command', async () => {
+  const f = fixture();
+  try {
+    f.seedHelper(f.paths.vendoredHelperPath);
+    const run = (command, args, options) => {
+      if (command === f.paths.vendoredHelperPath && args[0] === 'self-test') {
+        return { status: 0, stdout: '{"schema":"pulse.presence_helper.self_test.v1","status":"pass","vectors":13}\n', stderr: '', signal: null };
+      }
+      return f.run(command, args, options);
+    };
+    await assert.rejects(
+      installPresenceTrust({ ...f.options, run, confirmation: INSTALL_CONFIRMATION }),
+      /trust_vendored_contract_invalid/,
     );
     assert.equal(f.calls.some((call) => call.command === '/usr/bin/sudo'), false);
   } finally { f.cleanup(); }

@@ -47,6 +47,7 @@ import {
 } from './trust-helper.js';
 import { BindingError, canonicalizeWorkspace, defaultBindingPaths, resolveWorkspaceBinding } from './workspace-binding.js';
 import { captureEnabledForHost, captureStatePaths, writeCaptureStateFiles } from './capture-state.js';
+import { assertSupportedNodeVersion } from './release-manifest.js';
 import { acquireCLIInvocation, consumeCLIResponse } from './cli-idempotency.js';
 import {
   codexWorkspaceDigest,
@@ -1753,10 +1754,11 @@ function requireClaudeProductVersion() {
 }
 
 function checkNodeRuntime() {
-  const major = Number.parseInt(process.versions.node.split('.')[0], 10);
+  let supported = true;
+  try { assertSupportedNodeVersion(process.versions.node); } catch { supported = false; }
   return {
-    ok: major >= 18,
-    detail: `v${process.versions.node}${major >= 18 ? '' : ' (needs 18+)'}`,
+    ok: supported,
+    detail: `v${process.versions.node}${supported ? '' : ' (needs 20+)'}`,
   };
 }
 

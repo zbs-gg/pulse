@@ -31,11 +31,13 @@
     "src/trust-helper.js",
     "src/workspace-binding.js",
     "src/local-supervisor.js",
+    "src/release-manifest.js",
     "src/demo-corpus.json",
     "scripts",
     "vendor/pulse-preview-source",
     "vendor/pulse-mcp-dist",
     "vendor/pulse-presence-helper",
+    "release",
     "README.md",
     "LICENSE"
   ],
@@ -49,11 +51,12 @@
     "test:codex-team-packaging-contract": "node scripts/codex-team-packaging-contract.mjs",
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
+    "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "pulse",

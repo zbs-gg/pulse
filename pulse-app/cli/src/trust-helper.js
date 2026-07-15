@@ -10,11 +10,17 @@ import { fileURLToPath } from 'node:url';
 export const INSTALL_CONFIRMATION = 'install pulse presence helper';
 export const EXPECTED_HELPER_IDENTIFIER = 'gg.zbs.pulse.presence-helper';
 export const EXPECTED_HELPER_TEAM_IDENTIFIER = '44N4NZ86S5';
-export const EXPECTED_HELPER_CONTRACT_VERSION = 2;
+export const EXPECTED_HELPER_CONTRACT_VERSION = 3;
 export const EXPECTED_HELPER_CAPABILITIES = Object.freeze([
   'dpop-create', 'dpop-delete', 'dpop-proof', 'dpop-public',
   'prove', 'public-key', 'self-test', 'sign-binding-registry',
 ]);
+export const EXPECTED_HELPER_SELF_TEST = Object.freeze({
+  contract_version: EXPECTED_HELPER_CONTRACT_VERSION,
+  schema: 'pulse.presence_helper.self_test.v2',
+  suite: 'es256-p1363-policy-v1',
+  vectors: 29,
+});
 
 export const DEFAULT_TRUST_PATHS = Object.freeze({
   helperPath: '/Library/PrivilegedHelperTools/gg.zbs.pulse.presence-helper',
@@ -149,12 +155,19 @@ function readHelperContract(helperPath, run) {
   try {
     const value = JSON.parse(result.stdout);
     if (!value || Array.isArray(value) || typeof value !== 'object' ||
-        Object.keys(value).sort().join('\0') !== 'capabilities\0schema\0version' ||
+        Object.keys(value).sort().join('\0') !== 'capabilities\0schema\0self_test\0version' ||
         value.schema !== 'pulse.presence_helper.contract.v1' ||
         value.version !== EXPECTED_HELPER_CONTRACT_VERSION ||
         !Array.isArray(value.capabilities) ||
-        value.capabilities.join('\0') !== EXPECTED_HELPER_CAPABILITIES.join('\0')) return null;
-    return Object.freeze({ version: value.version, capabilities: Object.freeze([...value.capabilities]) });
+        value.capabilities.join('\0') !== EXPECTED_HELPER_CAPABILITIES.join('\0') ||
+        !value.self_test || Array.isArray(value.self_test) ||
+        Object.keys(value.self_test).sort().join('\0') !== 'contract_version\0schema\0suite\0vectors' ||
+        Object.keys(EXPECTED_HELPER_SELF_TEST).some((key) => value.self_test[key] !== EXPECTED_HELPER_SELF_TEST[key])) return null;
+    return Object.freeze({
+      version: value.version,
+      capabilities: Object.freeze([...value.capabilities]),
+      self_test: EXPECTED_HELPER_SELF_TEST,
+    });
   } catch {
     return null;
   }
@@ -168,9 +181,10 @@ function helperSelfTest(helperPath, run) {
   if (!exactResult(result) || typeof result.stdout !== 'string' || result.stdout.length > 4096) return false;
   try {
     const value = JSON.parse(result.stdout);
-    return value?.schema === 'pulse.presence_helper.self_test.v1' &&
-      value.status === 'pass' && value.vectors === 13 &&
-      Object.keys(value).sort().join('\0') === 'schema\0status\0vectors';
+    return value && !Array.isArray(value) &&
+      Object.keys(value).sort().join('\0') === 'contract_version\0schema\0status\0suite\0vectors' &&
+      value.status === 'pass' &&
+      Object.keys(EXPECTED_HELPER_SELF_TEST).every((key) => value[key] === EXPECTED_HELPER_SELF_TEST[key]);
   } catch {
     return false;
   }

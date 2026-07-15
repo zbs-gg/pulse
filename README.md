@@ -176,7 +176,7 @@ Then: `pulse demo --clean` removes the whole demo store.
 | Pulse Local Preview | state-aware retrieval, why-this-surfaced reasons, viewer, resume injection | Node 20+, Go toolchain (preview builds from source), Claude Code CLI, an embedder (one of the two below) |
 | — local embeddings | fully local retrieval path | Apple Silicon, 16GB+ RAM (32GB comfortable), bge-m3 model on disk (~2GB), MLX python env |
 | — API embeddings | easier setup, smaller RAM | Cohere API key (`~/.pulse/cohere-key.txt`) — embedding calls leave the machine, and doctor says so |
-| Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 18+, nothing else |
+| Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 20+, nothing else |
 
 Numbers are conservative estimates; `pulse doctor` reports the real state of
 your machine and refuses to call fallback "Pulse ready".
