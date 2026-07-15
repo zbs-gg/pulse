@@ -44,7 +44,7 @@ function installedClaudeHookContractDigest() {
 		const manifest = JSON.parse(readFileSync(join(
 			dirname(fileURLToPath(import.meta.url)), '..', 'runtime-manifest.json',
 		), 'utf8'));
-		if (manifest?.schema !== 'pulse.codex_runtime.v1') return undefined;
+		if (manifest?.schema !== 'pulse.codex_runtime.v2') return undefined;
 		return claudeHookContractDigest(manifest.tree_digest);
 	} catch {
 		return undefined;

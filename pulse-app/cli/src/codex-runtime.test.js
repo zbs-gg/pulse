@@ -53,6 +53,13 @@ async function managedActivationFixture(dataDir) {
 			['support/tokenizer.json', Buffer.from('{}\n'), 0o600],
 		]],
 		[artifactDescriptor('pulse-model', 'model', '3'.repeat(64)), [['model.safetensors', tinySafetensors(), 0o600]]],
+		[artifactDescriptor('pulse-plugin-runtime', 'plugin-runtime', '4'.repeat(64)), [
+			['marketplace/plugins/pulse/.codex-plugin/plugin.json', Buffer.from('{}\n'), 0o600],
+			['runtime/src/cli.js', Buffer.from('#!/usr/bin/env node\n'), 0o600],
+		]],
+		[artifactDescriptor('pulse-presence-helper', 'presence-helper', '5'.repeat(64)), [
+			['bin/gg.zbs.pulse.presence-helper', Buffer.from('#!/bin/sh\n'), 0o700],
+		]],
 	];
 	for (const [descriptor, files] of fixtures) {
 		await activateArtifactVersion(descriptor, join(dataDir, 'unused'), {
@@ -67,20 +74,26 @@ async function managedActivationFixture(dataDir) {
 			},
 		});
 	}
-	writeActivatedArtifactSet({
+	const release = {
 		schema: 'pulse.verified_release_manifest.v1', manifest_digest: 'a'.repeat(64),
 		version: '0.8.0', epoch: 8,
 		artifacts: Object.fromEntries(fixtures.map(([descriptor]) => [descriptor.kind, descriptor])),
-	}, { installRoot });
+	};
+	writeActivatedArtifactSet(release, { installRoot });
+	const activations = Object.fromEntries(fixtures.map(([descriptor]) => [
+		descriptor.kind,
+		readActivatedArtifact(descriptor.id, { installRoot, expectedKind: descriptor.kind }),
+	]));
 	const vault = { data_dir: join(dataDir, 'vault') };
-	return resolveManagedRuntime(vault, {
+	const managed = resolveManagedRuntime(vault, {
 		installRoot,
 		verifiedActivations: {
-			 daemon: readActivatedArtifact('pulse-daemon', { installRoot, expectedKind: 'daemon' }),
-			 embedderRuntime: readActivatedArtifact('pulse-embedder-runtime', { installRoot, expectedKind: 'embedder-runtime' }),
-			 model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model' }),
+			 daemon: activations.daemon,
+			 embedderRuntime: activations['embedder-runtime'],
+			 model: activations.model,
 		},
 	});
+	return { activations, managed, release };
 }
 
 test('installed runtime proxies only read-only Team tools through the exact current binding', async () => {
@@ -219,17 +232,19 @@ test('legacy v2 product activation is explicitly non-ready', () => {
 	);
 });
 
-test('v3 product activation binds runtime and shared artifacts without pinning one project vault', async () => {
+test('legacy v3 product activation is explicitly non-ready because it omits the signed Codex edge', async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-v3.'));
 	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
 	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
 	mkdirSync(join(runtimeRoot, 'src'), { recursive: true, mode: 0o700 });
-	writeFileSync(runtimePath, '#!/usr/bin/env node\n', { mode: 0o700 });
-	const runtimeDigest = 'a'.repeat(64);
+	const runtimeBytes = Buffer.from('#!/usr/bin/env node\n');
+	writeFileSync(runtimePath, runtimeBytes, { mode: 0o700 });
+	const runtimeDigest = createHash('sha256')
+		.update('src/cli.js').update('\x00').update(runtimeBytes).update('\x00').digest('hex');
 	writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify({
 		schema: 'pulse.codex_runtime.v1', tree_digest: runtimeDigest, entrypoint: 'src/cli.js',
 	}), { mode: 0o600 });
-	const managed = await managedActivationFixture(dataDir);
+	const { managed } = await managedActivationFixture(dataDir);
 	const activation = {
 		activated_at: '2026-07-15T10:00:00Z',
 		daemon_activation_digest: managed.daemon.activation_digest,
@@ -255,16 +270,71 @@ test('v3 product activation binds runtime and shared artifacts without pinning o
 	const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
 	writeFileSync(activationPath, JSON.stringify(activation), { mode: 0o600 });
 
-	const admitted = readProductActivation(dataDir);
-	assert.equal(admitted.daemon_digest, managed.daemon.digest);
-	assert.equal(admitted.model_tree_digest, managed.model.tree_digest);
-	assert.equal('managed_embedder_config_path' in admitted, false);
+	assert.throws(
+		() => readProductActivation(dataDir),
+		/product_activation_v3_not_ready/,
+	);
+});
+
+test('v4 product activation binds the complete signed release and rejects plugin-runtime drift', async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-v4.'));
+	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
+	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
+	mkdirSync(join(runtimeRoot, 'src'), { recursive: true, mode: 0o700 });
+	const runtimeBytes = Buffer.from('#!/usr/bin/env node\n');
+	writeFileSync(runtimePath, runtimeBytes, { mode: 0o700 });
+	const runtimeDigest = createHash('sha256')
+		.update('src/cli.js').update('\x00').update(runtimeBytes).update('\x00').digest('hex');
+	const pluginTreeDigest = 'b'.repeat(64);
+	const { activations, managed, release } = await managedActivationFixture(dataDir);
+	const pluginRuntime = activations['plugin-runtime'];
+	writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify({
+		schema: 'pulse.codex_runtime.v2', tree_digest: runtimeDigest, entrypoint: 'src/cli.js',
+		package_version: release.version, installed_at: '2026-07-15T10:00:00Z',
+		release_manifest_digest: release.manifest_digest, release_version: release.version, release_epoch: release.epoch,
+		plugin_runtime_artifact_id: pluginRuntime.artifact_id,
+		plugin_runtime_artifact_sha256: pluginRuntime.sha256,
+		plugin_runtime_activation_digest: pluginRuntime.activation_digest,
+		plugin_runtime_tree_digest: pluginRuntime.tree_digest,
+		plugin_tree_digest: pluginTreeDigest,
+	}), { mode: 0o600 });
+	const activation = {
+		activated_at: '2026-07-15T10:00:00Z',
+		daemon_activation_digest: managed.daemon.activation_digest,
+		daemon_artifact_id: managed.daemon.artifact_id,
+		daemon_artifact_sha256: managed.daemon.artifact_sha256,
+		daemon_digest: managed.daemon.digest,
+		daemon_path: realpathSync(managed.daemon.path),
+		daemon_tree_digest: managed.daemon.tree_digest,
+		embedder_runtime_activation_digest: managed.embedder_runtime.activation_digest,
+		embedder_runtime_artifact_id: managed.embedder_runtime.artifact_id,
+		embedder_runtime_artifact_sha256: managed.embedder_runtime.artifact_sha256,
+		embedder_runtime_tree_digest: managed.embedder_runtime.tree_digest,
+		model_activation_digest: managed.model.activation_digest,
+		model_artifact_id: managed.model.artifact_id,
+		model_artifact_sha256: managed.model.artifact_sha256,
+		model_tree_digest: managed.model.tree_digest,
+		plugin_runtime_activation_digest: pluginRuntime.activation_digest,
+		plugin_runtime_artifact_id: pluginRuntime.artifact_id,
+		plugin_runtime_artifact_sha256: pluginRuntime.sha256,
+		plugin_runtime_tree_digest: pluginRuntime.tree_digest,
+		plugin_tree_digest: pluginTreeDigest,
+		release_epoch: release.epoch,
+		release_manifest_digest: release.manifest_digest,
+		release_version: release.version,
+		runtime_path: runtimePath,
+		runtime_tree_digest: runtimeDigest,
+		schema: 'pulse.product_activation.v4',
+	};
+	const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+	writeFileSync(activationPath, JSON.stringify(activation), { mode: 0o600 });
+	assert.equal(readProductActivation(dataDir).release_manifest_digest, release.manifest_digest);
 	writeFileSync(activationPath, JSON.stringify({
-		...activation, model_tree_digest: 'f'.repeat(64),
+		...activation, plugin_runtime_tree_digest: 'f'.repeat(64),
 	}), { mode: 0o600 });
 	assert.throws(
 		() => readProductActivation(dataDir),
-		/product_activation_artifact_identity_mismatch/,
+		/product_activation_(?:runtime_digest|artifact_identity)_mismatch/,
 	);
 });
 

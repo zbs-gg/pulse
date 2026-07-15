@@ -326,6 +326,41 @@ test('healthy retrieval with incomplete activation reports the exact activation 
   assert.equal(run.receipts.at(-1).reason_code, 'codex_activation_incomplete');
 });
 
+test('trusted Codex hooks with missing lifecycle evidence ask for a normal new task', async () => {
+  const run = harness({
+    inspectHealth: async () => ({
+      ready: false, full_retrieval: true, reason_code: 'codex_hook_lifecycle_required',
+    }),
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'codex_hook_lifecycle_required');
+  assert.match(result.next_action, /open.*normal new Codex task/i);
+  assert.doesNotMatch(result.next_action, /approve|trust.*hook/i);
+  assert.equal(run.receipts.at(-1).reason_code, 'codex_hook_lifecycle_required');
+});
+
+test('Codex native lifecycle capability gap has a truthful stable next action', async () => {
+	const run = harness({
+		inspectHealth: async () => ({
+			ready: false, full_retrieval: true,
+			reason_code: 'codex_native_lifecycle_attestation_unavailable',
+		}),
+	});
+	const result = await runPersonalInstall({
+		plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+	});
+
+	assert.equal(result.outcome, 'action_required');
+	assert.equal(result.reason_code, 'codex_native_lifecycle_attestation_unavailable');
+	assert.match(result.next_action, /use Pulse MCP tools explicitly/i);
+	assert.match(result.next_action, /Codex.*replayable native hook execution evidence/i);
+	assert.doesNotMatch(result.next_action, /normal new Codex task|approve|trust/i);
+});
+
 test('unsafe bindings stop on an existing read-only review action without replacement or repair recursion', async () => {
   for (const status of ['conflict', 'legacy', 'repair_required']) {
     const run = harness({

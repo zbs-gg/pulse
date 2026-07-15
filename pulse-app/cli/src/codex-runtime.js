@@ -15,6 +15,8 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { readCommittedArtifactSet } from './artifact-installer.js';
+import { inspectCodexRuntimeAt } from './codex-install.js';
+import { RELEASE_ARTIFACT_KINDS } from './release-manifest.js';
 import { resolveWorkspaceBinding } from './workspace-binding.js';
 import {
 	SupervisorError,
@@ -42,7 +44,7 @@ function requirePrivateFile(path, label, maxBytes = 8192, { allowReadOnlyShared 
 	return { info, currentUID };
 }
 
-function readProductActivationBundle(
+export function readProductActivationBundle(
 	dataDir = process.env.PULSE_DATA_DIR,
 	{ verifyArtifacts = true } = {},
 ) {
@@ -53,37 +55,55 @@ function readProductActivationBundle(
 	if (activation?.schema === 'pulse.product_activation.v2') {
 		throw new Error('product_activation_v2_not_ready');
 	}
+	if (activation?.schema === 'pulse.product_activation.v3') {
+		throw new Error('product_activation_v3_not_ready');
+	}
 	const allowed = [
 		'activated_at',
 		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
 		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
 		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_id', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest',
+		'release_epoch', 'release_manifest_digest', 'release_version',
 		'runtime_path', 'runtime_tree_digest', 'schema',
 	];
 	const digestFields = [
 		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_tree_digest',
 		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
 		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest', 'release_manifest_digest',
 		'runtime_tree_digest',
 	];
-	const idFields = ['daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id'];
-	if (activation?.schema !== 'pulse.product_activation.v3' ||
+	const idFields = [
+		'daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id', 'plugin_runtime_artifact_id',
+	];
+	if (activation?.schema !== 'pulse.product_activation.v4' ||
 			Object.keys(activation).length !== allowed.length || Object.keys(activation).some((name) => !allowed.includes(name)) ||
 			![activation.daemon_path, activation.runtime_path]
 				.every((value) => typeof value === 'string' && isAbsolute(value)) ||
 			!digestFields.every((field) => /^[a-f0-9]{64}$/.test(activation[field] ?? '')) ||
 			!idFields.every((field) => /^[a-z0-9][a-z0-9._-]{0,127}$/.test(activation[field] ?? '')) ||
+			typeof activation.release_version !== 'string' || activation.release_version.length < 1 ||
+			!Number.isSafeInteger(activation.release_epoch) || activation.release_epoch < 1 ||
 			typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
 		throw new Error('product_activation_invalid');
 	}
 	const expectedRuntimePath = join(resolve(dataDir), 'runtime', 'codex', 'current', 'src', 'cli.js');
 	if (resolve(activation.runtime_path) !== expectedRuntimePath) throw new Error('product_activation_runtime_mismatch');
-	requirePrivateFile(activation.runtime_path, 'product_runtime', 128 * 1024 * 1024, { allowReadOnlyShared: true });
-	const manifestPath = resolve(activation.runtime_path, '..', '..', 'runtime-manifest.json');
-	requirePrivateFile(manifestPath, 'product_runtime_manifest', 8192, { allowReadOnlyShared: true });
-	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-	if (manifest?.schema !== 'pulse.codex_runtime.v1' ||
-		manifest.tree_digest !== activation.runtime_tree_digest || manifest.entrypoint !== 'src/cli.js') {
+	const inspectedRuntime = inspectCodexRuntimeAt(activation.runtime_path);
+	if (!inspectedRuntime.ok) throw new Error(`product_activation_runtime_invalid:${inspectedRuntime.detail}`);
+	const manifest = inspectedRuntime.manifest;
+	if (manifest?.schema !== 'pulse.codex_runtime.v2' ||
+			manifest.tree_digest !== activation.runtime_tree_digest || manifest.entrypoint !== 'src/cli.js' ||
+			manifest.release_manifest_digest !== activation.release_manifest_digest ||
+			manifest.release_version !== activation.release_version || manifest.release_epoch !== activation.release_epoch ||
+			manifest.plugin_runtime_artifact_id !== activation.plugin_runtime_artifact_id ||
+			manifest.plugin_runtime_artifact_sha256 !== activation.plugin_runtime_artifact_sha256 ||
+			manifest.plugin_runtime_activation_digest !== activation.plugin_runtime_activation_digest ||
+			manifest.plugin_runtime_tree_digest !== activation.plugin_runtime_tree_digest ||
+			manifest.plugin_tree_digest !== activation.plugin_tree_digest) {
 		throw new Error('product_activation_runtime_digest_mismatch');
 	}
 	const { currentUID } = requirePrivateFile(activation.daemon_path, 'product_daemon', 1024 * 1024 * 1024);
@@ -94,11 +114,18 @@ function readProductActivationBundle(
 	}
 	if (!verifyArtifacts) return { activation };
 	const installRoot = join(resolve(dataDir), 'artifacts');
-	const committed = readCommittedArtifactSet({ installRoot }).activations;
+	const committedSet = readCommittedArtifactSet({ installRoot });
+	const committed = committedSet.activations;
 	const daemon = committed.daemon;
 	const embedderRuntime = committed['embedder-runtime'];
 	const model = committed.model;
-	if (!daemon || !embedderRuntime || !model ||
+	const pluginRuntime = committed['plugin-runtime'];
+	const presenceHelper = committed['presence-helper'];
+	if (Object.keys(committed).sort().join('\0') !== [...RELEASE_ARTIFACT_KINDS].sort().join('\0') ||
+			!daemon || !embedderRuntime || !model || !pluginRuntime || !presenceHelper ||
+			committedSet.record.manifest_digest !== activation.release_manifest_digest ||
+			committedSet.record.version !== activation.release_version ||
+			committedSet.record.epoch !== activation.release_epoch ||
 			daemon.artifact_id !== activation.daemon_artifact_id || daemon.sha256 !== activation.daemon_artifact_sha256 ||
 			daemon.activation_digest !== activation.daemon_activation_digest || daemon.tree_digest !== activation.daemon_tree_digest ||
 			realpathSync(activation.daemon_path) !== realpathSync(join(daemon.version_path, 'bin', 'pulse')) ||
@@ -107,10 +134,18 @@ function readProductActivationBundle(
 			embedderRuntime.activation_digest !== activation.embedder_runtime_activation_digest ||
 			embedderRuntime.tree_digest !== activation.embedder_runtime_tree_digest ||
 			model.artifact_id !== activation.model_artifact_id || model.sha256 !== activation.model_artifact_sha256 ||
-			model.activation_digest !== activation.model_activation_digest || model.tree_digest !== activation.model_tree_digest) {
+			model.activation_digest !== activation.model_activation_digest || model.tree_digest !== activation.model_tree_digest ||
+			pluginRuntime.artifact_id !== activation.plugin_runtime_artifact_id ||
+			pluginRuntime.sha256 !== activation.plugin_runtime_artifact_sha256 ||
+			pluginRuntime.activation_digest !== activation.plugin_runtime_activation_digest ||
+			pluginRuntime.tree_digest !== activation.plugin_runtime_tree_digest) {
 		throw new Error('product_activation_artifact_identity_mismatch');
 	}
-	return { activation, activations: { daemon, embedderRuntime, model } };
+	return {
+		activation,
+		activations: { daemon, embedderRuntime, model, pluginRuntime, presenceHelper },
+		committedSet,
+	};
 }
 
 export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {

@@ -1,10 +1,12 @@
 import {
+	chmodSync,
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+	realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -16,6 +18,15 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { migrateLegacyPulseHookConfig } from './host-adapter.js';
 
 const RUNTIME_MANIFEST = 'runtime-manifest.json';
+const MARKETPLACE_SNAPSHOT_MANIFEST = 'snapshot.json';
+
+export function codexProductActivationReady(report) {
+	const required = [
+		'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+		'mcp_shadow', 'legacy_hooks', 'binding', 'runtime', 'activation', 'vault', 'capture',
+	];
+	return required.every((name) => report?.checks?.[name]?.ok === true);
+}
 
 export function codexHomePath(env = process.env) {
   return resolve(env.CODEX_HOME || join(homedir(), '.codex'));
@@ -86,6 +97,331 @@ export function parsePulsePluginList(output) {
 		if (match) return { installed: true, enabled: match[1] === 'installed, enabled', version: match[2], path: match[3] };
 	}
 	return { installed: false, enabled: false, path: undefined };
+}
+
+export function parseCodexMarketplaceList(output, marketplace = 'zbs-gg') {
+	if (typeof output !== 'string') return { configured: false, root: undefined };
+	for (const line of output.split(/\r?\n/)) {
+		const match = line.match(/^(\S+)\s{2,}(.+?)\s*$/);
+		if (match?.[1] === marketplace) return { configured: true, root: match[2] };
+	}
+	return { configured: false, root: undefined };
+}
+
+export function codexMarketplaceDoctorCheck({ exact, marketplace, snapshot }) {
+	if (exact) return { ok: true, detail: 'exact activation-owned marketplace snapshot' };
+	if (!snapshot?.ok) {
+		return {
+			ok: false,
+			reason: snapshot?.reason ?? 'codex_marketplace_snapshot_mismatch',
+			detail: snapshot?.detail ?? snapshot?.reason ?? 'Codex marketplace snapshot validation failed',
+		};
+	}
+	if (!marketplace?.configured || !marketplace.root) {
+		return {
+			ok: false,
+			reason: 'codex_marketplace_not_configured',
+			detail: marketplace?.error ?? 'Codex marketplace zbs-gg is not configured',
+		};
+	}
+	return {
+		ok: false,
+		reason: 'codex_marketplace_provenance_mismatch',
+		detail: 'Codex marketplace zbs-gg points at a different source',
+	};
+}
+
+const SHA256 = /^[a-f0-9]{64}$/;
+const SAFE_ARTIFACT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+
+function ownerControlledTreeDigest(root, label, { excludeRootFiles = [] } = {}) {
+	const base = resolve(root);
+	const excluded = new Set(excludeRootFiles);
+	const rootInfo = lstatSync(base);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : rootInfo.uid;
+	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== currentUID || (rootInfo.mode & 0o022) !== 0) {
+		throw new Error(`${label}_unsafe`);
+	}
+	const hash = createHash('sha256');
+	const visit = (directory, prefix = '') => {
+		for (const name of readdirSync(directory).sort()) {
+			if (prefix === '' && excluded.has(name)) continue;
+			const path = join(directory, name);
+			const relative = prefix ? `${prefix}/${name}` : name;
+			const info = lstatSync(path);
+			if (info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o022) !== 0 ||
+				(info.isFile() && info.nlink !== 1)) {
+				throw new Error(`${label}_unsafe`);
+			}
+			if (info.isDirectory()) {
+				visit(path, relative);
+			} else if (info.isFile()) {
+				hash.update(relative);
+				hash.update('\x00');
+				hash.update(readFileSync(path));
+				hash.update('\x00');
+			} else {
+				throw new Error(`${label}_unsafe`);
+			}
+		}
+	};
+	visit(base);
+	return hash.digest('hex');
+}
+
+function requireProductEdgeFile(root, relative, label) {
+	const path = join(root, relative);
+	let info;
+	try { info = lstatSync(path); } catch { throw new Error(`${label}_missing`); }
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o022) !== 0) {
+		throw new Error(`${label}_unsafe`);
+	}
+	return path;
+}
+
+export function resolveSignedCodexProductEdge({ release, activation } = {}) {
+	if (release?.schema !== 'pulse.verified_release_manifest.v1' || !SHA256.test(release.manifest_digest ?? '') ||
+		typeof release.version !== 'string' || release.version.length < 1 ||
+		!Number.isSafeInteger(release.epoch) || release.epoch < 1) {
+		throw new Error('codex_product_release_invalid');
+	}
+	if (!activation || activation.kind !== 'plugin-runtime' || !SAFE_ARTIFACT_ID.test(activation.artifact_id ?? '') ||
+		![activation.sha256, activation.activation_digest, activation.tree_digest].every((value) => SHA256.test(value ?? '')) ||
+		activation.version !== release.version || activation.epoch !== release.epoch ||
+		typeof activation.version_path !== 'string' || !isAbsolute(activation.version_path)) {
+		throw new Error('codex_plugin_runtime_activation_mismatch');
+	}
+	const versionPath = realpathSync(resolve(activation.version_path));
+	const marketplaceRoot = join(versionPath, 'marketplace');
+	const pluginRoot = join(marketplaceRoot, 'plugins', 'pulse');
+	const runtimeRoot = join(versionPath, 'runtime');
+	const marketplacePath = requireProductEdgeFile(
+		marketplaceRoot, '.agents/plugins/marketplace.json', 'codex_marketplace_manifest',
+	);
+	const pluginManifestPath = requireProductEdgeFile(
+		pluginRoot, '.codex-plugin/plugin.json', 'codex_plugin_manifest',
+	);
+	for (const [relative, label] of [
+		['.mcp.json', 'codex_plugin_mcp'],
+		['hooks/hooks.json', 'codex_plugin_hooks'],
+		['hooks/pulse-hook.mjs', 'codex_plugin_hook_launcher'],
+		['runtime-locator.mjs', 'codex_plugin_runtime_locator'],
+		['mcp/server.mjs', 'codex_plugin_mcp_launcher'],
+	]) requireProductEdgeFile(pluginRoot, relative, label);
+	const runtimePackagePath = requireProductEdgeFile(runtimeRoot, 'package.json', 'codex_runtime_package');
+	requireProductEdgeFile(runtimeRoot, 'src/cli.js', 'codex_runtime_entrypoint');
+	requireProductEdgeFile(runtimeRoot, 'vendor/pulse-mcp-dist/index.js', 'codex_runtime_mcp');
+
+	let marketplace;
+	let pluginManifest;
+	let runtimePackage;
+	try {
+		marketplace = JSON.parse(readFileSync(marketplacePath, 'utf8'));
+		pluginManifest = JSON.parse(readFileSync(pluginManifestPath, 'utf8'));
+		runtimePackage = JSON.parse(readFileSync(runtimePackagePath, 'utf8'));
+	} catch { throw new Error('codex_product_edge_json_invalid'); }
+	const plugins = marketplace?.plugins;
+	if (marketplace?.name !== 'zbs-gg' || !Array.isArray(plugins) || plugins.length !== 1 ||
+		plugins[0]?.name !== 'pulse' || plugins[0]?.source?.source !== 'local' ||
+		plugins[0]?.source?.path !== './plugins/pulse') {
+		throw new Error('codex_marketplace_snapshot_invalid');
+	}
+	if (pluginManifest?.name !== 'pulse' || pluginManifest.version !== release.version) {
+		throw new Error('codex_plugin_version_mismatch');
+	}
+	if (runtimePackage?.name !== '@zbs-gg/pulse' || runtimePackage.version !== release.version) {
+		throw new Error('codex_runtime_release_mismatch');
+	}
+	return Object.freeze({
+		schema: 'pulse.codex_product_edge.v1',
+		release_manifest_digest: release.manifest_digest,
+		release_version: release.version,
+		release_epoch: release.epoch,
+		plugin_runtime_artifact_id: activation.artifact_id,
+		plugin_runtime_artifact_sha256: activation.sha256,
+		plugin_runtime_activation_digest: activation.activation_digest,
+		plugin_runtime_tree_digest: activation.tree_digest,
+		marketplace_root: marketplaceRoot,
+		marketplace_tree_digest: ownerControlledTreeDigest(marketplaceRoot, 'codex_marketplace_snapshot'),
+		plugin_root: pluginRoot,
+		plugin_tree_digest: ownerControlledTreeDigest(pluginRoot, 'codex_plugin_snapshot'),
+		runtime_root: runtimeRoot,
+		runtime_tree_digest: ownerControlledTreeDigest(runtimeRoot, 'codex_runtime_snapshot'),
+	});
+}
+
+function validateCodexProductEdgeIdentity(edge) {
+	if (edge?.schema !== 'pulse.codex_product_edge.v1' ||
+		!SAFE_ARTIFACT_ID.test(edge.plugin_runtime_artifact_id ?? '') ||
+		typeof edge.release_version !== 'string' || edge.release_version.length < 1 ||
+		!Number.isSafeInteger(edge.release_epoch) || edge.release_epoch < 1 ||
+		![
+			edge.release_manifest_digest,
+			edge.plugin_runtime_artifact_sha256,
+			edge.plugin_runtime_activation_digest,
+			edge.plugin_runtime_tree_digest,
+			edge.marketplace_tree_digest,
+			edge.plugin_tree_digest,
+			edge.runtime_tree_digest,
+		].every((value) => SHA256.test(value ?? '')) ||
+		![edge.marketplace_root, edge.plugin_root, edge.runtime_root]
+			.every((value) => typeof value === 'string' && isAbsolute(value))) {
+		throw new Error('codex_product_edge_invalid');
+	}
+}
+
+function marketplaceSnapshotRoot(edge, dataDir) {
+	validateCodexProductEdgeIdentity(edge);
+	return join(
+		resolve(dataDir), 'runtime', 'codex-marketplaces',
+		edge.release_manifest_digest, edge.plugin_runtime_activation_digest,
+	);
+}
+
+function marketplaceSnapshotManifest(edge) {
+	return {
+		schema: 'pulse.codex_marketplace_snapshot.v1',
+		release_manifest_digest: edge.release_manifest_digest,
+		release_version: edge.release_version,
+		release_epoch: edge.release_epoch,
+		plugin_runtime_artifact_id: edge.plugin_runtime_artifact_id,
+		plugin_runtime_artifact_sha256: edge.plugin_runtime_artifact_sha256,
+		plugin_runtime_activation_digest: edge.plugin_runtime_activation_digest,
+		plugin_runtime_tree_digest: edge.plugin_runtime_tree_digest,
+		marketplace_tree_digest: edge.marketplace_tree_digest,
+		plugin_tree_digest: edge.plugin_tree_digest,
+	};
+}
+
+export function normalizePrivateTree(root) {
+	const visit = (path) => {
+		const info = lstatSync(path);
+		if (info.isSymbolicLink()) throw new Error('codex_marketplace_snapshot_unsafe');
+		if (info.isDirectory()) {
+			chmodSync(path, 0o700);
+			for (const name of readdirSync(path)) visit(join(path, name));
+			return;
+		}
+		if (!info.isFile()) throw new Error('codex_marketplace_snapshot_unsafe');
+		chmodSync(path, (info.mode & 0o111) !== 0 ? 0o700 : 0o600);
+	};
+	visit(root);
+}
+
+function verifyCodexMarketplaceSnapshotAt(edge, root) {
+	validateCodexProductEdgeIdentity(edge);
+	const declaredRoot = resolve(root);
+	const declaredInfo = lstatSync(declaredRoot);
+	if (!declaredInfo.isDirectory() || declaredInfo.isSymbolicLink()) {
+		throw new Error('codex_marketplace_snapshot_unsafe');
+	}
+	const canonicalRoot = realpathSync(declaredRoot);
+	ownerControlledTreeDigest(canonicalRoot, 'codex_marketplace_snapshot_root');
+	const marketplaceRoot = join(canonicalRoot, 'marketplace');
+	const pluginRoot = join(marketplaceRoot, 'plugins', 'pulse');
+	const manifestPath = requireProductEdgeFile(
+		canonicalRoot, MARKETPLACE_SNAPSHOT_MANIFEST, 'codex_marketplace_snapshot_manifest',
+	);
+	let manifest;
+	try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch {
+		throw new Error('codex_marketplace_snapshot_manifest_invalid');
+	}
+	const expected = marketplaceSnapshotManifest(edge);
+	if (JSON.stringify(manifest) !== JSON.stringify(expected)) {
+		throw new Error('codex_marketplace_snapshot_identity_mismatch');
+	}
+	const marketplaceDigest = ownerControlledTreeDigest(marketplaceRoot, 'codex_marketplace_snapshot');
+	const pluginDigest = ownerControlledTreeDigest(pluginRoot, 'codex_plugin_snapshot');
+	if (marketplaceDigest !== edge.marketplace_tree_digest || pluginDigest !== edge.plugin_tree_digest) {
+		throw new Error('codex_marketplace_snapshot_mismatch');
+	}
+	return {
+		root: canonicalRoot,
+		marketplace_root: marketplaceRoot,
+		plugin_root: pluginRoot,
+		marketplace_tree_digest: marketplaceDigest,
+		plugin_tree_digest: pluginDigest,
+		manifest,
+	};
+}
+
+export function inspectCodexMarketplaceSnapshot(edge, dataDir) {
+	const root = marketplaceSnapshotRoot(edge, dataDir);
+	if (!existsSync(root)) {
+		return { ok: false, reason: 'codex_marketplace_snapshot_missing', detail: 'managed Codex marketplace snapshot is missing' };
+	}
+	try {
+		return { ok: true, reason: 'codex_marketplace_snapshot_exact', ...verifyCodexMarketplaceSnapshotAt(edge, root) };
+	} catch (error) {
+		let reason = 'codex_marketplace_snapshot_mismatch';
+		if (error.message.includes('_unsafe')) reason = 'codex_marketplace_snapshot_unsafe';
+		return { ok: false, reason, detail: error.message };
+	}
+}
+
+export function materializeCodexMarketplaceSnapshot(edge, dataDir) {
+	validateCodexProductEdgeIdentity(edge);
+	if (ownerControlledTreeDigest(edge.marketplace_root, 'codex_signed_marketplace') !== edge.marketplace_tree_digest ||
+		ownerControlledTreeDigest(edge.plugin_root, 'codex_signed_plugin') !== edge.plugin_tree_digest) {
+		throw new Error('codex_signed_marketplace_mismatch');
+	}
+	const existing = inspectCodexMarketplaceSnapshot(edge, dataDir);
+	if (existing.ok) return { ...existing, reused: true, repaired: false };
+
+	const destination = marketplaceSnapshotRoot(edge, dataDir);
+	const parent = dirname(destination);
+	const next = join(parent, `.next-${process.pid}-${Date.now()}`);
+	const previous = join(parent, `.previous-${process.pid}-${Date.now()}`);
+	mkdirSync(parent, { recursive: true, mode: 0o700 });
+	rmSync(next, { recursive: true, force: true });
+	rmSync(previous, { recursive: true, force: true });
+	let previousMoved = false;
+	try {
+		mkdirSync(next, { mode: 0o700 });
+		cpSync(edge.marketplace_root, join(next, 'marketplace'), { recursive: true, dereference: false });
+		normalizePrivateTree(join(next, 'marketplace'));
+		atomicWriteJSON(join(next, MARKETPLACE_SNAPSHOT_MANIFEST), marketplaceSnapshotManifest(edge));
+		verifyCodexMarketplaceSnapshotAt(edge, next);
+		if (ownerControlledTreeDigest(edge.marketplace_root, 'codex_signed_marketplace') !== edge.marketplace_tree_digest ||
+			ownerControlledTreeDigest(edge.plugin_root, 'codex_signed_plugin') !== edge.plugin_tree_digest) {
+			throw new Error('codex_signed_marketplace_mismatch');
+		}
+
+		if (existsSync(destination)) {
+			renameSync(destination, previous);
+			previousMoved = true;
+		}
+		try {
+			renameSync(next, destination);
+			const verified = verifyCodexMarketplaceSnapshotAt(edge, destination);
+			rmSync(previous, { recursive: true, force: true });
+			return { ok: true, reason: 'codex_marketplace_snapshot_exact', ...verified, reused: false, repaired: previousMoved };
+		} catch (error) {
+			rmSync(destination, { recursive: true, force: true });
+			if (previousMoved && existsSync(previous)) renameSync(previous, destination);
+			throw error;
+		}
+	} finally {
+		rmSync(next, { recursive: true, force: true });
+		if (!previousMoved || existsSync(destination)) rmSync(previous, { recursive: true, force: true });
+	}
+}
+
+export function inspectCodexPluginCompatibility(plugin, edge) {
+	if (!plugin?.installed) return { ok: false, reason: 'codex_plugin_missing', detail: 'pulse@zbs-gg is not installed' };
+	if (!plugin.enabled) return { ok: false, reason: 'codex_plugin_disabled', detail: 'pulse@zbs-gg is disabled' };
+	if (plugin.version !== edge?.release_version) {
+		return { ok: false, reason: 'codex_plugin_version_mismatch', detail: 'installed plugin version does not match the signed release' };
+	}
+	let digest;
+	try { digest = ownerControlledTreeDigest(plugin.path, 'codex_plugin_snapshot'); } catch (error) {
+		return { ok: false, reason: 'codex_plugin_snapshot_unsafe', detail: error.message };
+	}
+	if (digest !== edge?.plugin_tree_digest) {
+		return { ok: false, reason: 'codex_plugin_snapshot_mismatch', detail: 'installed plugin bytes do not match the signed release' };
+	}
+	return { ok: true, reason: 'codex_plugin_exact', detail: `pulse@zbs-gg ${plugin.version}`, digest };
 }
 
 function runtimeRoot(dataDir) {
@@ -178,31 +514,12 @@ export function removeCodexProductLocator({ codexHome, binding }) {
 }
 
 function runtimeTreeDigest(root) {
-  const hash = createHash('sha256');
-  const visit = (directory, prefix = '') => {
-    for (const name of readdirSync(directory).sort()) {
-      if (prefix === '' && name === RUNTIME_MANIFEST) continue;
-      const path = join(directory, name);
-      const relative = prefix ? `${prefix}/${name}` : name;
-      const info = lstatSync(path);
-      if (info.isSymbolicLink()) throw new Error(`Codex runtime contains a symlink: ${relative}`);
-      if (info.isDirectory()) {
-        visit(path, relative);
-      } else if (info.isFile()) {
-        hash.update(relative);
-        hash.update('\x00');
-        hash.update(readFileSync(path));
-        hash.update('\x00');
-      } else {
-        throw new Error(`Codex runtime contains an unsupported entry: ${relative}`);
-      }
-    }
-  };
-  visit(root);
-  return hash.digest('hex');
+	return ownerControlledTreeDigest(root, 'codex_runtime', {
+		excludeRootFiles: [RUNTIME_MANIFEST],
+	});
 }
 
-function includeRuntimePath(sourceRoot, sourcePath) {
+export function includeRuntimePath(sourceRoot, sourcePath) {
   const relative = sourcePath.slice(sourceRoot.length).replace(/^\/+/, '');
   if (relative === '') return true;
   const top = relative.split('/')[0];
@@ -231,9 +548,23 @@ function committedRuntimeDigest(dataDir) {
 		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
 		'runtime_path', 'runtime_tree_digest', 'schema',
 	];
-	const allowed = activation?.schema === 'pulse.product_activation.v2' ? allowedV2 : allowedV3;
+	const allowedV4 = [
+		'activated_at',
+		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_id', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest', 'release_epoch', 'release_manifest_digest', 'release_version',
+		'runtime_path', 'runtime_tree_digest', 'schema',
+	];
+	const allowedBySchema = {
+		'pulse.product_activation.v2': allowedV2,
+		'pulse.product_activation.v3': allowedV3,
+		'pulse.product_activation.v4': allowedV4,
+	};
+	const allowed = allowedBySchema[activation?.schema];
 	const expectedRuntimePath = join(runtimeRoot(dataDir), 'current', 'src', 'cli.js');
-	if (!['pulse.product_activation.v2', 'pulse.product_activation.v3'].includes(activation?.schema) ||
+	if (!allowed || !activation || typeof activation !== 'object' || Array.isArray(activation) ||
 		Object.keys(activation).length !== allowed.length ||
 		Object.keys(activation).some((name) => !allowed.includes(name)) ||
 		resolve(activation.runtime_path ?? '') !== resolve(expectedRuntimePath) ||
@@ -289,6 +620,13 @@ export function installCodexRuntime(packageRoot, dataDir, options = {}) {
 	// tree committed. Ambiguous state is preserved and rejected, never guessed.
 	recoverInterruptedRuntimeInstall(dataDir);
   try {
+		if (options.signedEdge) {
+			if (options.signedEdge.schema !== 'pulse.codex_product_edge.v1' ||
+				realpathSync(resolve(packageRoot)) !== realpathSync(resolve(options.signedEdge.runtime_root)) ||
+				ownerControlledTreeDigest(packageRoot, 'codex_runtime_snapshot') !== options.signedEdge.runtime_tree_digest) {
+				throw new Error('codex_runtime_snapshot_mismatch');
+			}
+		}
     cpSync(packageRoot, next, {
       recursive: true,
       dereference: true,
@@ -320,13 +658,31 @@ export function installCodexRuntime(packageRoot, dataDir, options = {}) {
     }
     const digest = runtimeTreeDigest(next);
     const packageJSON = JSON.parse(readFileSync(join(next, 'package.json'), 'utf8'));
-    atomicWriteJSON(join(next, RUNTIME_MANIFEST), {
-      schema: 'pulse.codex_runtime.v1',
-      package_version: packageJSON.version,
-      tree_digest: digest,
-      installed_at: (options.now ?? new Date()).toISOString(),
-      entrypoint: 'src/cli.js',
-    });
+		if (options.signedEdge && (digest !== options.signedEdge.runtime_tree_digest ||
+			packageJSON.version !== options.signedEdge.release_version)) {
+			throw new Error('codex_runtime_snapshot_mismatch');
+		}
+		atomicWriteJSON(join(next, RUNTIME_MANIFEST), options.signedEdge ? {
+			schema: 'pulse.codex_runtime.v2',
+			package_version: packageJSON.version,
+			tree_digest: digest,
+			installed_at: (options.now ?? new Date()).toISOString(),
+			entrypoint: 'src/cli.js',
+			release_manifest_digest: options.signedEdge.release_manifest_digest,
+			release_version: options.signedEdge.release_version,
+			release_epoch: options.signedEdge.release_epoch,
+			plugin_runtime_artifact_id: options.signedEdge.plugin_runtime_artifact_id,
+			plugin_runtime_artifact_sha256: options.signedEdge.plugin_runtime_artifact_sha256,
+			plugin_runtime_activation_digest: options.signedEdge.plugin_runtime_activation_digest,
+			plugin_runtime_tree_digest: options.signedEdge.plugin_runtime_tree_digest,
+			plugin_tree_digest: options.signedEdge.plugin_tree_digest,
+		} : {
+			schema: 'pulse.codex_runtime.v1',
+			package_version: packageJSON.version,
+			tree_digest: digest,
+			installed_at: (options.now ?? new Date()).toISOString(),
+			entrypoint: 'src/cli.js',
+		});
     rmSync(previous, { recursive: true, force: true });
     if (existsSync(current)) renameSync(current, previous);
     try {
@@ -367,9 +723,20 @@ function inspectRuntimeRoot(root) {
   if (!existsSync(manifestPath)) return { ok: false, detail: 'trusted Codex runtime is not installed' };
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    if (manifest?.schema !== 'pulse.codex_runtime.v1' ||
-        !/^[a-f0-9]{64}$/.test(manifest.tree_digest ?? '') ||
-        manifest.entrypoint !== 'src/cli.js') {
+		const v1 = manifest?.schema === 'pulse.codex_runtime.v1';
+		const v2 = manifest?.schema === 'pulse.codex_runtime.v2' &&
+			SHA256.test(manifest.release_manifest_digest ?? '') &&
+			typeof manifest.release_version === 'string' && manifest.release_version === manifest.package_version &&
+			Number.isSafeInteger(manifest.release_epoch) && manifest.release_epoch > 0 &&
+			SAFE_ARTIFACT_ID.test(manifest.plugin_runtime_artifact_id ?? '') &&
+			[
+				manifest.plugin_runtime_artifact_sha256,
+				manifest.plugin_runtime_activation_digest,
+				manifest.plugin_runtime_tree_digest,
+				manifest.plugin_tree_digest,
+			].every((value) => SHA256.test(value ?? ''));
+		if ((!v1 && !v2) || !SHA256.test(manifest.tree_digest ?? '') ||
+				manifest.entrypoint !== 'src/cli.js') {
       throw new Error('runtime manifest is invalid');
     }
 		const actual = runtimeTreeDigest(root);

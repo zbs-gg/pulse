@@ -19,6 +19,8 @@ const ACTION_REQUIRED_CODES = new Set([
   'binding_conflict',
   'binding_legacy',
   'binding_repair_required',
+	'codex_hook_lifecycle_required',
+	'codex_native_lifecycle_attestation_unavailable',
   'codex_hook_trust_required',
   'codex_activation_incomplete',
   'codex_identity_changed',
@@ -89,6 +91,8 @@ function nextAction(reasonCode) {
     binding_legacy: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     binding_repair_required: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     codex_activation_incomplete: 'Run pulse doctor codex --json and fix the first failed activation check.',
+		codex_hook_lifecycle_required: 'Open and use a normal new Codex task so the Pulse lifecycle can run, then run pulse install again.',
+		codex_native_lifecycle_attestation_unavailable: 'Use Pulse MCP tools explicitly for now; Codex 0.136 does not expose replayable native hook execution evidence to Pulse.',
     codex_hook_trust_required: 'Approve the Pulse hook in Codex, then run pulse install again.',
     codex_identity_changed: 'Run pulse install-plan --json again and review the changed Codex executable before retrying.',
     codex_identity_invalid: 'Install the Codex CLI in a supported system location, then run pulse install-plan --json.',
@@ -375,7 +379,8 @@ export async function runPersonalInstall({
     if (health?.ready !== true || health?.full_retrieval !== true) {
       const reasonCode = health?.reason_code ?? (health?.warming ? 'model_warming' : 'full_retrieval_unavailable');
       if (![
-        'codex_activation_incomplete', 'codex_hook_trust_required',
+				'codex_activation_incomplete', 'codex_hook_lifecycle_required', 'codex_hook_trust_required',
+				'codex_native_lifecycle_attestation_unavailable',
         'full_retrieval_unavailable', 'model_warming',
       ].includes(reasonCode)) {
         fail('health_status_invalid');

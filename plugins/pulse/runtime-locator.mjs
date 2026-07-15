@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function workspaceDigest(canonicalPath) {
   return createHash('sha256')
@@ -41,39 +42,50 @@ function requireOwnerControlledRuntimeEntry(path, relative, expectedKind) {
 	return info;
 }
 
-// Keep this byte-for-byte compatible with pulse-app/cli/src/codex-install.js.
 // The plugin owns this verification because code inside the installed runtime
 // cannot establish its own integrity after Node has already executed it.
-function runtimeTreeDigest(root) {
+function trustedTreeDigest(root, { label, excludeRootFile } = {}) {
 	requireOwnerControlledRuntimeEntry(root, '.', 'directory');
 	const hash = createHash('sha256');
 	const visit = (directory, prefix = '') => {
 		for (const name of readdirSync(directory).sort()) {
+			if (prefix === '' && name === excludeRootFile) continue;
 			const path = join(directory, name);
 			const relative = prefix ? `${prefix}/${name}` : name;
 			const info = lstatSync(path);
 			if (info.isSymbolicLink()) {
-				throw new Error(`Pulse trusted runtime contains a symlink: ${relative}`);
+				throw new Error(`${label} contains a symlink: ${relative}`);
 			}
 			const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
 			if (info.uid !== currentUID || (info.mode & 0o022) !== 0) {
-				throw new Error(`Pulse trusted runtime entry is unsafe: ${relative}`);
+				throw new Error(`${label} entry is unsafe: ${relative}`);
 			}
 			if (info.isDirectory()) {
 				visit(path, relative);
 			} else if (info.isFile()) {
-				if (prefix === '' && name === 'runtime-manifest.json') continue;
 				hash.update(relative);
 				hash.update('\x00');
 				hash.update(readFileSync(path));
 				hash.update('\x00');
 			} else {
-				throw new Error(`Pulse trusted runtime contains an unsupported entry: ${relative}`);
+				throw new Error(`${label} contains an unsupported entry: ${relative}`);
 			}
 		}
 	};
 	visit(root);
 	return hash.digest('hex');
+}
+
+// Keep this byte-for-byte compatible with pulse-app/cli/src/codex-install.js.
+function runtimeTreeDigest(root) {
+	return trustedTreeDigest(root, {
+		label: 'Pulse trusted runtime',
+		excludeRootFile: 'runtime-manifest.json',
+	});
+}
+
+function pluginTreeDigest(root) {
+	return trustedTreeDigest(root, { label: 'Pulse trusted plugin' });
 }
 
 export function resolveProductEnvironment({ cwd = process.cwd(), env = process.env } = {}) {
@@ -106,22 +118,28 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
 		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
 		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
 		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_id', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest', 'release_epoch', 'release_manifest_digest', 'release_version',
 		'runtime_path', 'runtime_tree_digest', 'schema',
 	];
 	const activationDigests = [
 		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_tree_digest',
 		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
 		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest', 'release_manifest_digest',
 		'runtime_tree_digest',
 	];
-	const artifactIDs = ['daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id'];
-	if (activation?.schema !== 'pulse.product_activation.v3' ||
+	const artifactIDs = ['daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id', 'plugin_runtime_artifact_id'];
+	if (activation?.schema !== 'pulse.product_activation.v4' ||
 		Object.keys(activation).length !== activationKeys.length ||
 		Object.keys(activation).some((name) => !activationKeys.includes(name)) ||
 		![activation.daemon_path, activation.runtime_path]
 			.every((value) => typeof value === 'string' && isAbsolute(value)) ||
 		!activationDigests.every((name) => /^[a-f0-9]{64}$/.test(activation[name] ?? '')) ||
 		!artifactIDs.every((name) => /^[a-z0-9][a-z0-9._-]{0,127}$/.test(activation[name] ?? '')) ||
+		typeof activation.release_version !== 'string' || activation.release_version.length < 1 ||
+		!Number.isSafeInteger(activation.release_epoch) || activation.release_epoch < 1 ||
 		typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
 		throw new Error('Pulse product activation is missing or invalid; reconnect this workspace.');
 	}
@@ -132,11 +150,23 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
 	const runtimeRoot = resolve(activation.runtime_path, '..', '..');
 	const actualRuntimeDigest = runtimeTreeDigest(runtimeRoot);
 	const runtimeManifest = JSON.parse(readFileSync(join(runtimeRoot, 'runtime-manifest.json'), 'utf8'));
-	if (runtimeManifest?.schema !== 'pulse.codex_runtime.v1' ||
+	if (runtimeManifest?.schema !== 'pulse.codex_runtime.v2' ||
 		runtimeManifest.entrypoint !== 'src/cli.js' ||
 		runtimeManifest.tree_digest !== activation.runtime_tree_digest ||
+		runtimeManifest.release_manifest_digest !== activation.release_manifest_digest ||
+		runtimeManifest.release_version !== activation.release_version ||
+		runtimeManifest.release_epoch !== activation.release_epoch ||
+		runtimeManifest.plugin_runtime_artifact_id !== activation.plugin_runtime_artifact_id ||
+		runtimeManifest.plugin_runtime_artifact_sha256 !== activation.plugin_runtime_artifact_sha256 ||
+		runtimeManifest.plugin_runtime_activation_digest !== activation.plugin_runtime_activation_digest ||
+		runtimeManifest.plugin_runtime_tree_digest !== activation.plugin_runtime_tree_digest ||
+		runtimeManifest.plugin_tree_digest !== activation.plugin_tree_digest ||
 		actualRuntimeDigest !== activation.runtime_tree_digest) {
 		throw new Error('Pulse product runtime and activation are out of sync; retry after activation completes.');
+	}
+	const pluginRoot = dirname(fileURLToPath(import.meta.url));
+	if (pluginTreeDigest(pluginRoot) !== activation.plugin_tree_digest) {
+		throw new Error('Pulse installed plugin does not match the signed product activation.');
 	}
 	const daemonPath = realpathSync(resolve(activation.daemon_path));
 	const daemonInfo = lstatSync(daemonPath);
@@ -150,6 +180,8 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
     PULSE_DATA_DIR: entry.data_dir,
 		PULSE_RUNTIME_PATH: activation.runtime_path,
 		PULSE_RUNTIME_DIGEST: activation.runtime_tree_digest,
+		PULSE_PLUGIN_TREE_DIGEST: activation.plugin_tree_digest,
+		PULSE_RELEASE_MANIFEST_DIGEST: activation.release_manifest_digest,
   };
   if (entry.trust_mode === 'test') {
     productEnvironment.PULSE_TRUST_MODE = 'test';

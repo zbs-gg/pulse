@@ -233,16 +233,16 @@ export function hookBundleDigest(bytes) {
 
 export function codexHookExecutionDigest(pluginRoot, runtimePath) {
   const hash = createHash('sha256');
-  for (const relative of [
-    '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
-  ]) {
+	for (const relative of [
+		'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+	]) {
     hash.update(relative);
     hash.update('\x00');
     hash.update(readFileSync(join(pluginRoot, relative)));
     hash.update('\x00');
   }
 	const runtime = JSON.parse(readFileSync(join(normalize(runtimePath), '..', '..', 'runtime-manifest.json'), 'utf8'));
-  if (runtime?.schema !== 'pulse.codex_runtime.v1' || !/^[a-f0-9]{64}$/.test(runtime.tree_digest ?? '')) {
+	if (runtime?.schema !== 'pulse.codex_runtime.v2' || !/^[a-f0-9]{64}$/.test(runtime.tree_digest ?? '')) {
     throw new Error('Codex runtime manifest is invalid');
   }
   hash.update('runtime-tree-digest\x00');
@@ -254,20 +254,21 @@ export function validateHookReadiness(source, receipt, expected = {}) {
   const current = typeof source === 'string' && /^[a-f0-9]{64}$/.test(source)
     ? source
     : hookBundleDigest(source);
-  if (!receipt || receipt.schema !== 'pulse.codex_hook_readiness.v1' ||
+  if (!receipt || receipt.schema !== 'pulse.codex_hook_readiness.v2' ||
       receipt.hooks_digest !== current || !HOST_EVENTS.has(receipt.last_event) ||
       !/^[a-f0-9]{64}$/.test(receipt.binding_digest ?? '') ||
       !Number.isSafeInteger(receipt.resolver_epoch) ||
       typeof receipt.repository_id !== 'string' ||
       !/^[a-f0-9]{64}$/.test(receipt.workspace_digest ?? '') ||
+		  !/^[a-f0-9]{64}$/.test(receipt.session_proof ?? '') ||
       !/^[a-f0-9]{64}$/.test(receipt.turn_proof ?? '') ||
-      !['prompt_context', 'write_receipt', 'turn_finalize'].every((name) =>
+		  !['session_context', 'prompt_context', 'write_receipt', 'turn_finalize'].every((name) =>
         typeof receipt.milestones?.[name] === 'string' && !Number.isNaN(Date.parse(receipt.milestones[name]))) ||
       Object.entries(expected).some(([name, value]) => value !== undefined && receipt[name] !== value) ||
       typeof receipt.observed_at !== 'string' || Number.isNaN(Date.parse(receipt.observed_at))) {
-    return { ready: false, hooks_digest: current, reason: 'hook_trust_review_required' };
+    return { ready: false, hooks_digest: current, reason: 'hook_lifecycle_receipt_required' };
   }
-  return { ready: true, hooks_digest: current, reason: 'hook_executed_after_trust' };
+	return { ready: true, hooks_digest: current, reason: 'hook_lifecycle_observed_after_trust' };
 }
 
 function legacyPulseHookCommand(command) {

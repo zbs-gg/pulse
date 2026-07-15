@@ -1,12 +1,17 @@
 import { createHash, sign } from 'node:crypto';
 import {
-  chmodSync, linkSync, mkdirSync, rmSync, writeFileSync,
+  chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+import { includeRuntimePath, normalizePrivateTree } from '../src/codex-install.js';
 import { canonicalReleaseJSON } from '../src/release-manifest.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const scriptRoot = dirname(fileURLToPath(import.meta.url));
+const cliRoot = resolve(scriptRoot, '..');
+const repoRoot = resolve(cliRoot, '..', '..');
 
 function treeManifest(files) {
   return {
@@ -15,6 +20,68 @@ function treeManifest(files) {
       path, bytes: bytes.length, sha256: digest(bytes), mode, executable: (mode & 0o111) !== 0,
     })),
   };
+}
+
+function treeManifestFromRoot(root) {
+	const files = [];
+	const visit = (directory, prefix = '') => {
+		for (const name of readdirSync(directory).sort()) {
+			const path = join(directory, name);
+			const relative = prefix ? `${prefix}/${name}` : name;
+			const info = lstatSync(path);
+			if (info.isSymbolicLink()) throw new Error(`synthetic product edge contains a symlink: ${relative}`);
+			if (info.isDirectory()) visit(path, relative);
+			else if (info.isFile()) {
+				const bytes = readFileSync(path);
+				const mode = info.mode & 0o777;
+				files.push({ path: relative, bytes: bytes.length, sha256: digest(bytes), mode, executable: (mode & 0o111) !== 0 });
+			} else throw new Error(`synthetic product edge contains an unsupported entry: ${relative}`);
+		}
+	};
+	visit(root);
+	return { schema: 'pulse.artifact_tree.v1', files };
+}
+
+function pruneEmptyDirectories(root) {
+	const visit = (directory, keep) => {
+		for (const name of readdirSync(directory)) {
+			const path = join(directory, name);
+			if (lstatSync(path).isDirectory()) visit(path, false);
+		}
+		if (!keep && readdirSync(directory).length === 0) rmSync(directory, { recursive: true });
+	};
+	visit(root, true);
+}
+
+function writeProductEdgeFixture(target) {
+	mkdirSync(join(target, 'marketplace', '.agents', 'plugins'), { recursive: true, mode: 0o700 });
+	cpSync(join(repoRoot, '.agents', 'plugins', 'marketplace.json'),
+		join(target, 'marketplace', '.agents', 'plugins', 'marketplace.json'), {
+			recursive: true, dereference: true,
+		});
+	cpSync(join(repoRoot, 'plugins', 'pulse'), join(target, 'marketplace', 'plugins', 'pulse'), {
+		recursive: true, dereference: true,
+	});
+	cpSync(cliRoot, join(target, 'runtime'), {
+		recursive: true, dereference: true,
+		filter: (sourcePath) => includeRuntimePath(cliRoot, sourcePath),
+	});
+	pruneEmptyDirectories(target);
+	normalizePrivateTree(target);
+	return treeManifestFromRoot(target);
+}
+
+function cachedProductEdgeFixture(root) {
+	const sourceRoot = join(root, 'product-edge-fixture');
+	const manifestPath = join(root, 'product-edge-fixture-manifest.json');
+	if (existsSync(sourceRoot) && existsSync(manifestPath)) {
+		return { sourceRoot, manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) };
+	}
+	rmSync(sourceRoot, { recursive: true, force: true });
+	mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
+	const manifest = writeProductEdgeFixture(sourceRoot);
+	writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+	return { sourceRoot, manifest };
 }
 
 function tinySafetensors(salt = 0) {
@@ -52,7 +119,10 @@ function managedEmbedRuntimeFixture() {
   return Buffer.from(`#!/bin/sh\nexec "${process.execPath.replaceAll('"', '\\"')}" "$@"\n`);
 }
 
-export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoch, { realInputs } = {}) {
+export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoch, {
+	realInputs,
+	pluginRuntimeMarker,
+} = {}) {
   const assetsRoot = join(root, 'release-assets');
   const sourcesRoot = join(root, 'release-materialized');
   const manifestPath = join(root, 'personal-preview-manifest.json');
@@ -70,7 +140,7 @@ export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoc
       ['support/tokenizer.json', Buffer.from('{}\n'), 0o600],
     ],
     model: [['model.safetensors', tinySafetensors(epoch), 0o600]],
-    'plugin-runtime': [['runtime/index.js', Buffer.from(`export const releaseEpoch = ${epoch};\n`), 0o600]],
+		'plugin-runtime': null,
     'presence-helper': [['bin/gg.zbs.pulse.presence-helper', Buffer.from(`#!/bin/sh\n# epoch ${epoch}\nexit 0\n`), 0o700]],
   };
   const artifacts = {};
@@ -93,22 +163,42 @@ export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoc
       linkSync(realInputs.modelPath, join(assetsRoot, filename));
       carrierDigest = realInputs.modelDigest.sha256;
       carrierSize = realInputs.modelDigest.bytes;
-    } else {
-      const carrierBytes = kind === 'model'
-        ? entries[0][1]
-        : Buffer.from(`pulse-synthetic-carrier:${epoch}:${kind}:${digest(Buffer.concat(entries.map((entry) => entry[1])))}`);
-      writeFileSync(join(assetsRoot, filename), carrierBytes, { mode: 0o600 });
-      carrierDigest = digest(carrierBytes);
-      carrierSize = carrierBytes.length;
-      sourceRoot = join(sourcesRoot, kind);
-      mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
-      for (const [path, bytes, mode] of entries) {
-        const destination = join(sourceRoot, path);
-        mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
-        writeFileSync(destination, bytes, { mode });
-        chmodSync(destination, mode);
-      }
-      manifest = treeManifest(entries);
+		} else {
+			if (kind === 'plugin-runtime') {
+				const base = cachedProductEdgeFixture(root);
+				sourceRoot = join(sourcesRoot, kind);
+				cpSync(base.sourceRoot, sourceRoot, { recursive: true, dereference: true });
+				if (pluginRuntimeMarker !== undefined) {
+					if (typeof pluginRuntimeMarker !== 'string' || !/^[a-z0-9-]{1,64}$/.test(pluginRuntimeMarker)) {
+						throw new Error('synthetic plugin runtime marker is invalid');
+					}
+					const hookPath = join(sourceRoot, 'marketplace', 'plugins', 'pulse', 'hooks', 'pulse-hook.mjs');
+					writeFileSync(hookPath, Buffer.concat([
+						readFileSync(hookPath), Buffer.from(`\n// fixture:${pluginRuntimeMarker}\n`),
+					]), { mode: 0o600 });
+				}
+				normalizePrivateTree(sourceRoot);
+				manifest = treeManifestFromRoot(sourceRoot);
+			} else {
+				sourceRoot = join(sourcesRoot, kind);
+				mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
+				for (const [path, bytes, mode] of entries) {
+					const destination = join(sourceRoot, path);
+					mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+					writeFileSync(destination, bytes, { mode });
+					chmodSync(destination, mode);
+				}
+				manifest = treeManifest(entries);
+			}
+			const contentDigest = kind === 'model'
+				? digest(entries[0][1])
+				: digest(Buffer.from(canonicalReleaseJSON(manifest)));
+			const carrierBytes = kind === 'model'
+				? entries[0][1]
+				: Buffer.from(`pulse-synthetic-carrier:${epoch}:${kind}:${contentDigest}`);
+			writeFileSync(join(assetsRoot, filename), carrierBytes, { mode: 0o600 });
+			carrierDigest = digest(carrierBytes);
+			carrierSize = carrierBytes.length;
       materializers[kind] = { source_root: sourceRoot, tree_manifest: manifest };
     }
     const signedDescriptor = realInputs && kind === 'embedder-runtime'

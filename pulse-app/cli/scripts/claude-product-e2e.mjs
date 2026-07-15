@@ -18,7 +18,6 @@ import { writeSyntheticReleaseFixture } from './product-release-fixture.mjs';
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
 const pulseAppRoot = resolve(cliRoot, '..');
-const repoRoot = resolve(cliRoot, '..', '..');
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -156,21 +155,72 @@ function writeFakeCodex(path) {
 const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
-const root = path.join(process.env.CODEX_HOME, 'plugins', 'cache', 'zbs-gg', 'pulse', '0.7.0');
+const marketplaceState = process.env.PULSE_FAKE_CODEX_MARKETPLACE_STATE;
+const cacheRoot = path.join(process.env.CODEX_HOME, 'plugins', 'cache', 'zbs-gg', 'pulse');
+function readMarketplace() {
+  if (!marketplaceState || !fs.existsSync(marketplaceState)) return undefined;
+  return fs.readFileSync(marketplaceState, 'utf8').trim();
+}
+function installedPlugin() {
+  if (!fs.existsSync(cacheRoot)) return undefined;
+  const versions = fs.readdirSync(cacheRoot).sort();
+  if (versions.length !== 1) return undefined;
+  return { version: versions[0], root: path.join(cacheRoot, versions[0]) };
+}
+function widenSnapshotDirectories(root) {
+  const visit = (directory) => {
+    fs.chmodSync(directory, 0o755);
+    for (const name of fs.readdirSync(directory)) {
+      const child = path.join(directory, name);
+      const info = fs.lstatSync(child);
+      if (info.isDirectory()) visit(child);
+    }
+  };
+  visit(path.join(root, 'plugins'));
+}
 if (args[0] === '--version') { console.log('codex-cli 0.1.0'); process.exit(0); }
 if (args[0] !== 'plugin') process.exit(2);
-if (args[1] === 'marketplace' && args[2] === 'add') process.exit(0);
+if (args[1] === 'marketplace' && args[2] === 'add') {
+  const source = path.resolve(args[3]);
+  fs.mkdirSync(path.dirname(marketplaceState), { recursive: true });
+  fs.writeFileSync(marketplaceState, source);
+  widenSnapshotDirectories(source);
+  process.exit(0);
+}
+if (args[1] === 'marketplace' && args[2] === 'list') {
+  console.log('MARKETPLACE  ROOT');
+  const source = readMarketplace();
+  if (source) console.log('zbs-gg      ' + source);
+  process.exit(0);
+}
+if (args[1] === 'marketplace' && args[2] === 'remove') {
+  try { fs.rmSync(marketplaceState); } catch {}
+  process.exit(0);
+}
 if (args[1] === 'add') {
+  const marketplace = readMarketplace();
+  if (!marketplace) process.exit(3);
+  const source = path.join(marketplace, 'plugins', 'pulse');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, '.codex-plugin', 'plugin.json'), 'utf8'));
+  const root = path.join(cacheRoot, manifest.version);
+  fs.rmSync(cacheRoot, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(root), { recursive: true });
-  fs.cpSync(process.env.PULSE_FAKE_CODEX_PLUGIN_SOURCE, root, { recursive: true });
+  fs.cpSync(source, root, { recursive: true });
   if (process.env.PULSE_FAKE_CODEX_BAD_PLUGIN === '1') {
     fs.writeFileSync(path.join(root, '.mcp.json'), JSON.stringify({ mcpServers: { pulse: { url: 'https://unsafe.invalid' } } }));
   }
   process.exit(0);
 }
-if (args[1] === 'remove') { fs.rmSync(root, { recursive: true, force: true }); process.exit(0); }
+if (args[1] === 'remove') { fs.rmSync(cacheRoot, { recursive: true, force: true }); process.exit(0); }
 if (args[1] === 'list') {
-  if (fs.existsSync(root)) console.log('pulse@zbs-gg  installed, enabled  0.7.0  ' + root);
+  const installed = installedPlugin();
+  if (installed) {
+    const mcpPath = path.join(installed.root, '.mcp.json');
+    const badUpgrade = fs.existsSync(mcpPath) && fs.readFileSync(mcpPath, 'utf8').includes('unsafe.invalid');
+    const version = process.env.PULSE_FAKE_CODEX_STALE_PLUGIN === '1' && !badUpgrade
+      ? '0.6.0' : installed.version;
+    console.log('pulse@zbs-gg  installed, enabled  ' + version + '  ' + installed.root);
+  }
   process.exit(0);
 }
 process.exit(2);
@@ -318,14 +368,14 @@ try {
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
     PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
     PULSE_TRUST_MODE: 'test',
+		PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
     PULSE_RELEASE_TEST_MODE: '1',
     PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
     PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
     PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
     PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
     PULSE_FAKE_CLAUDE_STATE: fakeClaudeState,
-		PULSE_FAKE_CODEX_PLUGIN_SOURCE: join(repoRoot, 'plugins', 'pulse'),
-		PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
+		PULSE_FAKE_CODEX_MARKETPLACE_STATE: join(root, 'codex-marketplace.txt'),
     PULSE_CLI_ANIMATION: '0',
   };
   for (const name of [
@@ -522,12 +572,18 @@ try {
     assert.equal(state.hosts.codex.enabled, true);
     assert.equal(state.hosts['claude-code'].enabled, true);
   }
-	const pluginMcpPath = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', '0.7.0', '.mcp.json');
+	const pluginCacheRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse');
+	const pluginVersions = readdirSync(pluginCacheRoot);
+	assert.equal(pluginVersions.length, 1);
+	const pluginMcpPath = join(pluginCacheRoot, pluginVersions[0], '.mcp.json');
 	const pluginMcpBeforeFailedUpgrade = readFileSync(pluginMcpPath);
 	const failedPluginUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env: { ...env, PULSE_FAKE_CODEX_BAD_PLUGIN: '1' }, timeout: 120_000, status: 1,
+		cwd: workspace,
+		env: { ...env, PULSE_FAKE_CODEX_STALE_PLUGIN: '1', PULSE_FAKE_CODEX_BAD_PLUGIN: '1' },
+		timeout: 120_000,
+		status: 1,
 	});
-	assert.match(`${failedPluginUpgrade.stdout}${failedPluginUpgrade.stderr}`, /plugin must expose exactly one pulse-product MCP server/);
+	assert.match(`${failedPluginUpgrade.stdout}${failedPluginUpgrade.stderr}`, /codex_plugin_snapshot_mismatch/);
 	assert.deepEqual(readFileSync(pluginMcpPath), pluginMcpBeforeFailedUpgrade);
 
   const runtimeCLI = mcpConfig.args[0];
@@ -586,6 +642,8 @@ try {
   assert.equal(report.trust.full_retrieval, true);
 
 	const oldClaudeHook = hookCommand(settings, 'SessionStart');
+	const installedCodexHook = join(pluginCacheRoot, pluginVersions[0], 'hooks', 'pulse-hook.mjs');
+	const installedCodexHookBeforeClaudeUpgrade = readFileSync(installedCodexHook);
 	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// mixed-harness-upgrade\n`);
 	const codexUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
 		cwd: workspace, env,
@@ -602,16 +660,60 @@ try {
 		assert.equal(state.hosts['claude-code'].enabled, true);
 	}
 	const daemonB = Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_UPGRADE_B\n')]);
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonB, 8);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonB, 8, {
+		pluginRuntimeMarker: 'claude-upgrade-b',
+	});
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
+	const marketplaceBeforeFailedClaudeUpgrade = readFileSync(env.PULSE_FAKE_CODEX_MARKETPLACE_STATE);
+	const failedClaudeCodexUpgrade = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
+		cwd: workspace,
+		env: { ...env, PULSE_FAKE_CODEX_BAD_PLUGIN: '1' },
+		timeout: 120_000,
+		status: 1,
+	});
+	assert.match(
+		`${failedClaudeCodexUpgrade.stdout}${failedClaudeCodexUpgrade.stderr}`,
+		/codex_plugin_snapshot_mismatch/,
+	);
+	assert.deepEqual(
+		readFileSync(installedCodexHook),
+		installedCodexHookBeforeClaudeUpgrade,
+		'failed Claude-initiated upgrade must restore the prior Codex plugin bytes',
+	);
+	assert.deepEqual(
+		readFileSync(env.PULSE_FAKE_CODEX_MARKETPLACE_STATE),
+		marketplaceBeforeFailedClaudeUpgrade,
+		'failed Claude-initiated upgrade must restore the prior Codex marketplace registration',
+	);
 	const claudeUpgrade = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
 		cwd: workspace, env, timeout: 120_000,
 	});
 	assert.match(claudeUpgrade.stdout, /one bound vault, two connected harnesses/);
+	const installedCodexHookAfterClaudeUpgrade = readFileSync(installedCodexHook);
+	assert.notDeepEqual(
+		installedCodexHookAfterClaudeUpgrade,
+		installedCodexHookBeforeClaudeUpgrade,
+		'Claude-initiated shared-runtime upgrade must replace the installed Codex plugin bytes',
+	);
+	assert.equal(installedCodexHookAfterClaudeUpgrade.includes(Buffer.from('// fixture:claude-upgrade-b')), true);
+	const upgradedCodexHookRun = run(process.execPath, [installedCodexHook, 'SessionStart'], {
+		cwd: nestedWorkspace,
+		env,
+		input: JSON.stringify({
+			...codexBase,
+			session_id: 'session-codex-after-claude-upgrade',
+			hook_event_name: 'SessionStart',
+			source: 'resume',
+		}),
+	});
+	assert.match(
+		JSON.parse(upgradedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
+		new RegExp(codexSummary),
+	);
 	const sharedMcp = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
 	assert.equal(sharedMcp.env.PULSE_GO_BIN, undefined);
 	assert.equal(upgradedMcp.env.PULSE_GO_BIN, undefined);
@@ -620,7 +722,7 @@ try {
 	const upgradedRuntimeReceipt = JSON.parse(readFileSync(join(vaultDir, 'supervisor-runtime.json'), 'utf8'));
 	const productDaemon = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
 	assert.equal(locatorEntry.daemon_path, undefined, 'workspace locator must not carry daemon execution authority');
-	assert.equal(productDaemon.schema, 'pulse.product_activation.v3');
+	assert.equal(productDaemon.schema, 'pulse.product_activation.v4');
 	assert.equal(productDaemon.daemon_path, upgradedRuntimeReceipt.executable);
 	assert.equal(productDaemon.daemon_digest, upgradedRuntimeReceipt.executable_digest);
 	assert.match(productDaemon.runtime_tree_digest, /^[a-f0-9]{64}$/);
@@ -628,6 +730,8 @@ try {
 		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_tree_digest',
 		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
 		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+		'plugin_runtime_activation_digest', 'plugin_runtime_artifact_sha256', 'plugin_runtime_tree_digest',
+		'plugin_tree_digest', 'release_manifest_digest',
 	]) assert.match(productDaemon[field], /^[a-f0-9]{64}$/);
 
   writeFileSync(fakeClaudeState, JSON.stringify({

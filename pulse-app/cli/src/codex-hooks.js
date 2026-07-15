@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   readFileSync,
+	realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+
+import { inspectCodexPluginCompatibility } from './codex-install.js';
 
 import {
   contextLease,
@@ -325,7 +329,9 @@ export async function runCodexHookCLI(eventName) {
   if (result?.[HEALTHY] === true) {
     try {
       const resolved = resolveBoundCodexRuntime(input);
-      recordCodexHookReadiness(eventName, resolved, { input, output: result });
+      recordCodexHookReadiness(eventName, resolved, {
+			input, output: result, environment: process.env,
+		});
     } catch {
       // Readiness evidence never changes hook behavior.
     }
@@ -340,7 +346,274 @@ export function codexWorkspaceDigest(canonicalPath) {
     .digest('hex');
 }
 
+const CODEX_NATIVE_HOOK_EVENTS = new Map([
+	['SessionStart', 'sessionStart'],
+	['UserPromptSubmit', 'userPromptSubmit'],
+	['PreToolUse', 'preToolUse'],
+	['PostToolUse', 'postToolUse'],
+	['PreCompact', 'preCompact'],
+	['PostCompact', 'postCompact'],
+	['SubagentStart', 'subagentStart'],
+	['SubagentStop', 'subagentStop'],
+	['Stop', 'stop'],
+]);
+
+function nativeHookFailure(reason, detail, extra = {}) {
+	return { ready: false, reason, detail, ...extra };
+}
+
+export function inspectCodexNativeHookList(response, {
+	cwd, pluginRoot, marketplacePluginRoot, cachePluginRoot, edge,
+} = {}) {
+	if (!Array.isArray(response?.data) || typeof cwd !== 'string' || typeof pluginRoot !== 'string' || !edge) {
+		return nativeHookFailure('codex_native_hook_query_invalid', 'Codex returned an invalid hooks/list response');
+	}
+	if (!isAbsolute(cwd)) {
+		return nativeHookFailure('codex_native_hook_query_invalid', 'Codex hook inspection requires an absolute workspace path');
+	}
+	let canonicalCwd;
+	try { canonicalCwd = realpathSync(cwd); } catch {
+		return nativeHookFailure('codex_native_hook_query_invalid', 'Codex hook inspection workspace is unavailable');
+	}
+	const target = response.data.find((entry) => {
+		if (typeof entry?.cwd !== 'string' || !isAbsolute(entry.cwd)) return false;
+		try { return realpathSync(entry.cwd) === canonicalCwd; } catch { return false; }
+	});
+	if (!target || !Array.isArray(target.hooks) || !Array.isArray(target.errors)) {
+		return nativeHookFailure('codex_native_hook_query_invalid', 'Codex returned no hook state for this workspace');
+	}
+	if (target.errors.length > 0) {
+		return nativeHookFailure('codex_native_hook_query_error', 'Codex reported hook configuration errors');
+	}
+	const pulseHooks = target.hooks.filter((hook) => hook?.pluginId === 'pulse@zbs-gg');
+	if (pulseHooks.length !== CODEX_NATIVE_HOOK_EVENTS.size) {
+		return nativeHookFailure('codex_native_hook_set_mismatch', 'Codex did not load the complete Pulse plugin hook set');
+	}
+	const sourcePaths = new Set();
+	for (const hook of pulseHooks) {
+		try { sourcePaths.add(realpathSync(hook.sourcePath)); } catch { sourcePaths.add(''); }
+	}
+	if (sourcePaths.size !== 1 || sourcePaths.has('')) {
+		return nativeHookFailure('codex_native_hook_set_mismatch', 'Codex Pulse hooks do not share one exact source');
+	}
+	const [nativeSource] = sourcePaths;
+	const allowedSources = new Map();
+	for (const root of [pluginRoot, marketplacePluginRoot, cachePluginRoot]) {
+		if (typeof root !== 'string') continue;
+		try {
+			const canonicalRoot = realpathSync(root);
+			allowedSources.set(realpathSync(join(canonicalRoot, 'hooks', 'hooks.json')), canonicalRoot);
+		} catch { /* unavailable roots are not trusted */ }
+	}
+	const nativePluginRoot = allowedSources.get(nativeSource);
+	if (!nativePluginRoot) {
+		return nativeHookFailure('codex_native_hook_set_mismatch',
+			'Codex native hook source is outside the signed marketplace, installed plugin, and versioned Codex cache');
+	}
+	const compatibility = inspectCodexPluginCompatibility({
+		installed: true, enabled: true, version: edge.release_version, path: nativePluginRoot,
+	}, edge);
+	if (!compatibility.ok) {
+		return nativeHookFailure('codex_native_hook_set_mismatch',
+			`Codex native hook source is not the signed plugin: ${compatibility.reason}`);
+	}
+	let expectedEvents;
+	let expectedDefinitions;
+	try {
+		const config = JSON.parse(readFileSync(nativeSource, 'utf8'));
+		expectedDefinitions = new Map(Object.entries(config?.hooks ?? {}).map(([eventName, entries]) => {
+			if (!CODEX_NATIVE_HOOK_EVENTS.has(eventName) || !Array.isArray(entries) || entries.length !== 1 ||
+				!Array.isArray(entries[0]?.hooks) || entries[0].hooks.length !== 1 ||
+				entries[0].hooks[0]?.type !== 'command') {
+				throw new Error('invalid Pulse native hook definition');
+			}
+			const handler = entries[0].hooks[0];
+			if (typeof handler.command !== 'string' || !Number.isSafeInteger(handler.timeout)) {
+				throw new Error('invalid Pulse native hook command');
+			}
+			const nativeEvent = CODEX_NATIVE_HOOK_EVENTS.get(eventName);
+			return [nativeEvent, {
+				command: handler.command.replaceAll('${PLUGIN_ROOT}', nativePluginRoot),
+				matcher: entries[0].matcher ?? null,
+				timeoutSec: handler.timeout,
+			}];
+		}));
+		expectedEvents = [...expectedDefinitions.keys()].sort();
+		if (expectedEvents.length !== CODEX_NATIVE_HOOK_EVENTS.size) {
+			throw new Error('incomplete Pulse native hook definition');
+		}
+	} catch (error) {
+		return nativeHookFailure('codex_native_hook_set_mismatch', error.message);
+	}
+	const hashes = [];
+	const trustStatuses = new Set();
+	for (const eventName of expectedEvents) {
+		const matches = pulseHooks.filter((hook) => hook.eventName === eventName);
+		if (matches.length !== 1) {
+			return nativeHookFailure('codex_native_hook_set_mismatch', `Codex Pulse hook mismatch: ${eventName}`);
+		}
+		const hook = matches[0];
+		const expected = expectedDefinitions.get(eventName);
+		let sourcePath;
+		try { sourcePath = realpathSync(hook.sourcePath); } catch { sourcePath = ''; }
+		const mismatches = [
+			[sourcePath !== nativeSource, 'source'],
+			[hook.source !== 'plugin', 'source-kind'],
+			[hook.handlerType !== 'command', 'handler'],
+			[hook.command !== expected.command, 'command'],
+			[(hook.matcher ?? null) !== expected.matcher, 'matcher'],
+			[hook.timeoutSec !== expected.timeoutSec, 'timeout'],
+			[hook.enabled !== true, 'enabled'],
+			[!/^sha256:[a-f0-9]{64}$/.test(hook.currentHash ?? ''), 'hash'],
+		].filter(([failed]) => failed).map(([, field]) => field);
+		if (mismatches.length > 0) {
+			return nativeHookFailure('codex_native_hook_set_mismatch',
+				`Codex Pulse hook identity mismatch (${mismatches.join(', ')}): ${eventName}`);
+		}
+		if (!['trusted', 'managed'].includes(hook.trustStatus)) {
+			return nativeHookFailure('codex_native_hook_trust_required',
+				`Codex native hook review is ${hook.trustStatus ?? 'unavailable'}: ${eventName}`,
+				{ trust_status: hook.trustStatus ?? 'unavailable' });
+		}
+		if ((hook.trustStatus === 'managed') !== (hook.isManaged === true)) {
+			return nativeHookFailure('codex_native_hook_set_mismatch',
+				`Codex Pulse hook management state mismatch: ${eventName}`);
+		}
+		trustStatuses.add(hook.trustStatus);
+		hashes.push(`${eventName}\x00${hook.currentHash}`);
+	}
+	const hookSetDigest = createHash('sha256')
+		.update('pulse-codex-native-hook-set-v1\x00')
+		.update(hashes.sort().join('\x00'))
+		.digest('hex');
+	const trustStatus = trustStatuses.size === 1 ? [...trustStatuses][0] : 'mixed';
+	return {
+		ready: true,
+		reason: 'codex_native_hooks_trusted',
+		detail: `Codex reports the exact Pulse plugin hook set as ${trustStatus}`,
+		hook_set_digest: hookSetDigest,
+		native_plugin_root: nativePluginRoot,
+		trust_status: trustStatus,
+	};
+}
+
+function queryCodexNativeHooks({ codexExecutable, cwd, timeoutMs }) {
+	return new Promise((resolveQuery, rejectQuery) => {
+		const command = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
+			? process.execPath : codexExecutable;
+		const args = command === process.execPath
+			? [codexExecutable, 'app-server', '--stdio']
+			: ['app-server', '--stdio'];
+		const child = spawn(command, args, {
+			cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
+		});
+		let settled = false;
+		let finishing = false;
+		let stdout = '';
+		let timer;
+		let killTimer;
+		let shutdownTimer;
+		const settle = (error, value) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			clearTimeout(killTimer);
+			clearTimeout(shutdownTimer);
+			if (error) rejectQuery(error); else resolveQuery(value);
+		};
+		const finish = (error, value) => {
+			if (settled || finishing) return;
+			finishing = true;
+			clearTimeout(timer);
+			try { child.stdin.end(); } catch { /* already closed */ }
+			child.once('close', () => settle(error, value));
+			try { child.kill('SIGTERM'); } catch { /* close/error path will settle */ }
+			killTimer = setTimeout(() => {
+				try { child.kill('SIGKILL'); } catch { /* close/error path will settle */ }
+			}, 100);
+			shutdownTimer = setTimeout(() => settle(error, value), 1000);
+		};
+		const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+		const handleLine = (line) => {
+			if (!line.trim()) return;
+			let message;
+			try { message = JSON.parse(line); } catch { return; }
+			if (message.id === 1) {
+				if (message.error) return finish(new Error('codex_native_hook_initialize_failed'));
+				send({ method: 'initialized', params: {} });
+				send({ id: 2, method: 'hooks/list', params: { cwds: [cwd] } });
+			} else if (message.id === 2) {
+				if (message.error) return finish(new Error('codex_native_hook_query_failed'));
+				finish(undefined, message.result);
+			}
+		};
+		child.stdout.on('data', (chunk) => {
+			stdout += chunk.toString('utf8');
+			if (stdout.length > 4 * 1024 * 1024) return finish(new Error('codex_native_hook_response_too_large'));
+			const lines = stdout.split(/\r?\n/);
+			stdout = lines.pop() ?? '';
+			for (const line of lines) handleLine(line);
+		});
+		child.stderr.resume();
+		child.stdin.on('error', () => finish(new Error('codex_native_hook_query_unavailable')));
+		child.once('error', () => finish(new Error('codex_native_hook_query_unavailable')));
+		child.once('exit', (code) => {
+			if (!settled && !finishing) finish(new Error(code === 0
+				? 'codex_native_hook_response_missing'
+				: 'codex_native_hook_query_failed'));
+		});
+		timer = setTimeout(() => finish(new Error('codex_native_hook_query_timeout')), timeoutMs);
+		send({
+			id: 1,
+			method: 'initialize',
+			params: {
+				clientInfo: { name: 'pulse-doctor', version: '0.7.0' },
+				capabilities: { experimentalApi: true },
+			},
+		});
+	});
+}
+
+export async function inspectCodexNativeHookTrust({
+	codexExecutable = 'codex', cwd = process.cwd(), pluginRoot, marketplacePluginRoot, cachePluginRoot,
+	edge, timeoutMs = 5000, query,
+} = {}) {
+	try {
+		const response = await (query ?? queryCodexNativeHooks)({ codexExecutable, cwd, timeoutMs });
+		return inspectCodexNativeHookList(response, {
+			cwd, pluginRoot, marketplacePluginRoot, cachePluginRoot, edge,
+		});
+	} catch (error) {
+		return nativeHookFailure('codex_native_hook_query_unavailable', error.message);
+	}
+}
+
+function syntheticLifecycleAttestorEnabled(environment = process.env) {
+	return environment?.PULSE_TRUST_MODE === 'test' &&
+		environment?.PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR === '1';
+}
+
+export function projectCodexLifecycleAttestation({
+	syntheticAuthority = false, testAttestor = false, readiness,
+} = {}) {
+	if (syntheticAuthority && testAttestor) {
+		return {
+			...readiness,
+			trusted_hook_observed: readiness?.ready === true,
+		};
+	}
+	return {
+		ready: false,
+		hooks_digest: readiness?.hooks_digest ?? '',
+		reason: 'codex_native_lifecycle_attestation_unavailable',
+		detail: 'Codex trusts the exact Pulse hooks, but Codex 0.136 exposes no replayable native hook execution evidence to plugins.',
+		trusted_hook_observed: false,
+	};
+}
+
 function readinessMilestone(eventName, options) {
+	if (eventName === 'SessionStart' &&
+		options.output?.hookSpecificOutput?.hookEventName === 'SessionStart') return 'session_context';
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
   if (eventName === 'PostToolUse' && isTrustedPulseProductTool(options.input?.tool_name) &&
@@ -352,15 +625,25 @@ function readinessMilestone(eventName, options) {
 }
 
 export function recordCodexHookReadiness(eventName, resolved, options = {}) {
+	if (!syntheticLifecycleAttestorEnabled(options.environment)) return false;
   const hooksDigest = options.hooksDigest ?? process.env.PULSE_HOOK_BUNDLE_DIGEST;
   const milestone = options.milestone ?? readinessMilestone(eventName, options);
   if (!/^[a-f0-9]{64}$/.test(hooksDigest ?? '') ||
-      !['prompt_context', 'write_receipt', 'turn_finalize'].includes(milestone) ||
+		  !['session_context', 'prompt_context', 'write_receipt', 'turn_finalize'].includes(milestone) ||
       !resolved?.binding || !resolved?.runtime) return false;
   const { binding, runtime } = resolved;
   const sessionID = options.input?.session_id;
   const turnID = options.input?.turn_id;
-  const turnProof = options.turnProof ?? (
+	const sessionProof = options.sessionProof ?? (
+		typeof sessionID === 'string'
+			? createHash('sha256')
+				.update('pulse-codex-readiness-session-v1\x1f')
+				.update(binding.binding_digest ?? '')
+				.update('\x1f').update(sessionID)
+				.digest('hex')
+			: undefined
+	);
+	let turnProof = options.turnProof ?? (
     typeof sessionID === 'string' && typeof turnID === 'string'
       ? createHash('sha256')
         .update('pulse-codex-readiness-turn-v1\x1f')
@@ -373,7 +656,8 @@ export function recordCodexHookReadiness(eventName, resolved, options = {}) {
       !Number.isSafeInteger(binding.resolver_epoch) ||
       typeof binding.workspace?.repository_id !== 'string' ||
       typeof binding.workspace?.canonical_path !== 'string' ||
-      !/^[a-f0-9]{64}$/.test(turnProof ?? '')) return false;
+		  !/^[a-f0-9]{64}$/.test(sessionProof ?? '') ||
+		  (milestone !== 'session_context' && !/^[a-f0-9]{64}$/.test(turnProof ?? ''))) return false;
   const dataDir = options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(homedir(), '.pulse');
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const path = join(dataDir, 'codex-hook-readiness.json');
@@ -387,21 +671,27 @@ export function recordCodexHookReadiness(eventName, resolved, options = {}) {
   let milestones = {};
   try {
     const current = JSON.parse(readFileSync(path, 'utf8'));
-    if (current?.schema === 'pulse.codex_hook_readiness.v1' &&
-        current.hooks_digest === hooksDigest && current.turn_proof === turnProof &&
+		if (current?.schema === 'pulse.codex_hook_readiness.v2' &&
+				current.hooks_digest === hooksDigest && current.session_proof === sessionProof &&
         Object.entries(authority).every(([key, value]) => current[key] === value) &&
         current.milestones && typeof current.milestones === 'object') {
-      milestones = current.milestones;
+			if (milestone === 'session_context' || current.turn_proof === null || current.turn_proof === turnProof) {
+				milestones = current.milestones;
+				if (milestone === 'session_context' && current.turn_proof) turnProof = current.turn_proof;
+			} else if (typeof current.milestones.session_context === 'string') {
+				milestones = { session_context: current.milestones.session_context };
+			}
     }
   } catch {
     // Missing, invalid, stale, or another turn starts a fresh receipt.
   }
   const observedAt = (options.now ?? new Date()).toISOString();
   const receipt = {
-    schema: 'pulse.codex_hook_readiness.v1',
+		schema: 'pulse.codex_hook_readiness.v2',
     hooks_digest: hooksDigest,
     ...authority,
-    turn_proof: turnProof,
+		session_proof: sessionProof,
+		turn_proof: turnProof ?? null,
     milestones: { ...milestones, [milestone]: observedAt },
     last_event: eventName,
     observed_at: observedAt,

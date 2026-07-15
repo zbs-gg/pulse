@@ -1,22 +1,66 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync,
+	readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+	codexProductActivationReady,
+	codexMarketplaceDoctorCheck,
   finalizeCodexRuntimeInstall,
   inspectCodexRuntime,
+	inspectCodexMarketplaceSnapshot,
+	inspectCodexPluginCompatibility,
   installCodexRuntime,
-  migrateLegacyPulseHookFiles,
+	materializeCodexMarketplaceSnapshot,
+	migrateLegacyPulseHookFiles,
+	parseCodexMarketplaceList,
 	parsePulsePluginList,
 	pulseProductMcpShadowFiles,
 	readCodexProductLocator,
 	removeCodexProductLocator,
+	resolveSignedCodexProductEdge,
 	rollbackCodexRuntimeInstall,
 	writeCodexProductLocator,
 } from './codex-install.js';
 import { recordCodexHookReadiness } from './codex-hooks.js';
+
+test('Codex product activation is not ready when exact marketplace provenance fails', () => {
+	const checks = Object.fromEntries([
+		'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+		'mcp_shadow', 'legacy_hooks', 'binding', 'runtime', 'activation', 'vault', 'capture',
+	].map((name) => [name, { ok: true }]));
+	assert.equal(codexProductActivationReady({ checks }), true);
+	checks.marketplace.ok = false;
+	assert.equal(codexProductActivationReady({ checks }), false);
+});
+
+test('doctor reports missing marketplace registration after validating the snapshot itself', () => {
+	assert.deepEqual(codexMarketplaceDoctorCheck({
+		exact: false,
+		marketplace: { configured: false },
+		snapshot: { ok: true, reason: 'codex_marketplace_snapshot_exact' },
+	}), {
+		ok: false,
+		reason: 'codex_marketplace_not_configured',
+		detail: 'Codex marketplace zbs-gg is not configured',
+	});
+});
+
+test('doctor reports marketplace provenance mismatch after validating the snapshot itself', () => {
+	assert.deepEqual(codexMarketplaceDoctorCheck({
+		exact: false,
+		marketplace: { configured: true, root: '/tmp/wrong-marketplace' },
+		snapshot: { ok: true, reason: 'codex_marketplace_snapshot_exact' },
+	}), {
+		ok: false,
+		reason: 'codex_marketplace_provenance_mismatch',
+		detail: 'Codex marketplace zbs-gg points at a different source',
+	});
+});
 
 function writeProductActivation(dataDir, runtime, runtimeDigest = runtime.digest) {
 	const path = join(dataDir, 'runtime', 'product-daemon.json');
@@ -81,6 +125,170 @@ test('plugin list parser accepts only enabled pulse from zbs-gg', () => {
   assert.equal(parsePulsePluginList('pulse@other  installed, enabled  1.0.0  /tmp/no').enabled, false);
 });
 
+test('marketplace parser exposes exact local provenance instead of accepting a floating source', () => {
+	assert.deepEqual(parseCodexMarketplaceList(
+		'MARKETPLACE  ROOT\nzbs-gg      /private/var/pulse/artifacts/pulse-plugin-runtime/versions/signed/marketplace\n',
+	), {
+		configured: true,
+		root: '/private/var/pulse/artifacts/pulse-plugin-runtime/versions/signed/marketplace',
+	});
+	assert.deepEqual(parseCodexMarketplaceList('MARKETPLACE  ROOT\nopenai  /tmp/openai\n'), {
+		configured: false, root: undefined,
+	});
+});
+
+function writeSignedProductEdgeFixture(root, { releaseVersion = '0.7.0', pluginVersion = releaseVersion } = {}) {
+	const versionPath = join(root, 'pulse-plugin-runtime', 'versions', 'signed-fixture');
+	const marketplaceRoot = join(versionPath, 'marketplace');
+	const pluginRoot = join(marketplaceRoot, 'plugins', 'pulse');
+	const runtimeRoot = join(versionPath, 'runtime');
+	mkdirSync(join(marketplaceRoot, '.agents', 'plugins'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(pluginRoot, '.codex-plugin'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(pluginRoot, 'hooks'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(pluginRoot, 'mcp'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(runtimeRoot, 'src'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(runtimeRoot, 'node_modules'), { recursive: true, mode: 0o700 });
+	writeFileSync(join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json'), JSON.stringify({
+		name: 'zbs-gg', plugins: [{ name: 'pulse', source: { source: 'local', path: './plugins/pulse' } }],
+	}));
+	writeFileSync(join(pluginRoot, '.codex-plugin', 'plugin.json'), JSON.stringify({
+		name: 'pulse', version: pluginVersion, mcpServers: './.mcp.json',
+	}));
+	writeFileSync(join(pluginRoot, '.mcp.json'), JSON.stringify({
+		mcpServers: { 'pulse-product': { command: 'node', args: ['${PLUGIN_ROOT}/mcp/server.mjs'] } },
+	}));
+	writeFileSync(join(pluginRoot, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+	writeFileSync(join(pluginRoot, 'hooks', 'pulse-hook.mjs'), 'export {}\n');
+	writeFileSync(join(pluginRoot, 'runtime-locator.mjs'), 'export {}\n');
+	writeFileSync(join(pluginRoot, 'mcp', 'server.mjs'), 'export {}\n');
+	writeFileSync(join(runtimeRoot, 'package.json'), JSON.stringify({ name: '@zbs-gg/pulse', version: releaseVersion }));
+	writeFileSync(join(runtimeRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n');
+	writeFileSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist', 'index.js'), 'export {};\n');
+	const release = {
+		schema: 'pulse.verified_release_manifest.v1', manifest_digest: 'a'.repeat(64),
+		version: releaseVersion, epoch: 8, artifacts: {},
+	};
+	const activation = {
+		artifact_id: 'pulse-plugin-runtime', sha256: 'b'.repeat(64),
+		activation_digest: 'c'.repeat(64), tree_digest: 'd'.repeat(64),
+		version: releaseVersion, epoch: 8, version_path: versionPath, kind: 'plugin-runtime',
+	};
+	return { activation, marketplaceRoot, pluginRoot, release, runtimeRoot, versionPath };
+}
+
+test('signed Codex product edge accepts only the exact release-owned plugin and runtime snapshot', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-signed-edge-'));
+	try {
+		const fixture = writeSignedProductEdgeFixture(root);
+		const edge = resolveSignedCodexProductEdge({
+			release: fixture.release,
+			activation: fixture.activation,
+		});
+		assert.equal(edge.marketplace_root, realpathSync(fixture.marketplaceRoot));
+		assert.equal(edge.runtime_root, realpathSync(fixture.runtimeRoot));
+		assert.equal(edge.release_manifest_digest, fixture.release.manifest_digest);
+		assert.equal(edge.release_version, '0.7.0');
+		assert.match(edge.plugin_tree_digest, /^[a-f0-9]{64}$/);
+		assert.match(edge.marketplace_tree_digest, /^[a-f0-9]{64}$/);
+		assert.match(edge.runtime_tree_digest, /^[a-f0-9]{64}$/);
+
+		const installedPlugin = join(root, 'installed-plugin');
+		cpSync(fixture.pluginRoot, installedPlugin, { recursive: true });
+		assert.equal(inspectCodexPluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).ok, true);
+		writeFileSync(join(installedPlugin, '.mcp.json'), '{"tampered":true}\n');
+		assert.equal(inspectCodexPluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).reason, 'codex_plugin_snapshot_mismatch');
+
+		const wrongVersion = writeSignedProductEdgeFixture(join(root, 'wrong'), { pluginVersion: '0.7.1' });
+		assert.throws(
+			() => resolveSignedCodexProductEdge({ release: wrongVersion.release, activation: wrongVersion.activation }),
+			/codex_plugin_version_mismatch/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('managed Codex marketplace snapshot isolates host mutations from the signed artifact and repairs byte drift', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-marketplace-snapshot-'));
+	try {
+		const fixture = writeSignedProductEdgeFixture(root);
+		const edge = resolveSignedCodexProductEdge({ release: fixture.release, activation: fixture.activation });
+		const dataDir = join(root, 'data');
+		const signedPluginMode = lstatSync(fixture.pluginRoot).mode & 0o777;
+
+		const created = materializeCodexMarketplaceSnapshot(edge, dataDir);
+		assert.equal(created.reused, false);
+		assert.notEqual(created.marketplace_root, fixture.marketplaceRoot);
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).ok, true);
+
+		for (const relative of ['', 'hooks', 'mcp', '.codex-plugin']) {
+			chmodSync(join(created.plugin_root, relative), 0o755);
+		}
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).ok, true,
+			'Codex may widen read/execute bits on its disposable snapshot');
+		assert.equal(lstatSync(fixture.pluginRoot).mode & 0o777, signedPluginMode,
+			'the immutable signed artifact must never be passed to or mutated by Codex');
+
+		const reused = materializeCodexMarketplaceSnapshot(edge, dataDir);
+		assert.equal(reused.reused, true);
+		writeFileSync(join(created.plugin_root, '.mcp.json'), '{"tampered":true}\n');
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).reason, 'codex_marketplace_snapshot_mismatch');
+
+		const repaired = materializeCodexMarketplaceSnapshot(edge, dataDir);
+		assert.equal(repaired.reused, false);
+		assert.equal(repaired.repaired, true);
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).ok, true);
+		assert.equal(lstatSync(fixture.pluginRoot).mode & 0o777, signedPluginMode);
+
+		chmodSync(repaired.plugin_root, 0o777);
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).reason, 'codex_marketplace_snapshot_unsafe');
+		chmodSync(repaired.plugin_root, 0o755);
+		const hardlink = join(root, 'snapshot-hardlink');
+		linkSync(join(repaired.plugin_root, '.mcp.json'), hardlink);
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).reason, 'codex_marketplace_snapshot_unsafe');
+		rmSync(hardlink);
+		rmSync(join(repaired.plugin_root, '.mcp.json'));
+		symlinkSync(join(fixture.pluginRoot, '.mcp.json'), join(repaired.plugin_root, '.mcp.json'));
+		assert.equal(inspectCodexMarketplaceSnapshot(edge, dataDir).reason, 'codex_marketplace_snapshot_unsafe');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('signed Codex runtime records the complete release edge and preserves last-known-good on drift', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-signed-runtime-'));
+	try {
+		const fixture = writeSignedProductEdgeFixture(root);
+		const edge = resolveSignedCodexProductEdge({ release: fixture.release, activation: fixture.activation });
+		const dataDir = join(root, 'data');
+		const installed = installCodexRuntime(fixture.runtimeRoot, dataDir, {
+			now: new Date('2026-07-15T10:00:00Z'), signedEdge: edge,
+		});
+		assert.equal(installed.manifest.schema, 'pulse.codex_runtime.v2');
+		assert.equal(installed.manifest.release_manifest_digest, fixture.release.manifest_digest);
+		assert.equal(installed.manifest.release_version, fixture.release.version);
+		assert.equal(installed.manifest.release_epoch, fixture.release.epoch);
+		assert.equal(installed.manifest.plugin_runtime_activation_digest, fixture.activation.activation_digest);
+		assert.equal(installed.manifest.plugin_runtime_tree_digest, fixture.activation.tree_digest);
+		assert.equal(installed.manifest.plugin_tree_digest, edge.plugin_tree_digest);
+
+		const before = installed.digest;
+		writeFileSync(join(fixture.runtimeRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n// drifted after signing\n');
+		assert.throws(
+			() => installCodexRuntime(fixture.runtimeRoot, dataDir, { keepPrevious: true, signedEdge: edge }),
+			/codex_runtime_snapshot_mismatch/,
+		);
+		assert.equal(inspectCodexRuntime(dataDir).digest, before);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test('product locators are exact and workspace removal preserves other connections', () => {
 	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-locators-'));
 	try {
@@ -122,20 +330,24 @@ test('successful trusted hook writes a content-free global readiness receipt', (
       runtime: { data_dir: '/vault/ready' },
     };
     for (const [event, milestone] of [
-      ['UserPromptSubmit', 'prompt_context'], ['PostToolUse', 'write_receipt'], ['Stop', 'turn_finalize'],
+		  ['SessionStart', 'session_context'], ['UserPromptSubmit', 'prompt_context'],
+		  ['PostToolUse', 'write_receipt'], ['Stop', 'turn_finalize'],
     ]) {
       assert.equal(recordCodexHookReadiness(event, resolved, {
-        dataDir: root, hooksDigest: 'a'.repeat(64), turnProof: 'c'.repeat(64), milestone,
+			  dataDir: root, hooksDigest: 'a'.repeat(64), sessionProof: 'e'.repeat(64),
+			  turnProof: 'c'.repeat(64), milestone,
+			  environment: { PULSE_TRUST_MODE: 'test', PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1' },
         now: new Date('2026-07-14T10:00:00Z'),
       }), true);
     }
     const receipt = JSON.parse(readFileSync(join(root, 'codex-hook-readiness.json'), 'utf8'));
-    assert.equal(receipt.schema, 'pulse.codex_hook_readiness.v1');
+		assert.equal(receipt.schema, 'pulse.codex_hook_readiness.v2');
     assert.equal(receipt.binding_digest, 'b'.repeat(64));
     assert.equal(receipt.repository_id, 'repository-ready');
-    assert.equal(receipt.turn_proof, 'c'.repeat(64));
-    assert.deepEqual(Object.keys(receipt.milestones).sort(), [
-      'prompt_context', 'turn_finalize', 'write_receipt',
+		assert.equal(receipt.turn_proof, 'c'.repeat(64));
+		assert.equal(receipt.session_proof, 'e'.repeat(64));
+		assert.deepEqual(Object.keys(receipt.milestones).sort(), [
+		  'prompt_context', 'session_context', 'turn_finalize', 'write_receipt',
     ]);
     assert.doesNotMatch(JSON.stringify(receipt), /\/workspace\/ready/);
   } finally {
@@ -157,6 +369,10 @@ test('Codex runtime install is local, atomic, and integrity checked', () => {
     const installed = installCodexRuntime(source, dataDir, { now: new Date('2026-07-14T10:00:00Z') });
     assert.equal(installed.ok, true);
     assert.match(installed.digest, /^[a-f0-9]{64}$/);
+		chmodSync(installed.path, 0o720);
+		assert.equal(inspectCodexRuntime(dataDir).ok, false);
+		chmodSync(installed.path, 0o700);
+		assert.equal(inspectCodexRuntime(dataDir).ok, true);
     writeFileSync(installed.path, '#!/usr/bin/env node\n// tampered\n');
     assert.equal(inspectCodexRuntime(dataDir).ok, false);
   } finally {

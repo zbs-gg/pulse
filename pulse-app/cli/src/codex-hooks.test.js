@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import {
+	chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync,
+	realpathSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -13,7 +17,14 @@ import {
   renderPulseContext,
   validateHookReadiness,
 } from './host-adapter.js';
-import { codexWorkspaceDigest, handleCodexHook } from './codex-hooks.js';
+import {
+	codexWorkspaceDigest,
+	handleCodexHook,
+	inspectCodexNativeHookList,
+	inspectCodexNativeHookTrust,
+	projectCodexLifecycleAttestation,
+	recordCodexHookReadiness,
+} from './codex-hooks.js';
 
 const base = {
   session_id: '019f5fc4-fea2-7142-90de-691158b1052d',
@@ -49,6 +60,26 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '.
 
 function opaque(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
+}
+
+function testTreeDigest(root) {
+	const hash = createHash('sha256');
+	const visit = (directory, prefix = '') => {
+		for (const name of readdirSync(directory).sort()) {
+			const path = resolve(directory, name);
+			const relative = prefix ? `${prefix}/${name}` : name;
+			const info = lstatSync(path);
+			if (info.isDirectory()) visit(path, relative);
+			else if (info.isFile()) {
+				hash.update(relative);
+				hash.update('\x00');
+				hash.update(readFileSync(path));
+				hash.update('\x00');
+			}
+		}
+	};
+	visit(root);
+	return hash.digest('hex');
 }
 
 test('official Codex hook input normalizes without transcript or prompt content', () => {
@@ -409,16 +440,118 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   }
 });
 
-test('hook readiness becomes stale when the trusted bundle changes', () => {
+test('native hook trust accepts only the exact enabled Pulse plugin hook set reported by Codex', () => {
+	const pluginRoot = realpathSync(resolve(repoRoot, 'plugins', 'pulse'));
+	const sourcePath = realpathSync(resolve(pluginRoot, 'hooks', 'hooks.json'));
+	const workspace = realpathSync(repoRoot);
+	const nativeEvents = new Map([
+		['PostCompact', 'postCompact'], ['PostToolUse', 'postToolUse'],
+		['PreCompact', 'preCompact'], ['PreToolUse', 'preToolUse'],
+		['SessionStart', 'sessionStart'], ['Stop', 'stop'],
+		['SubagentStart', 'subagentStart'], ['SubagentStop', 'subagentStop'],
+		['UserPromptSubmit', 'userPromptSubmit'],
+	]);
+	const hookConfig = JSON.parse(readFileSync(sourcePath, 'utf8'));
+	const expected = Object.entries(hookConfig.hooks).map(([configuredEvent, groups]) => {
+		const group = groups[0];
+		const handler = group.hooks[0];
+		return {
+			eventName: nativeEvents.get(configuredEvent),
+			matcher: group.matcher ?? null,
+			command: handler.command.replaceAll('${PLUGIN_ROOT}', pluginRoot),
+			timeoutSec: handler.timeout,
+		};
+	}).sort((left, right) => left.eventName.localeCompare(right.eventName));
+	const response = { data: [{
+		cwd: workspace, warnings: [], errors: [],
+		hooks: expected.map((definition, index) => ({
+			key: `pulse@zbs-gg:${definition.eventName}:${index}`,
+			...definition, handlerType: 'command',
+			source: 'plugin', sourcePath, pluginId: 'pulse@zbs-gg',
+			enabled: true, isManaged: false, trustStatus: 'trusted',
+			currentHash: `sha256:${String(index + 1).padStart(64, '0')}`,
+			displayOrder: index,
+		})),
+	}] };
+	const edge = { release_version: '0.7.0', plugin_tree_digest: testTreeDigest(pluginRoot) };
+	const trusted = inspectCodexNativeHookList(response, { cwd: workspace, pluginRoot, edge });
+	assert.equal(trusted.ready, true);
+	assert.match(trusted.hook_set_digest, /^[a-f0-9]{64}$/);
+	assert.equal(trusted.trust_status, 'trusted');
+
+	const cacheRoot = mkdtempSync(join(tmpdir(), 'pulse-codex-signed-cache-'));
+	try {
+		const cachePluginPath = join(cacheRoot, 'plugins', 'cache', 'zbs-gg', 'pulse', '0.7.0');
+		cpSync(pluginRoot, cachePluginPath, { recursive: true });
+		const cachePluginRoot = realpathSync(cachePluginPath);
+		const cacheSource = realpathSync(join(cachePluginRoot, 'hooks', 'hooks.json'));
+		for (const hook of response.data[0].hooks) {
+			hook.sourcePath = cacheSource;
+			hook.command = hook.command.replace(pluginRoot, cachePluginRoot);
+		}
+		const cached = inspectCodexNativeHookList(response, {
+			cwd: workspace, pluginRoot, cachePluginRoot, edge,
+		});
+		assert.equal(cached.ready, true, cached.detail);
+		for (const hook of response.data[0].hooks) {
+			hook.sourcePath = sourcePath;
+			hook.command = hook.command.replace(cachePluginRoot, pluginRoot);
+		}
+	} finally {
+		rmSync(cacheRoot, { recursive: true, force: true });
+	}
+
+	response.data[0].hooks.forEach((hook) => {
+		hook.trustStatus = 'managed';
+		hook.isManaged = true;
+	});
+	const managed = inspectCodexNativeHookList(response, { cwd: workspace, pluginRoot, edge });
+	assert.equal(managed.ready, true);
+	assert.equal(managed.trust_status, 'managed');
+	response.data[0].hooks.forEach((hook) => {
+		hook.trustStatus = 'trusted';
+		hook.isManaged = false;
+	});
+
+	response.data[0].cwd = undefined;
+	const missingCwd = inspectCodexNativeHookList(response, { cwd: workspace, pluginRoot, edge });
+	assert.equal(missingCwd.ready, false);
+	assert.equal(missingCwd.reason, 'codex_native_hook_query_invalid');
+	response.data[0].cwd = workspace;
+
+	response.data[0].hooks[0].trustStatus = 'modified';
+	const modified = inspectCodexNativeHookList(response, { cwd: workspace, pluginRoot, edge });
+	assert.equal(modified.ready, false);
+	assert.equal(modified.reason, 'codex_native_hook_trust_required');
+	response.data[0].hooks[0].trustStatus = 'trusted';
+
+	for (const [field, value] of [
+		['sourcePath', realpathSync(resolve(pluginRoot, 'mcp', 'server.mjs'))],
+		['command', 'node /tmp/not-pulse.mjs'],
+		['matcher', 'not-the-signed-matcher'],
+		['timeoutSec', 99],
+	]) {
+		const original = response.data[0].hooks[0][field];
+		response.data[0].hooks[0][field] = value;
+		const mismatch = inspectCodexNativeHookList(response, { cwd: workspace, pluginRoot, edge });
+		assert.equal(mismatch.ready, false, `${field} drift must fail closed`);
+		assert.equal(mismatch.reason, 'codex_native_hook_set_mismatch');
+		response.data[0].hooks[0][field] = original;
+	}
+});
+
+test('hook readiness requires SessionStart plus one complete same-session turn and becomes stale on bundle drift', () => {
   const bytes = Buffer.from('{"hooks":{"Stop":[]}}');
   const receipt = {
-    schema: 'pulse.codex_hook_readiness.v1',
+		schema: 'pulse.codex_hook_readiness.v2',
     hooks_digest: hookBundleDigest(bytes),
     binding_digest: 'a'.repeat(64), resolver_epoch: 7,
     repository_id: 'repository-pulse',
     workspace_digest: codexWorkspaceDigest('/workspace/pulse'),
+		session_proof: 'c'.repeat(64),
     turn_proof: 'b'.repeat(64),
     milestones: {
+			session_context: '2026-07-14T09:59:59Z',
       prompt_context: '2026-07-14T10:00:00Z',
       write_receipt: '2026-07-14T10:00:01Z',
       turn_finalize: '2026-07-14T10:00:02Z',
@@ -427,8 +560,92 @@ test('hook readiness becomes stale when the trusted bundle changes', () => {
     observed_at: '2026-07-14T10:00:00Z',
   };
   assert.equal(validateHookReadiness(bytes, receipt).ready, true);
+	delete receipt.milestones.session_context;
+	assert.equal(validateHookReadiness(bytes, receipt).ready, false);
+	receipt.milestones.session_context = '2026-07-14T09:59:59Z';
   assert.deepEqual(validateHookReadiness(Buffer.from('{"hooks":{}}'), receipt).ready, false);
   assert.equal(validateHookReadiness(bytes, receipt, { repository_id: 'repository-other' }).ready, false);
+});
+
+test('launcher lifecycle receipts are synthetic-test-only and production ignores complete receipts', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-attestation-'));
+	try {
+		const resolvedRuntime = {
+			binding: {
+				binding_digest: 'a'.repeat(64), resolver_epoch: 7,
+				workspace: { repository_id: 'repository-pulse', canonical_path: '/workspace/pulse' },
+			},
+			runtime: { data_dir: '/vault/pulse' },
+		};
+		const options = {
+			dataDir: root, hooksDigest: 'b'.repeat(64), milestone: 'session_context',
+			sessionProof: 'c'.repeat(64), turnProof: 'd'.repeat(64),
+		};
+		assert.equal(recordCodexHookReadiness('SessionStart', resolvedRuntime, {
+			...options, environment: { PULSE_TRUST_MODE: 'test' },
+		}), false);
+		assert.equal(existsSync(join(root, 'codex-hook-readiness.json')), false);
+		assert.equal(recordCodexHookReadiness('SessionStart', resolvedRuntime, {
+			...options,
+			environment: { PULSE_TRUST_MODE: 'test', PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1' },
+		}), true);
+
+		const unavailable = projectCodexLifecycleAttestation({
+			syntheticAuthority: false, testAttestor: false,
+			readiness: { ready: true, hooks_digest: 'b'.repeat(64) },
+		});
+		assert.equal(unavailable.ready, false);
+		assert.equal(unavailable.reason, 'codex_native_lifecycle_attestation_unavailable');
+		assert.equal(unavailable.trusted_hook_observed, false);
+		assert.match(unavailable.detail, /Codex 0\.136/);
+
+		assert.equal(projectCodexLifecycleAttestation({
+			syntheticAuthority: true, testAttestor: false, readiness: { ready: true },
+		}).ready, false);
+		assert.equal(projectCodexLifecycleAttestation({
+			syntheticAuthority: true, testAttestor: true, readiness: { ready: true },
+		}).ready, true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('native hook query hard-stops an app-server child that ignores SIGTERM', async () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-app-server-timeout-'));
+	const executable = join(root, 'ignoring-app-server.js');
+	const pidPath = join(root, 'pid');
+	const previousPidPath = process.env.PULSE_TEST_APP_SERVER_PID_PATH;
+	let pid;
+	try {
+		writeFileSync(executable, `#!${process.execPath}\n` +
+			`const fs = require('node:fs');\n` +
+			`fs.writeFileSync(process.env.PULSE_TEST_APP_SERVER_PID_PATH, String(process.pid));\n` +
+			`process.on('SIGTERM', () => {});\n` +
+			`process.stdin.resume();\n` +
+			`setInterval(() => {}, 1000);\n`, { mode: 0o700 });
+		chmodSync(executable, 0o700);
+		process.env.PULSE_TEST_APP_SERVER_PID_PATH = pidPath;
+		const pluginRoot = realpathSync(resolve(repoRoot, 'plugins', 'pulse'));
+		const result = await inspectCodexNativeHookTrust({
+			codexExecutable: executable,
+			cwd: realpathSync(repoRoot),
+			pluginRoot,
+			edge: { release_version: '0.7.0', plugin_tree_digest: testTreeDigest(pluginRoot) },
+			timeoutMs: 150,
+		});
+		assert.equal(result.ready, false);
+		assert.equal(result.reason, 'codex_native_hook_query_unavailable');
+		assert.equal(result.detail, 'codex_native_hook_query_timeout');
+		pid = Number.parseInt(readFileSync(pidPath, 'utf8'), 10);
+		assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+	} finally {
+		if (pid) {
+			try { process.kill(pid, 'SIGKILL'); } catch { /* already stopped */ }
+		}
+		if (previousPidPath === undefined) delete process.env.PULSE_TEST_APP_SERVER_PID_PATH;
+		else process.env.PULSE_TEST_APP_SERVER_PID_PATH = previousPidPath;
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test('legacy Pulse Codex hook migration removes duplicates and preserves unrelated hooks', () => {

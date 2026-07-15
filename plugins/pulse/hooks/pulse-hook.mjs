@@ -12,13 +12,13 @@ const productEnvironment = resolveProductEnvironment();
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 const runtimeRoot = resolve(cliPath, '..', '..');
 const runtimeManifest = JSON.parse(readFileSync(join(runtimeRoot, 'runtime-manifest.json'), 'utf8'));
-if (runtimeManifest?.schema !== 'pulse.codex_runtime.v1' ||
+if (runtimeManifest?.schema !== 'pulse.codex_runtime.v2' ||
 		runtimeManifest.tree_digest !== productEnvironment.PULSE_RUNTIME_DIGEST) {
   throw new Error('Pulse trusted Codex runtime manifest is invalid; run `pulse connect codex` again.');
 }
 const digest = createHash('sha256');
 for (const relative of [
-  '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+	'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
 ]) {
   digest.update(relative);
   digest.update('\x00');

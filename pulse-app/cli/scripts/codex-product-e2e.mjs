@@ -12,6 +12,7 @@ import {
 	  openSync,
 	  readFileSync,
 	  readSync,
+	  realpathSync,
   readdirSync,
 	  rmSync,
 	  symlinkSync,
@@ -25,7 +26,12 @@ import { fileURLToPath } from 'node:url';
 import {
   bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
 } from '../src/workspace-binding.js';
-import { materializeVerifiedDmg } from '../src/artifact-installer.js';
+import { materializeVerifiedDmg, readCommittedArtifactSet } from '../src/artifact-installer.js';
+import {
+	inspectCodexMarketplaceSnapshot,
+	parseCodexMarketplaceList,
+	resolveSignedCodexProductEdge,
+} from '../src/codex-install.js';
 import {
 	canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
 } from '../src/release-manifest.js';
@@ -241,18 +247,9 @@ try {
   const installRoot = join(root, 'packed-cli');
 	const pulseDataDir = join(root, 'pulse');
 	const artifactRoot = join(pulseDataDir, 'artifacts');
-	const marketplaceRoot = join(root, 'marketplace-fixture');
-	const marketplaceManifestSource = join(repoRoot, '.agents', 'plugins', 'marketplace.json');
-	const marketplaceManifestPath = join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json');
-	const marketplacePluginSource = join(repoRoot, 'plugins', 'pulse');
-	const marketplacePluginRoot = join(marketplaceRoot, 'plugins', 'pulse');
   mkdirSync(home, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(installRoot, { recursive: true });
-	copyRegularTree(marketplaceManifestSource, marketplaceManifestPath);
-	copyRegularTree(marketplacePluginSource, marketplacePluginRoot);
-	assert.deepEqual(readFileSync(marketplaceManifestPath), readFileSync(marketplaceManifestSource));
-	assert.deepEqual(regularTreeManifest(marketplacePluginRoot), regularTreeManifest(marketplacePluginSource));
   initializeRepository(workspace);
 	initializeRepository(workspaceB);
 
@@ -326,12 +323,12 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
 		PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
 		PULSE_TRUST_MODE: 'test',
+		PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
 		PULSE_RELEASE_TEST_MODE: '1',
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
-		PULSE_CODEX_MARKETPLACE_SOURCE: marketplaceRoot,
 	};
 	for (const name of [
 		'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
@@ -370,7 +367,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	});
 	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /managed full-retrieval smoke|did not become ready/);
 	const pluginAfterFailure = run('codex', ['plugin', 'list', '--marketplace', 'zbs-gg'], { cwd: workspace, env });
-	assert.match(pluginAfterFailure.stdout, /pulse@zbs-gg\s+not installed/);
+	assert.match(pluginAfterFailure.stdout, /pulse@zbs-gg\s+not installed|No plugins found/);
 	assert.equal(existsSync(join(root, 'pulse', 'runtime', 'codex', 'current')), false);
 	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
 	assert.equal(existsSync(join(codexHome, 'pulse', 'product-locators.json')), false);
@@ -396,18 +393,46 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 
   const cacheVersions = readdirSync(join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse'));
   assert.equal(cacheVersions.length, 1);
-  const pluginRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', cacheVersions[0]);
+	const pluginRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', cacheVersions[0]);
+	const committedRelease = readCommittedArtifactSet({ installRoot: artifactRoot });
+	const signedMarketplaceRoot = join(committedRelease.activations['plugin-runtime'].version_path, 'marketplace');
+	const signedPluginRoot = join(signedMarketplaceRoot, 'plugins', 'pulse');
 	const configuredMarketplaces = run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout;
-	assert.equal(configuredMarketplaces.includes(marketplaceRoot), true,
-		'Codex marketplace provenance must name the isolated fixture');
+	const signedEdge = resolveSignedCodexProductEdge({
+		release: {
+			schema: 'pulse.verified_release_manifest.v1',
+			manifest_digest: committedRelease.record.manifest_digest,
+			version: committedRelease.record.version,
+			epoch: committedRelease.record.epoch,
+		},
+		activation: committedRelease.activations['plugin-runtime'],
+	});
+	const marketplaceSnapshot = inspectCodexMarketplaceSnapshot(signedEdge, join(root, 'pulse'));
+	assert.equal(marketplaceSnapshot.ok, true);
+	const configuredMarketplace = parseCodexMarketplaceList(configuredMarketplaces);
+	assert.equal(configuredMarketplace.configured, true);
+	assert.equal(realpathSync(configuredMarketplace.root), marketplaceSnapshot.marketplace_root,
+		'Codex marketplace provenance must name the exact activation-owned snapshot');
+	assert.notEqual(marketplaceSnapshot.marketplace_root, realpathSync(signedMarketplaceRoot),
+		'Codex must never receive the immutable signed artifact tree directly');
+	assert.equal(marketplaceSnapshot.marketplace_root.startsWith(
+		realpathSync(join(root, 'pulse', 'runtime', 'codex-marketplaces')),
+	), true);
 	assert.equal(configuredMarketplaces.includes(repoRoot), false,
 		'packed Codex lifecycle must not register the live repository as marketplace provenance');
-	assert.deepEqual(regularTreeManifest(pluginRoot), regularTreeManifest(marketplacePluginRoot),
-		'installed Codex plugin bytes must exactly match the isolated marketplace fixture');
+	assert.deepEqual(regularTreeManifest(pluginRoot), regularTreeManifest(signedPluginRoot),
+		'installed Codex plugin bytes must exactly match the signed plugin-runtime artifact');
+	assert.deepEqual(regularTreeManifest(marketplaceSnapshot.plugin_root), regularTreeManifest(signedPluginRoot),
+		'operational marketplace snapshot bytes must exactly match the signed plugin-runtime artifact');
+	for (const relative of ['plugins', 'plugins/pulse', 'plugins/pulse/.codex-plugin', 'plugins/pulse/hooks', 'plugins/pulse/mcp']) {
+		assert.equal(lstatSync(join(signedMarketplaceRoot, relative)).mode & 0o777, 0o700,
+			`Codex must not change signed artifact directory mode: ${relative}`);
+	}
   const hook = join(pluginRoot, 'hooks', 'pulse-hook.mjs');
   const sessionID = 'session-codex-e2e';
   const freshHostEnv = Object.fromEntries(
-		Object.entries(env).filter(([name]) => !name.startsWith('PULSE_') || name === 'PULSE_TRUST_MODE'),
+		Object.entries(env).filter(([name]) => !name.startsWith('PULSE_') ||
+			['PULSE_TRUST_MODE', 'PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR'].includes(name)),
   );
 	const hookEnv = {
 	  ...freshHostEnv,
@@ -654,14 +679,88 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   assert.deepEqual(JSON.parse(recursiveStop.stdout), {});
 
-  const doctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], { cwd: workspace, env });
+	const doctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
+		cwd: workspace, env, status: 1,
+	});
   const report = JSON.parse(doctor.stdout);
-	assert.equal(report.verdict, 'Pulse Codex synthetic test lifecycle ready; production authority is not active.');
+	assert.equal(report.verdict, 'Pulse Codex automatic lifecycle is not ready.');
 	assert.equal(report.trust.authority_mode, 'synthetic-test');
-  assert.equal(Object.values(report.checks).every((check) => check.ok), true);
+	assert.equal(report.checks.native_hook_trust.ok, false);
+	assert.equal(report.checks.native_hook_trust.reason, 'codex_native_hook_trust_required',
+		report.checks.native_hook_trust.detail);
+	assert.equal(report.checks.hooks.ok, true,
+		'direct hook fixtures may prove lifecycle behavior but cannot approve native Codex trust');
+	assert.equal(Object.entries(report.checks)
+		.filter(([name]) => name !== 'native_hook_trust')
+		.every(([, check]) => check.ok), true);
   assert.equal(report.trust.raw_transcript_capture, false);
   assert.equal(report.trust.full_retrieval, true);
-  assert.equal(report.trust.external_embedding_api, false);
+	assert.equal(report.trust.external_embedding_api, false);
+
+	const cacheHookConfigPath = join(pluginRoot, 'hooks', 'hooks.json');
+	const cacheHookConfigBytes = readFileSync(cacheHookConfigPath);
+	const mutatingTools = join(root, 'mutating-tools');
+	mkdirSync(mutatingTools, { mode: 0o700 });
+	symlinkSync(process.execPath, join(mutatingTools, 'node'));
+	const mutatingCodex = join(mutatingTools, 'codex');
+	writeFileSync(mutatingCodex, `#!${process.execPath}
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const readline = require('node:readline');
+const args = process.argv.slice(2);
+const realCodex = ${JSON.stringify(codexExecutable)};
+const sourcePath = fs.realpathSync(${JSON.stringify(cacheHookConfigPath)});
+const pluginRoot = fs.realpathSync(${JSON.stringify(pluginRoot)});
+if (args[0] !== 'app-server') {
+  const result = spawnSync(realCodex, args, { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
+}
+const nativeEvents = new Map([
+  ['PostCompact', 'postCompact'], ['PostToolUse', 'postToolUse'],
+  ['PreCompact', 'preCompact'], ['PreToolUse', 'preToolUse'],
+  ['SessionStart', 'sessionStart'], ['Stop', 'stop'],
+  ['SubagentStart', 'subagentStart'], ['SubagentStop', 'subagentStop'],
+  ['UserPromptSubmit', 'userPromptSubmit'],
+]);
+const config = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+process.on('SIGTERM', () => {
+  fs.appendFileSync(sourcePath, ' ');
+  process.exit(0);
+});
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.id === 1) {
+    process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: 'pulse-mutation-fixture' } }) + '\\n');
+    return;
+  }
+  if (message.id !== 2) return;
+  const hooks = Object.entries(config.hooks).map(([configuredEvent, groups], index) => {
+    const group = groups[0];
+    const handler = group.hooks[0];
+    return {
+      key: 'pulse@zbs-gg:' + configuredEvent + ':' + index,
+      eventName: nativeEvents.get(configuredEvent), handlerType: 'command',
+      matcher: group.matcher ?? null,
+      command: handler.command.replaceAll('\${PLUGIN_ROOT}', pluginRoot),
+      timeoutSec: handler.timeout, sourcePath, source: 'plugin', pluginId: 'pulse@zbs-gg',
+      displayOrder: index, enabled: true, isManaged: false,
+      currentHash: 'sha256:' + String(index + 1).padStart(64, '0'), trustStatus: 'untrusted',
+    };
+  });
+  process.stdout.write(JSON.stringify({ id: 2, result: { data: [{
+    cwd: message.params.cwds[0], hooks, warnings: [], errors: [],
+  }] } }) + '\\n');
+});
+`, { mode: 0o700 });
+	chmodSync(mutatingCodex, 0o700);
+	const mutationDoctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
+		cwd: workspace, env: { ...env, PATH: `${mutatingTools}:${tools}` }, status: 1,
+	});
+	const mutationReport = JSON.parse(mutationDoctor.stdout);
+	assert.equal(mutationReport.checks.plugin.reason, 'codex_product_state_changed_during_inspection');
+	assert.equal(mutationReport.checks.native_hook_trust.reason, 'codex_product_state_changed_during_inspection');
+	assert.equal(mutationReport.checks.hooks.reason, 'codex_product_state_changed_during_inspection');
+	writeFileSync(cacheHookConfigPath, cacheHookConfigBytes);
 
 	const receiptBeforeHelperCrash = JSON.parse(readFileSync(
 		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
@@ -694,6 +793,9 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const activeSetBeforeFailedManagedUpgrade = readFileSync(
 		join(root, 'pulse', 'artifacts', 'active-release.json'),
 	);
+	const marketplaceBeforeFailedManagedUpgrade = parseCodexMarketplaceList(
+		run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout,
+	).root;
 	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 9, { realInputs });
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
@@ -729,6 +831,11 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		activeSetBeforeFailedManagedUpgrade,
 		'failed managed upgrade must restore the previous atomic artifact set',
 	);
+	readCommittedArtifactSet({ installRoot: join(root, 'pulse', 'artifacts') });
+	assert.equal(realpathSync(parseCodexMarketplaceList(
+		run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout,
+	).root), realpathSync(marketplaceBeforeFailedManagedUpgrade),
+	'failed managed upgrade must restore the previous marketplace provenance');
 	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, healthyDaemonBytes, 8, { realInputs });
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
@@ -747,14 +854,22 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
 	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env, timeout: 120_000 });
-	const activationV3 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
+	const activationV4 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
+	const activeReleaseV2 = readCommittedArtifactSet({ installRoot: join(root, 'pulse', 'artifacts') });
 	const receiptAv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
-	assert.equal(activationV3.schema, 'pulse.product_activation.v3');
-	assert.equal(receiptAv2.executable_digest, activationV3.daemon_digest);
+	assert.equal(activationV4.schema, 'pulse.product_activation.v4');
+	assert.equal(activationV4.release_manifest_digest, activeReleaseV2.record.manifest_digest);
+	assert.equal(activationV4.release_version, activeReleaseV2.record.version);
+	assert.equal(activationV4.release_epoch, activeReleaseV2.record.epoch);
+	assert.equal(activationV4.plugin_runtime_activation_digest,
+		activeReleaseV2.activations['plugin-runtime'].activation_digest);
+	assert.equal(activationV4.plugin_runtime_tree_digest,
+		activeReleaseV2.activations['plugin-runtime'].tree_digest);
+	assert.equal(receiptAv2.executable_digest, activationV4.daemon_digest);
 	assert.match(receiptAv2.managed_embedder_config_digest, /^[a-f0-9]{64}$/);
-	assert.equal('managed_embedder_config_path' in activationV3, false,
+	assert.equal('managed_embedder_config_path' in activationV4, false,
 		'global activation must not pin one project vault config');
-	assert.notEqual(receiptBv1.executable_digest, activationV3.daemon_digest);
+	assert.notEqual(receiptBv1.executable_digest, activationV4.daemon_digest);
 	const workspaceBResume = run(process.execPath, [hook, 'SessionStart'], {
 		cwd: workspaceB,
 		env: hookEnv,
@@ -766,7 +881,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	});
 	assert.match(JSON.parse(workspaceBResume.stdout).hookSpecificOutput.additionalContext, /pulse.context.v1/);
 	const receiptBv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
-	assert.equal(receiptBv2.executable_digest, activationV3.daemon_digest,
+	assert.equal(receiptBv2.executable_digest, activationV4.daemon_digest,
 		'first hook in another workspace must reconcile its vault before reading memory');
 	assert.notEqual(receiptBv2.managed_embedder_config_path, receiptAv2.managed_embedder_config_path,
 		'each project vault must keep its own private managed embedder config');
