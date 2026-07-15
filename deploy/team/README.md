@@ -1,7 +1,7 @@
 # Pulse Team deployment assets
 
 These files are a **default-off, synthetic-data-only** operating slice for the
-Team remote security foundation and U7 read/Airlock path. They are not a
+Team remote security foundation and U8 read/Airlock/Owner-operator path. They are not a
 production deployment, do not enable real team reads, and cannot turn the
 current loopback gateway into a public service. The files have not yet been
 installed as a live external deployment, exercised against a real Auth0
@@ -66,6 +66,7 @@ Run account and directory creation under a human-controlled root session:
 ```bash
 useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin pulse-team-daemon
 useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin pulse-team-gateway
+groupadd --system pulse-team-owner
 install -d -m 0750 -o root -g root /etc/pulse-team/gates /etc/pulse-team/secrets
 install -d -m 0700 -o pulse-team-daemon -g pulse-team-daemon /etc/pulse-team/synthetic
 install -d -m 0700 -o pulse-team-daemon -g pulse-team-daemon /var/lib/pulse-team-daemon
@@ -84,6 +85,39 @@ creates its own 0600 IPC key in its private data directory on first start.
 Install the selected Team Cohere key, if used, and the labeled synthetic
 Airlock candidate as regular mode-0600 files owned by `pulse-team-daemon` at
 the paths in `daemon.env`. Never place a Personal key or real content there.
+
+Create the non-secret Owner authorization profile as a root-owned regular file
+readable only by named human operators. Add each authorized operator account to
+`pulse-team-owner`; never add either service account to that group:
+
+```bash
+usermod -a -G pulse-team-owner <owner-operator-account>
+install -m 0640 -o root -g pulse-team-owner /dev/null /etc/pulse-team/team-owner-profile.json
+```
+
+Write this exact closed schema, replacing every placeholder with the pinned live
+deployment value. The issuer and three provider endpoints must share one HTTPS
+origin; the audience must be the exact public `/mcp` resource. `client_id` is a
+public PKCE client ID, not a secret, and `expected_subject` is one authorized
+Owner's exact OIDC subject:
+
+```json
+{
+  "schema": "pulse.team.owner_auth_profile.v1",
+  "issuer": "https://tenant.example/",
+  "authorization_endpoint": "https://tenant.example/authorize",
+  "token_endpoint": "https://tenant.example/oauth/token",
+  "jwks_uri": "https://tenant.example/.well-known/jwks.json",
+  "audience": "https://pulse.example/mcp",
+  "client_id": "pulse-owner-public-client",
+  "expected_subject": "auth0|owner-subject",
+  "scopes": ["openid", "offline_access", "pulse:connect", "pulse:owner"]
+}
+```
+
+Recheck `root:pulse-team-owner` ownership, mode `0640`, non-symlink status, and
+operator readability after writing it. Use a separate profile and Owner
+credential for each human Owner subject.
 
 ## Exact Authorization Server contract
 
@@ -112,21 +146,27 @@ openid offline_access pulse:connect pulse:status pulse:read pulse:audit
 
 The profile must contain every scope above and is rejected if it contains
 `pulse:write`, `pulse:delete`, or `pulse:owner`; the deployment must not grant
-unneeded additional scopes. Its installed Commons surface is limited to status, recall,
-context query, resume, inspect, and own audit. Direct shared writes are not
+unneeded additional scopes. Its installed Codex Commons surface is limited to
+status, recall, context query, resume, and inspect. The authorization profile
+still carries `pulse:audit`, but no installed audit tool is exposed in this
+increment. Direct shared writes are not
 registered or dispatched; Team publication goes through the separate browser
 Airlock only.
 
-### Airlock Owner client and Auth0 Action contract
+### Airlock and Owner browser client Auth0 Action contract
 
-The Airlock client is a separate public Authorization Code + PKCE client. The
-gateway sends `prompt=login`, `max_age=0`, `scope=openid pulse:owner`, and:
+The Airlock client and the separate Owner-administration client are public
+Authorization Code + PKCE clients. Each browser flow sends `prompt=login` and
+`max_age=0`. Airlock requests `openid pulse:owner`; Owner administration
+requests exactly `openid offline_access pulse:connect pulse:owner`. Both send:
 
 ```text
 acr_values=https://pulse.zbs.gg/acr/airlock-human-presence/v1
 ```
 
-The resulting ID token is accepted only when all of the following are true:
+For Owner administration, the nonce also binds the exact canonical operation
+and a fresh random challenge; its assertion ID is the durable one-use replay
+fence. The resulting ID token is accepted only when all of the following are true:
 
 - `acr` is exactly
   `https://pulse.zbs.gg/acr/airlock-human-presence/v1`;
@@ -158,6 +198,28 @@ SMS, TOTP, email OTP, a remembered session, Action execution time, or passkey
 enrollment into `webauthn-platform`. The code and tests define this contract,
 but no live Auth0 Action has yet been verified; do not enable external or real
 content gates until that verification succeeds.
+
+### Owner operator flow
+
+Run every Owner command as a named member of `pulse-team-owner`, never as a
+daemon or gateway service account:
+
+```bash
+pulse team owner login --profile /etc/pulse-team/team-owner-profile.json
+# Verify the emitted request digest, then install it atomically in the protected gateway registry.
+pulse team owner member create --profile /etc/pulse-team/team-owner-profile.json --issuer https://tenant.example/ --subject 'auth0|member-subject' --role member
+pulse team owner binding create --profile /etc/pulse-team/team-owner-profile.json --issuer https://tenant.example/ --subject 'auth0|member-subject' --client-id codex-member-client
+pulse team owner project create --profile /etc/pulse-team/team-owner-profile.json --name "Project Atlas"
+pulse team owner project grant --profile /etc/pulse-team/team-owner-profile.json --project-id project_... --principal-id principal_... --access write
+pulse team owner project revoke-grant --profile /etc/pulse-team/team-owner-profile.json --grant-id grant_...
+```
+
+The first login only emits the enrollment request. This repository does not yet
+provide a browser acceptance/status workflow or atomically install that request
+in the protected registry; that manual operator step is a product blocker, not
+a successful onboarding claim. Every mutation opens a new action-bound
+platform-WebAuthn flow and returns only bounded IDs and audit metadata. Revoke
+membership by `--principal-id`; revoke an installation binding by `--binding-id`.
 
 ## Team embedder boundary
 

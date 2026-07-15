@@ -2,9 +2,9 @@
 
 ## Status
 
-This repository contains the security foundation and current U7 product path for a synthetic-data team-remote pilot. It is not a production deployment and it is not yet the shared workspace for Nikita, Dima, or other real team members.
+This repository contains the security foundation and current U8 product path for a synthetic-data team-remote pilot. It is not a production deployment and it is not yet the shared workspace for Nikita, Dima, or other real team members.
 
-The current worktree adds a sender-constrained, read-only Commons path to the installed Codex product; independent Desk and Commons continuity composition; safe OAuth refresh; an Owner-only publication Airlock; projection workers and readiness; and default-off deployment templates. Those paths have automated and synthetic coverage. A fresh-machine package install, a live Auth0 tenant, external HTTPS ingress, and a real two-person deployment have not been verified. No real team content is authorized by this document.
+The current worktree adds a sender-constrained, read-only Commons path to the installed Codex product; independent Desk and Commons continuity composition; safe OAuth refresh; an Owner-only publication Airlock; a separate action-bound Owner CLI for membership, installation binding, project, and grant administration; gateway/store surfaces for metadata-only audit and governed deletion; projection workers and readiness; and default-off deployment templates. Those paths have automated and synthetic coverage. A fresh-machine package install, protected enrollment-registry acceptance, a live Auth0 tenant, external HTTPS ingress, and a real two-person deployment have not been verified. No real team content is authorized by this document.
 
 `npm run test:codex-team-packaging-contract` is deliberately narrower than a product E2E: it proves that the packed artifact contains the signed helper and MCP runtime, that both Codex and Claude composition use the exact signed Commons `project_id`, that the Codex package exposes the Desk plus read-only Commons registry, and that it carries the Airlock-only publication flag. It mocks binding authority, OAuth, remote transport, and the daemon. It is not evidence of a fresh-user install, a packaged Claude onboarding, or live Team continuity. `make verify` runs this contract.
 
@@ -27,7 +27,7 @@ The product branch begins at `codex/pulse-codex-team-memory`. New migrations sta
 | Mode | Intended use | Data boundary |
 |---|---|---|
 | Local Preview | One person's local development and memory | Local `~/.pulse`; no team sharing |
-| Team remote foundation | Synthetic verification of multi-principal policy plus the U7 read/Airlock product path | Dedicated team database; no local fallback |
+| Team remote foundation | Synthetic verification of multi-principal policy plus the U8 read/Airlock/Owner-operator product path | Dedicated team database; no local fallback |
 | Real pilot deployment | A separately approved hosted pilot | New deployment, real IdP, named members, explicit connector consent |
 
 Starting team mode never upgrades or adopts an existing local database. A remote outage never falls back to local storage.
@@ -46,7 +46,7 @@ The installation authorization profile is exactly:
 openid offline_access pulse:connect pulse:status pulse:read pulse:audit
 ```
 
-It rejects `pulse:write`, `pulse:delete`, and `pulse:owner`. The installed MCP exposes only `pulse_team_status`, `pulse_team_recall`, `pulse_team_context_query`, `pulse_team_resume`, `pulse_team_inspect`, and `pulse_team_audit` for Commons. Direct `pulse_team_remember` and `pulse_team_graph_delta` publication is absent from the product tool registry and dispatch; delete is also absent from the installed Codex proxy.
+It rejects `pulse:write`, `pulse:delete`, and `pulse:owner`. The installed Codex MCP exposes only `pulse_team_status`, `pulse_team_recall`, `pulse_team_context_query`, `pulse_team_resume`, and `pulse_team_inspect` for Commons. The broader Team gateway contract also contains member-authorized audit and deletion-status operations, but the installed Codex client does not expose them. Direct `pulse_team_remember` and `pulse_team_graph_delta` publication is absent from the installed product registry and dispatch; delete is also absent from the installed Codex proxy.
 
 Each installation has a P-256 key, a distinct enrollment, a DPoP-bound access token, and a protected credential reference. The gateway validates the access token, exact installation enrollment, proof target/method/token hash, replay state, current membership, client binding, project grant, and object scope on every request. Team responses carry `fallback=false`.
 
@@ -55,6 +55,17 @@ Each installation has a P-256 key, a distinct enrollment, a DPoP-bound access to
 ### Human Owner
 
 Membership changes, installation enrollment, grants, revocation, shared deletion, activation, broader audit, and publication approval are not ordinary member MCP tools. Publication is possible only through the browser Airlock: it shows the exact canonical envelope, requires fresh Owner authentication with platform WebAuthn, and binds approval to the exact store, team, publisher, request, and envelope digest. Possession of a shell, loopback access, token, or daemon IPC key is not human approval.
+
+The separate `pulse team owner` operator surface covers login plus exact
+member, installation-binding, project, and project-grant mutations. Its
+root-owned profile is `/etc/pulse-team/team-owner-profile.json`; the closed
+schema, file ownership, permissions, and complete command sequence are in
+[`deploy/team/README.md`](../deploy/team/README.md). Each mutation displays the
+exact action and target before opening a fresh platform-WebAuthn flow. Its ID
+token nonce binds the canonical operation and a random challenge, and the
+derived assertion ID is consumed durably once. The first Owner login only emits
+an enrollment request: protected registry acceptance/status is still a manual,
+deployment-specific gap and therefore blocks real colleague onboarding.
 
 The Airlock starts Authorization Code + PKCE with `prompt=login`, `max_age=0`, `scope=openid pulse:owner`, and this exact ACR:
 
@@ -99,10 +110,19 @@ Real content stays blocked until all of these are demonstrated against a tempora
 - generation-fenced deletion through database, queue, projection, and live-cache barriers;
 - metadata-only audit with no bearer token, prompt, transcript, summary, secret, or local path;
 - daemon outage returns `shared_memory_unavailable` with `fallback=false`;
-- negative smoke rejects legacy auth, fallback, route, tool, migration, assertion, and approval settings.
-- installed Codex lists only the six read/status/audit Commons tools and receives a sender-constrained token with no write, delete, or Owner scope;
+- negative smoke rejects legacy auth, fallback, route, tool, and malformed-token settings. Migration/store drift, unscoped writers, complete assertion/approval replay matrices, and worker-readiness failures still require a real daemon/store acceptance gate and are not claimed by the current Node-only smoke.
+- installed Codex lists only the five read/status/inspection Commons tools and receives a sender-constrained token with no write, delete, or Owner scope; its `pulse:audit` authorization is not surfaced as an installed tool in this increment;
 - an Airlock approval succeeds only with the exact fresh platform-WebAuthn ACR/claim contract and the exact human-reviewed envelope;
 - a Team-specific embedder is configured and its projection-worker heartbeat is ready; Personal `COHERE_API_KEY` discovery is never reused for Commons.
+
+`make team-remote-daemon-store-acceptance` proves compiled Go, temporary
+SQLite, workers, and the Node gateways. Its Owner slice also runs a synthetic
+HTTP request through CLI-built canonical approval bytes, a real DPoP sender
+proof, signed access and nonce-bound ID tokens, the production authorization
+core, Go/SQLite, tamper denial, durable replay denial after daemon restart, and
+the membership/binding/grant revocation cascade. It does not exercise external
+TLS, a live IdP, protected registry installation, the native helper binary, or
+a packaged fresh-machine CLI install. Those remain separate deployment gates.
 
 Activation is explicit. Passing migrations or starting an empty daemon cannot activate a store automatically.
 

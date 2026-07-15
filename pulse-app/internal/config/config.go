@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -212,7 +214,40 @@ func loadTeamBootstrapRoot() (*teamauth.BootstrapRoot, error) {
 	if set != 3 {
 		return nil, fmt.Errorf("team bootstrap root must set issuer, subject, and admin client binding together")
 	}
+	if !isCanonicalHTTPSIssuer(root.Issuer) {
+		return nil, fmt.Errorf("PULSE_TEAM_BOOTSTRAP_ISSUER must be an exact canonical HTTPS issuer URL")
+	}
 	return &root, nil
+}
+
+func isCanonicalHTTPSIssuer(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Host == "" || parsed.Path == "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.String() != value {
+		return false
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" || hostname != strings.ToLower(hostname) || strings.HasSuffix(parsed.Host, ":") {
+		return false
+	}
+	for _, char := range hostname {
+		if char > 127 {
+			return false
+		}
+	}
+	if port := parsed.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 || strconv.Itoa(value) != port || value == 443 {
+			return false
+		}
+	}
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func loadExpectedTeamIdentity() (string, string, error) {

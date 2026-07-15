@@ -96,7 +96,7 @@ export function readTeamAuthProfile(path, {
   });
 }
 
-async function fetchJWKS(profile, fetchFn, { networkTimeoutMs, signal } = {}) {
+export async function fetchTeamAuthJWKS(profile, fetchFn, { networkTimeoutMs, signal } = {}) {
   let response;
   try {
     response = await boundedRemoteFetch(fetchFn, profile.jwksURI, {
@@ -123,7 +123,7 @@ async function fetchJWKS(profile, fetchFn, { networkTimeoutMs, signal } = {}) {
   return jwks;
 }
 
-function callbackReceiver({ timeoutMs = 180_000 } = {}) {
+export function createTeamAuthCallbackReceiver({ timeoutMs = 180_000 } = {}) {
   const callbackPath = `/pulse/oauth/callback-${randomBytes(18).toString('base64url')}`;
   let settle;
   let reject;
@@ -191,7 +191,7 @@ function callbackReceiver({ timeoutMs = 180_000 } = {}) {
   });
 }
 
-function writeEnrollmentRequest(path, request) {
+export function writeTeamEnrollmentRequest(path, request) {
   if (!isAbsolute(path)) invalid('output_path_invalid');
   const absolute = resolve(path);
   mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
@@ -222,8 +222,8 @@ export async function runTeamLogin({
   if (profile.audience !== binding.commons.resource) invalid('audience_binding_mismatch');
   if (typeof binding.commons.credential_ref !== 'string' || binding.commons.credential_ref === '') invalid('binding_required');
   if (typeof openAuthorizationURL !== 'function' || typeof fetchFn !== 'function') invalid('runtime_unavailable');
-  const jwks = await fetchJWKS(profile, fetchFn, { networkTimeoutMs, signal });
-  const receiver = await callbackReceiver({ timeoutMs });
+  const jwks = await fetchTeamAuthJWKS(profile, fetchFn, { networkTimeoutMs, signal });
+  const receiver = await createTeamAuthCallbackReceiver({ timeoutMs });
   let key;
   let credentialPersisted = false;
   try {
@@ -265,7 +265,7 @@ export async function runTeamLogin({
       signal,
     });
     const proposed = createInstallationEnrollmentRequest({ tokenSet, key });
-    const writtenPath = writeEnrollmentRequest(outputPath, proposed.request);
+    const writtenPath = writeTeamEnrollmentRequest(outputPath, proposed.request);
     try {
       persistRemoteCredential(credentialStore, binding.commons.credential_ref, {
         tokenSet,

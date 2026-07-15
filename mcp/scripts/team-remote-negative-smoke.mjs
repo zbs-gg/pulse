@@ -56,7 +56,7 @@ function spawnEnvironment(overrides = {}) {
     PULSE_DATA_DIR: dataDir,
     PULSE_API_KEY: secretSentinel,
     PULSE_REMOTE_PUBLIC_BASE_URL: publicOrigin,
-    PULSE_REMOTE_AUTH_ISSUER: 'https://synthetic-idp.example',
+    PULSE_REMOTE_AUTH_ISSUER: 'https://synthetic-idp.example/',
     PULSE_REMOTE_ALLOWED_ORIGINS: allowedOrigin,
     PULSE_REMOTE_BEARER: '',
     PULSE_REMOTE_OAUTH_DEV: '',
@@ -188,7 +188,7 @@ try {
   const { publicKey: installationPublicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   writeFileSync(enrollmentRegistryPath, JSON.stringify({
     schema: 'pulse.team.installation_enrollment_registry.v1',
-    issuer: 'https://synthetic-idp.example',
+    issuer: 'https://synthetic-idp.example/',
     enrollments: [{
       enrollment_id: 'enrollment_negative_smoke_1',
       generation: 1,

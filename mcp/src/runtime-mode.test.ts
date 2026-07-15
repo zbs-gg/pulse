@@ -15,7 +15,7 @@ const TEAM_BASELINE: Record<string, string> = {
   PULSE_MCP_MODE: 'daemon',
   PULSE_BASE_URL: 'http://127.0.0.1:18789',
   PULSE_REMOTE_PUBLIC_BASE_URL: 'https://pulse.example.com',
-  PULSE_REMOTE_AUTH_ISSUER: 'https://auth.example.com',
+  PULSE_REMOTE_AUTH_ISSUER: 'https://auth.example.com/',
   PULSE_REMOTE_BEARER: '',
   PULSE_REMOTE_OAUTH_DEV: '',
   PULSE_REMOTE_TRUST_AUTH_HEADER: '',

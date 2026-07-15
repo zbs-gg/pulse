@@ -100,6 +100,37 @@ func TestOwnerMemberRouteConsumesActionBoundApprovalAndReturnsOpaqueMetadata(t *
 	}
 }
 
+func TestOwnerApprovalRejectsIdentityIssuerOutsidePinnedDeployment(t *testing.T) {
+	fixture := newPrincipalFixture(t)
+	server := newOwnerAdminServerFixture(t, fixture)
+	mutation := store.OwnerAdminMutation{
+		Action: store.OwnerActionMembershipCreate, Issuer: "https://other-issuer.example/",
+		Subject: "wrong-issuer-member", Role: "member",
+	}
+	targetKind, targetID, targetDigest, err := store.OwnerAdminMutationTarget(mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"schema": OwnerApprovalSchema, "action": mutation.Action,
+		"store_id": fixture.storeID, "team_id": fixture.teamID,
+		"target_kind": targetKind, "target_id": targetID, "target_digest": targetDigest,
+		"mutation": map[string]any{
+			"issuer": mutation.Issuer, "subject": mutation.Subject, "role": mutation.Role,
+		},
+	})
+	assertion := signOwnerApprovalAssertion(
+		t, fixture, "owner-member-wrong-issuer", body, mutation.Action, fixture.storeID, fixture.teamID,
+	)
+	response := serveOwnerAdminRequest(
+		server.Handler(), OwnerApprovalRoutePath, body, "req-owner-member-wrong-issuer", assertion,
+	)
+	if response.Code != http.StatusBadRequest ||
+		response.Body.String() != "{\"error\":\"invalid_owner_approval\",\"fallback\":false}\n" {
+		t.Fatalf("wrong issuer approval = %d %q", response.Code, response.Body.String())
+	}
+}
+
 func TestOwnerMutationContractsAreActionSpecificAndRejectKnownFieldSmuggling(t *testing.T) {
 	valid := []struct {
 		schema string

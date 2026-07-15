@@ -16,6 +16,19 @@ private let allowedActions: Set<String> = [
     "binding.change", "vault.wipe", "airlock.approve",
     "mandatory.activate", "membership.change",
 ]
+private let allowedDPoPOwnerPaths: Set<String> = [
+    "/owner/v1/approval",
+    "/owner/v1/bootstrap",
+    "/owner/v1/activate",
+    "/owner/v1/members",
+    "/owner/v1/bindings",
+    "/owner/v1/services",
+    "/owner/v1/projects",
+    "/owner/v1/project-grants",
+    "/owner/v1/shared-delete",
+    "/owner/v1/audit",
+    "/owner/v1/deletion-status",
+]
 
 private enum HelperFailure: Error {
     case invalidRequest
@@ -164,6 +177,25 @@ private func validatedHTTPSURL(_ value: Any?, requireMCP: Bool) throws -> String
         throw HelperFailure.invalidRequest
     }
     return text
+}
+
+// Installation metadata pins the OAuth audience to the exact /mcp resource.
+// Owner administration shares that resource's origin, but only these exact,
+// query-free public routes may receive a proof from the same installation key.
+private func validatedDPoPResourceTarget(_ value: Any?, pinnedResource: String) throws -> String {
+    let resource = try validatedHTTPSURL(pinnedResource, requireMCP: true)
+    let target = try validatedHTTPSURL(value, requireMCP: false)
+    if target == resource { return target }
+
+    guard let resourceComponents = URLComponents(string: resource),
+          let targetComponents = URLComponents(string: target),
+          resourceComponents.scheme == targetComponents.scheme,
+          resourceComponents.host?.caseInsensitiveCompare(targetComponents.host ?? "") == .orderedSame,
+          (resourceComponents.port ?? 443) == (targetComponents.port ?? 443),
+          allowedDPoPOwnerPaths.contains(targetComponents.percentEncodedPath) else {
+        throw HelperFailure.invalidRequest
+    }
+    return target
 }
 
 private func validatedBase64URL(_ value: Any?, exactCount: Int? = nil, maximumCount: Int = 512) throws -> String {
@@ -390,6 +422,16 @@ private func runPureSelfTest() throws {
 		  resource.payload["htu"] as? String == "https://team.example/mcp" else {
 		throw HelperFailure.signingFailed
 	}
+	for path in allowedDPoPOwnerPaths.sorted() {
+		var ownerRequest = resourceRequest
+		ownerRequest["htu"] = "https://team.example\(path)"
+		let owner = try validateDPoPProofPolicy(
+			try policyData(ownerRequest), metadata: metadata, now: policyNow
+		)
+		guard owner.payload["htu"] as? String == "https://team.example\(path)" else {
+			throw HelperFailure.signingFailed
+		}
+	}
 	var tokenRequest = resourceRequest
 	tokenRequest["ath"] = ""
 	tokenRequest["enrollment_generation"] = 0
@@ -421,6 +463,20 @@ private func runPureSelfTest() throws {
 	invalid["htm"] = "PATCH"
 	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
 	invalid = tokenRequest
+	invalid["htm"] = "GET"
+	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	for target in [
+		"https://other.example/owner/v1/members",
+		"https://team.example/owner/v1/members/",
+		"https://team.example/owner/v1/members?debug=1",
+		"https://team.example/owner/v1/unknown",
+	] {
+		invalid = resourceRequest
+		invalid["htu"] = target
+		guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
+	}
+	invalid = resourceRequest
+	invalid["htu"] = "https://team.example/owner/v1/members"
 	invalid["htm"] = "GET"
 	guard policyRejects(invalid) else { throw HelperFailure.signingFailed }
 }
@@ -489,10 +545,12 @@ private func validateDPoPProofPolicy(
         "sub": subject,
     ]
     if purpose == "resource" {
-        guard method == "GET" || method == "POST" || method == "DELETE",
-              object["htu"] as? String == pinnedResource,
+        let target = try validatedDPoPResourceTarget(object["htu"], pinnedResource: pinnedResource)
+        let isPinnedMCPResource = target == pinnedResource
+        guard (isPinnedMCPResource && (method == "GET" || method == "POST" || method == "DELETE")) ||
+              (!isPinnedMCPResource && method == "POST"),
               object["nonce"] as? String == "" else { throw HelperFailure.invalidRequest }
-        payload["htu"] = pinnedResource
+        payload["htu"] = target
         payload["ath"] = try validatedBase64URL(object["ath"], exactCount: 43)
         payload["enrollment_id"] = try validatedIdentity(object["enrollment_id"])
         guard let generation = object["enrollment_generation"] as? NSNumber,
@@ -674,7 +732,7 @@ private func run() async throws {
         try emitJSON([
             "schema": "pulse.presence_helper.self_test.v1",
             "status": "pass",
-            "vectors": 13,
+            "vectors": 29,
         ])
         return
     }

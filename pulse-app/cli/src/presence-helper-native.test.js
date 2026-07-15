@@ -41,6 +41,6 @@ test('shipped native helper passes DER-to-P1363 known-answer and malformed vecto
   assert.deepEqual(run('self-test'), {
     schema: 'pulse.presence_helper.self_test.v1',
     status: 'pass',
-    vectors: 13,
+    vectors: 29,
   });
 });

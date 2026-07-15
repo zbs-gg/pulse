@@ -41,6 +41,12 @@ const HELPER_CONSTRAINTS = Object.freeze({
   clientID: CLIENT_ID,
   subject: SUBJECT,
 });
+const HELPER_OWNER_PATHS = Object.freeze([
+  '/owner/v1/approval', '/owner/v1/bootstrap', '/owner/v1/activate',
+  '/owner/v1/members', '/owner/v1/bindings', '/owner/v1/services',
+  '/owner/v1/projects', '/owner/v1/project-grants', '/owner/v1/shared-delete',
+  '/owner/v1/audit', '/owner/v1/deletion-status',
+]);
 const TEST_KEY_THUMBPRINT = 'a'.repeat(43);
 const AUTHORITY = Object.freeze({
   tokenEndpoint: `${ISSUER}oauth/token`,
@@ -53,6 +59,7 @@ function macHelperHarness({ malformedSignature = false, switchPublicKey = false 
   const publicJWK = primary.publicKey.export({ format: 'jwk' });
   const alternatePublicJWK = alternate.publicKey.export({ format: 'jwk' });
   const generic = new Map();
+  const dpopMetadata = new Map();
   const calls = [];
   let publicReads = 0;
   const helperPath = '/test/gg.zbs.pulse.presence-helper';
@@ -83,6 +90,10 @@ function macHelperHarness({ malformedSignature = false, switchPublicKey = false 
     calls.at(-1).payload = payload;
     const keyRef = payload.key_ref;
     if (args[0] === 'dpop-create') {
+      dpopMetadata.set(keyRef, {
+        resource: payload.resource,
+        tokenEndpoint: payload.token_endpoint,
+      });
       return response({ schema: 'pulse.dpop.public.v1', key_ref: keyRef, public_jwk: publicJWK });
     }
     if (args[0] === 'dpop-public') {
@@ -91,6 +102,26 @@ function macHelperHarness({ malformedSignature = false, switchPublicKey = false 
       return response({ schema: 'pulse.dpop.public.v1', key_ref: keyRef, public_jwk: jwk });
     }
     if (args[0] === 'dpop-proof') {
+      const metadata = dpopMetadata.get(keyRef);
+      let targetAllowed = false;
+      try {
+        if (payload.purpose === 'token') {
+          targetAllowed = payload.htm === 'POST' && payload.htu === metadata?.tokenEndpoint;
+        } else if (payload.purpose === 'resource' && metadata) {
+          const resource = new URL(metadata.resource);
+          const target = new URL(payload.htu);
+          const exactMCP = payload.htu === metadata.resource && ['GET', 'POST', 'DELETE'].includes(payload.htm);
+          const exactOwner = payload.htm === 'POST' && target.origin === resource.origin &&
+            target.username === '' && target.password === '' && target.search === '' && target.hash === '' &&
+            target.toString() === payload.htu && HELPER_OWNER_PATHS.includes(target.pathname);
+          targetAllowed = exactMCP || exactOwner;
+        }
+      } catch {
+        targetAllowed = false;
+      }
+      if (!targetAllowed) {
+        return { status: 1, signal: null, stdout: '', stderr: 'denied' };
+      }
       const proofPayload = payload.purpose === 'token'
         ? {
           client_id: payload.client_id, htm: payload.htm, htu: payload.htu, iat: payload.iat,
@@ -814,6 +845,42 @@ test('macOS production store provisions and signs with a non-exportable helper k
     () => store.set('keychain:pulse/team/nik', JSON.stringify({ publicJWK: { ...key.publicJWK, d: 'secret' } })),
     /remote_auth_private_key_persistence_forbidden/,
   );
+});
+
+test('macOS production helper policy signs only exact same-origin Owner POST targets', () => {
+  const harness = macHelperHarness();
+  const store = new MacOSKeychainCredentialStore({
+    spawnSync: harness.spawnSync, helperPath: harness.helperPath, trustMode: 'test',
+  });
+  const key = provisionInstallationKey(store, 'keychain:pulse/team-owner/nik', {
+    keyID: 'install_owner_device_bound_1', constraints: HELPER_CONSTRAINTS,
+  });
+  const claims = (htu, htm = 'POST') => ({
+    schema: 'pulse.dpop.proof.v1', key_ref: key.keyRef, purpose: 'resource',
+    htu, htm, iat: NOW, jti: 'j'.repeat(32), nonce: '',
+    ath: 'h'.repeat(43), enrollment_id: 'enrollment_1', enrollment_generation: 1,
+    client_id: CLIENT_ID, sub: SUBJECT,
+  });
+
+  for (const path of HELPER_OWNER_PATHS) {
+    const target = `https://pulse.example${path}`;
+    const proof = store.createDPoPProof(key.keyRef, claims(target));
+    assert.equal(JSON.parse(Buffer.from(proof.split('.')[1], 'base64url')).htu, target);
+  }
+
+  for (const [target, method] of [
+    ['https://other.example/owner/v1/members', 'POST'],
+    ['https://pulse.example/owner/v1/members/', 'POST'],
+    ['https://pulse.example/owner/v1/members?debug=1', 'POST'],
+    ['https://pulse.example/owner/v1/unknown', 'POST'],
+    ['https://pulse.example/owner/v1/members', 'GET'],
+  ]) {
+    assert.throws(
+      () => store.createDPoPProof(key.keyRef, claims(target, method)),
+      /remote_auth_installation_key_unavailable/,
+      `${method} ${target}`,
+    );
+  }
 });
 
 test('macOS production credential document contains tokens and public JWK but no private key', () => {

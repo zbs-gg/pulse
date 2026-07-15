@@ -19,13 +19,47 @@ import {
   TeamPrincipalClient,
   TeamRequestSecurity,
 } from './principal-context.js';
-import { drainSecurityReporterForShutdown, terminateStartedResponse } from './index.js';
+import {
+  authorizeTeamOwnerPublicOperation,
+  drainSecurityReporterForShutdown,
+  terminateStartedResponse,
+} from './index.js';
 import { requiredTeamCapabilities } from './team-contracts.js';
 
 const ENTRYPOINT = new URL('./index.ts', import.meta.url);
 const DEFAULT_BEARER = 'dev-token';
 const DIRECT_SPAWN_DATA_DIR = mkdtempSync(join(tmpdir(), 'pulse-http-direct-'));
 after(() => rmSync(DIRECT_SPAWN_DATA_DIR, { recursive: true, force: true }));
+
+test('Owner browser assertion failures stay an exact step-up denial after sender auth', async () => {
+  const identity = {
+    issuer: 'https://issuer.example/',
+    subject: 'owner-subject',
+    clientId: 'owner-client',
+    capabilities: ['pulse:owner'] as const,
+    authTime: 1_700_000_000,
+    confirmationKeyThumbprint: 'sender-thumbprint',
+  };
+  await assert.rejects(
+    authorizeTeamOwnerPublicOperation({
+      senderVerifier: { verifyAuthorization: async () => identity },
+      browserVerifier: { verifyBrowserAuthorization: async () => { throw new Error('bad nonce'); } },
+      ownerGateway: { verifyRecentStepUp: () => {} },
+      ownerOperationStepUpNonce: () => 'expected-browser-nonce',
+      ownerStepUpError: () => new Error('owner_step_up_required'),
+    }, {
+      senderHeaders: { authorization: 'DPoP a.b.c', dpop: 'proof', enrollmentID: 'enrollment' },
+      method: 'POST',
+      targetURL: 'https://pulse.example/owner/v1/approval',
+      body: { action: 'membership.create' },
+      idToken: 'bad.id.token',
+      operationChallenge: 'challenge',
+      authorizationStartedAt: 1_700_000_000,
+      maxAuthenticationAgeSeconds: 300,
+    }, identity),
+    /owner_step_up_required/,
+  );
+});
 
 function pkceChallenge(verifier: string): string {
   return createHash('sha256')
@@ -169,7 +203,7 @@ async function startTeamHttpServer(env: Record<string, string> = {}) {
   const enrollmentRegistryFile = join(dir, 'enrollments.json');
   writeFileSync(enrollmentRegistryFile, JSON.stringify({
     schema: 'pulse.team.installation_enrollment_registry.v1',
-    issuer: 'https://auth.example.com',
+    issuer: 'https://auth.example.com/',
     enrollments: [{
       enrollment_id: 'enrollment_test_1', generation: 1,
       client_id: 'test-client', subject: 'test-subject', status: 'active',
@@ -185,7 +219,7 @@ async function startTeamHttpServer(env: Record<string, string> = {}) {
       PULSE_API_KEY: 'synthetic-ipc-key',
       PULSE_DATA_DIR: dir,
       PULSE_REMOTE_PUBLIC_BASE_URL: 'https://pulse.example.com',
-      PULSE_REMOTE_AUTH_ISSUER: 'https://auth.example.com',
+      PULSE_REMOTE_AUTH_ISSUER: 'https://auth.example.com/',
       PULSE_REMOTE_ALLOWED_ORIGINS: 'https://allowed.example',
       PULSE_REMOTE_BEARER: '',
       PULSE_REMOTE_OAUTH_DEV: '',
@@ -286,7 +320,7 @@ test('team HTTP keeps public surface minimal and authenticates before parsing ev
     const metadata = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', server.url));
     assert.deepEqual(await metadata.json(), {
       resource: 'https://pulse.example.com/mcp',
-      authorization_servers: ['https://auth.example.com'],
+      authorization_servers: ['https://auth.example.com/'],
       bearer_methods_supported: ['header'],
       scopes_supported: [
         'pulse:connect', 'pulse:status', 'pulse:read', 'pulse:write',
@@ -357,7 +391,7 @@ test('Owner browser gateway requires exact Host Origin CORS and bearer before pa
     assert.equal(preflight.headers['access-control-allow-methods'], 'POST,OPTIONS');
     assert.equal(
       preflight.headers['access-control-allow-headers'],
-      'Authorization, Content-Type, DPoP, X-Pulse-Enrollment',
+      'Authorization, Content-Type, DPoP, X-Pulse-Enrollment, X-Pulse-Owner-ID-Token, X-Pulse-Owner-Operation-Challenge, X-Pulse-Owner-Authorization-Started-At',
     );
 
     const wrongHost = await directHttpRequest(server.url, 'POST', '/owner/v1/approval', {

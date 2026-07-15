@@ -24,6 +24,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { StandaloneStore } from './standalone.js';
+import type { VerifiedOAuthIdentity } from './oauth-resource.js';
+import type { TeamCapability } from './team-contracts.js';
 import {
   assertTeamRemoteStaticConfig,
   resolveRuntimeMode,
@@ -1396,6 +1398,9 @@ async function startHttpMode(): Promise<void> {
         if (
           hasDuplicateHeader(req, 'authorization') || hasDuplicateHeader(req, 'content-type') ||
           hasDuplicateHeader(req, 'content-encoding') || hasDuplicateHeader(req, 'content-length') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-id-token') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-operation-challenge') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-authorization-started-at') ||
           hasDuplicateHeader(req, 'transfer-encoding') ||
           singleHeader(req.headers['transfer-encoding']) !== ''
         ) {
@@ -1431,7 +1436,46 @@ async function startHttpMode(): Promise<void> {
           return;
         }
         const body = await readRequestJSON(req, 64 * 1024);
-        const result = await teamSecurity.ownerGateway.call(path, identity, requestId, body);
+        const idToken = singleHeader(req.headers['x-pulse-owner-id-token']);
+        const operationChallenge = singleHeader(req.headers['x-pulse-owner-operation-challenge']);
+        const authorizationStartedText = singleHeader(
+          req.headers['x-pulse-owner-authorization-started-at'],
+        );
+        let ownerStepUp: { assertionJTI: string } | undefined;
+        if (path === '/owner/v1/approval') {
+          if (
+            idToken === '' || idToken.length > 16 * 1024 ||
+            !/^[A-Za-z0-9_-]{43}$/.test(operationChallenge) ||
+            !/^[1-9][0-9]{0,10}$/.test(authorizationStartedText)
+          ) {
+            throw new teamSecurity.OwnerError('owner_step_up_required');
+          }
+          const authorized = await authorizeTeamOwnerPublicOperation({
+            senderVerifier: teamSecurity.senderVerifier,
+            browserVerifier: teamSecurity.verifier,
+            ownerGateway: teamSecurity.ownerGateway,
+            ownerOperationStepUpNonce: teamSecurity.ownerOperationStepUpNonce,
+            ownerStepUpError: () => new teamSecurity.OwnerError('owner_step_up_required'),
+          }, {
+            senderHeaders,
+            method: req.method ?? '',
+            targetURL: `${publicBaseURL}${path}`,
+            body,
+            idToken,
+            operationChallenge,
+            authorizationStartedAt: Number(authorizationStartedText),
+            maxAuthenticationAgeSeconds: parseBoundedEnvInt(
+              'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
+            ),
+          }, identity);
+          identity = authorized.identity;
+          ownerStepUp = authorized.ownerStepUp;
+        } else if (idToken !== '' || operationChallenge !== '' || authorizationStartedText !== '') {
+          throw new teamSecurity.OwnerError('invalid_owner_request');
+        }
+        const result = await teamSecurity.ownerGateway.call(
+          path, identity, requestId, body, ownerStepUp,
+        );
         writeJSON(res, result);
       } catch (error) {
         if (teamSecurity.isOAuthError(error) || teamSecurity.isInstallationProofError(error)) {
@@ -1872,6 +1916,7 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
   const ownerGateway = new owner.OwnerApprovalGateway({
     daemonBaseURL: PULSE_BASE_URL,
     signer,
+    expectedOAuthIssuer: authIssuer,
     apiKey: resolveApiKey,
     maxStepUpAgeSeconds: parseBoundedEnvInt(
       'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
@@ -1910,8 +1955,10 @@ async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string)
     airlockGateway,
     isOwnerPublicPath: owner.isOwnerPublicPath,
     isExactOwnerBrowserRequest: owner.isExactOwnerBrowserRequest,
+    ownerOperationStepUpNonce: owner.ownerOperationStepUpNonce,
     isOwnerGatewayError: (error: unknown): error is InstanceType<typeof owner.OwnerGatewayError> =>
       error instanceof owner.OwnerGatewayError,
+    OwnerError: owner.OwnerGatewayError,
     requiredCapabilities: contracts.requiredTeamProductCapabilities,
     metadata: teamMetadata(resource, authIssuer),
     isOAuthError: (error: unknown): error is InstanceType<typeof OAuthResourceError> =>
@@ -1961,7 +2008,93 @@ function writeOwnerCors(res: ServerResponse, origin: string): void {
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, DPoP, X-Pulse-Enrollment');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Authorization, Content-Type, DPoP, X-Pulse-Enrollment, X-Pulse-Owner-ID-Token, X-Pulse-Owner-Operation-Challenge, X-Pulse-Owner-Authorization-Started-At',
+  );
+}
+
+function exactDPoPAccessToken(authorization: string): string {
+  const match = /^DPoP ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.exec(authorization);
+  if (!match || match[1].length > 16 * 1024) throw new Error('invalid Owner access token');
+  return match[1];
+}
+
+type OwnerPublicIdentity = Readonly<VerifiedOAuthIdentity>;
+
+export async function authorizeTeamOwnerPublicOperation(
+  dependencies: Readonly<{
+    senderVerifier: {
+      verifyAuthorization(input: {
+        authorization: string;
+        dpop: string;
+        enrollmentID: string;
+        method: string;
+        targetURL: string;
+      }, requiredCapabilities: readonly TeamCapability[]): Promise<OwnerPublicIdentity>;
+    };
+    browserVerifier: {
+      verifyBrowserAuthorization(input: {
+        accessToken: string;
+        idToken: string;
+        clientId: string;
+        nonce: string;
+        requiredCapabilities: readonly TeamCapability[];
+        maxAuthenticationAgeSeconds: number;
+        authorizationStartedAt: number;
+      }): Promise<OwnerPublicIdentity>;
+    };
+    ownerGateway: { verifyRecentStepUp(identity: OwnerPublicIdentity): void };
+    ownerOperationStepUpNonce(body: unknown, challenge: string): string;
+    ownerStepUpError(): Error;
+  }>,
+  request: Readonly<{
+    senderHeaders: { authorization: string; dpop: string; enrollmentID: string };
+    method: string;
+    targetURL: string;
+    body: unknown;
+    idToken: string;
+    operationChallenge: string;
+    authorizationStartedAt: number;
+    maxAuthenticationAgeSeconds: number;
+  }>,
+  baselineIdentity?: OwnerPublicIdentity,
+): Promise<Readonly<{ identity: OwnerPublicIdentity; ownerStepUp: { assertionJTI: string } }>> {
+  const identity = baselineIdentity ?? await dependencies.senderVerifier.verifyAuthorization({
+    ...request.senderHeaders,
+    method: request.method,
+    targetURL: request.targetURL,
+  }, ['pulse:owner']);
+  dependencies.ownerGateway.verifyRecentStepUp(identity);
+  const expectedNonce = dependencies.ownerOperationStepUpNonce(
+    request.body, request.operationChallenge,
+  );
+  let browserIdentity: OwnerPublicIdentity;
+  try {
+    browserIdentity = await dependencies.browserVerifier.verifyBrowserAuthorization({
+      accessToken: exactDPoPAccessToken(request.senderHeaders.authorization),
+      idToken: request.idToken,
+      clientId: identity.clientId,
+      nonce: expectedNonce,
+      requiredCapabilities: ['pulse:owner'],
+      maxAuthenticationAgeSeconds: request.maxAuthenticationAgeSeconds,
+      authorizationStartedAt: request.authorizationStartedAt,
+    });
+  } catch {
+    // Sender-constrained OAuth already succeeded. Any failure in the separate
+    // browser assertion is a failed human step-up, never a transport verdict.
+    throw dependencies.ownerStepUpError();
+  }
+  if (
+    browserIdentity.issuer !== identity.issuer ||
+    browserIdentity.subject !== identity.subject ||
+    browserIdentity.clientId !== identity.clientId ||
+    browserIdentity.confirmationKeyThumbprint !== identity.confirmationKeyThumbprint
+  ) throw dependencies.ownerStepUpError();
+  return Object.freeze({
+    identity: browserIdentity,
+    ownerStepUp: Object.freeze({ assertionJTI: `owner_browser_${expectedNonce}` }),
+  });
 }
 
 function singleHeader(value: string | string[] | undefined): string {

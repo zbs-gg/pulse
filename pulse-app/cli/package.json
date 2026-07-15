@@ -25,6 +25,8 @@
     "src/team-remote-client.js",
     "src/product-compositor.js",
     "src/team-status.js",
+    "src/team-owner-client.js",
+    "src/team-owner-login.js",
     "src/binding-admin.js",
     "src/trust-helper.js",
     "src/workspace-binding.js",

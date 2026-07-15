@@ -3354,3 +3354,28 @@ test('migrate guide fails clearly for unknown sources', () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /supports: chatgpt, claude, codex, claude-code/);
 });
+
+test('Team Owner CLI exposes the separate step-up and exact mutation commands', () => {
+  const help = run(['--help']).result;
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /pulse team owner login --profile <root-owned-json>/);
+  assert.match(help.stdout, /pulse team owner member create --profile <root-owned-json> --issuer <https-url> --subject <id> --role owner\|member\|reviewer/);
+  assert.match(help.stdout, /pulse team owner member revoke --profile <root-owned-json> --principal-id <id>/);
+  assert.match(help.stdout, /pulse team owner binding create --profile <root-owned-json> --issuer <https-url> --subject <id> --client-id <id>/);
+  assert.match(help.stdout, /pulse team owner binding revoke --profile <root-owned-json> --binding-id <id>/);
+  assert.match(help.stdout, /pulse team owner project create --profile <root-owned-json> --name <name>/);
+  assert.match(help.stdout, /pulse team owner project grant --profile <root-owned-json> --project-id <id> --principal-id <id> --access read\|write\|admin/);
+  assert.match(help.stdout, /pulse team owner project revoke-grant --profile <root-owned-json> --grant-id <id>/);
+
+  const unknown = run(['team', 'owner', 'surprise']).result;
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /pulse team owner supports: login \| member create\|revoke \| binding create\|revoke \| project create\|grant\|revoke-grant/);
+
+  const incomplete = run(['team', 'owner', 'member', 'create']).result;
+  assert.notEqual(incomplete.status, 0);
+  assert.match(incomplete.stderr, /member create requires --issuer, --subject, and --role/);
+
+  const incompleteBinding = run(['team', 'owner', 'binding', 'create']).result;
+  assert.notEqual(incompleteBinding.status, 0);
+  assert.match(incompleteBinding.stderr, /binding create requires --issuer, --subject, and --client-id/);
+});

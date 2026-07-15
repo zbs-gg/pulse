@@ -76,6 +76,9 @@ type ownerApprovalEnvelope struct {
 	BootstrapIntent *ownerBootstrapIntentEnvelope `json:"bootstrap_intent,omitempty"`
 	GateDigest      *string                       `json:"gate_digest,omitempty"`
 	Mutation        *ownerAdminMutationEnvelope   `json:"mutation,omitempty"`
+	Cursor          *string                       `json:"cursor,omitempty"`
+	Limit           *int                          `json:"limit,omitempty"`
+	OperationID     *string                       `json:"operation_id,omitempty"`
 }
 
 type ownerApprovalRequest struct {
@@ -89,6 +92,9 @@ type ownerApprovalRequest struct {
 	BootstrapIntent *ownerBootstrapIntent
 	GateDigest      string
 	Mutation        *store.OwnerAdminMutation
+	Cursor          string
+	Limit           int
+	OperationID     string
 }
 
 type ownerApprovalResponse struct {
@@ -197,6 +203,8 @@ func (s *OwnerAdminServer) Handler() http.Handler {
 	router.Post(OwnerBootstrapRoutePath, s.handleOwnerBootstrap)
 	router.Post(OwnerActivateRoutePath, s.handleOwnerActivate)
 	router.Post(OwnerSharedDeleteRoutePath, s.handleOwnerSharedDelete)
+	router.Post(OwnerAuditRoutePath, s.handleOwnerAudit)
+	router.Post(OwnerDeletionStatusRoutePath, s.handleOwnerDeletionStatus)
 	s.registerMutationRoutes(router)
 	return router
 }
@@ -236,6 +244,11 @@ func (s *OwnerAdminServer) handleOwnerApproval(w http.ResponseWriter, r *http.Re
 	)
 	if err != nil {
 		writeOwnerStepUpError(w, err)
+		return
+	}
+	if request.Mutation != nil && ownerMutationHasIssuer(request.Mutation.Action) &&
+		request.Mutation.Issuer != s.cfg.StepUpVerifier.expectedRoot.Issuer {
+		writeOwnerAdminError(w, http.StatusBadRequest, "invalid_owner_approval")
 		return
 	}
 	ownerID := stepUp.Identity.OwnerPrincipalID
@@ -280,6 +293,12 @@ func (s *OwnerAdminServer) handleOwnerApproval(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeTeamReadJSON(w, response)
+}
+
+func ownerMutationHasIssuer(action string) bool {
+	return action == store.OwnerActionMembershipCreate ||
+		action == store.OwnerActionAgentBindingCreate ||
+		action == store.OwnerActionServicePrincipalCreate
 }
 
 func (s *OwnerAdminServer) handleOwnerBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -402,6 +421,7 @@ func decodeOwnerApprovalRequest(raw []byte) (ownerApprovalRequest, error) {
 	switch request.Action {
 	case store.OwnerActionTeamBootstrap:
 		if envelope.TeamName == nil || envelope.BootstrapIntent == nil || envelope.GateDigest != nil || envelope.Mutation != nil ||
+			envelope.Cursor != nil || envelope.Limit != nil || envelope.OperationID != nil ||
 			!validOwnerDisplayName(*envelope.TeamName) {
 			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
 		}
@@ -414,6 +434,7 @@ func decodeOwnerApprovalRequest(raw []byte) (ownerApprovalRequest, error) {
 		request.TeamName, request.BootstrapIntent = *envelope.TeamName, &intent
 	case store.OwnerActionSyntheticActivate:
 		if envelope.GateDigest == nil || envelope.TeamName != nil || envelope.BootstrapIntent != nil || envelope.Mutation != nil ||
+			envelope.Cursor != nil || envelope.Limit != nil || envelope.OperationID != nil ||
 			!validTeamAdminDigest(*envelope.GateDigest) || request.TargetKind != "team_activation" ||
 			request.TargetID != request.TeamID ||
 			store.SyntheticActivationTargetDigest(request.StoreID, request.TeamID, *envelope.GateDigest) != request.TargetDigest {
@@ -422,13 +443,40 @@ func decodeOwnerApprovalRequest(raw []byte) (ownerApprovalRequest, error) {
 		request.GateDigest = *envelope.GateDigest
 	case store.OwnerActionSharedDelete:
 		if envelope.TeamName != nil || envelope.BootstrapIntent != nil || envelope.GateDigest != nil ||
-			envelope.Mutation != nil || request.TargetKind != "team_object" ||
+			envelope.Mutation != nil || envelope.Cursor != nil || envelope.Limit != nil || envelope.OperationID != nil ||
+			request.TargetKind != "team_object" ||
 			store.SharedDeletionApprovalTargetDigest(request.TargetID) != request.TargetDigest {
 			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
 		}
+	case store.OwnerActionTeamAuditInspect:
+		if envelope.TeamName != nil || envelope.BootstrapIntent != nil || envelope.GateDigest != nil ||
+			envelope.Mutation != nil || envelope.Limit == nil || envelope.OperationID != nil ||
+			*envelope.Limit < 1 || *envelope.Limit > 50 || request.TargetKind != "team_audit" ||
+			request.TargetID != request.TeamID {
+			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
+		}
+		if envelope.Cursor != nil {
+			if !validTeamAdminOpaque(*envelope.Cursor) {
+				return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
+			}
+			request.Cursor = *envelope.Cursor
+		}
+		request.Limit = *envelope.Limit
+		if store.OwnerAuditApprovalTargetDigest(request.Cursor, request.Limit) != request.TargetDigest {
+			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
+		}
+	case store.OwnerActionDeletionStatus:
+		if envelope.TeamName != nil || envelope.BootstrapIntent != nil || envelope.GateDigest != nil ||
+			envelope.Mutation != nil || envelope.Cursor != nil || envelope.Limit != nil || envelope.OperationID == nil ||
+			!validTeamAdminOpaque(*envelope.OperationID) || request.TargetKind != "deletion_operation" ||
+			request.TargetID != *envelope.OperationID ||
+			store.OwnerDeletionStatusApprovalTargetDigest(*envelope.OperationID) != request.TargetDigest {
+			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
+		}
+		request.OperationID = *envelope.OperationID
 	default:
 		if envelope.TeamName != nil || envelope.BootstrapIntent != nil || envelope.GateDigest != nil ||
-			envelope.Mutation == nil {
+			envelope.Mutation == nil || envelope.Cursor != nil || envelope.Limit != nil || envelope.OperationID != nil {
 			return ownerApprovalRequest{}, store.ErrOwnerApprovalInvalid
 		}
 		mutation, ok := decodeOwnerAdminMutation(request.Action, *envelope.Mutation)

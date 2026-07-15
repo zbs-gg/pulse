@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify team-deploy-static-verify team-race-release release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -67,6 +67,9 @@ mcp-build: ## Build MCP server (mcp/)
 cli-test: ## Run published CLI contract tests (pulse-app/cli/)
 	cd $(CLI_DIR) && $(NPM) test
 
+team-remote-daemon-store-acceptance: mcp-build ## Exercise Go/SQLite plus a synthetic Owner HTTP/OIDC/DPoP/CLI chain; external TLS/live IdP stays separate
+	cd $(MCP_DIR) && $(NPM) run acceptance:team-remote-daemon-store
+
 team-deploy-static-verify: ## Validate default-off Team deployment templates on any development host
 	./deploy/team/verify-templates.mjs
 
@@ -76,7 +79,13 @@ team-race-release: ## Run the Team Go release suites under the race detector exa
 release-verify: verify team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
 
 verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
-	@status=pass; \
+	@verify_data=$$(mktemp -d "$${TMPDIR:-/tmp}/pulse-verify.XXXXXX") || exit 1; \
+	trap 'rm -rf "$$verify_data"' EXIT HUP INT TERM; \
+	case "$$verify_data" in \
+	  "$(HOME)/.pulse"|"$(HOME)/.pulse/"*) echo "refusing to verify against the real ~/.pulse"; exit 1;; \
+	esac; \
+	export PULSE_DATA_DIR="$$verify_data"; \
+	status=pass; \
 	( cd $(APP_DIR) \
 	  && $(GO) build ./... \
 	  && $(GO) vet ./... \
@@ -90,6 +99,7 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	       cd $(MCP_DIR) \
 	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
 	       && $(NPM) test --silent && $(NPM) run --silent build \
+	       && $(NPM) run --silent acceptance:team-remote-daemon-store \
 	       && $(NPM) run --silent smoke:standalone-negative \
 	       && $(NPM) run --silent smoke:team-remote-negative; \
 	     else \

@@ -122,12 +122,46 @@ interface OwnerStepUpSignCommon {
   oauthSubject: string;
   oauthClientId: string;
   authTime: number;
+  assertionJTI?: string;
 }
+
+type OwnerApprovalAction =
+  | 'team.bootstrap'
+  | 'team.activation.synthetic'
+  | 'membership.create'
+  | 'membership.revoke'
+  | 'agent_binding.create'
+  | 'agent_binding.revoke'
+  | 'service_principal.create'
+  | 'service_principal.revoke'
+  | 'project.create'
+  | 'project_grant.create'
+  | 'project_grant.revoke'
+  | 'team.object.delete.shared'
+  | 'team.audit.inspect'
+  | 'team.deletion.status';
+
+const OWNER_APPROVAL_ACTIONS = new Set<OwnerApprovalAction>([
+  'team.bootstrap',
+  'team.activation.synthetic',
+  'membership.create',
+  'membership.revoke',
+  'agent_binding.create',
+  'agent_binding.revoke',
+  'service_principal.create',
+  'service_principal.revoke',
+  'project.create',
+  'project_grant.create',
+  'project_grant.revoke',
+  'team.object.delete.shared',
+  'team.audit.inspect',
+  'team.deletion.status',
+]);
 
 export type OwnerStepUpSignInput = OwnerStepUpSignCommon & (
   | {
       path: '/team/v1/owner/approval';
-      action: 'team.bootstrap' | 'team.activation.synthetic';
+      action: OwnerApprovalAction;
     }
   | {
       path: '/airlock/team-publication';
@@ -875,7 +909,7 @@ export class PrincipalSigner {
     const now = this.now();
     const exactActionPath = (
       input.path === '/team/v1/owner/approval' &&
-      ['team.bootstrap', 'team.activation.synthetic'].includes(input.action)
+      OWNER_APPROVAL_ACTIONS.has(input.action as OwnerApprovalAction)
     ) || (
       input.path === '/airlock/team-publication' && input.action === 'team.commons.publish'
     );
@@ -908,7 +942,9 @@ export class PrincipalSigner {
       .setIssuedAt(now)
       .setNotBefore(now - 1)
       .setExpirationTime(now + 30)
-      .setJti(this.randomId())
+      .setJti(input.assertionJTI === undefined
+        ? this.randomId()
+        : requireOpaqueValue(input.assertionJTI, 'Owner browser approval ID'))
       .sign(this.privateKey);
   }
 

@@ -113,7 +113,7 @@ func TestLoadIgnoresTeamOnlyEnvironment(t *testing.T) {
 }
 
 func TestLoadTeamBootstrapRootIsAllOrNothing(t *testing.T) {
-	t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example")
+	t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example/")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "")
 	if _, err := LoadTeam(teamTempDir(t)); err == nil {
@@ -148,8 +148,8 @@ func TestLoadExpectedTeamIdentityIsAllOrNothing(t *testing.T) {
 	}
 }
 
-func TestLoadTeamPreservesBootstrapIdentityExactly(t *testing.T) {
-	t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://Issuer.Example/OIDC")
+func TestLoadTeamPreservesCanonicalBootstrapIdentityExactly(t *testing.T) {
+	t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example/OIDC")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "Owner Subject")
 	t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "Admin/Client")
 
@@ -157,7 +157,7 @@ func TestLoadTeamPreservesBootstrapIdentityExactly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantIssuer := "https://Issuer.Example/OIDC"
+	wantIssuer := "https://issuer.example/OIDC"
 	wantSubject := "Owner Subject"
 	wantClient := "Admin/Client"
 	if cfg.TeamBootstrapRoot == nil ||
@@ -165,6 +165,29 @@ func TestLoadTeamPreservesBootstrapIdentityExactly(t *testing.T) {
 		cfg.TeamBootstrapRoot.Subject != wantSubject ||
 		cfg.TeamBootstrapRoot.AdminClientID != wantClient {
 		t.Fatalf("bootstrap identity was normalized: %+v", cfg.TeamBootstrapRoot)
+	}
+}
+
+func TestLoadTeamRejectsNoncanonicalOrInsecureBootstrapIssuer(t *testing.T) {
+	issuers := []string{
+		"http://issuer.example/",
+		"https://Issuer.Example/OIDC",
+		"https://issuer.example",
+		"https://issuer.example:443/",
+		"https://user@issuer.example/",
+		"https://issuer.example/?tenant=one",
+		"https://issuer.example/#fragment",
+		"https://issuer.example/a/../b",
+	}
+	for _, issuer := range issuers {
+		t.Run(issuer, func(t *testing.T) {
+			t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", issuer)
+			t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "owner-subject")
+			t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "admin-client")
+			if _, err := LoadTeam(teamTempDir(t)); err == nil {
+				t.Fatalf("LoadTeam accepted noncanonical issuer %q", issuer)
+			}
+		})
 	}
 }
 
@@ -183,7 +206,7 @@ func TestLoadTeamRejectsSurroundingWhitespace(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example")
+			t.Setenv("PULSE_TEAM_BOOTSTRAP_ISSUER", "https://issuer.example/")
 			t.Setenv("PULSE_TEAM_BOOTSTRAP_SUBJECT", "owner-subject")
 			t.Setenv("PULSE_TEAM_BOOTSTRAP_ADMIN_CLIENT_ID", "admin-client")
 			t.Setenv("PULSE_TEAM_EXPECTED_STORE_ID", "store_123")

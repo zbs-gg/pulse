@@ -36,6 +36,7 @@ export function createAuthorizationCodePKCERequest({
   callbackURL,
   scopes,
   dpopJKT,
+  nonce: suppliedNonce,
   randomBytes = cryptoRandomBytes,
 }) {
   const issuerURL = pinnedHTTPSURL(issuer, 'issuer_invalid');
@@ -54,7 +55,11 @@ export function createAuthorizationCodePKCERequest({
   const codeVerifier = randomBase64URL(64, randomBytes);
   if (codeVerifier.length < 43 || codeVerifier.length > 128) fail('pkce_verifier_invalid');
   const state = randomBase64URL(32, randomBytes);
-  const nonce = randomBase64URL(32, randomBytes);
+  const nonce = suppliedNonce === undefined
+    ? randomBase64URL(32, randomBytes)
+    : safeString(suppliedNonce, 'nonce_invalid', {
+        max: 256, pattern: /^[A-Za-z0-9_-]{32,256}$/,
+      });
   authorizeURL.searchParams.set('response_type', 'code');
   authorizeURL.searchParams.set('client_id', clientID);
   authorizeURL.searchParams.set('redirect_uri', callback.toString());

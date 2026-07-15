@@ -42,7 +42,7 @@ import {
 } from './team-contracts.js';
 
 const NOW = 1_789_000_000;
-const ISSUER = 'https://synthetic-idp.example';
+const ISSUER = 'https://synthetic-idp.example/';
 const RESOURCE = 'https://synthetic-pulse.example/mcp';
 const STORE_ID = 'store_synthetic_e2e';
 const TEAM_ID = 'team_synthetic_e2e';
@@ -492,7 +492,7 @@ test('synthetic team-remote proof composes OAuth, principal binding, scoped doma
       ? json({ keys: [issuerJWK] })
       : json({
           issuer: ISSUER,
-          jwks_uri: `${ISSUER}/jwks`,
+          jwks_uri: `${ISSUER}jwks`,
           code_challenge_methods_supported: ['S256'],
         }),
   });
@@ -506,6 +506,7 @@ test('synthetic team-remote proof composes OAuth, principal binding, scoped doma
   const ownerGateway = new OwnerApprovalGateway({
     daemonBaseURL: 'http://127.0.0.1:18789',
     signer,
+    expectedOAuthIssuer: ISSUER,
     apiKey: () => IPC_KEY,
     fetch: daemonFetch,
     now: () => NOW,
@@ -642,6 +643,7 @@ test('synthetic team-remote proof composes OAuth, principal binding, scoped doma
         target_digest: ownerActivationTargetDigest(STORE_ID, TEAM_ID, gateDigest),
         gate_digest: gateDigest,
       },
+      { assertionJTI: `owner_browser_${'e'.repeat(43)}` },
     ) as { approval_nonce: string };
     const activation = await ownerGateway.call(
       OWNER_ACTIVATE_PUBLIC_PATH,

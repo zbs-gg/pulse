@@ -32,6 +32,13 @@ import {
 } from './remote-auth-network.js';
 import { readTeamAuthProfile, runTeamLogin } from './team-login.js';
 import { inspectTeamInstallation, setTeamStatusExitCode } from './team-status.js';
+import {
+	createTeamOwnerRemotePost,
+	buildTeamOwnerStepUp,
+	runTeamOwnerOperation,
+	TeamOwnerError,
+} from './team-owner-client.js';
+import { readTeamOwnerAuthProfile, runTeamOwnerLogin, runTeamOwnerStepUp } from './team-owner-login.js';
 import { createWorkspaceBinding, recoverWorkspaceBindingTransaction } from './binding-admin.js';
 import {
   inspectPresenceTrust,
@@ -125,6 +132,14 @@ Usage:
   pulse supervisor start|status|stop [--cwd <path>] [--json]
   pulse team login --profile <root-owned-json> [--out <json>] [--no-open]
   pulse team status [--json]
+  pulse team owner login --profile <root-owned-json> [--out <json>] [--no-open]
+  pulse team owner member create --profile <root-owned-json> --issuer <https-url> --subject <id> --role owner|member|reviewer [--json] [--no-open]
+  pulse team owner member revoke --profile <root-owned-json> --principal-id <id> [--json] [--no-open]
+  pulse team owner binding create --profile <root-owned-json> --issuer <https-url> --subject <id> --client-id <id> [--json] [--no-open]
+  pulse team owner binding revoke --profile <root-owned-json> --binding-id <id> [--json] [--no-open]
+  pulse team owner project create --profile <root-owned-json> --name <name> [--json] [--no-open]
+  pulse team owner project grant --profile <root-owned-json> --project-id <id> --principal-id <id> --access read|write|admin [--json] [--no-open]
+  pulse team owner project revoke-grant --profile <root-owned-json> --grant-id <id> [--json] [--no-open]
   pulse connect claude-code [--remote-control]
   pulse connect codex
   pulse connect chatgpt|claude-chat --base <https-origin-or-mcp-url> [--open]
@@ -5345,6 +5360,185 @@ async function teamStatus() {
 	console.log('[pulse] Agent writes to Commons: disabled. Publication: exact-envelope human Airlock only.');
 }
 
+function requiredTeamOwnerArg(flag, message) {
+	const value = getArg(flag);
+	if (!value) throw new Error(message);
+	return value;
+}
+
+function teamOwnerMutationFromArgs() {
+	const surface = args[2];
+	const action = args[3];
+	if (surface === 'member' && action === 'create') {
+		const message = 'pulse team owner member create requires --issuer, --subject, and --role';
+		return {
+			action: 'membership.create',
+			issuer: requiredTeamOwnerArg('--issuer', message),
+			subject: requiredTeamOwnerArg('--subject', message),
+			role: requiredTeamOwnerArg('--role', message),
+		};
+	}
+	if (surface === 'member' && action === 'revoke') {
+		return {
+			action: 'membership.revoke',
+			target_id: requiredTeamOwnerArg(
+				'--principal-id', 'pulse team owner member revoke requires --principal-id',
+			),
+		};
+	}
+	if (surface === 'binding' && action === 'create') {
+		const message = 'pulse team owner binding create requires --issuer, --subject, and --client-id';
+		return {
+			action: 'agent_binding.create',
+			issuer: requiredTeamOwnerArg('--issuer', message),
+			subject: requiredTeamOwnerArg('--subject', message),
+			client_id: requiredTeamOwnerArg('--client-id', message),
+		};
+	}
+	if (surface === 'binding' && action === 'revoke') {
+		return {
+			action: 'agent_binding.revoke',
+			target_id: requiredTeamOwnerArg(
+				'--binding-id', 'pulse team owner binding revoke requires --binding-id',
+			),
+		};
+	}
+	if (surface === 'project' && action === 'create') {
+		return {
+			action: 'project.create',
+			name: requiredTeamOwnerArg('--name', 'pulse team owner project create requires --name'),
+		};
+	}
+	if (surface === 'project' && action === 'grant') {
+		const message = 'pulse team owner project grant requires --project-id, --principal-id, and --access';
+		return {
+			action: 'project_grant.create',
+			project_id: requiredTeamOwnerArg('--project-id', message),
+			target_principal_id: requiredTeamOwnerArg('--principal-id', message),
+			access_level: requiredTeamOwnerArg('--access', message),
+		};
+	}
+	if (surface === 'project' && action === 'revoke-grant') {
+		return {
+			action: 'project_grant.revoke',
+			target_id: requiredTeamOwnerArg(
+				'--grant-id', 'pulse team owner project revoke-grant requires --grant-id',
+			),
+		};
+	}
+	throw new Error('pulse team owner supports: login | member create|revoke | binding create|revoke | project create|grant|revoke-grant');
+}
+
+async function teamOwnerLogin() {
+	const profilePath = getArg('--profile');
+	if (!profilePath) throw new Error('pulse team owner login requires --profile <root-owned-json>');
+	await recoverBindingAuthority();
+	const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	if (binding.mode !== 'team') throw new Error('pulse team owner login requires a trusted Team workspace binding');
+	const profile = readTeamOwnerAuthProfile(resolve(profilePath));
+	const outputPath = getArg('--out')
+		? resolve(getArg('--out'))
+		: join(
+			DATA_DIR, 'supervisor', 'enrollment-requests',
+			`${binding.commons.team_id}-owner-${Date.now()}-${randomBytes(6).toString('hex')}.json`,
+		);
+	const noOpen = args.includes('--no-open');
+	const result = await runTeamOwnerLogin({
+		profile,
+		binding,
+		credentialStore: createOSCredentialStore(),
+		outputPath,
+		openAuthorizationURL: async (url) => {
+			if (noOpen) {
+				console.log(`[pulse] Open this exact Owner step-up URL in your browser:\n${url}`);
+				return;
+			}
+			openExternalURL(url);
+			console.log('[pulse] Opened the Owner step-up in your browser.');
+		},
+	});
+	if (args.includes('--json')) {
+		console.log(JSON.stringify(result, null, 2));
+		return;
+	}
+	console.log(`[pulse] Owner authentication: ${result.status}.`);
+	console.log(`[pulse] Enrollment: ${result.enrollmentID}.`);
+	if (result.requestDigest) {
+		console.log(`[pulse] Public Owner enrollment request: ${result.requestPath}.`);
+		console.log(`[pulse] Enrollment request digest: ${result.requestDigest}.`);
+		console.log('[pulse] Owner API remains blocked until this separate Owner enrollment is accepted.');
+	} else {
+		console.log('[pulse] Owner authentication refreshed; enrollment acceptance is still verified only by the remote gateway.');
+		console.log('[pulse] Each mutation performs its own action-bound browser step-up.');
+	}
+}
+
+async function teamOwnerMutation() {
+	const input = teamOwnerMutationFromArgs();
+	const profilePath = getArg('--profile');
+	if (!profilePath) throw new Error('pulse team owner mutations require --profile <root-owned-json>');
+	await recoverBindingAuthority();
+	const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	if (binding.mode !== 'team') throw new Error('pulse team owner requires a trusted Team workspace binding');
+	const profile = readTeamOwnerAuthProfile(resolve(profilePath));
+	if ((input.action === 'membership.create' || input.action === 'agent_binding.create') &&
+		input.issuer !== profile.issuer) {
+		throw new TeamOwnerError('request_issuer_mismatch');
+	}
+	const pending = buildTeamOwnerStepUp(binding, input);
+	const noOpen = args.includes('--no-open');
+	const credentialStore = createOSCredentialStore();
+	const browserStepUp = await runTeamOwnerStepUp({
+		profile,
+		binding,
+		credentialStore,
+		operationNonce: pending.nonce,
+		openAuthorizationURL: async (url) => {
+			console.log(`[pulse] Owner approval: ${pending.operation.approval.action} ${pending.operation.approval.target_kind}/${pending.operation.approval.target_id}.`);
+			console.log('[pulse] Exact Owner approval payload bound to this browser step-up:');
+			console.log(pending.approvalText);
+			if (noOpen) {
+				console.log(`[pulse] Open this exact action-bound Owner URL in your browser:\n${url}`);
+				return;
+			}
+			openExternalURL(url);
+			console.log('[pulse] Opened the action-bound Owner step-up in your browser.');
+		},
+	});
+	let receipt;
+	try {
+		receipt = await runTeamOwnerOperation(binding, input, {
+			post: createTeamOwnerRemotePost(binding, { credentialStore }),
+			stepUp: {
+				idToken: browserStepUp.idToken,
+				operationChallenge: pending.challenge,
+				authorizationStartedAt: browserStepUp.authorizationStartedAt,
+			},
+		});
+	} catch (error) {
+		if (error instanceof TeamOwnerError && error.code === 'step_up_required') {
+			throw new Error('Owner action-bound browser approval was rejected or expired; rerun the same Owner mutation');
+		}
+		throw error;
+	}
+	if (args.includes('--json')) {
+		console.log(JSON.stringify(receipt, null, 2));
+		return;
+	}
+	console.log(`[pulse] Owner action: ${receipt.action}; status=${receipt.status}.`);
+	console.log(`[pulse] Target: ${receipt.target_kind}/${receipt.target_id}.`);
+	if (receipt.principal_id) console.log(`[pulse] Principal: ${receipt.principal_id}.`);
+	console.log(`[pulse] Receipt: audit=${receipt.audit_event_id}; auth_epoch=${receipt.auth_epoch}; fallback=false.`);
+}
+
+async function teamOwnerCommand() {
+	if (args[2] === 'login') {
+		await teamOwnerLogin();
+		return;
+	}
+	await teamOwnerMutation();
+}
+
 function parsePulseDataDirFromCommand(command) {
   const text = String(command ?? '');
   const match = text.match(/(?:^|\s)-{1,2}data-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/);
@@ -7963,7 +8157,8 @@ async function main() {
   if (command === 'team') {
 	if (args[1] === 'login') await loginTeam();
 	else if (args[1] === 'status') await teamStatus();
-	else throw new Error('pulse team supports: pulse team login | pulse team status');
+	else if (args[1] === 'owner') await teamOwnerCommand();
+	else throw new Error('pulse team supports: pulse team login | pulse team status | pulse team owner');
 	return;
   }
 

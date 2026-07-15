@@ -119,9 +119,45 @@ Docs, agent install script, and source: https://github.com/zbs-gg/pulse
 
 Team remote is a separate synthetic foundation, not another Local Preview
 install target. The CLI never sends the local `X-Pulse-Key` to a configurable
-remote base; that header is allowed only for an exact loopback host. Real team
-onboarding and the IdP-specific Owner browser UI are not available in the
-public preview package. See
+remote base; that header is allowed only for an exact loopback host. The
+default-off Owner operator contour uses a separate least-privilege
+`pulse:owner` credential, fresh browser step-up, and exact two-phase HTTPS
+approval for member and project administration; it never upgrades the
+installed read-only credential. A root-controlled IdP profile, accepted Owner
+enrollment, and a verified deployment are still required, so this is not a
+claim that real team onboarding is live in the public preview. See
 [`docs/TEAM_REMOTE_PILOT.md`](../../docs/TEAM_REMOTE_PILOT.md).
+
+Before using the Owner CLI, a deployment operator must create the exact
+root-owned, operator-readable profile documented in
+[`deploy/team/README.md`](../../deploy/team/README.md) at
+`/etc/pulse-team/team-owner-profile.json`. The profile contains no client secret;
+it pins the public Owner client, expected human subject, issuer endpoints, exact
+`/mcp` audience, and scopes
+`openid offline_access pulse:connect pulse:owner`. The bounded operator flow
+then begins as follows:
+
+```bash
+pulse team owner login --profile /etc/pulse-team/team-owner-profile.json
+# A human operator installs the emitted request into the protected deployment registry.
+pulse team owner member create --profile /etc/pulse-team/team-owner-profile.json --issuer https://issuer.example/ --subject user-id --role member
+pulse team owner binding create --profile /etc/pulse-team/team-owner-profile.json --issuer https://issuer.example/ --subject user-id --client-id codex-user
+pulse team owner project create --profile /etc/pulse-team/team-owner-profile.json --name "Project Atlas"
+pulse team owner project grant --profile /etc/pulse-team/team-owner-profile.json --project-id project_... --principal-id principal_... --access write
+pulse team owner project revoke-grant --profile /etc/pulse-team/team-owner-profile.json --grant-id grant_...
+```
+
+The first login emits a separate enrollment request. This package does not yet
+install or approve that request: the deployment operator must verify its digest
+and atomically update the service-owned registry. A second login reports that
+acceptance is unverified rather than claiming readiness. Every mutation starts
+its own platform-WebAuthn browser flow; the ID-token nonce is bound to the exact
+canonical action and random challenge, and the resulting assertion ID is
+consumed durably once. Mutation commands return opaque IDs and audit metadata,
+never the supplied subject, issuer, or project name. The composed acceptance
+gate exercises the production authorization core with synthetic HTTP,
+CLI-built approval bytes, DPoP, and signed tokens; it does not claim external
+TLS, live IdP behavior, protected registry installation, native helper
+execution, or a packaged fresh-machine CLI install.
 
 AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available (`COMMERCIAL.md`).
