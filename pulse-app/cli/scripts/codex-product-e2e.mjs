@@ -75,6 +75,10 @@ async function freePort() {
   return port;
 }
 
+function personalPrincipalID(suffix) {
+  return `principal_${createHash('sha256').update(`pulse-codex-e2e:${suffix}`).digest('hex').slice(0, 32)}`;
+}
+
 function writeSignedPersonalBindings(root, fixtures) {
   const supervisor = join(root, 'trust');
   mkdirSync(supervisor, { recursive: true, mode: 0o700 });
@@ -93,7 +97,7 @@ function writeSignedPersonalBindings(root, fixtures) {
         repository_id: workspace.repository_id,
       },
       mode: 'personal',
-			principal_ref: `principal_codex_e2e_${suffix}`,
+			principal_ref: personalPrincipalID(suffix),
 			personal: {
 				store_id: `store_personal_codex_e2e_${suffix}`,
 				data_dir: join(root, 'vaults', `personal-${suffix}`),
@@ -155,6 +159,38 @@ function digestFile(path) {
 	}
 }
 
+function copyRegularTree(source, destination) {
+	const info = lstatSync(source);
+	if (info.isSymbolicLink()) throw new Error(`marketplace fixture source contains a symlink: ${source}`);
+	if (info.isDirectory()) {
+		mkdirSync(destination, { recursive: true, mode: info.mode & 0o777 });
+		for (const name of readdirSync(source).sort()) {
+			copyRegularTree(join(source, name), join(destination, name));
+		}
+		return;
+	}
+	if (!info.isFile()) throw new Error(`marketplace fixture source is not a regular file: ${source}`);
+	mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+	writeFileSync(destination, readFileSync(source), { mode: info.mode & 0o777 });
+}
+
+function regularTreeManifest(root) {
+	const files = [];
+	function visit(directory, prefix = '') {
+		for (const name of readdirSync(directory).sort()) {
+			const path = join(directory, name);
+			const relative = prefix ? `${prefix}/${name}` : name;
+			const info = lstatSync(path);
+			if (info.isSymbolicLink()) throw new Error(`installed marketplace plugin contains a symlink: ${relative}`);
+			if (info.isDirectory()) visit(path, relative);
+			else if (info.isFile()) files.push({ path: relative, sha256: digestFile(path).sha256 });
+			else throw new Error(`installed marketplace plugin contains an unsafe entry: ${relative}`);
+		}
+	}
+	visit(root);
+	return files;
+}
+
 async function prepareRealMLXInputs(root) {
 	const manifestBytes = readFileSync(realReleaseManifest, 'utf8');
 	const envelope = JSON.parse(manifestBytes);
@@ -205,18 +241,28 @@ try {
   const installRoot = join(root, 'packed-cli');
 	const pulseDataDir = join(root, 'pulse');
 	const artifactRoot = join(pulseDataDir, 'artifacts');
+	const marketplaceRoot = join(root, 'marketplace-fixture');
+	const marketplaceManifestSource = join(repoRoot, '.agents', 'plugins', 'marketplace.json');
+	const marketplaceManifestPath = join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json');
+	const marketplacePluginSource = join(repoRoot, 'plugins', 'pulse');
+	const marketplacePluginRoot = join(marketplaceRoot, 'plugins', 'pulse');
   mkdirSync(home, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(installRoot, { recursive: true });
+	copyRegularTree(marketplaceManifestSource, marketplaceManifestPath);
+	copyRegularTree(marketplacePluginSource, marketplacePluginRoot);
+	assert.deepEqual(readFileSync(marketplaceManifestPath), readFileSync(marketplaceManifestSource));
+	assert.deepEqual(regularTreeManifest(marketplacePluginRoot), regularTreeManifest(marketplacePluginSource));
   initializeRepository(workspace);
 	initializeRepository(workspaceB);
 
   const port = await freePort();
 	const portB = await freePort();
-	const bindingPaths = writeSignedPersonalBindings(root, [
-		{ workspace: canonicalizeWorkspace(workspace), port, suffix: 'a' },
-		{ workspace: canonicalizeWorkspace(workspaceB), port: portB, suffix: 'b' },
-	]);
+	const bindingPaths = {
+		registryPath: join(root, 'trust', 'workspace-bindings.json'),
+		publicKeyPath: join(root, 'trust', 'workspace-bindings.pub.pem'),
+		anchorPath: join(root, 'trust', 'workspace-bindings.anchor.json'),
+	};
 	const daemon = join(root, 'pulse-product-daemon');
 	run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
 	chmodSync(daemon, 0o700);
@@ -246,11 +292,13 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const realInputs = requireRealMLX ? await prepareRealMLXInputs(root) : null;
 	let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 8, { realInputs });
 	const productEvidence = realInputs ? {
+		authority: 'synthetic-test', production_install_proof: false,
 		embedder: 'real-mlx-bge-m3', full_retrieval: true,
 		model_sha256: realInputs.modelDigest.sha256,
 		runtime_sha256: realInputs.runtimeDigest.sha256,
 		schema: 'pulse.codex_product_e2e.v1',
 	} : {
+		authority: 'synthetic-test', production_install_proof: false,
 		embedder: 'synthetic-protocol-fixture', full_retrieval: true,
 		schema: 'pulse.codex_product_e2e.v1',
 	};
@@ -283,7 +331,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
-		PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
+		PULSE_CODEX_MARKETPLACE_SOURCE: marketplaceRoot,
 	};
 	for (const name of [
 		'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
@@ -291,6 +339,31 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	]) delete env[name];
 	assert.equal(existsSync(join(tools, 'go')), false);
 	assert.equal(existsSync(join(tools, 'python')), false);
+
+	const personalPlan = JSON.parse(run(process.execPath, [packedCLI, 'install-plan', '--json'], {
+		cwd: workspace, env,
+	}).stdout);
+	assert.equal(personalPlan.schema, 'pulse.personal_install_plan.v1');
+	assert.equal(personalPlan.outcome, 'action_required');
+	assert.deepEqual(personalPlan.reason_codes, ['synthetic_authority_forbidden']);
+	assert.equal(personalPlan.target_host, 'codex');
+	assert.equal(personalPlan.release.artifacts.length, 5);
+	assert.equal(personalPlan.release.total_download_bytes > 0, true);
+	assert.deepEqual(personalPlan.release.origins, ['https://releases.zbs.gg']);
+	const rejectedPublicInstall = run(process.execPath, [packedCLI, 'install', '--json'], {
+		cwd: workspace, env, status: 1,
+	});
+	const rejectedPublicInstallResult = JSON.parse(rejectedPublicInstall.stdout);
+	assert.equal(rejectedPublicInstallResult.outcome, 'action_required');
+	assert.equal(rejectedPublicInstallResult.reason_code, 'synthetic_authority_forbidden');
+	assert.deepEqual(rejectedPublicInstallResult.completed_steps, []);
+	assert.equal(existsSync(pulseDataDir), false, 'synthetic public install rejection must not create product state');
+	assert.equal(existsSync(join(home, '.pulse')), false, 'synthetic public install rejection must not create identity state');
+	assert.deepEqual(readdirSync(codexHome), [], 'synthetic public install rejection must not mutate Codex');
+	assert.deepEqual(writeSignedPersonalBindings(root, [
+		{ workspace: canonicalizeWorkspace(workspace), port, suffix: 'a' },
+		{ workspace: canonicalizeWorkspace(workspaceB), port: portB, suffix: 'b' },
+	]), bindingPaths);
 
 	const failedConnect = run(process.execPath, [packedCLI, 'connect', 'codex'], {
 		cwd: workspace, env, status: 1, timeout: 30_000,
@@ -309,8 +382,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
 
-  const connected = run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env });
-  assert.match(connected.stdout, /pulse@|Codex plugin installed/);
+	const connected = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+		cwd: workspace, env, timeout: 120_000,
+	});
+	assert.match(connected.stdout, /pulse@|Codex plugin installed/);
 
   const nativeMcp = run('codex', ['mcp', 'get', 'pulse-product', '--json'], { cwd: workspace, env });
   const nativeMcpConfig = JSON.parse(nativeMcp.stdout);
@@ -322,6 +397,13 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   const cacheVersions = readdirSync(join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse'));
   assert.equal(cacheVersions.length, 1);
   const pluginRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', cacheVersions[0]);
+	const configuredMarketplaces = run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout;
+	assert.equal(configuredMarketplaces.includes(marketplaceRoot), true,
+		'Codex marketplace provenance must name the isolated fixture');
+	assert.equal(configuredMarketplaces.includes(repoRoot), false,
+		'packed Codex lifecycle must not register the live repository as marketplace provenance');
+	assert.deepEqual(regularTreeManifest(pluginRoot), regularTreeManifest(marketplacePluginRoot),
+		'installed Codex plugin bytes must exactly match the isolated marketplace fixture');
   const hook = join(pluginRoot, 'hooks', 'pulse-hook.mjs');
   const sessionID = 'session-codex-e2e';
   const freshHostEnv = Object.fromEntries(
@@ -713,8 +795,8 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 
 	process.stdout.write(`${JSON.stringify(productEvidence)}\n`);
 	process.stdout.write(requireRealMLX
-		? 'Pulse Codex packed-product real-MLX E2E passed.\n'
-		: 'Pulse Codex packed-product synthetic-protocol E2E passed.\n');
+		? 'Pulse Codex packed-product synthetic-authority lifecycle with real MLX passed; this is not a production install proof.\n'
+		: 'Pulse Codex packed-product synthetic-authority lifecycle passed; this is not a production install proof.\n');
 } finally {
   if (!runtimeStopped) {
     const receiptPaths = [

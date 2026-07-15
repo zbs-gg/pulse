@@ -178,6 +178,18 @@ function recoverInvalidCurrent(artifact, installRoot) {
   }
 }
 
+function readVerifiedPersonalRelease(manifestPath, epochPath, verification) {
+  return verifyReleaseManifestEnvelope(readCanonicalEnvelope(manifestPath), {
+    architecture: verification.architecture,
+    minimumAcceptedEpoch: readMinimumReleaseEpoch(epochPath),
+    now: verification.now,
+    osVersion: verification.osVersion,
+    packageVersion: verification.packageVersion,
+    platform: verification.platform,
+    trustedKeys: verification.trustedKeys,
+  });
+}
+
 export async function provisionPersonalRuntime({
   architecture = process.arch,
   dataDir,
@@ -202,15 +214,8 @@ export async function provisionPersonalRuntime({
   const lockPath = join(runtimeRoot, 'install.lock');
   const releaseLock = acquireInstallLock(lockPath);
   try {
-    const envelope = readCanonicalEnvelope(manifestPath);
-    const release = verifyReleaseManifestEnvelope(envelope, {
-      architecture,
-      minimumAcceptedEpoch: readMinimumReleaseEpoch(epochPath),
-      now,
-      osVersion,
-      packageVersion: expectedPackageVersion,
-      platform,
-      trustedKeys,
+    const release = readVerifiedPersonalRelease(manifestPath, epochPath, {
+      architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
     });
     const activeSetPath = join(installRoot, 'active-release.json');
     const previous = previousActivationDigest(activeSetPath);
@@ -256,6 +261,75 @@ export async function provisionPersonalRuntime({
   } finally {
     releaseLock();
   }
+}
+
+export function inspectPersonalRuntime({
+  architecture = process.arch,
+  dataDir,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  now = new Date(),
+  osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
+  packageVersion: expectedPackageVersion = packageVersion(),
+  platform = process.platform,
+  trustedKeys = pinnedReleaseKeyring(),
+} = {}) {
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
+    fail('personal_runtime_configuration_invalid');
+  }
+  const root = resolve(dataDir);
+  const release = readVerifiedPersonalRelease(
+    manifestPath,
+    join(root, 'runtime', 'minimum-release-epoch.json'),
+    { architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+  );
+  try {
+    const activationSet = readActivatedArtifactSet(release, {
+      installRoot: join(root, 'artifacts'),
+    });
+    return Object.freeze({
+      activationSet,
+      ready: true,
+      reason_code: 'runtime_staged',
+      release,
+    });
+  } catch (error) {
+    return Object.freeze({
+      activationSet: null,
+      ready: false,
+      reason_code: typeof error?.code === 'string' ? error.code : 'runtime_not_staged',
+      release,
+    });
+  }
+}
+
+// Verify only the signed release envelope and compatibility metadata. The
+// disclosure screen uses this path before consent so it never pays the cost of
+// hashing an already-installed model tree. Full artifact integrity remains a
+// post-consent installer step under the install lock.
+export function inspectPersonalRelease({
+  architecture = process.arch,
+  dataDir,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  now = new Date(),
+  osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
+  packageVersion: expectedPackageVersion = packageVersion(),
+  platform = process.platform,
+  trustedKeys = pinnedReleaseKeyring(),
+} = {}) {
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
+    fail('personal_runtime_configuration_invalid');
+  }
+  const root = resolve(dataDir);
+  const release = readVerifiedPersonalRelease(
+    manifestPath,
+    join(root, 'runtime', 'minimum-release-epoch.json'),
+    { architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+  );
+  return Object.freeze({
+    ready: true,
+    reason_code: 'release_manifest_verified',
+    release,
+  });
 }
 
 // Raise the anti-rollback floor only after managed retrieval and host

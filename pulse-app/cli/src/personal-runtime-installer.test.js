@@ -10,7 +10,12 @@ import test from 'node:test';
 import { canonicalReleaseJSON, releaseKeyID } from './release-manifest.js';
 import { readActivatedArtifactSet } from './artifact-installer.js';
 import { acquireInstallLock } from './install-journal.js';
-import { commitPersonalRuntimeRelease, provisionPersonalRuntime } from './personal-runtime-installer.js';
+import {
+  commitPersonalRuntimeRelease,
+  inspectPersonalRelease,
+  inspectPersonalRuntime,
+  provisionPersonalRuntime,
+} from './personal-runtime-installer.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -139,6 +144,19 @@ test('empty Personal install downloads the signed compatibility set and publishe
     assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'minimum-release-epoch.json'), 'utf8')).epoch, 7);
     assert.equal(readActivatedArtifactSet(installed.release, { installRoot: join(dataDir, 'artifacts') }).record.epoch, 7);
 
+    const inspection = inspectPersonalRuntime({
+      architecture: 'arm64', dataDir, manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin',
+      trustedKeys: [{
+        key_id: value.keyID, public_key_pem: value.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(inspection.ready, true);
+    assert.equal(inspection.reason_code, 'runtime_staged');
+    assert.equal(inspection.release.manifest_digest, installed.release.manifest_digest);
+
     await provisionPersonalRuntime({
       architecture: 'arm64', dataDir, manifestPath,
       fetchImpl: async () => { throw new Error('idempotent install must not download'); },
@@ -150,6 +168,43 @@ test('empty Personal install downloads the signed compatibility set and publishe
         valid_from_epoch: 1, valid_through_epoch: 20,
       }],
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Personal runtime inspection verifies the release without creating install state', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime-inspect.'));
+  const manifestPath = join(root, 'manifest.json');
+  const dataDir = join(root, 'missing-data');
+  const value = fixture();
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
+  try {
+    const releaseInspection = inspectPersonalRelease({
+      architecture: 'arm64', dataDir, manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin',
+      trustedKeys: [{
+        key_id: value.keyID, public_key_pem: value.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(releaseInspection.ready, true);
+    assert.equal(releaseInspection.reason_code, 'release_manifest_verified');
+    assert.equal(releaseInspection.release.epoch, 7);
+
+    const inspection = inspectPersonalRuntime({
+      architecture: 'arm64', dataDir, manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin',
+      trustedKeys: [{
+        key_id: value.keyID, public_key_pem: value.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(inspection.ready, false);
+    assert.equal(inspection.release.epoch, 7);
+    assert.equal(existsSync(dataDir), false, 'inspection must not create Pulse product state');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

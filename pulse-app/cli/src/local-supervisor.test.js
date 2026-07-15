@@ -191,7 +191,11 @@ const value = (name) => process.argv[process.argv.indexOf(name) + 1];
 const dataDir = value('-data-dir');
 const [host, port] = value('-addr').split(':');
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
+try {
+  writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600, flag: 'wx' });
+} catch (error) {
+  if (error?.code !== 'EEXIST') throw error;
+}
 const server = createServer((request, response) => {
   if (request.url === '/health' && request.headers['x-pulse-key'] === 'a'.repeat(64)) {
     response.end('{"status":"ok"}'); return;

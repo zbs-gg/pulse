@@ -425,6 +425,88 @@ test('install-plan claude-code prints human-readable trust plan', () => {
   assert.doesNotMatch(result.stdout, /PULSE_API_KEY|secret\.key|sk-|ghp_|xoxb-/);
 });
 
+test('install-plan --json exposes the Codex-first Personal product contract without mutation', () => {
+  const { home, result } = run(['install-plan', '--json']);
+
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.schema, 'pulse.personal_install_plan.v1');
+  assert.equal(plan.target_host, 'codex');
+  assert.equal(plan.stage, 'personal_stage_1');
+  assert.equal(plan.privacy.raw_transcript_capture, 'off');
+  assert.equal(plan.privacy.backend_model_calls, 'off');
+  assert.match(plan.reason_codes.join('\n'), /workspace_not_git/);
+  assert.match(plan.reason_codes.join('\n'), /release_manifest_unavailable/);
+  assert.equal(existsSync(join(home, '.pulse')), false);
+});
+
+test('non-interactive Personal install prints disclosure and cancels before product state', () => {
+  const { home, result } = run(['install']);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Pulse Personal install/);
+  assert.match(result.stdout, /Nothing above is written until you approve/);
+  assert.match(result.stdout, /action_required/);
+  assert.equal(existsSync(join(home, '.pulse')), false);
+});
+
+test('Personal install --json keeps stdout machine-readable', () => {
+  const { result } = run(['install', '--json']);
+
+  assert.notEqual(result.status, 0);
+  const terminal = JSON.parse(result.stdout);
+  assert.equal(terminal.schema, 'pulse.personal_install_result.v1');
+  assert.equal(terminal.outcome, 'action_required');
+  assert.match(result.stderr, /Pulse Personal install/);
+  assert.doesNotMatch(result.stdout, /Pulse Personal install/);
+});
+
+test('complete pre-consent plan never executes a project-local Codex from PATH', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-plan-safe-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-plan-safe-cwd.'));
+  const bin = join(cwd, 'bin');
+  const marker = join(cwd, 'codex-executed');
+  mkdirSync(bin);
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(bin, 'codex'), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o700 });
+  chmodSync(join(bin, 'codex'), 0o700);
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PATH: `${bin}:/usr/bin:/bin` });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).schema, 'pulse.personal_install_plan.v1');
+  assert.equal(existsSync(marker), false);
+});
+
+test('public Personal installer rejects a marketplace source override as synthetic authority', () => {
+  const { result } = run(['install-plan', '--json'], {
+    PULSE_CODEX_MARKETPLACE_SOURCE: '/tmp/untrusted-pulse-marketplace',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.outcome, 'action_required');
+  assert.ok(plan.reason_codes.includes('synthetic_authority_forbidden'));
+});
+
+test('preflight derives resume evidence from a durable runtime journal after process interruption', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-cwd.'));
+  const dataDir = join(home, 'pulse-data');
+  mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(dataDir, 'runtime', 'install-journal.json'), JSON.stringify({
+    schema: 'pulse.personal_install_journal.v1',
+    phase: 'downloading',
+    manifest_digest: 'a'.repeat(64),
+  }), { mode: 0o600 });
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
+});
+
 test('init claude-code dry run prints install plan and writes nothing', () => {
   const { cwd, home, result } = run(['init', 'claude-code', '--dry-run']);
 
@@ -840,6 +922,13 @@ test('disconnect claude-code never overwrites invalid hook JSON', () => {
 
 test('viewer prints local authenticated viewer URL', () => {
   const { result } = run(['viewer']);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\/viewer\?key=/);
+});
+
+test('home exposes the existing local Memory Home surface', () => {
+  const { result } = run(['home']);
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\/viewer\?key=/);
