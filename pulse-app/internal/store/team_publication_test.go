@@ -27,6 +27,7 @@ func committedDeskObject(t *testing.T, desk *Store) MemoryWriteReceipt {
 	if err != nil {
 		t.Fatalf("prepare desk memory: %v", err)
 	}
+	presentTrayReceipt(t, desk, prepared.Receipts[0], now, time.Second)
 	committed, err := desk.CommitMemoryTrayCandidate(
 		prepared.Receipts[0].CandidateID, prepared.Receipts[0].CandidateVersion, now.Add(time.Second),
 	)
@@ -181,7 +182,10 @@ func TestDeskPublicationIntentPayloadIsPurgedBySourceDeleteAndFullWipe(t *testin
 		if err := desk.WipeProductMemory(); err != nil {
 			t.Fatalf("wipe Desk with publication intent: %v", err)
 		}
-		for _, table := range []string{"team_publication_intents", "private_memory_objects", "memory_capsules"} {
+		for _, table := range []string{
+			"team_publication_intents", "memory_presentation_receipts",
+			"private_memory_objects", "memory_capsules",
+		} {
 			var rows int
 			if err := desk.DB().QueryRow("SELECT count(*) FROM " + table).Scan(&rows); err != nil || rows != 0 {
 				t.Fatalf("%s rows after wipe=%d err=%v", table, rows, err)

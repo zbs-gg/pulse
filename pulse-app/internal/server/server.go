@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -66,8 +67,10 @@ type BillingStatus struct {
 
 // Server wraps the chi router.
 type Server struct {
-	cfg     Config
-	started time.Time
+	cfg            Config
+	started        time.Time
+	trayScheduleMu sync.Mutex
+	traySchedules  map[memoryTrayScheduleKey]*memoryTrayScheduleState
 }
 
 func New(cfg Config) (*Server, error) {
@@ -83,7 +86,10 @@ func New(cfg Config) (*Server, error) {
 	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
 		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
 	}
-	server := &Server{cfg: cfg, started: time.Now()}
+	server := &Server{
+		cfg: cfg, started: time.Now(),
+		traySchedules: make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
+	}
 	if err := server.recoverMemoryTray(); err != nil {
 		return nil, err
 	}

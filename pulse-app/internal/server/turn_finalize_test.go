@@ -81,6 +81,27 @@ func newProductMemoryServer(t *testing.T) (*store.Store, *httptest.Server) {
 	return vault, httptest.NewServer(srv.Handler())
 }
 
+func presentProductCandidate(t *testing.T, vault *store.Store, receipt store.MemoryWriteReceipt, now time.Time, grace time.Duration) {
+	t.Helper()
+	var bindingDigest string
+	if err := vault.DB().QueryRow(`
+		SELECT ledger.binding_digest
+		  FROM memory_tray_candidates candidate
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE candidate.candidate_id=?`,
+		receipt.CandidateID,
+	).Scan(&bindingDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.PresentMemoryTrayCandidate(store.MemoryPresentationRequest{
+		CandidateID: receipt.CandidateID, CandidateVersion: receipt.CandidateVersion,
+		ContentDigest: receipt.ContentDigest, BindingDigest: bindingDigest,
+		TrustedSurfaceKind: "memory_home", TrustedSurfaceInstance: "test_home_" + receipt.CandidateID,
+	}, now, grace); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
 	_, ts := newProductMemoryServer(t)
 	defer ts.Close()
@@ -271,6 +292,7 @@ func TestMemoryStatusSurfacesCaptureDisabledWithoutDeletingData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, time.Second)
 	if _, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +346,125 @@ func TestTurnNoChangeRouteIsDurableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshSessionFacts(t *testing.T) {
+	terminal := TerminalMemoryReadinessFact{
+		ReceiptID: "receipt_memory_01", PresentationReceiptID: "presentation_01", ObjectID: "pulse:memory_01",
+		EvidenceIDs: []string{"pulse:pulse:memory_01"}, Status: string(store.MemoryWriteCreated),
+		ContentDigest: strings.Repeat("c", 64),
+		MemoryKind:    "decision", ConversationScope: "current_turn",
+		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository-pulse",
+		Host: "codex", SessionID: "session-a", CreatedAt: "2026-07-16T01:00:00Z",
+		Active: true,
+	}
+	offered := ContextDeliveryReadinessFact{
+		ContextID: "context_01", Acknowledgement: "offered_to_host",
+		ObjectIDs: []string{terminal.ObjectID}, EvidenceIDs: []string{terminal.EvidenceIDs[0]},
+		PayloadDigest: strings.Repeat("b", 64), BindingDigest: terminal.BindingDigest,
+		RepositoryID: terminal.RepositoryID, Host: "codex", SessionID: "session-b",
+		CreatedAt: "2026-07-16T01:01:00Z",
+	}
+	observed := offered
+	observed.Acknowledgement = "host_observed"
+	observed.CreatedAt = "2026-07-16T01:02:00Z"
+
+	tests := []struct {
+		name      string
+		memories  []TerminalMemoryReadinessFact
+		delivery  []ContextDeliveryReadinessFact
+		wantState string
+	}{
+		{name: "no terminal memory", wantState: "first_memory_pending"},
+		{name: "unpresented terminal receipt is not a proof", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			unpresented := terminal
+			unpresented.PresentationReceiptID = ""
+			return unpresented
+		}()}, wantState: "first_memory_pending"},
+		{name: "empty terminal identity is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			malformed := terminal
+			malformed.ReceiptID = ""
+			malformed.MemoryKind = ""
+			return malformed
+		}()}, wantState: "first_memory_pending"},
+		{name: "whitespace terminal identity is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			malformed := terminal
+			malformed.ReceiptID = " receipt_memory_01"
+			malformed.Host = "codex "
+			return malformed
+		}()}, wantState: "first_memory_pending"},
+		{name: "non canonical terminal time is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			malformed := terminal
+			malformed.CreatedAt = "2026-07-16"
+			return malformed
+		}()}, wantState: "first_memory_pending"},
+		{name: "non canonical fractional time is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			malformed := terminal
+			malformed.CreatedAt = "2026-07-16T01:00:00.1000Z"
+			return malformed
+		}()}, wantState: "first_memory_pending"},
+		{name: "empty evidence element is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+			malformed := terminal
+			malformed.EvidenceIDs = []string{""}
+			return malformed
+		}()}, wantState: "first_memory_pending"},
+		{name: "install event is not a memory proof", memories: []TerminalMemoryReadinessFact{{
+			ReceiptID: "receipt_install", PresentationReceiptID: "presentation_install",
+			ObjectID: "pulse:install", Status: string(store.MemoryWriteCreated), ContentDigest: strings.Repeat("d", 64),
+			MemoryKind: "system_event", ConversationScope: "install_event",
+			BindingDigest: terminal.BindingDigest, RepositoryID: terminal.RepositoryID,
+			Host: "pulse-cli", SessionID: "install", CreatedAt: "2026-07-16T00:00:00Z", Active: true,
+		}}, wantState: "first_memory_pending"},
+		{name: "terminal memory only", memories: []TerminalMemoryReadinessFact{terminal}, wantState: "context_offer_pending"},
+		{name: "wrong project offer", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
+			wrong := offered
+			wrong.RepositoryID = "repository-other"
+			return wrong
+		}()}, wantState: "context_offer_pending"},
+		{name: "same task offer is not continuity", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
+			same := offered
+			same.SessionID = terminal.SessionID
+			return same
+		}()}, wantState: "context_offer_pending"},
+		{name: "wrong evidence is not continuity", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
+			wrong := offered
+			wrong.EvidenceIDs = []string{"pulse:other"}
+			return wrong
+		}()}, wantState: "context_offer_pending"},
+		{name: "offered only", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered}, wantState: "host_observation_pending"},
+		{name: "non canonical offer time is rejected", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
+			malformed := offered
+			malformed.CreatedAt = "2026-07-17"
+			return malformed
+		}()}, wantState: "context_offer_pending"},
+		{name: "different context observation", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered, func() ContextDeliveryReadinessFact {
+			wrong := observed
+			wrong.ContextID = "context_other"
+			return wrong
+		}()}, wantState: "host_observation_pending"},
+		{name: "matching observed fact", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered, observed}, wantState: "ready"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ProjectReadinessLifecycleInputs(test.memories, test.delivery)
+			if got.Schema != ReadinessLifecycleInputsSchema || got.State != test.wantState {
+				t.Fatalf("projection = %#v", got)
+			}
+			if test.wantState == "ready" {
+				if got.TerminalMemory == nil || got.OfferedToHost == nil || got.HostObserved == nil ||
+					got.TerminalMemory.ObjectID != terminal.ObjectID || got.OfferedToHost.ContextID != offered.ContextID ||
+					got.HostObserved.ContextID != offered.ContextID {
+					t.Fatalf("ready inputs do not preserve exact chain: %#v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestMemoryTrayRecoveryScheduleSkipsUnpresentedCandidate(t *testing.T) {
+	if _, ok, err := memoryTrayScheduleDelay("", time.Now().UTC()); err != nil || ok {
+		t.Fatal("an unpresented candidate with no grace deadline became schedulable")
+	}
+}
+
 func TestProductDeleteRouteFailsClosedWithoutOSPresence(t *testing.T) {
 	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
@@ -340,6 +481,7 @@ func TestProductDeleteRouteFailsClosedWithoutOSPresence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, 10*time.Second)
 	created, err := vault.CommitMemoryTrayCandidate(
 		prepared.Receipts[0].CandidateID, 1, now.Add(10*time.Second),
 	)
@@ -371,6 +513,7 @@ func TestProductCorrectionRouteReturnsVisiblePendingCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, 10*time.Second)
 	created, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(10*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +585,7 @@ func TestProductCommitRecallDeleteInvalidatesLiveRetrievalImmediately(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, time.Second)
 	created, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -504,6 +648,8 @@ func TestSemanticDeleteRebuildsAndReindexesRemainingPrivateContributions(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
+		presentedAt := now.Add(time.Duration(index) * time.Minute)
+		presentProductCandidate(t, vault, prepared.Receipts[0], presentedAt, time.Second)
 		receipt, err := vault.CommitMemoryTrayCandidate(
 			prepared.Receipts[0].CandidateID, 1, now.Add(time.Duration(index)*time.Minute+time.Second),
 		)
@@ -555,6 +701,7 @@ func TestProjectionStaysPendingWithoutEmbedderAndReplaysWhenEnabled(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, time.Second)
 	created, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -633,6 +780,8 @@ func TestSemanticRebuildWithoutEmbedderReplaysSurvivorAfterRestart(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
+		presentedAt := now.Add(time.Duration(index) * time.Minute)
+		presentProductCandidate(t, vault, prepared.Receipts[0], presentedAt, time.Second)
 		receipt, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Duration(index)*time.Minute+time.Second))
 		if err != nil {
 			t.Fatal(err)
@@ -713,6 +862,7 @@ func TestProjectionRetriesTransientEmbedderFailureWithoutRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, time.Second)
 	created, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -762,6 +912,11 @@ func TestProductServerAutomaticallyCommitsAfterVisibleGrace(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("prepare status=%d", resp.StatusCode)
 	}
+	var prepared store.TurnFinalizeResult
+	if err := json.NewDecoder(resp.Body).Decode(&prepared); err != nil {
+		t.Fatal(err)
+	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], time.Now().UTC(), time.Second)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
@@ -807,6 +962,7 @@ func TestProductServerTurnsAutomaticCommitErrorsIntoDurableFailedReceipts(t *tes
 		t.Fatal(err)
 	}
 	candidateID := prepared.Receipts[0].CandidateID
+	presentProductCandidate(t, vault, prepared.Receipts[0], time.Now().UTC(), time.Second)
 	if _, err := vault.DB().Exec(`UPDATE memory_tray_candidates SET payload_json='{}' WHERE candidate_id=?`, candidateID); err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +993,7 @@ func TestProductServerTurnsAutomaticCommitErrorsIntoDurableFailedReceipts(t *tes
 	t.Fatal("automatic commit failure remained pending without a durable failed receipt")
 }
 
-func TestProductServerRestartRecoversExpiredPendingCandidate(t *testing.T) {
+func TestProductServerRestartLeavesUnpresentedPendingCandidateAlone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk-restart.db")
 	vault, err := store.OpenVault(path, store.StoreKindDesk, "store_desk_restart_test")
 	if err != nil {
@@ -876,18 +1032,20 @@ func TestProductServerRestartRecoversExpiredPendingCandidate(t *testing.T) {
 	if _, err := New(Config{IPCSecret: "secret", Store: reopened}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := reopened.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		if count == 1 {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	var state, graceExpiresAt string
+	if err := reopened.DB().QueryRow(`
+		SELECT state, grace_expires_at FROM memory_tray_candidates WHERE candidate_id=?`,
+		prepared.Receipts[0].CandidateID,
+	).Scan(&state, &graceExpiresAt); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("restart recovery did not schedule the expired pending candidate")
+	var count int
+	if err := reopened.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" || graceExpiresAt != "" || count != 0 {
+		t.Fatalf("unpresented recovery mutated candidate: state=%q grace=%q memories=%d", state, graceExpiresAt, count)
+	}
 }
 
 func TestRestartDoesNotCommitCandidateFromStaleRuntimeAuthority(t *testing.T) {
@@ -911,6 +1069,7 @@ func TestRestartDoesNotCommitCandidateFromStaleRuntimeAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentProductCandidate(t, vault, prepared.Receipts[0], now, time.Second)
 	if err := vault.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -992,6 +1151,9 @@ func TestProductServerRestartRecoversMoreThanOnePendingPage(t *testing.T) {
 		}, now, time.Second)
 		if err != nil {
 			t.Fatal(err)
+		}
+		for _, receipt := range result.Receipts {
+			presentProductCandidate(t, vault, receipt, now, time.Second)
 		}
 		createdCandidates += len(result.Receipts)
 	}

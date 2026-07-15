@@ -23,6 +23,7 @@ import {
 	inspectCodexNativeHookList,
 	inspectCodexNativeHookTrust,
 	projectCodexLifecycleAttestation,
+	projectReadinessLifecycleInputs,
 	recordCodexHookReadiness,
 } from './codex-hooks.js';
 
@@ -608,6 +609,72 @@ test('launcher lifecycle receipts are synthetic-test-only and production ignores
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test('readiness lifecycle projection requires a terminal user memory and a matching fresh-session offer observation chain', () => {
+	const terminal = {
+		receipt_id: 'receipt_memory_01', presentation_receipt_id: 'presentation_01', object_id: 'pulse:memory_01',
+		evidence_ids: ['pulse:pulse:memory_01'], status: 'created', memory_kind: 'decision',
+		content_digest: 'c'.repeat(64),
+		conversation_scope: 'current_turn', binding_digest: 'a'.repeat(64),
+		repository_id: 'repository-pulse', host: 'codex', session_id: 'session-a',
+		created_at: '2026-07-16T01:00:00Z', active: true,
+	};
+	const offered = {
+		context_id: 'context_01', acknowledgement: 'offered_to_host',
+		object_ids: [terminal.object_id], evidence_ids: [terminal.evidence_ids[0]],
+		payload_digest: 'b'.repeat(64), binding_digest: terminal.binding_digest,
+		repository_id: terminal.repository_id, host: 'codex', session_id: 'session-b',
+		created_at: '2026-07-16T01:01:00Z',
+	};
+	const observed = { ...offered, acknowledgement: 'host_observed', created_at: '2026-07-16T01:02:00Z' };
+
+	assert.equal(projectReadinessLifecycleInputs([], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, presentation_receipt_id: '',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, receipt_id: '', memory_kind: '',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, receipt_id: ' receipt_memory_01', host: 'codex ',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, created_at: '2026-07-16',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, created_at: '2026-07-16T01:00:00.1000Z',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, evidence_ids: [''],
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, receipt_id: 'receipt_install', object_id: 'pulse:install',
+		memory_kind: 'system_event', conversation_scope: 'install_event', host: 'pulse-cli',
+	}], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], []).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, repository_id: 'repository-other',
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, session_id: terminal.session_id,
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, evidence_ids: ['pulse:other'],
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [offered]).state, 'host_observation_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, created_at: '2026-07-17',
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [offered, {
+		...observed, context_id: 'context_other',
+	}]).state, 'host_observation_pending');
+	const ready = projectReadinessLifecycleInputs([terminal], [offered, observed]);
+	assert.equal(ready.schema, 'pulse.readiness_lifecycle_inputs.v1');
+	assert.equal(ready.state, 'ready');
+	assert.equal(ready.terminal_memory.object_id, terminal.object_id);
+	assert.equal(ready.offered_to_host.context_id, offered.context_id);
+	assert.equal(ready.host_observed.context_id, offered.context_id);
 });
 
 test('native hook query hard-stops an app-server child that ignores SIGTERM', async () => {

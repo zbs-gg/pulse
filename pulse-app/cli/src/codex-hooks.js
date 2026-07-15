@@ -611,6 +611,108 @@ export function projectCodexLifecycleAttestation({
 	};
 }
 
+const READINESS_LIFECYCLE_INPUTS_SCHEMA = 'pulse.readiness_lifecycle_inputs.v1';
+
+function readinessFactTime(value) {
+	if (typeof value !== 'string') return undefined;
+	const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(value);
+	if (!match) return undefined;
+	const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = ''] = match;
+	if (fraction.endsWith('0')) return undefined;
+	const [year, month, day, hour, minute, second] =
+		[yearText, monthText, dayText, hourText, minuteText, secondText].map(Number);
+	if (year < 1970 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) {
+		return undefined;
+	}
+	const milliseconds = Date.UTC(year, month - 1, day, hour, minute, second);
+	const parsed = new Date(milliseconds);
+	if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 ||
+		parsed.getUTCDate() !== day || parsed.getUTCHours() !== hour ||
+		parsed.getUTCMinutes() !== minute || parsed.getUTCSeconds() !== second) return undefined;
+	return BigInt(milliseconds) * 1_000_000n + BigInt(fraction.padEnd(9, '0'));
+}
+
+function readinessDigest(value) {
+	return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
+function readinessIDs(value) {
+	return Array.isArray(value) && value.every((item) =>
+		typeof item === 'string' && item.length > 0 && item.trim() === item);
+}
+
+function readinessID(value) {
+	return typeof value === 'string' && value.length > 0 && value.trim() === value;
+}
+
+function terminalReadinessFact(fact) {
+	const at = readinessFactTime(fact?.created_at);
+	if (at === undefined || !['created', 'updated', 'deduplicated'].includes(fact?.status) ||
+		fact?.active !== true || !readinessID(fact.receipt_id) || !readinessID(fact.presentation_receipt_id) ||
+		!readinessID(fact.object_id) || !readinessDigest(fact.content_digest) ||
+		!readinessID(fact.memory_kind) || fact.memory_kind === 'system_event' ||
+		!readinessID(fact.conversation_scope) || fact.conversation_scope === 'install_event' ||
+		!readinessDigest(fact.binding_digest) || !readinessID(fact.repository_id) ||
+		!readinessID(fact.host) || fact.host === 'pulse-cli' || !readinessID(fact.session_id) ||
+		!readinessIDs(fact.evidence_ids ?? [])) return undefined;
+	return { fact: structuredClone(fact), at };
+}
+
+function contextReferencesTerminal(fact, terminal) {
+	return fact.object_ids.includes(terminal.object_id) &&
+		(terminal.evidence_ids.length === 0 || terminal.evidence_ids.some((id) => fact.evidence_ids.includes(id)));
+}
+
+function sameReadinessIDs(left, right) {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function matchingContextReadinessFact(fact, terminal, after, acknowledgement, offered) {
+	const at = readinessFactTime(fact?.created_at);
+	if (at === undefined || at <= after || fact?.acknowledgement !== acknowledgement ||
+		!readinessID(fact.context_id) || !readinessDigest(fact.payload_digest) ||
+		fact.binding_digest !== terminal.binding_digest || fact.repository_id !== terminal.repository_id ||
+		fact.host !== terminal.host || !readinessID(fact.session_id) ||
+		fact.session_id === terminal.session_id || !readinessIDs(fact.object_ids) ||
+		!readinessIDs(fact.evidence_ids) || !contextReferencesTerminal(fact, terminal)) return undefined;
+	if (offered && (fact.context_id !== offered.context_id || fact.payload_digest !== offered.payload_digest ||
+		fact.session_id !== offered.session_id || !sameReadinessIDs(fact.object_ids, offered.object_ids) ||
+		!sameReadinessIDs(fact.evidence_ids, offered.evidence_ids))) return undefined;
+	return { fact: structuredClone(fact), at };
+}
+
+function earliestReadinessFact(facts) {
+	return facts.sort((left, right) => {
+		if (left.at < right.at) return -1;
+		if (left.at > right.at) return 1;
+		return String(left.fact.receipt_id ?? left.fact.context_id).localeCompare(
+			String(right.fact.receipt_id ?? right.fact.context_id));
+	})[0];
+}
+
+// This pure projection deliberately writes nothing. Future doctor/Home
+// ReadinessSnapshot consumers receive the same terminal/offered/observed facts
+// from the authoritative vault and recompute this chain on every read.
+export function projectReadinessLifecycleInputs(memories = [], deliveries = []) {
+	const result = { schema: READINESS_LIFECYCLE_INPUTS_SCHEMA, state: 'first_memory_pending' };
+	if (!Array.isArray(memories) || !Array.isArray(deliveries)) return result;
+	const terminal = earliestReadinessFact(memories.map(terminalReadinessFact).filter(Boolean));
+	if (!terminal) return result;
+	result.terminal_memory = terminal.fact;
+	result.state = 'context_offer_pending';
+	const offered = earliestReadinessFact(deliveries.map((fact) =>
+		matchingContextReadinessFact(fact, terminal.fact, terminal.at, 'offered_to_host')).filter(Boolean));
+	if (!offered) return result;
+	result.offered_to_host = offered.fact;
+	result.state = 'host_observation_pending';
+	const observed = earliestReadinessFact(deliveries.map((fact) =>
+		matchingContextReadinessFact(fact, terminal.fact, offered.at, 'host_observed', offered.fact)).filter(Boolean));
+	if (!observed) return result;
+	result.host_observed = observed.fact;
+	result.state = 'ready';
+	return result;
+}
+
 function readinessMilestone(eventName, options) {
 	if (eventName === 'SessionStart' &&
 		options.output?.hookSpecificOutput?.hookEventName === 'SessionStart') return 'session_context';

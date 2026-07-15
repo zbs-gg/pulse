@@ -400,7 +400,9 @@ func TestProductMemoryWipeRejectsCallerConfirmationWithoutOSPresence(t *testing.
 	if len(prepared.Receipts) != 1 {
 		t.Fatalf("expected one protected product memory candidate: %#v", prepared)
 	}
-	if _, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, time.Now().UTC().Add(11*time.Second)); err != nil {
+	presentedAt := time.Now().UTC()
+	presentProductCandidate(t, vault, prepared.Receipts[0], presentedAt, 10*time.Second)
+	if _, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, presentedAt.Add(10*time.Second)); err != nil {
 		t.Fatalf("commit protected product memory: %v", err)
 	}
 

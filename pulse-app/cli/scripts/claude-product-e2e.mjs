@@ -310,9 +310,10 @@ async function waitForCandidate(baseUrl, secret, candidateID, terminalStatus) {
     });
     if (response.ok) {
       const tray = await response.json();
-      const receipt = tray.candidates?.find((candidate) => candidate.candidate_id === candidateID)?.latest_receipt;
+      const candidate = tray.candidates?.find((entry) => entry.candidate_id === candidateID);
+      const receipt = candidate?.latest_receipt;
       lastStatus = receipt?.status ?? lastStatus;
-      if (receipt?.status === terminalStatus) return receipt;
+      if (receipt?.status === terminalStatus) return candidate;
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
@@ -560,8 +561,9 @@ try {
   const vaultDir = join(root, 'vaults', 'personal');
   const secret = readFileSync(join(vaultDir, 'secret.key'), 'utf8');
   const baseUrl = `http://127.0.0.1:${port}`;
-  const created = await waitForCandidate(baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'created');
-  assert.match(created.object_id, /^pulse:/);
+  const claudePending = await waitForCandidate(baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'pending');
+  assert.equal(claudePending.grace_expires_at, '');
+  assert.equal(claudePending.latest_receipt.object_id, undefined);
 
   const codexConnected = run(process.execPath, [packedCLI, 'connect', 'codex'], {
     cwd: workspace, env, timeout: 120_000,
@@ -598,7 +600,7 @@ try {
       ...codexBase, hook_event_name: 'SessionStart', source: 'resume',
     }),
   });
-  assert.match(JSON.parse(codexResume.stdout).hookSpecificOutput.additionalContext, new RegExp(summary));
+  assert.doesNotMatch(JSON.parse(codexResume.stdout).hookSpecificOutput.additionalContext, new RegExp(summary));
   run(process.execPath, [runtimeCLI, 'codex-hook', 'UserPromptSubmit'], {
     cwd: workspace, env, input: JSON.stringify({
       ...codexBase, hook_event_name: 'UserPromptSubmit', prompt: 'also must not persist',
@@ -622,14 +624,16 @@ try {
   const codexMessages = runProductMcp(codexMcpConfig, mcpRememberInput(codexMemory), nestedWorkspace, env);
   const codexRemember = JSON.parse(codexMessages.find((message) => message.id === 3).result.content[0].text);
   assert.notEqual(codexRemember.receipts[0].content_digest, claudeRemember.receipts[0].content_digest);
-  const codexCreated = await waitForCandidate(baseUrl, secret, codexRemember.receipts[0].candidate_id, 'created');
-  assert.equal(codexCreated.safe_provenance.host, 'codex');
+  const codexPending = await waitForCandidate(baseUrl, secret, codexRemember.receipts[0].candidate_id, 'pending');
+  assert.equal(codexPending.grace_expires_at, '');
+  assert.equal(codexPending.latest_receipt.object_id, undefined);
+  assert.equal(codexPending.latest_receipt.safe_provenance.host, 'codex');
 
   const resumed = runHook(settings, 'SessionStart', {
     session_id: 'session-claude-fresh', transcript_path: transcriptPath, cwd: workspace,
     hook_event_name: 'SessionStart', source: 'resume', permission_mode: 'default',
   }, workspace, env);
-  assert.match(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
+  assert.doesNotMatch(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
 
   const doctor = run(process.execPath, [packedCLI, 'doctor', 'claude-code', '--json'], {
     cwd: workspace, env,
@@ -710,7 +714,7 @@ try {
 			source: 'resume',
 		}),
 	});
-	assert.match(
+	assert.doesNotMatch(
 		JSON.parse(upgradedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
 		new RegExp(codexSummary),
 	);
@@ -790,7 +794,7 @@ try {
       hook_event_name: 'SessionStart', source: 'resume',
     }),
   });
-  assert.match(
+  assert.doesNotMatch(
     JSON.parse(codexAfterClaudeDisconnect.stdout).hookSpecificOutput.additionalContext,
     new RegExp(codexSummary),
   );

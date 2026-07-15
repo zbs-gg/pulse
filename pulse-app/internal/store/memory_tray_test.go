@@ -55,6 +55,19 @@ func trayFinalizeRequest(summary string) TurnFinalizeRequest {
 
 func ptr[T any](value T) *T { return &value }
 
+func presentTrayReceipt(t *testing.T, s *Store, receipt MemoryWriteReceipt, now time.Time, grace time.Duration) MemoryPresentationReceipt {
+	t.Helper()
+	presented, err := s.PresentMemoryTrayCandidate(MemoryPresentationRequest{
+		CandidateID: receipt.CandidateID, CandidateVersion: receipt.CandidateVersion,
+		ContentDigest: receipt.ContentDigest, BindingDigest: testTrayBindingDigest,
+		TrustedSurfaceKind: "memory_home", TrustedSurfaceInstance: "home_session_test",
+	}, now, grace)
+	if err != nil {
+		t.Fatalf("present candidate %s v%d: %v", receipt.CandidateID, receipt.CandidateVersion, err)
+	}
+	return presented
+}
+
 func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	desk, _ := openDeskTrayStore(t)
 	var disposition string
@@ -66,11 +79,24 @@ func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	if disposition != "applied" {
 		t.Fatalf("desk migration disposition=%q, want applied", disposition)
 	}
+	if err := desk.DB().QueryRow(`
+		SELECT disposition FROM schema_migration_applicability WHERE version=45`,
+	).Scan(&disposition); err != nil {
+		t.Fatalf("desk presentation migration applicability: %v", err)
+	}
+	if disposition != "applied" {
+		t.Fatalf("desk presentation migration disposition=%q, want applied", disposition)
+	}
 	var exists int
 	if err := desk.DB().QueryRow(`
 		SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_tray_candidates'`,
 	).Scan(&exists); err != nil || exists != 1 {
 		t.Fatalf("desk tray table: exists=%d err=%v", exists, err)
+	}
+	if err := desk.DB().QueryRow(`
+		SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_presentation_receipts'`,
+	).Scan(&exists); err != nil || exists != 1 {
+		t.Fatalf("desk presentation table: exists=%d err=%v", exists, err)
 	}
 
 	preview, err := Open(filepath.Join(t.TempDir(), "preview.db"))
@@ -85,6 +111,11 @@ func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	}
 	if disposition != "skipped" {
 		t.Fatalf("preview migration disposition=%q, want skipped", disposition)
+	}
+	if err := preview.DB().QueryRow(`
+		SELECT disposition FROM schema_migration_applicability WHERE version=45`,
+	).Scan(&disposition); err != nil || disposition != "skipped" {
+		t.Fatalf("preview presentation migration disposition=%q err=%v", disposition, err)
 	}
 	if err := preview.DB().QueryRow(`
 		SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_tray_candidates'`,
@@ -106,6 +137,11 @@ func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	}
 	if disposition != "skipped" {
 		t.Fatalf("commons migration disposition=%q, want skipped", disposition)
+	}
+	if err := commons.DB().QueryRow(`
+		SELECT disposition FROM schema_migration_applicability WHERE version=45`,
+	).Scan(&disposition); err != nil || disposition != "skipped" {
+		t.Fatalf("commons presentation migration disposition=%q err=%v", disposition, err)
 	}
 	if err := commons.DB().QueryRow(`
 		SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_tray_candidates'`,
@@ -190,7 +226,7 @@ func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testi
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 42 || writer != 42 {
+	if reader != 45 || writer != 45 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }
@@ -229,6 +265,7 @@ func TestFinalizePendingThenAtomicCommitReturnsTruthfulStableReceipts(t *testing
 	if err := s.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&canonical); err != nil || canonical != 0 {
 		t.Fatalf("pending reached canonical storage: count=%d err=%v", canonical, err)
 	}
+	presentTrayReceipt(t, s, pending, now, 10*time.Second)
 	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(9*time.Second)); !errors.Is(err, ErrMemoryTrayGraceActive) {
 		t.Fatalf("commit before grace err=%v, want grace active", err)
 	}
@@ -560,6 +597,7 @@ func TestCommitRevalidatesPreviewedPayloadAndFailsClosedOnTamper(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidateID := finalized.Receipts[0].CandidateID
+	presentTrayReceipt(t, s, finalized.Receipts[0], now, time.Second)
 	tampered := PrivateMemoryCandidate{
 		Kind:    PrivateMemoryCandidateCapsule,
 		Capsule: ptr(safeTrayCapsule("A different but still safe value was inserted after preview.")),
@@ -684,6 +722,7 @@ func TestCommitRechecksRuntimeAuthorityAfterGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, prepared.Receipts[0], now, time.Second)
 	if err := s.ConfigureProductRuntimeAuthority(strings.Repeat("c", 64), 1, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -769,6 +808,7 @@ func TestSemanticDeltaCommitsAtomicallyAfterGrace(t *testing.T) {
 			t.Fatalf("pending semantic delta reached %s: count=%d err=%v", table, count, err)
 		}
 	}
+	presentTrayReceipt(t, s, pending, now, 10*time.Second)
 	committed, err := s.CommitMemoryTrayCandidate(
 		pending.CandidateID, pending.CandidateVersion, now.Add(10*time.Second),
 	)
@@ -824,6 +864,7 @@ func TestPrivateSemanticProjectionMergesContributionsAndPreservesLegacyRows(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, first.Receipts[0], now, time.Second)
 	firstCreated, err := s.CommitMemoryTrayCandidate(
 		first.Receipts[0].CandidateID, first.Receipts[0].CandidateVersion, now.Add(time.Second),
 	)
@@ -844,6 +885,7 @@ func TestPrivateSemanticProjectionMergesContributionsAndPreservesLegacyRows(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, second.Receipts[0], now.Add(time.Minute), time.Second)
 	secondCreated, err := s.CommitMemoryTrayCandidate(
 		second.Receipts[0].CandidateID, second.Receipts[0].CandidateVersion, now.Add(time.Minute+time.Second),
 	)
@@ -944,6 +986,7 @@ func TestProductMemoryStatusCountsActiveCapsuleAndSemanticObjects(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, capsule.Receipts[0], now, time.Second)
 	capsuleReceipt, err := s.CommitMemoryTrayCandidate(capsule.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -954,6 +997,7 @@ func TestProductMemoryStatusCountsActiveCapsuleAndSemanticObjects(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, semantic.Receipts[0], now.Add(time.Minute), time.Second)
 	semanticReceipt, err := s.CommitMemoryTrayCandidate(semantic.Receipts[0].CandidateID, 1, now.Add(time.Minute+time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -985,6 +1029,7 @@ func TestCommittedCapsuleCorrectionUsesTrayAndKeepsStableObjectID(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1034,6 +1079,7 @@ func TestCommittedCapsuleCorrectionUsesTrayAndKeepsStableObjectID(t *testing.T) 
 	if before != "Use the old project rule." {
 		t.Fatalf("pending correction changed canonical content: %q", before)
 	}
+	presentTrayReceipt(t, s, pending, now.Add(time.Minute), time.Second)
 	updated, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(time.Minute+time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1081,6 +1127,7 @@ func TestCorrectionCommitReplayReturnsOriginalReceiptAfterLaterDelete(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1094,6 +1141,7 @@ func TestCorrectionCommitReplayReturnsOriginalReceiptAfterLaterDelete(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, correction.Receipts[0], now.Add(time.Minute), time.Second)
 	updated, err := s.CommitMemoryTrayCandidate(correction.Receipts[0].CandidateID, 1, now.Add(time.Minute+time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1122,6 +1170,7 @@ func TestCommittedSemanticCorrectionRebuildsOnlyStableTargetContribution(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1139,6 +1188,7 @@ func TestCommittedSemanticCorrectionRebuildsOnlyStableTargetContribution(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, prepared.Receipts[0], now.Add(time.Minute), time.Second)
 	updated, err := s.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Minute+time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1168,6 +1218,7 @@ func TestConcurrentCorrectionsDetectStaleTargetInsteadOfSilentlyLastWriteWins(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1190,6 +1241,8 @@ func TestConcurrentCorrectionsDetectStaleTargetInsteadOfSilentlyLastWriteWins(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, first.Receipts[0], now.Add(time.Minute), time.Second)
+	presentTrayReceipt(t, s, second.Receipts[0], now.Add(time.Minute), time.Second)
 	if _, err := s.CommitMemoryTrayCandidate(first.Receipts[0].CandidateID, 1, now.Add(time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -1212,6 +1265,7 @@ func TestCanceledCorrectionCanBeProposedAgainAndContentCanCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1237,6 +1291,7 @@ func TestCanceledCorrectionCanBeProposedAgainAndContentCanCycle(t *testing.T) {
 	if retryB.Receipts[0].CandidateID == canceledAttempt.Receipts[0].CandidateID {
 		t.Fatal("canceled correction reused a permanently terminal candidate")
 	}
+	presentTrayReceipt(t, s, retryB.Receipts[0], now.Add(2*time.Minute), time.Second)
 	if _, err := s.CommitMemoryTrayCandidate(retryB.Receipts[0].CandidateID, 1, now.Add(2*time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -1248,6 +1303,7 @@ func TestCanceledCorrectionCanBeProposedAgainAndContentCanCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, toC.Receipts[0], now.Add(3*time.Minute), time.Second)
 	if _, err := s.CommitMemoryTrayCandidate(toC.Receipts[0].CandidateID, 1, now.Add(3*time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -1258,6 +1314,7 @@ func TestCanceledCorrectionCanBeProposedAgainAndContentCanCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, backToB.Receipts[0], now.Add(4*time.Minute), time.Second)
 	updated, err := s.CommitMemoryTrayCandidate(backToB.Receipts[0].CandidateID, 1, now.Add(4*time.Minute+time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1281,6 +1338,7 @@ func TestUnsafeCorrectionReturnsDurableContentFreeRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, createdTurn.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(createdTurn.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1323,6 +1381,7 @@ func TestDuplicateContentDeduplicatesToExistingCanonicalObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, first.Receipts[0], now, 10*time.Second)
 	created, err := s.CommitMemoryTrayCandidate(first.Receipts[0].CandidateID, 1, now.Add(10*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1335,6 +1394,7 @@ func TestDuplicateContentDeduplicatesToExistingCanonicalObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, second.Receipts[0], now.Add(time.Minute), 10*time.Second)
 	deduplicated, err := s.CommitMemoryTrayCandidate(second.Receipts[0].CandidateID, 1, now.Add(70*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1356,6 +1416,7 @@ func TestEquivalentCrossHarnessContentDeduplicatesDespiteDifferentProvenance(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, first.Receipts[0], now, time.Second)
 	created, err := s.CommitMemoryTrayCandidate(first.Receipts[0].CandidateID, 1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1381,6 +1442,7 @@ func TestEquivalentCrossHarnessContentDeduplicatesDespiteDifferentProvenance(t *
 		t.Fatalf("semantic identity drifted by provenance: codex=%s claude=%s",
 			first.Receipts[0].ContentDigest, second.Receipts[0].ContentDigest)
 	}
+	presentTrayReceipt(t, s, second.Receipts[0], now.Add(time.Minute), time.Second)
 	deduplicated, err := s.CommitMemoryTrayCandidate(second.Receipts[0].CandidateID, 1, now.Add(61*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1430,6 +1492,7 @@ func TestCommittedCapsuleDeleteIsAtomicReceiptedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, finalized.Receipts[0], now, 10*time.Second)
 	created, err := s.CommitMemoryTrayCandidate(finalized.Receipts[0].CandidateID, 1, now.Add(10*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -1443,6 +1506,7 @@ func TestCommittedCapsuleDeleteIsAtomicReceiptedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	presentTrayReceipt(t, s, dedupFinalized.Receipts[0], now.Add(20*time.Second), 10*time.Second)
 	deduplicated, err := s.CommitMemoryTrayCandidate(dedupFinalized.Receipts[0].CandidateID, 1, now.Add(30*time.Second))
 	if err != nil || deduplicated.Status != MemoryWriteDeduplicated || deduplicated.ObjectID != created.ObjectID {
 		t.Fatalf("deduplicate: receipt=%#v err=%v", deduplicated, err)
@@ -1501,6 +1565,7 @@ func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := finalized.Receipts[0]
+	presentTrayReceipt(t, s, pending, now, 10*time.Second)
 	start := make(chan struct{})
 	type outcome struct {
 		receipt MemoryWriteReceipt
@@ -1547,5 +1612,362 @@ func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
 	}
 	if tray[0].State != "pending" && tray[0].State != "canceled" && tray[0].State != "committed" {
 		t.Fatalf("inconsistent post-race state: %#v", tray[0])
+	}
+}
+
+func TestMemoryPresentationIsRequiredBeforeGraceAndCommit(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("An unseen candidate must stay pending without a running deadline."),
+		now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+
+	var deadline string
+	if err := s.DB().QueryRow(`
+		SELECT grace_expires_at FROM memory_tray_candidates WHERE candidate_id=?`,
+		pending.CandidateID,
+	).Scan(&deadline); err != nil {
+		t.Fatal(err)
+	}
+	if deadline != "" {
+		t.Fatalf("unpresented candidate has running deadline %q", deadline)
+	}
+	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
+		t.Fatalf("unpresented commit err=%v, want ErrMemoryTrayNotPresented", err)
+	}
+	due, err := s.CommitDueMemoryTrayCandidates(now.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("unpresented candidate became due: %#v", due)
+	}
+}
+
+func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("The exact card becomes committable only after Home renders it."),
+		now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	req := MemoryPresentationRequest{
+		CandidateID: pending.CandidateID, CandidateVersion: pending.CandidateVersion,
+		ContentDigest: pending.ContentDigest, BindingDigest: testTrayBindingDigest,
+		TrustedSurfaceKind: "memory_home", TrustedSurfaceInstance: "home_session_01",
+	}
+	presentedAt := now.Add(time.Minute)
+	receipt, err := s.PresentMemoryTrayCandidate(req, presentedAt, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.CandidateID != pending.CandidateID || receipt.CandidateVersion != 1 ||
+		receipt.ContentDigest != pending.ContentDigest || receipt.BindingDigest != testTrayBindingDigest ||
+		receipt.TrustedSurfaceKind != "memory_home" || receipt.TrustedSurfaceInstance != "home_session_01" ||
+		receipt.PresentedAt != presentedAt.Format(time.RFC3339Nano) ||
+		receipt.GraceExpiresAt != presentedAt.Add(10*time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf("presentation receipt lost exact binding: %#v", receipt)
+	}
+	replayed, err := s.PresentMemoryTrayCandidate(req, presentedAt.Add(5*time.Second), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed != receipt {
+		t.Fatalf("exact concurrent/retry presentation was not idempotent: first=%#v retry=%#v", receipt, replayed)
+	}
+	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, presentedAt.Add(9*time.Second)); !errors.Is(err, ErrMemoryTrayGraceActive) {
+		t.Fatalf("commit before presented grace err=%v", err)
+	}
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, presentedAt.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Status != MemoryWriteCreated {
+		t.Fatalf("committed status=%q", committed.Status)
+	}
+}
+
+func TestTerminalMemoryReadinessFactsComeFromPresentedActiveTerminalReceipts(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	req := trayFinalizeRequest("Readiness uses the real presented terminal memory chain.")
+	finalized, err := s.FinalizeTurn(req, now, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	if facts, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 10); err != nil || len(facts) != 0 {
+		t.Fatalf("pending readiness facts=%#v err=%v", facts, err)
+	}
+	presentation := presentTrayReceipt(t, s, pending, now, 10*time.Second)
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("terminal readiness facts=%#v", facts)
+	}
+	fact := facts[0]
+	if fact.ReceiptID != committed.ReceiptID || fact.PresentationReceiptID != presentation.ReceiptID ||
+		fact.ObjectID != committed.ObjectID || fact.Status != string(MemoryWriteCreated) ||
+		fact.ContentDigest != pending.ContentDigest || fact.MemoryKind != "decision" ||
+		fact.ConversationScope != "current_turn" || fact.BindingDigest != testTrayBindingDigest ||
+		fact.RepositoryID != "repository_pulse" || fact.Host != req.Host ||
+		fact.SessionID != opaqueTurnCorrelation("session", req.SessionID) || !fact.Active || len(fact.EvidenceIDs) != 0 {
+		t.Fatalf("terminal readiness fact lost immutable chain: %#v", fact)
+	}
+	otherBinding := strings.Repeat("b", 64)
+	if err := s.ConfigureProductRuntimeAuthority(otherBinding, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if facts, err := s.TerminalMemoryReadinessFacts("repository_other", otherBinding, 10); err != nil || len(facts) != 0 {
+		t.Fatalf("cross-binding readiness facts=%#v err=%v", facts, err)
+	}
+	if _, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 10); !errors.Is(err, ErrProductRuntimeMismatch) {
+		t.Fatalf("stale signed binding error=%v", err)
+	}
+	if err := s.ConfigureProductRuntimeAuthority(testTrayBindingDigest, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteCommittedMemory(committed.ObjectID, "delete_readiness_fact", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if facts, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 10); err != nil || len(facts) != 0 {
+		t.Fatalf("deleted readiness facts=%#v err=%v", facts, err)
+	}
+	if _, err := s.TerminalMemoryReadinessFacts("", testTrayBindingDigest, 10); err == nil {
+		t.Fatal("empty repository identity was accepted")
+	}
+	if _, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 0); err == nil {
+		t.Fatal("unbounded readiness query was accepted")
+	}
+}
+
+func TestConcurrentExactPresentationsConvergeOnOneImmutableReceipt(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("Concurrent Home render acknowledgements converge exactly once."), now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	req := MemoryPresentationRequest{
+		CandidateID: pending.CandidateID, CandidateVersion: pending.CandidateVersion,
+		ContentDigest: pending.ContentDigest, BindingDigest: testTrayBindingDigest,
+		TrustedSurfaceKind: "memory_home", TrustedSurfaceInstance: "home_session_race",
+	}
+	type result struct {
+		receipt MemoryPresentationReceipt
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			receipt, err := s.PresentMemoryTrayCandidate(req, now, 10*time.Second)
+			results <- result{receipt: receipt, err: err}
+		}()
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent presentation errors: first=%v second=%v", first.err, second.err)
+	}
+	if first.receipt != second.receipt {
+		t.Fatalf("concurrent presentations diverged: first=%#v second=%#v", first.receipt, second.receipt)
+	}
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`, pending.CandidateID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("concurrent exact presentation receipt count=%d, want 1", count)
+	}
+	if _, err := s.DB().Exec(`UPDATE memory_presentation_receipts SET presented_at=? WHERE receipt_id=?`, now.Add(time.Second).Format(time.RFC3339Nano), first.receipt.ReceiptID); err == nil {
+		t.Fatal("presentation receipt was mutable")
+	}
+	if _, err := s.DB().Exec(`DELETE FROM memory_presentation_receipts WHERE receipt_id=?`, first.receipt.ReceiptID); err == nil {
+		t.Fatal("presentation receipt was deletable")
+	}
+}
+
+func TestConcurrentPresentEditAndCancelNeverTransfersPresentation(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("Presentation races stay bound to the exact candidate version."), now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	presentReq := MemoryPresentationRequest{
+		CandidateID: pending.CandidateID, CandidateVersion: 1, ContentDigest: pending.ContentDigest,
+		BindingDigest: testTrayBindingDigest, TrustedSurfaceKind: "memory_home",
+		TrustedSurfaceInstance: "home_session_control_race",
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 3)
+	go func() {
+		<-start
+		_, err := s.PresentMemoryTrayCandidate(presentReq, now, 10*time.Second)
+		errs <- err
+	}()
+	go func() {
+		<-start
+		_, err := s.EditMemoryTrayCandidate(
+			pending.CandidateID, 1,
+			PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited race winner still needs its own presentation."))},
+			now, 10*time.Second,
+		)
+		errs <- err
+	}()
+	go func() {
+		<-start
+		_, err := s.CancelMemoryTrayCandidate(pending.CandidateID, 1, now)
+		errs <- err
+	}()
+	close(start)
+	for range 3 {
+		err := <-errs
+		if err != nil && !errors.Is(err, ErrMemoryTrayVersionConflict) && !errors.Is(err, ErrMemoryTrayTerminal) {
+			t.Fatalf("unexpected presentation/control race error: %v", err)
+		}
+	}
+	var state, deadline, digest string
+	var version int
+	if err := s.DB().QueryRow(`
+		SELECT state, version, content_digest, grace_expires_at
+		  FROM memory_tray_candidates WHERE candidate_id=?`, pending.CandidateID,
+	).Scan(&state, &version, &digest, &deadline); err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case state == "canceled":
+		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayTerminal) {
+			t.Fatalf("canceled race winner became committable: %v", err)
+		}
+	case state == "pending" && version == 1:
+		if deadline == "" || digest != pending.ContentDigest {
+			t.Fatalf("original presented winner is inconsistent: state=%q version=%d digest=%q deadline=%q", state, version, digest, deadline)
+		}
+	case state == "pending" && version == 2:
+		if deadline != "" {
+			t.Fatalf("edited winner inherited original presentation deadline %q", deadline)
+		}
+		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
+			t.Fatalf("edited race winner inherited presentation: %v", err)
+		}
+	default:
+		t.Fatalf("unexpected presentation/control race state=%q version=%d", state, version)
+	}
+}
+
+func TestMemoryTrayEditInvalidatesPresentationAndDeadline(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("The original exact card is presented."), now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	original := MemoryPresentationRequest{
+		CandidateID: pending.CandidateID, CandidateVersion: 1, ContentDigest: pending.ContentDigest,
+		BindingDigest: testTrayBindingDigest, TrustedSurfaceKind: "memory_home",
+		TrustedSurfaceInstance: "home_session_01",
+	}
+	if _, err := s.PresentMemoryTrayCandidate(original, now, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := s.EditMemoryTrayCandidate(
+		pending.CandidateID, 1,
+		PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited exact card needs a fresh presentation."))},
+		now.Add(time.Second), 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitMemoryTrayCandidate(edited.CandidateID, edited.CandidateVersion, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
+		t.Fatalf("edited candidate inherited old presentation: %v", err)
+	}
+	if _, err := s.PresentMemoryTrayCandidate(original, now.Add(2*time.Second), 10*time.Second); !errors.Is(err, ErrMemoryTrayVersionConflict) {
+		t.Fatalf("stale presentation err=%v, want version conflict", err)
+	}
+	editedReq := original
+	editedReq.CandidateVersion = edited.CandidateVersion
+	editedReq.ContentDigest = edited.ContentDigest
+	if _, err := s.PresentMemoryTrayCandidate(editedReq, now.Add(3*time.Second), 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitMemoryTrayCandidate(edited.CandidateID, edited.CandidateVersion, now.Add(13*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var receiptCount int
+	if err := s.DB().QueryRow(`
+		SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`,
+		pending.CandidateID,
+	).Scan(&receiptCount); err != nil {
+		t.Fatal(err)
+	}
+	if receiptCount != 2 {
+		t.Fatalf("append-only presentation receipt count=%d, want 2", receiptCount)
+	}
+}
+
+func TestPresentMemoryTrayCandidateRejectsStaleDigestBindingAndUntrustedSurface(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("Presentation authority is narrower than daemon authority."), now, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	base := MemoryPresentationRequest{
+		CandidateID: pending.CandidateID, CandidateVersion: 1, ContentDigest: pending.ContentDigest,
+		BindingDigest: testTrayBindingDigest, TrustedSurfaceKind: "memory_home",
+		TrustedSurfaceInstance: "home_session_01",
+	}
+	stale := base
+	stale.ContentDigest = strings.Repeat("0", 64)
+	if _, err := s.PresentMemoryTrayCandidate(stale, now, 10*time.Second); !errors.Is(err, ErrMemoryPresentationConflict) {
+		t.Fatalf("stale digest err=%v", err)
+	}
+	wrongBinding := base
+	wrongBinding.BindingDigest = strings.Repeat("1", 64)
+	if _, err := s.PresentMemoryTrayCandidate(wrongBinding, now, 10*time.Second); !errors.Is(err, ErrProductRuntimeMismatch) {
+		t.Fatalf("wrong binding err=%v", err)
+	}
+	untrusted := base
+	untrusted.TrustedSurfaceKind = "mcp"
+	if _, err := s.PresentMemoryTrayCandidate(untrusted, now, 10*time.Second); err == nil {
+		t.Fatal("untrusted MCP surface minted presentation")
+	}
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_presentation_receipts`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected presentation persisted %d receipts", count)
 	}
 }

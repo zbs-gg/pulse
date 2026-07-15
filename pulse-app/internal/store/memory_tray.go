@@ -33,19 +33,22 @@ const (
 	MemoryWriteRejected     = capture.ReceiptRejected
 	MemoryWriteFailed       = capture.ReceiptFailed
 
-	TurnFinalizeReceiptSchema = "pulse.turn_finalize_receipt.v1"
+	TurnFinalizeReceiptSchema       = "pulse.turn_finalize_receipt.v1"
+	MemoryPresentationReceiptSchema = "pulse.memory_presentation_receipt.v1"
 )
 
 var (
-	ErrMemoryTrayRequired        = errors.New("product semantic writes require Memory Tray")
-	ErrMemoryTrayUnavailable     = errors.New("Memory Tray is unavailable for this store kind")
-	ErrMemoryTrayGraceActive     = errors.New("Memory Tray grace period is active")
-	ErrMemoryTrayVersionConflict = errors.New("Memory Tray candidate version conflict")
-	ErrMemoryCorrectionConflict  = errors.New("memory correction target changed after preview")
-	ErrMemoryTrayTerminal        = errors.New("Memory Tray candidate is terminal")
-	ErrTurnAlreadyFinalized      = errors.New("turn already finalized with a different result")
-	ErrTurnFinalizeConflict      = errors.New("turn finalization idempotency conflict")
-	ErrProductRuntimeMismatch    = errors.New("turn runtime authority does not match the bound vault")
+	ErrMemoryTrayRequired         = errors.New("product semantic writes require Memory Tray")
+	ErrMemoryTrayUnavailable      = errors.New("Memory Tray is unavailable for this store kind")
+	ErrMemoryTrayGraceActive      = errors.New("Memory Tray grace period is active")
+	ErrMemoryTrayNotPresented     = errors.New("Memory Tray candidate has not been presented")
+	ErrMemoryTrayVersionConflict  = errors.New("Memory Tray candidate version conflict")
+	ErrMemoryPresentationConflict = errors.New("memory presentation does not match the current candidate")
+	ErrMemoryCorrectionConflict   = errors.New("memory correction target changed after preview")
+	ErrMemoryTrayTerminal         = errors.New("Memory Tray candidate is terminal")
+	ErrTurnAlreadyFinalized       = errors.New("turn already finalized with a different result")
+	ErrTurnFinalizeConflict       = errors.New("turn finalization idempotency conflict")
+	ErrProductRuntimeMismatch     = errors.New("turn runtime authority does not match the bound vault")
 )
 
 var trayIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
@@ -141,6 +144,48 @@ type MemoryWriteProvenance struct {
 	SessionID      string `json:"session_id"`
 	TurnID         string `json:"turn_id"`
 	SourceEventKey string `json:"source_event_key"`
+}
+
+type MemoryPresentationRequest struct {
+	CandidateID            string `json:"candidate_id"`
+	CandidateVersion       int    `json:"candidate_version"`
+	ContentDigest          string `json:"content_digest"`
+	BindingDigest          string `json:"binding_digest"`
+	TrustedSurfaceKind     string `json:"trusted_surface_kind"`
+	TrustedSurfaceInstance string `json:"trusted_surface_instance"`
+}
+
+type MemoryPresentationReceipt struct {
+	Schema                 string `json:"schema"`
+	ReceiptID              string `json:"receipt_id"`
+	CandidateID            string `json:"candidate_id"`
+	CandidateVersion       int    `json:"candidate_version"`
+	ContentDigest          string `json:"content_digest"`
+	BindingDigest          string `json:"binding_digest"`
+	TrustedSurfaceKind     string `json:"trusted_surface_kind"`
+	TrustedSurfaceInstance string `json:"trusted_surface_instance"`
+	PresentedAt            string `json:"presented_at"`
+	GraceExpiresAt         string `json:"grace_expires_at"`
+}
+
+// TerminalMemoryReadinessFact is derived only from a terminal write receipt,
+// its exact presentation receipt, the current active object, and the bound
+// turn ledger. It contains no memory body and is safe for readiness projection.
+type TerminalMemoryReadinessFact struct {
+	ReceiptID             string   `json:"receipt_id"`
+	PresentationReceiptID string   `json:"presentation_receipt_id"`
+	ObjectID              string   `json:"object_id"`
+	EvidenceIDs           []string `json:"evidence_ids,omitempty"`
+	Status                string   `json:"status"`
+	ContentDigest         string   `json:"content_digest"`
+	MemoryKind            string   `json:"memory_kind"`
+	ConversationScope     string   `json:"conversation_scope"`
+	BindingDigest         string   `json:"binding_digest"`
+	RepositoryID          string   `json:"repository_id"`
+	Host                  string   `json:"host"`
+	SessionID             string   `json:"session_id"`
+	CreatedAt             string   `json:"created_at"`
+	Active                bool     `json:"active"`
 }
 
 type MemoryTrayCandidateView struct {
@@ -485,7 +530,6 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 		if err != nil {
 			return TurnFinalizeResult{}, err
 		}
-		graceExpires := now.Add(grace).UTC().Format(time.RFC3339Nano)
 		if _, err := tx.Exec(`
 			INSERT INTO memory_tray_candidates(
 				candidate_id, ledger_id, candidate_kind, operation, target_object_id, target_content_digest,
@@ -493,7 +537,7 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 				state, grace_expires_at, created_at, updated_at
 			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), 1, ?, ?, 'pending', ?, ?, ?)`,
 			candidateID, ledgerID, prepared[index].kind, operation, req.targetObjectID, targetContentDigest, prepared[index].digest,
-			string(prepared[index].payload), graceExpires, createdAt, createdAt,
+			string(prepared[index].payload), "", createdAt, createdAt,
 		); err != nil {
 			return TurnFinalizeResult{}, err
 		}
@@ -840,6 +884,242 @@ func loadTrayCandidateTx(tx *sql.Tx, candidateID string) (trayCandidateRow, erro
 	return row, err
 }
 
+func scanMemoryPresentationReceipt(scanner interface{ Scan(...any) error }) (MemoryPresentationReceipt, error) {
+	receipt := MemoryPresentationReceipt{Schema: MemoryPresentationReceiptSchema}
+	err := scanner.Scan(
+		&receipt.ReceiptID, &receipt.CandidateID, &receipt.CandidateVersion,
+		&receipt.ContentDigest, &receipt.TrustedSurfaceKind, &receipt.TrustedSurfaceInstance,
+		&receipt.BindingDigest, &receipt.PresentedAt, &receipt.GraceExpiresAt,
+	)
+	return receipt, err
+}
+
+func loadExactMemoryPresentationReceiptTx(tx *sql.Tx, req MemoryPresentationRequest) (MemoryPresentationReceipt, error) {
+	return scanMemoryPresentationReceipt(tx.QueryRow(`
+		SELECT receipt_id, candidate_id, candidate_version, content_digest,
+		       trusted_surface_kind, trusted_surface_instance, binding_digest,
+		       presented_at, grace_expires_at
+		  FROM memory_presentation_receipts
+		 WHERE candidate_id=? AND candidate_version=? AND content_digest=?
+		   AND trusted_surface_kind=? AND trusted_surface_instance=? AND binding_digest=?
+		 ORDER BY rowid LIMIT 1`,
+		req.CandidateID, req.CandidateVersion, req.ContentDigest,
+		req.TrustedSurfaceKind, req.TrustedSurfaceInstance, req.BindingDigest,
+	))
+}
+
+// PresentMemoryTrayCandidate records content-free proof that an authenticated,
+// trusted human surface rendered the exact current candidate. The first exact
+// presentation starts grace atomically; retries return the immutable receipt
+// and never extend the deadline.
+func (s *Store) PresentMemoryTrayCandidate(
+	req MemoryPresentationRequest,
+	now time.Time,
+	grace time.Duration,
+) (MemoryPresentationReceipt, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	if err := validateTrayGrace(grace); err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	if !validTrayIdentifier(req.CandidateID) || req.CandidateVersion < 1 ||
+		!trayBindingDigestPattern.MatchString(req.ContentDigest) ||
+		!trayBindingDigestPattern.MatchString(req.BindingDigest) {
+		return MemoryPresentationReceipt{}, errors.New("memory presentation identity is invalid")
+	}
+	if req.TrustedSurfaceKind != "memory_home" || !validTrayIdentifier(req.TrustedSurfaceInstance) {
+		return MemoryPresentationReceipt{}, errors.New("memory presentation surface is not trusted")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	defer tx.Rollback()
+	row, err := loadTrayCandidateTx(tx, req.CandidateID)
+	if err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	if row.version != req.CandidateVersion {
+		return MemoryPresentationReceipt{}, ErrMemoryTrayVersionConflict
+	}
+	if row.state != "pending" {
+		return MemoryPresentationReceipt{}, ErrMemoryTrayTerminal
+	}
+	if row.digest != req.ContentDigest {
+		return MemoryPresentationReceipt{}, ErrMemoryPresentationConflict
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	if row.bindingDigest != req.BindingDigest || row.bindingDigest != expectedBinding ||
+		row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
+		return MemoryPresentationReceipt{}, ErrProductRuntimeMismatch
+	}
+	if existing, loadErr := loadExactMemoryPresentationReceiptTx(tx, req); loadErr == nil {
+		return existing, nil
+	} else if loadErr != sql.ErrNoRows {
+		return MemoryPresentationReceipt{}, loadErr
+	}
+
+	presentedAt := now.UTC().Format(time.RFC3339Nano)
+	graceExpiresAt := row.graceExpires
+	if graceExpiresAt == "" {
+		graceExpiresAt = now.Add(grace).UTC().Format(time.RFC3339Nano)
+	}
+	receiptID, err := newOpaqueID("presentation")
+	if err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO memory_presentation_receipts(
+			receipt_id, candidate_id, candidate_version, content_digest,
+			trusted_surface_kind, trusted_surface_instance, binding_digest,
+			presented_at, grace_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		receiptID, req.CandidateID, req.CandidateVersion, req.ContentDigest,
+		req.TrustedSurfaceKind, req.TrustedSurfaceInstance, req.BindingDigest,
+		presentedAt, graceExpiresAt,
+	); err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	if row.graceExpires == "" {
+		updated, err := tx.Exec(`
+			UPDATE memory_tray_candidates
+			   SET grace_expires_at=?, updated_at=?
+			 WHERE candidate_id=? AND version=? AND content_digest=?
+			   AND state='pending' AND grace_expires_at=''`,
+			graceExpiresAt, presentedAt, req.CandidateID, req.CandidateVersion, req.ContentDigest,
+		)
+		if err != nil {
+			return MemoryPresentationReceipt{}, err
+		}
+		if affected, _ := updated.RowsAffected(); affected != 1 {
+			return MemoryPresentationReceipt{}, ErrMemoryTrayVersionConflict
+		}
+	}
+	receipt := MemoryPresentationReceipt{
+		Schema: MemoryPresentationReceiptSchema, ReceiptID: receiptID,
+		CandidateID: req.CandidateID, CandidateVersion: req.CandidateVersion,
+		ContentDigest: req.ContentDigest, BindingDigest: req.BindingDigest,
+		TrustedSurfaceKind: req.TrustedSurfaceKind, TrustedSurfaceInstance: req.TrustedSurfaceInstance,
+		PresentedAt: presentedAt, GraceExpiresAt: graceExpiresAt,
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryPresentationReceipt{}, err
+	}
+	return receipt, nil
+}
+
+// TerminalMemoryReadinessFacts exposes the immutable, content-free half of
+// the cross-session readiness chain. repositoryID must come from the signed
+// workspace binding that owns the returned binding digest; U6 joins these
+// facts with its delivery receipts without inventing onboarding state.
+func (s *Store) TerminalMemoryReadinessFacts(
+	repositoryID string,
+	expectedBindingDigest string,
+	limit int,
+) ([]TerminalMemoryReadinessFact, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return nil, err
+	}
+	if !validTrayIdentifier(repositoryID) {
+		return nil, errors.New("readiness repository identity is invalid")
+	}
+	configuredBindingDigest, _, _ := s.productRuntimeAuthority()
+	if !trayBindingDigestPattern.MatchString(expectedBindingDigest) || expectedBindingDigest != configuredBindingDigest {
+		return nil, ErrProductRuntimeMismatch
+	}
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("readiness fact limit must be between 1 and 100")
+	}
+	rows, err := s.db.Query(`
+		SELECT receipt.receipt_id, presentation.receipt_id, receipt.object_id,
+		       receipt.status, candidate.content_digest, candidate.payload_json,
+		       ledger.binding_digest, receipt.provenance_host,
+		       receipt.provenance_session_id, receipt.created_at
+		  FROM memory_write_receipts receipt
+		  JOIN memory_tray_candidates candidate
+		    ON candidate.candidate_id=receipt.candidate_id
+		   AND candidate.version=receipt.candidate_version
+		   AND candidate.content_digest=receipt.content_digest
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=receipt.ledger_id
+		  JOIN private_memory_objects object
+		    ON object.object_id=receipt.object_id
+		   AND object.content_digest=receipt.content_digest
+		   AND object.lifecycle='active'
+		  JOIN memory_presentation_receipts presentation
+		    ON presentation.candidate_id=candidate.candidate_id
+		   AND presentation.candidate_version=candidate.version
+		   AND presentation.content_digest=candidate.content_digest
+		   AND presentation.binding_digest=ledger.binding_digest
+		   AND presentation.receipt_id=(
+		       SELECT first_presentation.receipt_id
+		         FROM memory_presentation_receipts first_presentation
+		        WHERE first_presentation.candidate_id=candidate.candidate_id
+		          AND first_presentation.candidate_version=candidate.version
+		          AND first_presentation.content_digest=candidate.content_digest
+		          AND first_presentation.binding_digest=ledger.binding_digest
+		        ORDER BY first_presentation.rowid
+		        LIMIT 1
+		   )
+		 WHERE receipt.status IN ('created','updated','deduplicated')
+		   AND ledger.binding_digest=?
+		 ORDER BY receipt.created_at, receipt.receipt_id
+		 LIMIT ?`, expectedBindingDigest, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	facts := make([]TerminalMemoryReadinessFact, 0)
+	for rows.Next() {
+		var fact TerminalMemoryReadinessFact
+		var payload string
+		if err := rows.Scan(
+			&fact.ReceiptID, &fact.PresentationReceiptID, &fact.ObjectID,
+			&fact.Status, &fact.ContentDigest, &payload, &fact.BindingDigest,
+			&fact.Host, &fact.SessionID, &fact.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		kind, scope, err := terminalReadinessCandidateMetadata(payload)
+		if err != nil {
+			return nil, err
+		}
+		fact.MemoryKind = kind
+		fact.ConversationScope = scope
+		fact.RepositoryID = repositoryID
+		fact.EvidenceIDs = []string{}
+		fact.Active = true
+		facts = append(facts, fact)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return facts, nil
+}
+
+func terminalReadinessCandidateMetadata(payload string) (string, string, error) {
+	var candidate PrivateMemoryCandidate
+	if err := json.Unmarshal([]byte(payload), &candidate); err != nil {
+		return "", "", errors.New("stored readiness candidate JSON is invalid")
+	}
+	switch candidate.Kind {
+	case PrivateMemoryCandidateCapsule:
+		if candidate.Capsule == nil || len(candidate.Capsule.Items) != 1 ||
+			candidate.Capsule.Items[0].Kind == "" || candidate.Capsule.Source.ConversationScope == "" {
+			return "", "", errors.New("stored readiness capsule metadata is invalid")
+		}
+		return candidate.Capsule.Items[0].Kind, candidate.Capsule.Source.ConversationScope, nil
+	case PrivateMemoryCandidateSemanticDelta:
+		if candidate.SemanticDelta == nil || candidate.SemanticDelta.Source.ConversationScope == "" {
+			return "", "", errors.New("stored readiness semantic metadata is invalid")
+		}
+		return PrivateMemoryCandidateSemanticDelta, candidate.SemanticDelta.Source.ConversationScope, nil
+	default:
+		return "", "", errors.New("stored readiness candidate kind is invalid")
+	}
+}
+
 func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion int, now time.Time) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
@@ -861,6 +1141,22 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 	}
 	if row.state != "pending" {
 		return MemoryWriteReceipt{}, ErrMemoryTrayTerminal
+	}
+	if row.graceExpires == "" {
+		return MemoryWriteReceipt{}, ErrMemoryTrayNotPresented
+	}
+	var presented int
+	if err := tx.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM memory_presentation_receipts
+			 WHERE candidate_id=? AND candidate_version=? AND content_digest=?
+			   AND binding_digest=? AND grace_expires_at=?
+		)`, candidateID, expectedVersion, row.digest, row.bindingDigest, row.graceExpires,
+	).Scan(&presented); err != nil {
+		return MemoryWriteReceipt{}, err
+	}
+	if presented != 1 {
+		return MemoryWriteReceipt{}, ErrMemoryTrayNotPresented
 	}
 	graceExpires, err := time.Parse(time.RFC3339Nano, row.graceExpires)
 	if err != nil {
@@ -1374,7 +1670,7 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 		       grace_expires_at=?, updated_at=?
 		 WHERE candidate_id=? AND version=? AND state='pending'`,
 		prepared.kind, newVersion, prepared.digest, string(prepared.payload),
-		now.Add(grace).UTC().Format(time.RFC3339Nano), createdAt,
+		"", createdAt,
 		candidateID, expectedVersion)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
@@ -1882,7 +2178,7 @@ func (s *Store) CommitDueMemoryTrayCandidates(now time.Time, limit int) ([]Memor
 	}
 	rows, err := s.db.Query(`
 		SELECT candidate_id, version FROM memory_tray_candidates
-		 WHERE state='pending' AND grace_expires_at<=?
+		 WHERE state='pending' AND grace_expires_at!='' AND grace_expires_at<=?
 		 ORDER BY grace_expires_at, candidate_id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err

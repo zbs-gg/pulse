@@ -623,6 +623,31 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.match(remembered.receipts[0].safe_provenance.session_id, /^session:[a-f0-9]{64}$/);
   assert.match(remembered.receipts[0].safe_provenance.turn_id, /^turn:[a-f0-9]{64}$/);
 
+  // A separate MCP round trip proves the tray read happens after the durable
+  // remember receipt instead of relying on JSON-RPC request execution order.
+  const trayInput = [
+    { jsonrpc: '2.0', id: 4, method: 'initialize', params: {
+      protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pulse-e2e', version: '1' },
+    } },
+    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: {
+      name: 'pulse_tray', arguments: { limit: 10 },
+    } },
+  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
+  const trayMCP = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
+    cwd: workspace,
+    env: hookEnv,
+    input: trayInput,
+    timeout: 20_000,
+  });
+  const trayMessages = trayMCP.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const tray = JSON.parse(trayMessages.find((message) => message.id === 5).result.content[0].text);
+  const pendingCard = tray.candidates.find((candidate) =>
+    candidate.candidate_id === remembered.receipts[0].candidate_id);
+  assert.equal(pendingCard.state, 'pending');
+  assert.equal(pendingCard.grace_expires_at, '',
+    'an unseen card must have no running auto-commit deadline');
+
   const postTool = run(process.execPath, [hook, 'PostToolUse'], {
     cwd: workspace,
     env: hookEnv,
