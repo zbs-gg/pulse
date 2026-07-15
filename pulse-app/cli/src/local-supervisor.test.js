@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,11 +12,114 @@ import {
   SupervisorError,
 	assertVaultRuntimeHealthy,
 	inspectVaultRuntime,
+	resolveManagedRuntime,
 	startVaultRuntime,
 	stopVaultRuntime,
 	stopVaultRuntimeAndWait,
   vaultRuntimeFromBinding,
 } from './local-supervisor.js';
+import { activateArtifactVersion, readActivatedArtifact } from './artifact-installer.js';
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function treeEntry(path, bytes, mode) {
+  return { path, bytes: bytes.length, sha256: sha256(bytes), mode, executable: (mode & 0o111) !== 0 };
+}
+
+function artifact(id, kind, sha, modelPolicy = null) {
+  return {
+    id, kind, version: '0.8.0', epoch: 8, bytes: 1, sha256: sha,
+    origin: 'https://releases.zbs.gg', url: `https://releases.zbs.gg/${id}`,
+    ...(kind === 'model' ? { model_policy: modelPolicy ?? { data_only: true, custom_code: false } } : {}),
+  };
+}
+
+function safetensorsFixture() {
+  const header = Buffer.from(JSON.stringify({ embedding: { dtype: 'F32', shape: [1], data_offsets: [0, 4] } }));
+  const prefix = Buffer.alloc(8);
+  prefix.writeBigUInt64LE(BigInt(header.length));
+  return Buffer.concat([prefix, header, Buffer.alloc(4)]);
+}
+
+async function activateManagedRuntimeFixtures(root) {
+  const installRoot = join(root, 'artifacts');
+  const daemon = Buffer.from('#!/bin/sh\nexit 0\n');
+  const python = Buffer.from('#!/bin/sh\nexit 0\n');
+  const helper = Buffer.from('managed helper fixture\n');
+  const config = Buffer.from('{}\n');
+  const tokenizer = Buffer.from('{}\n');
+  const model = safetensorsFixture();
+  const fixtures = [
+    {
+      descriptor: artifact('pulse-daemon', 'daemon', '1'.repeat(64)),
+      files: [['bin/pulse', daemon, 0o700]],
+    },
+    {
+      descriptor: artifact('pulse-embedder-runtime', 'embedder-runtime', '2'.repeat(64)),
+      files: [
+        ['runtime/bin/python3.12', python, 0o700], ['helper.py', helper, 0o600],
+        ['support/config.json', config, 0o600], ['support/tokenizer.json', tokenizer, 0o600],
+      ],
+    },
+    {
+      descriptor: artifact('pulse-model', 'model', '3'.repeat(64)),
+      files: [['model.safetensors', model, 0o600]],
+    },
+  ];
+  for (const fixture of fixtures) {
+    const treeManifest = {
+      schema: 'pulse.artifact_tree.v1',
+      files: fixture.files.map(([path, bytes, mode]) => treeEntry(path, bytes, mode)),
+    };
+    await activateArtifactVersion(fixture.descriptor, join(root, 'unused'), {
+      installRoot,
+      treeManifest,
+      testOnlyMaterializer: true,
+      materialize: async (_staged, target) => {
+        for (const [path, bytes, mode] of fixture.files) {
+          const destination = join(target, path);
+          mkdirSync(join(destination, '..'), { recursive: true, mode: 0o700 });
+          writeFileSync(destination, bytes, { mode });
+          chmodSync(destination, mode);
+        }
+      },
+    });
+  }
+  return {
+    installRoot,
+    verifiedActivations: {
+      daemon: readActivatedArtifact('pulse-daemon', { installRoot, expectedKind: 'daemon' }),
+      embedderRuntime: readActivatedArtifact('pulse-embedder-runtime', { installRoot, expectedKind: 'embedder-runtime' }),
+      model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model' }),
+    },
+  };
+}
+
+test('managed product runtime resolves three verified activations and atomically pins a private embedder config', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-managed-runtime.'));
+  const runtime = vaultRuntimeFromBinding(binding('personal', root));
+  const { installRoot, verifiedActivations } = await activateManagedRuntimeFixtures(root);
+
+  const managed = resolveManagedRuntime(runtime, { installRoot, verifiedActivations });
+
+  assert.equal(managed.schema, 'pulse.managed_product_runtime.v1');
+  assert.equal(managed.daemon.artifact_id, 'pulse-daemon');
+  assert.equal(managed.embedder_runtime.artifact_id, 'pulse-embedder-runtime');
+  assert.equal(managed.model.artifact_id, 'pulse-model');
+  assert.equal(managed.daemon.path.endsWith('/bin/pulse'), true);
+  assert.equal(managed.managed_embedder.config_path, join(runtime.data_dir, 'runtime', 'managed-embedder.json'));
+  assert.match(managed.managed_embedder.config_digest, /^[a-f0-9]{64}$/);
+  assert.equal(statSync(managed.managed_embedder.config_path).mode & 0o777, 0o600);
+  const disk = JSON.parse(readFileSync(managed.managed_embedder.config_path, 'utf8'));
+  assert.equal(disk.schema, 'pulse.managed_embedder.config.v1');
+  assert.equal(disk.python_executable.endsWith('/runtime/bin/python3.12'), true);
+  assert.equal(disk.helper_path.endsWith('/helper.py'), true);
+  assert.equal(disk.model_file.endsWith('/model.safetensors'), true);
+  assert.equal(disk.dimensions, 1024);
+  assert.equal(disk.normalized, true);
+});
 
 function binding(mode, root) {
   const common = {
@@ -115,6 +221,92 @@ process.on('SIGTERM', () => setTimeout(() => server.close(() => process.exit(0))
 `, { mode: 0o700 });
   chmodSync(path, 0o700);
 }
+
+function writeManagedSmokeDaemon(path) {
+  writeFileSync(path, `#!${process.execPath}
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+const value = (name) => process.argv[process.argv.indexOf(name) + 1];
+const dataDir = value('-data-dir');
+const [host, port] = value('-addr').split(':');
+mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
+writeFileSync(dataDir + '/embedder-env.json', JSON.stringify({
+  managed: process.env.PULSE_MANAGED_EMBEDDER_CONFIG,
+  python: process.env.PULSE_LOCAL_EMBED_PYTHON,
+  helper: process.env.PULSE_LOCAL_EMBED_HELPER,
+  model: process.env.PULSE_LOCAL_EMBED_MODEL,
+  cohere: process.env.COHERE_API_KEY,
+}), { mode: 0o600 });
+writeFileSync(dataDir + '/retrieval-count.txt', '0', { mode: 0o600 });
+const server = createServer((request, response) => {
+  if (request.headers['x-pulse-key'] !== 'a'.repeat(64)) { response.statusCode = 401; response.end('denied'); return; }
+  response.setHeader('content-type', 'application/json');
+  if (request.url === '/health') { response.end('{"status":"ok"}'); return; }
+  if (request.url === '/memory/status') { response.end('{"full_retrieval":true,"embedder":"bge-m3"}'); return; }
+  if (request.url === '/retrieve' && request.method === 'POST') {
+    const count = Number(readFileSync(dataDir + '/retrieval-count.txt', 'utf8')) + 1;
+    writeFileSync(dataDir + '/retrieval-count.txt', String(count), { mode: 0o600 });
+    request.resume(); request.on('end', () => response.end('{"event_ids":[]}')); return;
+  }
+  response.statusCode = 404; response.end('{}');
+});
+server.listen(Number(port), host);
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+`, { mode: 0o700 });
+  chmodSync(path, 0o700);
+}
+
+test('managed launch passes one private config, clears public embedder env, and requires a real retrieval query', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-supervisor-managed-process.'));
+  const port = await freePort();
+  const selected = binding('personal', root);
+  selected.personal.base_url = `http://127.0.0.1:${port}`;
+  const runtime = vaultRuntimeFromBinding(selected);
+  const { installRoot, verifiedActivations } = await activateManagedRuntimeFixtures(root);
+  const managed = resolveManagedRuntime(runtime, { installRoot, verifiedActivations });
+  const daemon = join(root, 'managed-smoke-daemon.mjs');
+  writeManagedSmokeDaemon(daemon);
+  const old = {
+    python: process.env.PULSE_LOCAL_EMBED_PYTHON,
+    helper: process.env.PULSE_LOCAL_EMBED_HELPER,
+    model: process.env.PULSE_LOCAL_EMBED_MODEL,
+    cohere: process.env.COHERE_API_KEY,
+  };
+  Object.assign(process.env, {
+    PULSE_LOCAL_EMBED_PYTHON: '/tmp/forbidden-python',
+    PULSE_LOCAL_EMBED_HELPER: '/tmp/forbidden-helper',
+    PULSE_LOCAL_EMBED_MODEL: '/tmp/forbidden-model',
+    COHERE_API_KEY: 'must-not-cross-process-boundary',
+  });
+  t.after(async () => {
+    for (const [name, value] of Object.entries({
+      PULSE_LOCAL_EMBED_PYTHON: old.python, PULSE_LOCAL_EMBED_HELPER: old.helper,
+      PULSE_LOCAL_EMBED_MODEL: old.model, COHERE_API_KEY: old.cohere,
+    })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    try { await stopVaultRuntimeAndWait(runtime); } catch { /* already stopped */ }
+  });
+
+  await startVaultRuntime(runtime, {
+    daemonPath: daemon, managedEmbedder: managed.managed_embedder, timeoutMs: 5000,
+  });
+  assert.deepEqual(JSON.parse(readFileSync(join(runtime.data_dir, 'embedder-env.json'), 'utf8')), {
+    managed: managed.managed_embedder.config_path,
+    python: '', helper: '', model: '', cohere: '',
+  });
+  const receipt = JSON.parse(readFileSync(runtime.pid_file, 'utf8'));
+  assert.equal(receipt.managed_embedder_config_digest, managed.managed_embedder.config_digest);
+	assert.equal(readFileSync(join(runtime.data_dir, 'retrieval-count.txt'), 'utf8'), '1');
+	const running = inspectVaultRuntime(runtime);
+	assert.equal((await assertVaultRuntimeHealthy(runtime, {
+		status: running, fullRetrievalSmoke: false,
+	})).status, 'running');
+	assert.equal(readFileSync(join(runtime.data_dir, 'retrieval-count.txt'), 'utf8'), '1');
+  assert.equal((await assertVaultRuntimeHealthy(runtime)).status, 'running');
+	assert.equal(readFileSync(join(runtime.data_dir, 'retrieval-count.txt'), 'utf8'), '2');
+});
 
 test('supervisor launches and stops one exact bound local process without fallback', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-supervisor-process.'));

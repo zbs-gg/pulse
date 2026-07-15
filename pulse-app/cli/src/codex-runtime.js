@@ -5,19 +5,26 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
+	renameSync,
   rmSync,
 	writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
+import { readCommittedArtifactSet } from './artifact-installer.js';
 import { resolveWorkspaceBinding } from './workspace-binding.js';
 import {
+	SupervisorError,
+	activateManagedEmbedderConfig,
 	assertVaultRuntimeHealthy,
+	inspectManagedEmbedderConfig,
 	inspectVaultRuntime,
+	resolveManagedRuntime,
 	startVaultRuntime,
+	stopVaultRuntimeAndWait,
 	vaultRuntimeFromBinding,
 } from './local-supervisor.js';
 import { captureEnabledForHost } from './capture-state.js';
@@ -35,17 +42,38 @@ function requirePrivateFile(path, label, maxBytes = 8192, { allowReadOnlyShared 
 	return { info, currentUID };
 }
 
-export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {
+function readProductActivationBundle(
+	dataDir = process.env.PULSE_DATA_DIR,
+	{ verifyArtifacts = true } = {},
+) {
 	if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) throw new Error('product_activation_data_dir_invalid');
 	const path = join(resolve(dataDir), 'runtime', 'product-daemon.json');
 	requirePrivateFile(path, 'product_activation');
 	const activation = JSON.parse(readFileSync(path, 'utf8'));
-	const allowed = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
-	if (activation?.schema !== 'pulse.product_activation.v2' ||
-		Object.keys(activation).length !== allowed.length || Object.keys(activation).some((name) => !allowed.includes(name)) ||
-		![activation.daemon_path, activation.runtime_path].every((value) => typeof value === 'string' && isAbsolute(value)) ||
-		![activation.daemon_digest, activation.runtime_tree_digest].every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
-		typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
+	if (activation?.schema === 'pulse.product_activation.v2') {
+		throw new Error('product_activation_v2_not_ready');
+	}
+	const allowed = [
+		'activated_at',
+		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'runtime_path', 'runtime_tree_digest', 'schema',
+	];
+	const digestFields = [
+		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+		'runtime_tree_digest',
+	];
+	const idFields = ['daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id'];
+	if (activation?.schema !== 'pulse.product_activation.v3' ||
+			Object.keys(activation).length !== allowed.length || Object.keys(activation).some((name) => !allowed.includes(name)) ||
+			![activation.daemon_path, activation.runtime_path]
+				.every((value) => typeof value === 'string' && isAbsolute(value)) ||
+			!digestFields.every((field) => /^[a-f0-9]{64}$/.test(activation[field] ?? '')) ||
+			!idFields.every((field) => /^[a-z0-9][a-z0-9._-]{0,127}$/.test(activation[field] ?? '')) ||
+			typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
 		throw new Error('product_activation_invalid');
 	}
 	const expectedRuntimePath = join(resolve(dataDir), 'runtime', 'codex', 'current', 'src', 'cli.js');
@@ -61,10 +89,32 @@ export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {
 	const { currentUID } = requirePrivateFile(activation.daemon_path, 'product_daemon', 1024 * 1024 * 1024);
 	const daemonInfo = lstatSync(activation.daemon_path);
 	if (daemonInfo.uid !== currentUID || (daemonInfo.mode & 0o111) === 0 ||
-		createHash('sha256').update(readFileSync(activation.daemon_path)).digest('hex') !== activation.daemon_digest) {
+			createHash('sha256').update(readFileSync(activation.daemon_path)).digest('hex') !== activation.daemon_digest) {
 		throw new Error('product_activation_daemon_digest_mismatch');
 	}
-	return activation;
+	if (!verifyArtifacts) return { activation };
+	const installRoot = join(resolve(dataDir), 'artifacts');
+	const committed = readCommittedArtifactSet({ installRoot }).activations;
+	const daemon = committed.daemon;
+	const embedderRuntime = committed['embedder-runtime'];
+	const model = committed.model;
+	if (!daemon || !embedderRuntime || !model ||
+			daemon.artifact_id !== activation.daemon_artifact_id || daemon.sha256 !== activation.daemon_artifact_sha256 ||
+			daemon.activation_digest !== activation.daemon_activation_digest || daemon.tree_digest !== activation.daemon_tree_digest ||
+			realpathSync(activation.daemon_path) !== realpathSync(join(daemon.version_path, 'bin', 'pulse')) ||
+			embedderRuntime.artifact_id !== activation.embedder_runtime_artifact_id ||
+			embedderRuntime.sha256 !== activation.embedder_runtime_artifact_sha256 ||
+			embedderRuntime.activation_digest !== activation.embedder_runtime_activation_digest ||
+			embedderRuntime.tree_digest !== activation.embedder_runtime_tree_digest ||
+			model.artifact_id !== activation.model_artifact_id || model.sha256 !== activation.model_artifact_sha256 ||
+			model.activation_digest !== activation.model_activation_digest || model.tree_digest !== activation.model_tree_digest) {
+		throw new Error('product_activation_artifact_identity_mismatch');
+	}
+	return { activation, activations: { daemon, embedderRuntime, model } };
+}
+
+export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {
+	return readProductActivationBundle(dataDir).activation;
 }
 
 export async function acquireVaultActivationLock(runtime) {
@@ -97,34 +147,128 @@ export async function acquireVaultActivationLock(runtime) {
 	};
 }
 
-function runtimeMatchesActivation(status, activation) {
-	return status.status === 'running' && status.executable === resolve(activation.daemon_path) &&
-		status.executable_digest === activation.daemon_digest;
+function managedRuntimeForActivation(runtime, bundle, { publishConfig = false } = {}) {
+	const { activation, activations } = bundle;
+	const dataDir = process.env.PULSE_DATA_DIR;
+	if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) throw new Error('product_activation_data_dir_invalid');
+	const managed = resolveManagedRuntime(runtime, {
+		installRoot: join(resolve(dataDir), 'artifacts'), publishConfig, verifiedActivations: activations,
+	});
+	if (managed.daemon.artifact_id !== activation.daemon_artifact_id ||
+			managed.daemon.artifact_sha256 !== activation.daemon_artifact_sha256 ||
+			managed.daemon.activation_digest !== activation.daemon_activation_digest ||
+			managed.daemon.tree_digest !== activation.daemon_tree_digest ||
+			managed.daemon.digest !== activation.daemon_digest ||
+			realpathSync(managed.daemon.path) !== realpathSync(activation.daemon_path) ||
+			managed.embedder_runtime.artifact_id !== activation.embedder_runtime_artifact_id ||
+			managed.embedder_runtime.artifact_sha256 !== activation.embedder_runtime_artifact_sha256 ||
+			managed.embedder_runtime.activation_digest !== activation.embedder_runtime_activation_digest ||
+			managed.embedder_runtime.tree_digest !== activation.embedder_runtime_tree_digest ||
+			managed.model.artifact_id !== activation.model_artifact_id ||
+			managed.model.artifact_sha256 !== activation.model_artifact_sha256 ||
+			managed.model.activation_digest !== activation.model_activation_digest ||
+			managed.model.tree_digest !== activation.model_tree_digest) {
+		throw new Error('product_activation_managed_runtime_mismatch');
+	}
+	return managed;
+}
+
+function runtimeMatchesActivation(status, activation, managedEmbedder) {
+	const managedIdentityMatches = status.managed_embedder?.config_path ===
+		join(status.runtime.data_dir, 'runtime', 'managed-embedder.json') &&
+		status.managed_embedder?.embedder_runtime_activation_digest === activation.embedder_runtime_activation_digest &&
+		status.managed_embedder?.embedder_runtime_tree_digest === activation.embedder_runtime_tree_digest &&
+		status.managed_embedder?.model_activation_digest === activation.model_activation_digest &&
+		status.managed_embedder?.model_tree_digest === activation.model_tree_digest;
+	return status.status === 'running' && realpathSync(status.executable) === realpathSync(activation.daemon_path) &&
+			status.executable_digest === activation.daemon_digest &&
+			managedIdentityMatches && (!managedEmbedder || (
+				status.managed_embedder.config_path === managedEmbedder.config_path &&
+				status.managed_embedder.config_digest === managedEmbedder.config_digest
+			));
 }
 
 export async function ensureActivatedVaultRuntime(resolved) {
-	let activation = readProductActivation();
+	let bundle = readProductActivationBundle(undefined, { verifyArtifacts: false });
+	let { activation } = bundle;
 	let status = inspectVaultRuntime(resolved.runtime);
 	if (runtimeMatchesActivation(status, activation)) {
-		await assertVaultRuntimeHealthy(resolved.runtime);
-		return activation;
+		try {
+			await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
+			return activation;
+		} catch (error) {
+			if (!(error instanceof SupervisorError) || error.code !== 'vault_full_retrieval_unavailable') throw error;
+			// The daemon identity is exact but its managed helper died. Re-check
+			// under the vault lock and restart the same committed generation once.
+		}
 	}
 	if (!['running', 'stopped', 'crashed'].includes(status.status)) {
 		throw new Error(`product_vault_${status.status}`);
 	}
 	const release = await acquireVaultActivationLock(resolved.runtime);
 	try {
-		activation = readProductActivation();
+		bundle = readProductActivationBundle();
+		activation = bundle.activation;
+		let managedRuntime = managedRuntimeForActivation(resolved.runtime, bundle);
 		status = inspectVaultRuntime(resolved.runtime);
-		if (!runtimeMatchesActivation(status, activation)) {
+		if (runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder)) {
+			try {
+				await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
+				return activation;
+			} catch (error) {
+				if (!(error instanceof SupervisorError) || error.code !== 'vault_full_retrieval_unavailable') throw error;
+				await stopVaultRuntimeAndWait(resolved.runtime);
+				status = inspectVaultRuntime(resolved.runtime);
+			}
+		}
+		let started = false;
+		if (!runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder)) {
 			if (!['running', 'stopped', 'crashed'].includes(status.status)) {
 				throw new Error(`product_vault_${status.status}`);
 			}
-			await startVaultRuntime(resolved.runtime, {
-				daemonPath: activation.daemon_path, host: 'pulse-product',
+			let previous;
+			const configChanged = ['running', 'crashed'].includes(status.status) &&
+				status.managed_embedder?.config_digest !== managedRuntime.managed_embedder.config_digest;
+			if (configChanged) {
+				previous = {
+					daemonPath: status.executable,
+					managedEmbedder: inspectManagedEmbedderConfig(resolved.runtime, status.managed_embedder),
+				};
+				await stopVaultRuntimeAndWait(resolved.runtime);
+			}
+			managedRuntime.managed_embedder = activateManagedEmbedderConfig(
+				resolved.runtime, managedRuntime.managed_embedder,
+			);
+			try {
+				await startVaultRuntime(resolved.runtime, {
+					daemonPath: activation.daemon_path,
+					managedEmbedder: managedRuntime.managed_embedder,
+					host: 'pulse-product',
+				});
+				started = true;
+			} catch (error) {
+				if (previous) {
+					try {
+						previous.managedEmbedder = activateManagedEmbedderConfig(
+							resolved.runtime, previous.managedEmbedder,
+						);
+						await startVaultRuntime(resolved.runtime, {
+							daemonPath: previous.daemonPath,
+							managedEmbedder: previous.managedEmbedder,
+							host: 'pulse-product', allowRollback: false,
+						});
+					} catch (rollbackError) {
+						throw new Error(`product_vault_upgrade_and_rollback_failed:${error.message}:${rollbackError.message}`);
+					}
+				}
+				throw error;
+			}
+		}
+		if (!started) {
+			await assertVaultRuntimeHealthy(resolved.runtime, {
+				status, fullRetrievalSmoke: false,
 			});
 		}
-		await assertVaultRuntimeHealthy(resolved.runtime);
 		return activation;
 	} finally {
 		await release();

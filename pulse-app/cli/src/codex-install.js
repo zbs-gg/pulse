@@ -223,9 +223,17 @@ function committedRuntimeDigest(dataDir) {
 		throw new Error('Codex runtime activation journal is unsafe; refusing ambiguous recovery');
 	}
 	const activation = JSON.parse(readFileSync(path, 'utf8'));
-	const allowed = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
+	const allowedV2 = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
+	const allowedV3 = [
+		'activated_at',
+		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'runtime_path', 'runtime_tree_digest', 'schema',
+	];
+	const allowed = activation?.schema === 'pulse.product_activation.v2' ? allowedV2 : allowedV3;
 	const expectedRuntimePath = join(runtimeRoot(dataDir), 'current', 'src', 'cli.js');
-	if (activation?.schema !== 'pulse.product_activation.v2' ||
+	if (!['pulse.product_activation.v2', 'pulse.product_activation.v3'].includes(activation?.schema) ||
 		Object.keys(activation).length !== allowed.length ||
 		Object.keys(activation).some((name) => !allowed.includes(name)) ||
 		resolve(activation.runtime_path ?? '') !== resolve(expectedRuntimePath) ||

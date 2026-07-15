@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -13,7 +15,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+
+const SHA256 = /^[a-f0-9]{64}$/;
+const MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v1';
+const MANAGED_CONFIG_KEYS = [
+  'dimensions', 'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest', 'helper_path',
+  'model', 'model_activation_digest', 'model_file', 'model_tree_digest', 'normalized', 'pooling',
+  'protocol', 'python_executable', 'schema', 'support_directory',
+];
 
 export class SupervisorError extends Error {
   constructor(code, message) {
@@ -75,6 +85,183 @@ function ensurePrivateDirectory(path) {
   }
 }
 
+function canonicalJSON(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJSON(item)).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
+}
+
+function syncDirectory(path) {
+  const descriptor = openSync(path, 'r');
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+function atomicPrivateJSON(path, value) {
+  ensurePrivateDirectory(dirname(path));
+  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
+  try {
+    writeFileSync(temporary, `${canonicalJSON(value)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    chmodSync(temporary, 0o600);
+    const descriptor = openSync(temporary, 'r');
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+    renameSync(temporary, path);
+    syncDirectory(dirname(path));
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function inside(root, candidate) {
+  const base = resolve(root);
+  const value = resolve(candidate);
+  return value.startsWith(`${base}${sep}`);
+}
+
+function activatedFile(activation, relativePath, { executable = false } = {}) {
+  const path = join(activation.version_path, relativePath);
+  if (!inside(activation.version_path, path)) {
+    throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
+  }
+  const info = lstatSync(path);
+  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
+      (info.mode & 0o022) !== 0 || (executable && (info.mode & 0o111) === 0)) {
+    throw new SupervisorError('managed_artifact_file_unsafe', `managed artifact file is unsafe: ${relativePath}`);
+  }
+  return path;
+}
+
+function activatedDirectory(activation, relativePath) {
+  const path = join(activation.version_path, relativePath);
+  if (!inside(activation.version_path, path)) {
+    throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
+  }
+  const info = lstatSync(path);
+  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+    throw new SupervisorError('managed_artifact_directory_unsafe', `managed artifact directory is unsafe: ${relativePath}`);
+  }
+  return path;
+}
+
+export function inspectManagedEmbedderConfig(runtime, managedEmbedder) {
+  if (!managedEmbedder || typeof managedEmbedder !== 'object' ||
+      managedEmbedder.config_path !== join(runtime.data_dir, 'runtime', 'managed-embedder.json') ||
+      !SHA256.test(managedEmbedder.config_digest ?? '')) {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config identity is invalid');
+  }
+  const info = lstatSync(managedEmbedder.config_path);
+  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
+      (info.mode & 0o077) !== 0 || info.size > 16 * 1024) {
+    throw new SupervisorError('managed_embedder_config_unsafe', 'managed embedder config must be a private regular file');
+  }
+  const bytes = readFileSync(managedEmbedder.config_path, 'utf8');
+  if (createHash('sha256').update(bytes).digest('hex') !== managedEmbedder.config_digest) {
+    throw new SupervisorError('managed_embedder_config_digest_mismatch', 'managed embedder config digest changed');
+  }
+  let config;
+  try { config = JSON.parse(bytes); } catch {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config is not valid JSON');
+  }
+  if (Object.keys(config).sort().join('\0') !== [...MANAGED_CONFIG_KEYS].sort().join('\0') ||
+      bytes !== `${canonicalJSON(config)}\n` || config.schema !== MANAGED_CONFIG_SCHEMA || config.protocol !== 1 ||
+      config.model !== 'bge-m3' || config.dimensions !== 1024 || config.pooling !== 'cls' || config.normalized !== true ||
+      ![config.embedder_runtime_activation_digest, config.embedder_runtime_tree_digest,
+        config.model_activation_digest, config.model_tree_digest].every((value) => SHA256.test(value ?? '')) ||
+      ![config.python_executable, config.helper_path, config.support_directory, config.model_file]
+        .every((value) => typeof value === 'string' && isAbsolute(value))) {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config contract is invalid');
+  }
+  for (const field of [
+    'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest',
+    'model_activation_digest', 'model_tree_digest',
+  ]) {
+    if (managedEmbedder[field] !== undefined && managedEmbedder[field] !== config[field]) {
+      throw new SupervisorError('managed_embedder_config_identity_mismatch', `${field} does not match the config`);
+    }
+  }
+  return { ...managedEmbedder, config };
+}
+
+export function activateManagedEmbedderConfig(runtime, managedEmbedder) {
+  if (!managedEmbedder || managedEmbedder.config_path !== join(runtime.data_dir, 'runtime', 'managed-embedder.json') ||
+      !managedEmbedder.config ||
+      createHash('sha256').update(`${canonicalJSON(managedEmbedder.config)}\n`).digest('hex') !== managedEmbedder.config_digest) {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder activation is invalid');
+  }
+  atomicPrivateJSON(managedEmbedder.config_path, managedEmbedder.config);
+  return inspectManagedEmbedderConfig(runtime, managedEmbedder);
+}
+
+export function resolveManagedRuntime(runtime, {
+  installRoot, publishConfig = true, verifiedActivations,
+} = {}) {
+  if (typeof installRoot !== 'string' || !isAbsolute(installRoot)) {
+    throw new SupervisorError('managed_artifact_root_invalid', 'managed artifact root must be absolute');
+  }
+  const daemonActivation = verifiedActivations?.daemon;
+  const embedderActivation = verifiedActivations?.embedderRuntime ?? verifiedActivations?.['embedder-runtime'];
+  const modelActivation = verifiedActivations?.model;
+  if (!daemonActivation || !embedderActivation || !modelActivation) {
+    throw new SupervisorError(
+      'managed_artifact_set_required',
+      'managed product runtime requires one verified signed compatibility set',
+    );
+  }
+  const daemonPath = activatedFile(daemonActivation, 'bin/pulse', { executable: true });
+  const pythonExecutable = activatedFile(embedderActivation, 'runtime/bin/python3.12', { executable: true });
+  const helperPath = activatedFile(embedderActivation, 'helper.py');
+  const supportDirectory = activatedDirectory(embedderActivation, 'support');
+  activatedFile(embedderActivation, 'support/config.json');
+  activatedFile(embedderActivation, 'support/tokenizer.json');
+  const modelFile = activatedFile(modelActivation, 'model.safetensors');
+  const config = {
+    dimensions: 1024,
+    embedder_runtime_activation_digest: embedderActivation.activation_digest,
+    embedder_runtime_tree_digest: embedderActivation.tree_digest,
+    helper_path: helperPath,
+    model: 'bge-m3',
+    model_activation_digest: modelActivation.activation_digest,
+    model_file: modelFile,
+    model_tree_digest: modelActivation.tree_digest,
+    normalized: true,
+    pooling: 'cls',
+    protocol: 1,
+    python_executable: pythonExecutable,
+    schema: MANAGED_CONFIG_SCHEMA,
+    support_directory: supportDirectory,
+  };
+  ensurePrivateDirectory(runtime.data_dir);
+  const configPath = join(runtime.data_dir, 'runtime', 'managed-embedder.json');
+  let managedEmbedder = {
+    config_path: configPath,
+    config_digest: createHash('sha256').update(`${canonicalJSON(config)}\n`).digest('hex'),
+    embedder_runtime_activation_digest: embedderActivation.activation_digest,
+    embedder_runtime_tree_digest: embedderActivation.tree_digest,
+    model_activation_digest: modelActivation.activation_digest,
+    model_tree_digest: modelActivation.tree_digest,
+    config,
+  };
+  if (publishConfig) managedEmbedder = activateManagedEmbedderConfig(runtime, managedEmbedder);
+  const identity = (activation, path) => ({
+    artifact_id: activation.artifact_id,
+    artifact_sha256: activation.sha256,
+    activation_digest: activation.activation_digest,
+    tree_digest: activation.tree_digest,
+    version: activation.version,
+    version_path: activation.version_path,
+    ...(path ? { path, digest: createHash('sha256').update(readFileSync(path)).digest('hex') } : {}),
+  });
+  return {
+    schema: 'pulse.managed_product_runtime.v1',
+    daemon: identity(daemonActivation, daemonPath),
+    embedder_runtime: identity(embedderActivation),
+    model: identity(modelActivation),
+    managed_embedder: managedEmbedder,
+  };
+}
+
 function trustedExecutable(path) {
   const executable = realpathSync(resolve(path));
   const info = statSync(executable);
@@ -119,15 +306,37 @@ function receiptMetadataMatches(runtime, receipt) {
     return false;
   }
   try {
-    return trustedExecutable(receipt.executable) === receipt.executable &&
-      executableDigest(receipt.executable) === receipt.executable_digest;
+    if (trustedExecutable(receipt.executable) !== receipt.executable ||
+        executableDigest(receipt.executable) !== receipt.executable_digest) return false;
+    const managed = managedEmbedderFromReceipt(receipt);
+    if (managed === null) return false;
+    if (managed) inspectManagedEmbedderConfig(runtime, managed);
+    return true;
   } catch {
     return false;
   }
 }
 
-function receiptProcessMatches(runtime, receipt) {
-  const command = processCommand(receipt.pid);
+function managedEmbedderFromReceipt(receipt) {
+  const mapping = {
+    config_path: 'managed_embedder_config_path',
+    config_digest: 'managed_embedder_config_digest',
+    embedder_runtime_activation_digest: 'embedder_runtime_activation_digest',
+    embedder_runtime_tree_digest: 'embedder_runtime_tree_digest',
+    model_activation_digest: 'model_activation_digest',
+    model_tree_digest: 'model_tree_digest',
+  };
+  const present = Object.values(mapping).filter((field) => receipt[field] !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length !== Object.keys(mapping).length) return null;
+  const value = Object.fromEntries(Object.entries(mapping).map(([name, field]) => [name, receipt[field]]));
+  if (![value.config_digest, value.embedder_runtime_activation_digest, value.embedder_runtime_tree_digest,
+    value.model_activation_digest, value.model_tree_digest].every((digest) => SHA256.test(digest ?? '')) ||
+    typeof value.config_path !== 'string' || !isAbsolute(value.config_path)) return null;
+  return value;
+}
+
+function receiptProcessMatches(runtime, receipt, command = processCommand(receipt.pid)) {
   return command.includes(receipt.executable) && command.includes(`-data-dir ${runtime.data_dir}`) &&
     command.includes(`-addr ${runtime.addr}`);
 }
@@ -140,17 +349,20 @@ export function inspectVaultRuntime(runtime) {
   }
   const command = processCommand(receipt.pid);
   if (command === '') {
+    const managedEmbedder = managedEmbedderFromReceipt(receipt) || undefined;
     return {
       status: 'crashed', runtime, pid: receipt.pid, executable: receipt.executable,
-      executable_digest: receipt.executable_digest, fallback: false,
+      executable_digest: receipt.executable_digest, managed_embedder: managedEmbedder, fallback: false,
     };
   }
-  if (!receiptProcessMatches(runtime, receipt)) {
+	if (!receiptProcessMatches(runtime, receipt, command)) {
     return { status: 'stale_or_mismatched', runtime, fallback: false };
   }
   return {
     status: 'running', runtime, pid: receipt.pid, executable: receipt.executable,
-    executable_digest: receipt.executable_digest, fallback: false,
+    executable_digest: receipt.executable_digest,
+    managed_embedder: managedEmbedderFromReceipt(receipt) || undefined,
+    fallback: false,
   };
 }
 
@@ -175,9 +387,10 @@ async function terminateSpawnedProcess(pid) {
   await waitForProcessExit(pid, 1500);
 }
 
-async function waitForVault(runtime, timeoutMs) {
+async function waitForVault(runtime, timeoutMs, { fullRetrieval = false, retrievalSmoke = fullRetrieval } = {}) {
   const secretPath = join(runtime.data_dir, 'secret.key');
   const deadline = Date.now() + timeoutMs;
+	let lastCheck = 'daemon has not answered yet';
   while (Date.now() < deadline) {
     try {
       if (existsSync(secretPath)) {
@@ -189,35 +402,85 @@ async function waitForVault(runtime, timeoutMs) {
         const response = await fetch(`${runtime.base_url}/health`, {
           headers: { 'X-Pulse-Key': secret }, signal: AbortSignal.timeout(500),
         });
-        if (response.ok) return;
+        if (response.ok) {
+          if (!fullRetrieval) return;
+			lastCheck = 'health is ready; memory status is pending';
+          const status = await fetch(`${runtime.base_url}/memory/status`, {
+            headers: { 'X-Pulse-Key': secret }, signal: AbortSignal.timeout(750),
+          });
+          if (status.ok) {
+            const body = await status.json();
+            if (body.full_retrieval === true && body.embedder === 'bge-m3') {
+				if (!retrievalSmoke) return;
+				lastCheck = 'managed embedder is ready; retrieval query is pending';
+              const smoke = await fetch(`${runtime.base_url}/retrieve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+                body: JSON.stringify({ query: 'Pulse managed retrieval readiness', mode: 'factual', top_k: 1 }),
+                signal: AbortSignal.timeout(1500),
+              });
+              if (smoke.ok) {
+                const result = await smoke.json();
+                if (Array.isArray(result.event_ids)) return;
+				lastCheck = 'retrieval returned an invalid response contract';
+			  } else {
+				lastCheck = `retrieval returned HTTP ${smoke.status}`;
+              }
+			} else if (body.full_retrieval !== true) {
+			  lastCheck = 'memory status reports full retrieval disabled';
+			} else {
+			  lastCheck = 'memory status reports an unexpected embedder';
+            }
+		  } else {
+			lastCheck = `memory status returned HTTP ${status.status}`;
+          }
+		} else {
+		  lastCheck = `health returned HTTP ${response.status}`;
+        }
+	  } else {
+		lastCheck = 'daemon secret is pending';
       }
     } catch (error) {
       if (error instanceof SupervisorError) throw error;
+	  lastCheck = `readiness request failed (${error?.name ?? 'Error'})`;
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new SupervisorError('vault_start_timeout', 'bound local vault did not become ready');
+  throw new SupervisorError(
+    fullRetrieval ? 'vault_full_retrieval_unavailable' : 'vault_start_timeout',
+    fullRetrieval
+	  ? `bound local vault did not pass the managed full-retrieval smoke: ${lastCheck}`
+	  : `bound local vault did not become ready: ${lastCheck}`,
+  );
 }
 
-export async function assertVaultRuntimeHealthy(runtime, { timeoutMs = 1500 } = {}) {
-  const status = inspectVaultRuntime(runtime);
+export async function assertVaultRuntimeHealthy(runtime, {
+	timeoutMs = 1500, status = inspectVaultRuntime(runtime), fullRetrievalSmoke = true,
+} = {}) {
   if (status.status !== 'running') {
     throw new SupervisorError('vault_not_running', `bound local vault is ${status.status}`);
   }
-  await waitForVault(runtime, timeoutMs);
+	await waitForVault(runtime, timeoutMs, {
+		fullRetrieval: Boolean(status.managed_embedder), retrievalSmoke: fullRetrievalSmoke,
+	});
   return status;
 }
 
 export async function startVaultRuntime(runtime, {
-  daemonPath, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
+  daemonPath, managedEmbedder, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
 } = {}) {
   const executable = trustedExecutable(daemonPath);
   const desiredDigest = executableDigest(executable);
+  const desiredManaged = managedEmbedder ? inspectManagedEmbedderConfig(runtime, managedEmbedder) : undefined;
   const status = inspectVaultRuntime(runtime);
   let rollbackPath;
+	let rollbackManaged;
 	if (status.status === 'running') {
-		if (status.executable === executable && status.executable_digest === desiredDigest) return status;
+		const sameManaged = status.managed_embedder?.config_digest === desiredManaged?.config_digest &&
+			status.managed_embedder?.config_path === desiredManaged?.config_path;
+		if (status.executable === executable && status.executable_digest === desiredDigest && sameManaged) return status;
 		rollbackPath = status.executable;
+		rollbackManaged = status.managed_embedder;
 		await stopVaultRuntimeAndWait(runtime);
   }
   if (status.status === 'crashed') {
@@ -245,9 +508,8 @@ export async function startVaultRuntime(runtime, {
       PULSE_DATA_DIR: runtime.data_dir,
       PULSE_CACHE_DIR: runtime.cache_dir,
       PULSE_HOST: host,
-      PULSE_LOCAL_EMBED_PYTHON: process.env.PULSE_LOCAL_EMBED_PYTHON ?? '',
-      PULSE_LOCAL_EMBED_HELPER: process.env.PULSE_LOCAL_EMBED_HELPER ?? '',
-      PULSE_LOCAL_EMBED_MODEL: process.env.PULSE_LOCAL_EMBED_MODEL ?? '',
+      PULSE_MANAGED_EMBEDDER_CONFIG: desiredManaged?.config_path ?? '',
+      PULSE_LOCAL_EMBED_PYTHON: '', PULSE_LOCAL_EMBED_HELPER: '', PULSE_LOCAL_EMBED_MODEL: '',
       ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '',
     },
   });
@@ -258,13 +520,21 @@ export async function startVaultRuntime(runtime, {
     executable, executable_digest: desiredDigest, binding_digest: runtime.binding_digest,
     kind: runtime.kind, store_id: runtime.store_id, data_dir: runtime.data_dir,
     started_at: new Date().toISOString(),
+    ...(desiredManaged ? {
+      managed_embedder_config_path: desiredManaged.config_path,
+      managed_embedder_config_digest: desiredManaged.config_digest,
+      embedder_runtime_activation_digest: desiredManaged.embedder_runtime_activation_digest,
+      embedder_runtime_tree_digest: desiredManaged.embedder_runtime_tree_digest,
+      model_activation_digest: desiredManaged.model_activation_digest,
+      model_tree_digest: desiredManaged.model_tree_digest,
+    } : {}),
   };
   const temporary = `${runtime.pid_file}.new`;
   try {
     writeFileSync(temporary, JSON.stringify(receipt), { mode: 0o600, flag: 'wx' });
     renameSync(temporary, runtime.pid_file);
-    await waitForVault(runtime, timeoutMs);
-    return { status: 'running', runtime, pid: child.pid, fallback: false };
+    await waitForVault(runtime, timeoutMs, { fullRetrieval: Boolean(desiredManaged) });
+    return { status: 'running', runtime, pid: child.pid, managed_embedder: desiredManaged, fallback: false };
   } catch (error) {
 	let terminationError;
 	try {
@@ -278,7 +548,7 @@ export async function startVaultRuntime(runtime, {
     if (allowRollback && rollbackPath) {
       try {
         await startVaultRuntime(runtime, {
-          daemonPath: rollbackPath, timeoutMs, host, allowRollback: false,
+          daemonPath: rollbackPath, managedEmbedder: rollbackManaged, timeoutMs, host, allowRollback: false,
         });
 	  } catch (failure) {
 		rollbackError = failure;

@@ -79,12 +79,19 @@ import {
 } from './codex-runtime.js';
 import {
   SupervisorError,
+	activateManagedEmbedderConfig,
 	assertVaultRuntimeHealthy,
 	inspectVaultRuntime,
+	resolveManagedRuntime,
 	startVaultRuntime,
 	stopVaultRuntimeAndWait,
   vaultRuntimeFromBinding,
 } from './local-supervisor.js';
+import {
+	commitPersonalRuntimeRelease,
+	packagedPersonalRuntimeOptions,
+	provisionPersonalRuntime,
+} from './personal-runtime-installer.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -570,13 +577,45 @@ function restoreLocalFiles(snapshots) {
 	}
 }
 
+function artifactActivationFilePaths(dataDir) {
+	const root = join(resolve(dataDir), 'artifacts');
+	const paths = [join(root, 'active-release.json')];
+	if (!existsSync(root)) return paths;
+	for (const entry of readdirSync(root, { withFileTypes: true })) {
+		if (!entry.isDirectory() || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(entry.name)) continue;
+		paths.push(join(root, entry.name, 'current.json'), join(root, entry.name, 'previous.json'));
+	}
+	return paths;
+}
+
+function sameManagedEmbedder(left, right) {
+	if (!left || !right) return left === right;
+	return left.config_path === right.config_path && left.config_digest === right.config_digest &&
+		left.embedder_runtime_activation_digest === right.embedder_runtime_activation_digest &&
+		left.model_activation_digest === right.model_activation_digest;
+}
+
+async function stopUpgradedVaultBeforeFileRestore(runtime, previous) {
+	const current = inspectVaultRuntime(runtime);
+	if (current.status !== 'running' && current.status !== 'crashed') return;
+	const alreadyPrevious = previous.status === 'running' && current.status === 'running' &&
+		current.executable === previous.executable && current.executable_digest === previous.executable_digest &&
+		sameManagedEmbedder(current.managed_embedder, previous.managed_embedder);
+	if (!alreadyPrevious) await stopVaultRuntimeAndWait(runtime);
+}
+
 async function restoreVaultAfterFailedConnect(runtime, previous) {
 	const current = inspectVaultRuntime(runtime);
 	if (previous.status === 'running') {
 		if (current.status !== 'running' || current.executable !== previous.executable ||
-			current.executable_digest !== previous.executable_digest) {
+			current.executable_digest !== previous.executable_digest ||
+			!sameManagedEmbedder(current.managed_embedder, previous.managed_embedder)) {
+			if (current.status === 'running' || current.status === 'crashed') {
+				await stopVaultRuntimeAndWait(runtime);
+			}
 			await startVaultRuntime(runtime, {
-				daemonPath: previous.executable, host: 'pulse-product', allowRollback: false,
+					daemonPath: previous.executable, managedEmbedder: previous.managed_embedder,
+					host: 'pulse-product', allowRollback: false,
 			});
 		}
 		await assertVaultRuntimeHealthy(runtime);
@@ -593,10 +632,17 @@ async function restoreVaultAfterFailedConnect(runtime, previous) {
 
 function activationFilePaths(binding, { includeClaude = false, includeCodex = false } = {}) {
 	const paths = [
-		...captureStatePaths(DATA_DIR, binding),
-		join(DATA_DIR, 'runtime', 'product-daemon.json'),
-		resolve(process.cwd(), '.gitignore'),
-	];
+			...artifactActivationFilePaths(DATA_DIR),
+			...captureStatePaths(DATA_DIR, binding),
+			join(DATA_DIR, 'runtime', 'product-daemon.json'),
+			resolve(process.cwd(), '.gitignore'),
+		];
+	if (binding) {
+		paths.push(join(
+			binding.mode === 'personal' ? binding.personal.data_dir : binding.desk.data_dir,
+			'runtime', 'managed-embedder.json',
+		));
+	}
 	if (includeClaude) {
 		paths.push(
 			resolve(process.cwd(), '.mcp.json'),
@@ -625,8 +671,7 @@ async function connectCodexActivation() {
   const resolved = resolveCodexMcpRuntime(process.cwd());
 	const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
 	try {
-  const daemonPath = ensureProductDaemonBinary();
-	const previousDaemon = inspectVaultRuntime(resolved.runtime);
+		const previousDaemon = inspectVaultRuntime(resolved.runtime);
 	if (previousDaemon.status === 'running') await assertVaultRuntimeHealthy(resolved.runtime);
 	const previousRuntime = inspectCodexRuntime(DATA_DIR);
 	const captureBefore = safeReadJSON(join(resolved.runtime.data_dir, 'capture-state.json'));
@@ -648,10 +693,19 @@ async function connectCodexActivation() {
 		throw new Error('Pulse Codex plugin is installed but disabled; remove it explicitly before product activation');
 	}
 	const pluginSnapshot = snapshotPluginTree(pluginBefore);
-	let installedRuntime;
-	let migration;
+		let installedRuntime;
+		let managedRuntime;
+		let migration;
 	let runtimeInstalled = false;
-  try {
+	  try {
+			managedRuntime = await ensureManagedProductRuntime(resolved.runtime, { publishConfig: false });
+			if (previousDaemon.status === 'running' &&
+				previousDaemon.managed_embedder?.config_digest !== managedRuntime.managed_embedder.config_digest) {
+				await stopVaultRuntimeAndWait(resolved.runtime);
+			}
+			managedRuntime.managed_embedder = activateManagedEmbedderConfig(
+				resolved.runtime, managedRuntime.managed_embedder,
+			);
 		try {
 			codexCommand(['plugin', 'marketplace', 'add', source]);
 		} catch (error) {
@@ -666,15 +720,18 @@ async function connectCodexActivation() {
 		installedRuntime = installCodexRuntime(CLI_PACKAGE_ROOT, DATA_DIR, { keepPrevious: true });
 		runtimeInstalled = true;
 		if (!installedRuntime.ok) throw new Error(`Codex runtime install failed: ${installedRuntime.detail}`);
-		const status = inspectVaultRuntime(resolved.runtime);
-		if (status.status === 'stopped' || status.status === 'crashed' ||
-			(status.status === 'running' && status.executable !== daemonPath)) {
-			await startVaultRuntime(resolved.runtime, { daemonPath, host: 'pulse-product' });
-		} else if (status.status !== 'running') {
-			throw new Error(`Pulse bound vault is ${status.status}`);
-		}
-		await assertVaultRuntimeHealthy(resolved.runtime);
-		writeProductDaemonActivation(daemonPath, installedRuntime);
+			const status = inspectVaultRuntime(resolved.runtime);
+			if (['stopped', 'crashed', 'running'].includes(status.status)) {
+				await startVaultRuntime(resolved.runtime, {
+					daemonPath: managedRuntime.daemon.path,
+					managedEmbedder: managedRuntime.managed_embedder,
+					host: 'pulse-product', allowRollback: false,
+				});
+			} else {
+				throw new Error(`Pulse bound vault is ${status.status}`);
+			}
+			await assertVaultRuntimeHealthy(resolved.runtime);
+			writeProductDaemonActivation(managedRuntime, installedRuntime);
     migration = migrateLegacyPulseHookFiles({ cwd: process.cwd() });
 		if (claudeActive) {
 			installClaudeCode(installedRuntime.path, { requireExternal: true });
@@ -696,6 +753,7 @@ async function connectCodexActivation() {
       trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
     });
     finalizeCodexRuntimeInstall(DATA_DIR);
+		commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
   } catch (error) {
 		const failures = [];
 		if (runtimeInstalled) {
@@ -709,6 +767,7 @@ async function connectCodexActivation() {
 				installClaudeCode(previousClaudeRuntime.path, { requireExternal: true });
 			}
 		} catch (failure) { failures.push(failure); }
+		try { await stopUpgradedVaultBeforeFileRestore(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
 		try { restoreLocalFiles(snapshots); } catch (failure) { failures.push(failure); }
 		try { await restoreVaultAfterFailedConnect(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
 		if (!pluginBefore.installed) {
@@ -1324,37 +1383,11 @@ function runRequired(commandName, commandArgs, { cwd, env = {} } = {}) {
   return result;
 }
 
-function stageProductDaemon(sourcePath) {
-  if (!existsSync(sourcePath)) throw new Error(`Pulse product daemon is missing: ${sourcePath}`);
-  const bytes = readFileSync(sourcePath);
-  const digest = createHash('sha256').update(bytes).digest('hex');
-  const directory = join(DATA_DIR, 'bin');
-  const target = join(directory, `pulse-product-daemon-${digest}`);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (existsSync(target)) {
-    const info = lstatSync(target);
-    const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-    const actual = info.isFile() && !info.isSymbolicLink()
-      ? createHash('sha256').update(readFileSync(target)).digest('hex')
-      : '';
-    if (info.uid !== currentUID || (info.mode & 0o077) !== 0 || actual !== digest) {
-      throw new Error('existing content-addressed Pulse daemon failed integrity validation');
-    }
-    return realpathSync(target);
-  }
-  const temporary = `${target}.${process.pid}.${Date.now()}.new`;
-  try {
-    writeFileSync(temporary, bytes, { mode: 0o700, flag: 'wx' });
-    chmodSync(temporary, 0o700);
-    renameSync(temporary, target);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-  return realpathSync(target);
-}
-
-function writeProductDaemonActivation(daemonPath, runtime) {
-	const executable = realpathSync(resolve(daemonPath));
+function writeProductDaemonActivation(managedRuntime, runtime) {
+	if (managedRuntime?.schema !== 'pulse.managed_product_runtime.v1') {
+		throw new Error('Pulse managed product runtime activation is invalid');
+	}
+	const executable = realpathSync(resolve(managedRuntime.daemon.path));
 	const info = lstatSync(executable);
 	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
 	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
@@ -1365,40 +1398,40 @@ function writeProductDaemonActivation(daemonPath, runtime) {
 		throw new Error('Pulse product runtime activation is invalid');
 	}
 	atomicWriteJSON(join(DATA_DIR, 'runtime', 'product-daemon.json'), {
-		schema: 'pulse.product_activation.v2',
+		activated_at: new Date().toISOString(),
+		daemon_activation_digest: managedRuntime.daemon.activation_digest,
+		daemon_artifact_id: managedRuntime.daemon.artifact_id,
+		daemon_artifact_sha256: managedRuntime.daemon.artifact_sha256,
+		daemon_digest: managedRuntime.daemon.digest,
+		daemon_path: executable,
+		daemon_tree_digest: managedRuntime.daemon.tree_digest,
+		embedder_runtime_activation_digest: managedRuntime.embedder_runtime.activation_digest,
+		embedder_runtime_artifact_id: managedRuntime.embedder_runtime.artifact_id,
+		embedder_runtime_artifact_sha256: managedRuntime.embedder_runtime.artifact_sha256,
+		embedder_runtime_tree_digest: managedRuntime.embedder_runtime.tree_digest,
+		model_activation_digest: managedRuntime.model.activation_digest,
+		model_artifact_id: managedRuntime.model.artifact_id,
+		model_artifact_sha256: managedRuntime.model.artifact_sha256,
+		model_tree_digest: managedRuntime.model.tree_digest,
 		runtime_path: resolve(runtime.path),
 		runtime_tree_digest: runtime.digest,
-		daemon_path: executable,
-		daemon_digest: createHash('sha256').update(readFileSync(executable)).digest('hex'),
-		activated_at: new Date().toISOString(),
+		schema: 'pulse.product_activation.v3',
 	});
 	return executable;
 }
 
-function ensureProductDaemonBinary() {
-  if (process.env.PULSE_GO_BIN) return stageProductDaemon(resolve(process.env.PULSE_GO_BIN));
-  if (process.env.PULSE_PREVIEW_RUNTIME_SETUP === '0') {
-    throw new Error('Pulse product daemon is missing and automatic local build is disabled');
-  }
-  const sourceRoot = previewSourceRoot();
-  if (!sourceRoot) {
-    throw new Error('Pulse product daemon source is unavailable; reinstall @zbs-gg/pulse@preview');
-  }
-  requireCommand('go');
-  const directory = join(DATA_DIR, 'bin');
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const temporary = join(directory, `pulse-product-daemon-build-${process.pid}-${Date.now()}`);
-  try {
-    console.log('[pulse] Building the bound local product daemon...');
-    runRequired('go', ['build', '-o', temporary, './cmd/pulse'], {
-      cwd: join(sourceRoot, 'pulse-app'),
-      env: { ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '' },
-    });
-    chmodSync(temporary, 0o700);
-    return stageProductDaemon(temporary);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+async function ensureManagedProductRuntime(runtime, { publishConfig = true } = {}) {
+	if (process.env.PULSE_GO_BIN) {
+		throw new Error('PULSE_GO_BIN is developer-only and cannot satisfy Pulse product readiness');
+	}
+	const provisioned = await provisionPersonalRuntime(packagedPersonalRuntimeOptions(DATA_DIR));
+	return {
+		...resolveManagedRuntime(runtime, {
+			installRoot: join(DATA_DIR, 'artifacts'), publishConfig,
+			verifiedActivations: provisioned.activationSet.activations,
+		}),
+		verified_release: provisioned.release,
+	};
 }
 
 async function ensureVendoredPreviewRuntime() {
@@ -1719,7 +1752,7 @@ function checkCommandVersion(name, versionArgs = ['--version']) {
   }
   const result = spawnSync(name, versionArgs, {
     encoding: 'utf8',
-    timeout: 1200,
+    timeout: 5000,
   });
   if (result.status !== 0) {
     return { ok: false, detail: 'found but did not answer' };
@@ -2285,23 +2318,31 @@ async function connectClaudeCodeActivation(remoteControl) {
 	}));
 	let installedRuntime;
 	let runtimeInstalled = false;
-  let daemonPath;
-  try {
-			installedRuntime = installCodexRuntime(CLI_PACKAGE_ROOT, DATA_DIR, { keepPrevious: true });
+	  let managedRuntime;
+	  try {
+			managedRuntime = await ensureManagedProductRuntime(resolved.runtime, { publishConfig: false });
+			if (previousDaemon.status === 'running' &&
+				previousDaemon.managed_embedder?.config_digest !== managedRuntime.managed_embedder.config_digest) {
+				await stopVaultRuntimeAndWait(resolved.runtime);
+			}
+			managedRuntime.managed_embedder = activateManagedEmbedderConfig(
+				resolved.runtime, managedRuntime.managed_embedder,
+			);
+				installedRuntime = installCodexRuntime(CLI_PACKAGE_ROOT, DATA_DIR, { keepPrevious: true });
 		runtimeInstalled = true;
 			if (!installedRuntime.ok) throw new Error(`Claude Code runtime install failed: ${installedRuntime.detail}`);
-    daemonPath = ensureProductDaemonBinary();
-    const runtimeStatus = inspectVaultRuntime(resolved.runtime);
-    if (runtimeStatus.status === 'stopped' || runtimeStatus.status === 'crashed' ||
-        (runtimeStatus.status === 'running' && runtimeStatus.executable !== daemonPath)) {
-      await startVaultRuntime(resolved.runtime, {
-        daemonPath, host: 'pulse-product',
-      });
-    } else if (runtimeStatus.status !== 'running') {
-      throw new Error(`Pulse bound vault is ${runtimeStatus.status}`);
-    }
-		await assertVaultRuntimeHealthy(resolved.runtime);
-		writeProductDaemonActivation(daemonPath, installedRuntime);
+	    const runtimeStatus = inspectVaultRuntime(resolved.runtime);
+	    if (['stopped', 'crashed', 'running'].includes(runtimeStatus.status)) {
+	      await startVaultRuntime(resolved.runtime, {
+	        daemonPath: managedRuntime.daemon.path,
+				managedEmbedder: managedRuntime.managed_embedder,
+				host: 'pulse-product', allowRollback: false,
+	      });
+	    } else {
+	      throw new Error(`Pulse bound vault is ${runtimeStatus.status}`);
+	    }
+			await assertVaultRuntimeHealthy(resolved.runtime);
+			writeProductDaemonActivation(managedRuntime, installedRuntime);
 		  installClaudeCode(installedRuntime.path, { requireExternal: true });
 		  installClaudeCodeHooks(installedRuntime.path, installedRuntime.digest);
     writeCaptureStateFiles({
@@ -2319,6 +2360,7 @@ async function connectClaudeCodeActivation(remoteControl) {
 			});
 		}
     finalizeCodexRuntimeInstall(DATA_DIR);
+		commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
   } catch (error) {
 		const failures = [];
 		if (runtimeInstalled) {
@@ -2334,6 +2376,7 @@ async function connectClaudeCodeActivation(remoteControl) {
 					removeClaudeCodeExternalRegistration();
 			}
 		} catch (failure) { failures.push(failure); }
+		try { await stopUpgradedVaultBeforeFileRestore(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
 		try { restoreLocalFiles(snapshots); } catch (failure) { failures.push(failure); }
 		try { await restoreVaultAfterFailedConnect(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
 		if (failures.length > 0) {

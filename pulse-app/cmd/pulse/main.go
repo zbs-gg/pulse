@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -175,9 +177,13 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 
 	// Wire Phase G hybrid retrieval engine. Cohere key is optional — when
 	// absent we leave Retrieval=nil so /retrieve returns 503 instead of 404.
-	retrievalEngine, err := initRetrieval(s, dataDir)
+	retrievalEngine, err := initRetrieval(s, dataDir, kind != "")
 	if err != nil {
-		// Log but don't fail startup — retrieval is opt-in.
+		if kind != "" {
+			return fmt.Errorf("managed retrieval init: %w", err)
+		}
+		// Development retrieval is opt-in, so a broken optional dependency
+		// does not stop the rest of the developer daemon.
 		slog.Warn("retrieval init failed; /retrieve will return 503", "error", err)
 	}
 	var contextQuery server.ContextQueryAPI
@@ -195,29 +201,6 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 			// explicitly asks for fiction (book work).
 			DefaultDomains: []string{"real"},
 		})
-	}
-
-	// Capsule → event projection backfill (default ON; PULSE_CAPSULE_EVENTS=off
-	// disables). Idempotent: only capsules never projected (event_id IS NULL,
-	// privacy_tier='normal') gain a linked event. With an embedder wired the
-	// new events are embed-indexed immediately; otherwise they stay dark until
-	// an embedder is configured. Env wiring only — no billing / network-path
-	// change (the optional embed call uses the already-configured embedder).
-	if docs, err := s.BackfillCapsuleEvents(); err != nil {
-		slog.Warn("capsule event backfill failed", "error", err)
-	} else if len(docs) > 0 {
-		slog.Info("capsule events backfilled", "count", len(docs))
-		if retrievalEngine != nil && retrievalEngine.EmbedderReady() {
-			indexDocs := make([]retrieve.IndexEventDoc, len(docs))
-			for i, d := range docs {
-				indexDocs[i] = retrieve.IndexEventDoc{EventID: d.EventID, Text: d.Text}
-			}
-			backfillCtx, cancelBackfill := context.WithTimeout(context.Background(), 60*time.Second)
-			if err := retrievalEngine.EmbedAndIndexEvents(backfillCtx, indexDocs); err != nil {
-				slog.Warn("capsule event embed-index failed", "error", err)
-			}
-			cancelBackfill()
-		}
 	}
 
 	// Claim resolution (default OFF). Enabled only when an embedder is wired and
@@ -309,6 +292,11 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		defer reaperWG.Done()
 		reaperLoop(reaperCtx, ob)
 	}()
+	reaperWG.Add(1)
+	go func() {
+		defer reaperWG.Done()
+		backfillCapsuleEvents(reaperCtx, s, retrievalEngine)
+	}()
 
 	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir,
 		"vault_kind", s.StoreKind(), "store_id", s.StoreID())
@@ -345,6 +333,75 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	reaperWG.Wait()
 
 	return runErr
+}
+
+func backfillCapsuleEvents(ctx context.Context, s *store.Store, engine *retrieve.Engine) {
+	projected := 0
+	for ctx.Err() == nil {
+		docs, err := s.BackfillCapsuleEventsBatch(500)
+		if err != nil {
+			slog.Warn("capsule event backfill failed", "error", err)
+			return
+		}
+		projected += len(docs)
+		if len(docs) < 500 {
+			break
+		}
+	}
+	if projected > 0 {
+		slog.Info("capsule events backfilled", "count", projected)
+	}
+	if ctx.Err() != nil || engine == nil || !engine.EmbedderReady() {
+		return
+	}
+	persisted := 0
+	consecutiveFailures := 0
+	for ctx.Err() == nil {
+		docs, err := s.UnindexedHostEventDocs(500)
+		if err != nil {
+			slog.Warn("capsule event embed-index list failed", "error", err)
+			return
+		}
+		if len(docs) == 0 {
+			break
+		}
+		indexDocs := make([]retrieve.IndexEventDoc, len(docs))
+		for i, doc := range docs {
+			indexDocs[i] = retrieve.IndexEventDoc{EventID: doc.EventID, Text: doc.Text}
+		}
+		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		committed, embedErr := engine.EmbedAndPersistEvents(batchCtx, indexDocs)
+		cancel()
+		persisted += committed
+		if embedErr != nil {
+			consecutiveFailures++
+			slog.Warn("capsule event embed-index failed", "error", embedErr, "committed", committed,
+				"attempt", consecutiveFailures)
+			if consecutiveFailures >= 3 {
+				break
+			}
+			delay := time.Duration(consecutiveFailures) * 100 * time.Millisecond
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+			case <-timer.C:
+			}
+			continue
+		}
+		consecutiveFailures = 0
+		if len(docs) < 500 {
+			break
+		}
+	}
+	if persisted > 0 {
+		reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := engine.Reload(reloadCtx)
+		cancel()
+		if err != nil {
+			slog.Warn("capsule event embed-index reload failed", "error", err)
+		}
+	}
 }
 
 func runTeam(dataDir, addr string) error {
@@ -962,17 +1019,32 @@ func readTeamCredentialFile(path string, maximum int64) (string, error) {
 	return string(value), nil
 }
 
-func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
-	embedder, name, err := embedderFromEnv()
+func initRetrieval(s *store.Store, dataDir string, productLocal bool) (*retrieve.Engine, error) {
+	var (
+		embedder retrieve.Embedder
+		name     string
+		err      error
+	)
+	if productLocal {
+		embedder, name, err = managedEmbedderFromConfig()
+	} else {
+		embedder, name, err = embedderFromEnv()
+	}
 	if err != nil {
 		return nil, err
 	}
 	if embedder == nil {
+		if productLocal {
+			return nil, errors.New("managed embedder is required in product-local mode")
+		}
 		slog.Info("retrieval: no embedder configured (set COHERE_API_KEY for Cohere, or ensure local mlx_embed_helper.py + bge-m3 model are present); /retrieve and /context/query will respond 503")
 		return nil, nil
 	}
 
-	expander := expanderFromEnv(dataDir)
+	var expander retrieve.Expander
+	if !productLocal {
+		expander = expanderFromEnv(dataDir)
+	}
 
 	engine := retrieve.New(retrieve.Config{
 		Store:            s,
@@ -988,6 +1060,176 @@ func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
 	}
 	slog.Info("retrieval: engine initialized", "embedder", name, "expander", expander != nil)
 	return engine, nil
+}
+
+const managedEmbedderConfigSchema = "pulse.managed_embedder.config.v1"
+
+type managedEmbedderDiskConfig struct {
+	Dimensions                      int    `json:"dimensions"`
+	EmbedderRuntimeActivationDigest string `json:"embedder_runtime_activation_digest"`
+	EmbedderRuntimeTreeDigest       string `json:"embedder_runtime_tree_digest"`
+	HelperPath                      string `json:"helper_path"`
+	Model                           string `json:"model"`
+	ModelActivationDigest           string `json:"model_activation_digest"`
+	ModelFile                       string `json:"model_file"`
+	ModelTreeDigest                 string `json:"model_tree_digest"`
+	Normalized                      bool   `json:"normalized"`
+	Pooling                         string `json:"pooling"`
+	Protocol                        int    `json:"protocol"`
+	PythonExecutable                string `json:"python_executable"`
+	Schema                          string `json:"schema"`
+	SupportDirectory                string `json:"support_directory"`
+}
+
+func managedEmbedderFromConfig() (retrieve.Embedder, string, error) {
+	config, err := loadManagedEmbedderConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	client := embed.NewManagedLocal(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		_ = client.Close()
+		return nil, "", fmt.Errorf("start managed embedder: %w", err)
+	}
+	return client, client.Model(), nil
+}
+
+func loadManagedEmbedderConfig() (embed.ManagedLocalConfig, error) {
+	path := os.Getenv("PULSE_MANAGED_EMBEDDER_CONFIG")
+	if path == "" || strings.TrimSpace(path) != path || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config path is missing or invalid")
+	}
+	data, err := readOwnerOnlyRegularFile(path, 16*1024)
+	if err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config open: %w", err)
+	}
+	var disk managedEmbedderDiskConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&disk); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config decode: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config decode: trailing JSON")
+	}
+	if disk.Schema != managedEmbedderConfigSchema || disk.Model != "bge-m3" || disk.Dimensions != 1024 ||
+		disk.Pooling != "cls" || !disk.Normalized || disk.Protocol != 1 {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config contract mismatch")
+	}
+	for label, digest := range map[string]string{
+		"embedder runtime activation": disk.EmbedderRuntimeActivationDigest,
+		"embedder runtime tree":       disk.EmbedderRuntimeTreeDigest,
+		"model activation":            disk.ModelActivationDigest,
+		"model tree":                  disk.ModelTreeDigest,
+	} {
+		if !validManagedDigest(digest) {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder %s digest is invalid", label)
+		}
+	}
+	for label, value := range map[string]string{
+		"python": disk.PythonExecutable, "helper": disk.HelperPath, "model": disk.ModelFile, "support": disk.SupportDirectory,
+	} {
+		if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsRune(value, '\x00') {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder %s path is not absolute and clean", label)
+		}
+	}
+	if filepath.Ext(disk.ModelFile) != ".safetensors" {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder model must be a safetensors file")
+	}
+	if err := validateManagedArtifactPath(disk.PythonExecutable, true, false); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder python: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.HelperPath, false, false); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder helper: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.ModelFile, false, false); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.SupportDirectory, false, true); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support directory: %w", err)
+	}
+	for _, name := range []string{"config.json", "tokenizer.json"} {
+		if err := validateManagedArtifactPath(filepath.Join(disk.SupportDirectory, name), false, false); err != nil {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support %s: %w", name, err)
+		}
+	}
+	return embed.ManagedLocalConfig{
+		PythonExecutable: disk.PythonExecutable,
+		HelperPath:       disk.HelperPath,
+		ModelFile:        disk.ModelFile,
+		SupportDirectory: disk.SupportDirectory,
+	}, nil
+}
+
+func validManagedDigest(value string) bool {
+	if len(value) != 64 || value == strings.Repeat("0", 64) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func readOwnerOnlyRegularFile(path string, maximum int64) ([]byte, error) {
+	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
+		return nil, errors.New("invalid path")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, errors.New("file has an unexpected owner")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("file must be owner-only")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(data)) > maximum {
+		return nil, errors.New("file is too large")
+	}
+	return data, nil
+}
+
+func validateManagedArtifactPath(path string, executable, directory bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("symbolic links are forbidden")
+	}
+	if directory {
+		if !info.IsDir() {
+			return errors.New("not a directory")
+		}
+	} else if !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("unexpected owner")
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return errors.New("group/other writable path")
+	}
+	if executable && info.Mode().Perm()&0111 == 0 {
+		return errors.New("not executable")
+	}
+	return nil
 }
 
 // expanderFromEnv returns a query-expansion client when

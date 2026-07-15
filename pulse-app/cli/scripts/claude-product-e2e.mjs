@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import {
   bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
 } from '../src/workspace-binding.js';
+import { releaseKeyID } from '../src/release-manifest.js';
+import { writeSyntheticReleaseFixture } from './product-release-fixture.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -272,6 +274,8 @@ try {
   const home = join(root, 'home');
   const workspace = join(root, 'workspace');
   const installRoot = join(root, 'packed-cli');
+  const pulseDataDir = join(root, 'pulse');
+  const artifactRoot = join(pulseDataDir, 'artifacts');
   const tools = join(root, 'tools');
 	const codexHome = join(root, 'codex');
   mkdirSync(home, { recursive: true });
@@ -286,15 +290,13 @@ try {
   const daemon = join(root, 'pulse-product-daemon');
   run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
   chmodSync(daemon, 0o700);
-  const fakeEmbedHelper = join(root, 'fake-embed-helper.mjs');
-  const fakeEmbedModel = join(root, 'fake-embed-model');
-  mkdirSync(fakeEmbedModel, { recursive: true });
-  writeFileSync(fakeEmbedHelper, [
-    "import readline from 'node:readline';",
-    "process.stdout.write(JSON.stringify({id:'__startup__',ok:true})+'\\n');",
-    "const lines=readline.createInterface({input:process.stdin});",
-    "for await (const line of lines) { const request=JSON.parse(line); process.stdout.write(JSON.stringify({id:request.id,embeddings:request.texts.map(()=>[1,0,0,0])})+'\\n'); }",
-  ].join('\n'));
+  const releasePair = generateKeyPairSync('ed25519');
+  const releasePublicKey = releasePair.publicKey.export({ type: 'spki', format: 'pem' });
+  const releaseRootPath = join(root, 'release-root.pem');
+  writeFileSync(releaseRootPath, releasePublicKey, { mode: 0o600 });
+  const releaseKey = { privateKey: releasePair.privateKey, keyID: releaseKeyID(releasePublicKey) };
+  let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(daemon), 8);
+  assert.equal(existsSync(artifactRoot), false, 'packed provisioning must start with an empty artifact root');
 
   const tarball = packedTarball(root);
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball], {
@@ -311,20 +313,25 @@ try {
     HOME: home,
 		CODEX_HOME: codexHome,
     PATH: `${tools}:${process.env.PATH}`,
-    PULSE_DATA_DIR: join(root, 'pulse'),
-    PULSE_GO_BIN: daemon,
+    PULSE_DATA_DIR: pulseDataDir,
     PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
     PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
     PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
     PULSE_TRUST_MODE: 'test',
-    PULSE_LOCAL_EMBED_PYTHON: process.execPath,
-    PULSE_LOCAL_EMBED_HELPER: fakeEmbedHelper,
-    PULSE_LOCAL_EMBED_MODEL: fakeEmbedModel,
+    PULSE_RELEASE_TEST_MODE: '1',
+    PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+    PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
+    PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+    PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
     PULSE_FAKE_CLAUDE_STATE: fakeClaudeState,
 		PULSE_FAKE_CODEX_PLUGIN_SOURCE: join(repoRoot, 'plugins', 'pulse'),
 		PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
     PULSE_CLI_ANIMATION: '0',
   };
+  for (const name of [
+    'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
+    'PULSE_MANAGED_EMBEDDER_CONFIG', 'COHERE_API_KEY',
+  ]) delete env[name];
 
 	const projectMcpPath = join(workspace, '.mcp.json');
 	writeFileSync(projectMcpPath, JSON.stringify({
@@ -379,20 +386,20 @@ try {
 	assert.match(`${failedExternalRollback.stdout}${failedExternalRollback.stderr}`, /rollback failed: claude mcp remove failed/);
 	assert.equal(existsSync(fakeClaudeState), true, 'failed rollback must be reported instead of silently claiming cleanup');
 	rmSync(fakeClaudeState, { force: true });
-	const daemonDigest = createHash('sha256').update(readFileSync(daemon)).digest('hex');
-  const poisonedDaemon = join(root, 'pulse', 'bin', `pulse-product-daemon-${daemonDigest}`);
-  mkdirSync(dirname(poisonedDaemon), { recursive: true, mode: 0o700 });
-  writeFileSync(poisonedDaemon, 'wrong bytes', { mode: 0o700 });
+  const daemonPointer = JSON.parse(readFileSync(join(artifactRoot, 'pulse-daemon', 'current.json'), 'utf8'));
+  const activatedDaemon = join(daemonPointer.version_path, 'bin', 'pulse');
+  const activatedDaemonBytes = readFileSync(activatedDaemon);
+  writeFileSync(activatedDaemon, 'wrong bytes', { mode: 0o700 });
   const poisonedConnect = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
     cwd: workspace, env, timeout: 120_000, status: 1,
   });
-  assert.match(`${poisonedConnect.stdout}${poisonedConnect.stderr}`, /integrity validation/);
+  assert.match(`${poisonedConnect.stdout}${poisonedConnect.stderr}`, /integrity|artifact_tree|artifact_activation/);
 	assert.deepEqual(readFileSync(projectMcpPath), mcpBeforeFailedConnect);
 	assert.deepEqual(readFileSync(projectSettingsPath), settingsBeforeFailedConnect);
 	assert.equal(existsSync(fakeClaudeState), false);
 	assert.equal(existsSync(join(root, 'pulse', 'runtime', 'codex', 'current')), false);
 	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
-  rmSync(poisonedDaemon, { force: true });
+  writeFileSync(activatedDaemon, activatedDaemonBytes, { mode: 0o700 });
 
   const connected = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
     cwd: workspace, env, timeout: 120_000,
@@ -594,11 +601,15 @@ try {
 		assert.equal(state.hosts.codex.enabled, true);
 		assert.equal(state.hosts['claude-code'].enabled, true);
 	}
-	const daemonB = join(root, 'pulse-product-daemon-b');
-	writeFileSync(daemonB, Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_UPGRADE_B\n')]), { mode: 0o700 });
-	chmodSync(daemonB, 0o700);
+	const daemonB = Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_UPGRADE_B\n')]);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonB, 8);
+	Object.assign(env, {
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
+	});
 	const claudeUpgrade = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace, env: { ...env, PULSE_GO_BIN: daemonB }, timeout: 120_000,
+		cwd: workspace, env, timeout: 120_000,
 	});
 	assert.match(claudeUpgrade.stdout, /one bound vault, two connected harnesses/);
 	const sharedMcp = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
@@ -609,10 +620,15 @@ try {
 	const upgradedRuntimeReceipt = JSON.parse(readFileSync(join(vaultDir, 'supervisor-runtime.json'), 'utf8'));
 	const productDaemon = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
 	assert.equal(locatorEntry.daemon_path, undefined, 'workspace locator must not carry daemon execution authority');
-	assert.equal(productDaemon.schema, 'pulse.product_activation.v2');
+	assert.equal(productDaemon.schema, 'pulse.product_activation.v3');
 	assert.equal(productDaemon.daemon_path, upgradedRuntimeReceipt.executable);
 	assert.equal(productDaemon.daemon_digest, upgradedRuntimeReceipt.executable_digest);
 	assert.match(productDaemon.runtime_tree_digest, /^[a-f0-9]{64}$/);
+	for (const field of [
+		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+	]) assert.match(productDaemon[field], /^[a-f0-9]{64}$/);
 
   writeFileSync(fakeClaudeState, JSON.stringify({
 		...sharedMcp,
@@ -633,7 +649,7 @@ try {
 	const pluginRoot = dirname(pluginMcpPath);
 	rmSync(pluginRoot, { recursive: true, force: true });
 	const staleCodexMarkerConnect = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace, env: { ...env, PULSE_GO_BIN: daemonB }, timeout: 120_000,
+		cwd: workspace, env, timeout: 120_000,
 	});
 	assert.match(staleCodexMarkerConnect.stdout, /one bound vault, Claude Code connected/);
 	assert.doesNotMatch(staleCodexMarkerConnect.stdout, /two connected harnesses/);
@@ -645,7 +661,10 @@ try {
 		const wedgedConnect = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
 			cwd: workspace, env, status: 1, timeout: 5000,
 		});
-		assert.match(`${wedgedConnect.stdout}${wedgedConnect.stderr}`, /did not become ready/);
+		assert.match(
+			`${wedgedConnect.stdout}${wedgedConnect.stderr}`,
+			/did not become ready|managed full-retrieval smoke: readiness request failed/,
+		);
     const outage = run(process.execPath, [packedCLI, 'doctor', 'claude-code', '--json'], {
       cwd: workspace, env, status: 1,
     });

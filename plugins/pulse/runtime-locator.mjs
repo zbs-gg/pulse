@@ -101,12 +101,27 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
 	const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
 	requirePrivateLocator(activationPath);
 	const activation = JSON.parse(readFileSync(activationPath, 'utf8'));
-	const activationKeys = ['activated_at', 'daemon_digest', 'daemon_path', 'runtime_path', 'runtime_tree_digest', 'schema'];
-	if (activation?.schema !== 'pulse.product_activation.v2' ||
+	const activationKeys = [
+		'activated_at',
+		'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_id', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_id', 'model_artifact_sha256', 'model_tree_digest',
+		'runtime_path', 'runtime_tree_digest', 'schema',
+	];
+	const activationDigests = [
+		'daemon_activation_digest', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_tree_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_artifact_sha256', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_artifact_sha256', 'model_tree_digest',
+		'runtime_tree_digest',
+	];
+	const artifactIDs = ['daemon_artifact_id', 'embedder_runtime_artifact_id', 'model_artifact_id'];
+	if (activation?.schema !== 'pulse.product_activation.v3' ||
 		Object.keys(activation).length !== activationKeys.length ||
 		Object.keys(activation).some((name) => !activationKeys.includes(name)) ||
-		![activation.daemon_path, activation.runtime_path].every((value) => typeof value === 'string' && isAbsolute(value)) ||
-		![activation.daemon_digest, activation.runtime_tree_digest].every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
+		![activation.daemon_path, activation.runtime_path]
+			.every((value) => typeof value === 'string' && isAbsolute(value)) ||
+		!activationDigests.every((name) => /^[a-f0-9]{64}$/.test(activation[name] ?? '')) ||
+		!artifactIDs.every((name) => /^[a-z0-9][a-z0-9._-]{0,127}$/.test(activation[name] ?? '')) ||
 		typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
 		throw new Error('Pulse product activation is missing or invalid; reconnect this workspace.');
 	}

@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify personal-real-mlx-release team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -76,7 +76,10 @@ team-deploy-static-verify: ## Validate default-off Team deployment templates on 
 team-race-release: ## Run the Team Go release suites under the race detector exactly once
 	cd $(APP_DIR) && $(GO) test -race -count=1 -timeout 20m ./internal/store ./internal/server ./internal/teamread ./internal/teamjobs ./internal/teamauth ./cmd/pulse
 
-release-verify: verify team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
+personal-real-mlx-release: ## Prove the packed Personal product against the real pinned MLX BGE-M3 artifacts
+	cd $(CLI_DIR) && $(NPM) run --silent test:codex-product:real-mlx
+
+release-verify: verify personal-real-mlx-release team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
 
 verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
 	@verify_data=$$(mktemp -d "$${TMPDIR:-/tmp}/pulse-verify.XXXXXX") || exit 1; \

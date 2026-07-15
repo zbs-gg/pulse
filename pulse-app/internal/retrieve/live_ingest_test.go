@@ -2,12 +2,125 @@ package retrieve
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/embed"
 	"github.com/nkkmnk/pulse/internal/store"
 )
+
+type boundedRecordingEmbedder struct {
+	batches []int
+}
+
+type healthAwareEmbedder struct{ ready bool }
+
+func (e *healthAwareEmbedder) Model() string { return "health-aware" }
+func (e *healthAwareEmbedder) Ready() bool   { return e.ready }
+func (e *healthAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	return make([][]float32, len(texts)), nil
+}
+
+func (e *boundedRecordingEmbedder) Model() string { return "bounded-recording" }
+
+func (e *boundedRecordingEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	e.batches = append(e.batches, len(texts))
+	if len(texts) > embed.MaxBatchSize {
+		return nil, fmt.Errorf("batch %d exceeds %d", len(texts), embed.MaxBatchSize)
+	}
+	vectors := make([][]float32, len(texts))
+	for index := range texts {
+		vectors[index] = []float32{1, 0, 0, 0}
+	}
+	return vectors, nil
+}
+
+func TestEmbedAndIndexEventsChunksBacklogAtManagedBoundary(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "backlog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	embedder := &boundedRecordingEmbedder{}
+	engine := New(Config{Store: s, Embedder: embedder})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	docs := make([]IndexEventDoc, embed.MaxBatchSize+1)
+	for index := range docs {
+		id := int64(index + 1)
+		text := fmt.Sprintf("backlog memory %d", id)
+		if _, err := s.DB().Exec(
+			`INSERT INTO events(id, title, description, ts) VALUES (?, ?, ?, ?)`,
+			id, text, text, time.Now().UTC().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		docs[index] = IndexEventDoc{EventID: id, Text: text}
+	}
+	if err := engine.EmbedAndIndexEvents(context.Background(), docs); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(embedder.batches), fmt.Sprint([]int{embed.MaxBatchSize, 1}); got != want {
+		t.Fatalf("embed batches = %s, want %s", got, want)
+	}
+	var indexed int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM event_embeddings`).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != len(docs) || len(engine.eventIDs) != len(docs) {
+		t.Fatalf("indexed=%d live=%d want=%d", indexed, len(engine.eventIDs), len(docs))
+	}
+}
+
+func TestEmbedAndPersistEventsDefersReloadForPagedBackfill(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "persist-only.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	embedder := &boundedRecordingEmbedder{}
+	engine := New(Config{Store: s, Embedder: embedder})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(
+		`INSERT INTO events(id, title, description, ts) VALUES (1, 'deferred', '', ?)`,
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if persisted, err := engine.EmbedAndPersistEvents(context.Background(), []IndexEventDoc{{EventID: 1, Text: "deferred"}}); err != nil || persisted != 1 {
+		t.Fatal(err)
+	}
+	if len(engine.eventIDs) != 0 {
+		t.Fatalf("persist-only path reloaded %d live events", len(engine.eventIDs))
+	}
+	var persisted int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM event_embeddings`).Scan(&persisted); err != nil || persisted != 1 {
+		t.Fatalf("persisted=%d err=%v", persisted, err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.eventIDs) != 1 {
+		t.Fatalf("explicit reload live events=%d", len(engine.eventIDs))
+	}
+}
+
+func TestEmbedderReadyUsesLiveHelperHealthWhenAvailable(t *testing.T) {
+	health := &healthAwareEmbedder{ready: true}
+	engine := New(Config{Embedder: health})
+	if !engine.EmbedderReady() {
+		t.Fatal("live embedder reported unavailable")
+	}
+	health.ready = false
+	if engine.EmbedderReady() {
+		t.Fatal("dead embedder remained full-retrieval ready")
+	}
+}
 
 // Live ingest invariant: an event written via SaveSemanticDelta (with the new
 // occurred_at / anchor / biometrics / emotions fields) becomes retrievable

@@ -634,7 +634,16 @@ func (s *Store) UnindexedHostEventDocs(limit int) ([]CapsuleEventDoc, error) {
 		limit = 500
 	}
 	rows, err := s.db.Query(`
-		SELECT event.id, event.title, COALESCE(event.description, '')
+		SELECT event.id,
+		       COALESCE(
+		         (SELECT capsule.redacted_summary
+		            FROM memory_capsules capsule
+		           WHERE capsule.event_id=event.id
+		           LIMIT 1),
+		         event.title || CASE
+		           WHEN COALESCE(event.description, '')='' THEN ''
+		           ELSE char(10) || event.description
+		         END)
 		  FROM events event
 		  LEFT JOIN event_embeddings embedding ON embedding.event_id=event.id
 		 WHERE event.scorer_version='host-extracted' AND embedding.event_id IS NULL
@@ -646,32 +655,30 @@ func (s *Store) UnindexedHostEventDocs(limit int) ([]CapsuleEventDoc, error) {
 	var docs []CapsuleEventDoc
 	for rows.Next() {
 		var doc CapsuleEventDoc
-		var title, description string
-		if err := rows.Scan(&doc.EventID, &title, &description); err != nil {
+		if err := rows.Scan(&doc.EventID, &doc.Text); err != nil {
 			return nil, err
-		}
-		doc.Text = title
-		if description != "" {
-			doc.Text += "\n" + description
 		}
 		docs = append(docs, doc)
 	}
 	return docs, rows.Err()
 }
 
-// BackfillCapsuleEvents projects every not-yet-projected 'normal'-tier active
-// capsule into a linked event (idempotent: WHERE event_id IS NULL, so a second
-// run finds nothing). Called once at daemon startup. Returns the docs to
-// embed-index; no-op (nil, nil) when PULSE_CAPSULE_EVENTS is off.
-func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
+// BackfillCapsuleEventsBatch projects a bounded set of not-yet-projected
+// normal-tier capsules. Keeping each transaction bounded prevents a large
+// existing vault from delaying daemon readiness indefinitely.
+func (s *Store) BackfillCapsuleEventsBatch(limit int) ([]CapsuleEventDoc, error) {
 	if !capsuleEventsEnabled() {
 		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
 	}
 	rows, err := s.db.Query(`
 		SELECT id, kind, redacted_summary, source_timestamp, created_at, tags
 		  FROM memory_capsules
 		 WHERE event_id IS NULL AND privacy_tier='normal' AND status='active'
-		 ORDER BY created_at ASC, id ASC`)
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -719,6 +726,23 @@ func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
 		return nil, err
 	}
 	return docs, nil
+}
+
+// BackfillCapsuleEvents preserves the complete idempotent store API while
+// executing it as bounded transactions. Product startup uses the batch method
+// directly so it can yield between batches and index from the durable outbox.
+func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
+	var all []CapsuleEventDoc
+	for {
+		docs, err := s.BackfillCapsuleEventsBatch(500)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, docs...)
+		if len(docs) < 500 {
+			return all, nil
+		}
+	}
 }
 
 func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -14,6 +14,74 @@ import {
   writeCodexToolLease,
   writeCodexTurnContext,
 } from './codex-runtime.js';
+import { activateArtifactVersion, readActivatedArtifact, writeActivatedArtifactSet } from './artifact-installer.js';
+import { resolveManagedRuntime } from './local-supervisor.js';
+
+function artifactDescriptor(id, kind, sha256) {
+	return {
+		id, kind, sha256, version: '0.8.0', epoch: 8, bytes: 1,
+		origin: 'https://releases.zbs.gg', url: `https://releases.zbs.gg/${id}`,
+		...(kind === 'model' ? { model_policy: { data_only: true, custom_code: false } } : {}),
+	};
+}
+
+function artifactTree(files) {
+	return {
+		schema: 'pulse.artifact_tree.v1',
+		files: files.map(([path, bytes, mode]) => ({
+			path, bytes: bytes.length, mode, executable: (mode & 0o111) !== 0,
+			sha256: createHash('sha256').update(bytes).digest('hex'),
+		})),
+	};
+}
+
+function tinySafetensors() {
+	const header = Buffer.from(JSON.stringify({ embedding: { dtype: 'F32', shape: [1], data_offsets: [0, 4] } }));
+	const prefix = Buffer.alloc(8);
+	prefix.writeBigUInt64LE(BigInt(header.length));
+	return Buffer.concat([prefix, header, Buffer.alloc(4)]);
+}
+
+async function managedActivationFixture(dataDir) {
+	const installRoot = join(dataDir, 'artifacts');
+	const fixtures = [
+		[artifactDescriptor('pulse-daemon', 'daemon', '1'.repeat(64)), [['bin/pulse', Buffer.from('#!/bin/sh\n'), 0o700]]],
+		[artifactDescriptor('pulse-embedder-runtime', 'embedder-runtime', '2'.repeat(64)), [
+			['runtime/bin/python3.12', Buffer.from('#!/bin/sh\n'), 0o700],
+			['helper.py', Buffer.from('helper\n'), 0o600],
+			['support/config.json', Buffer.from('{}\n'), 0o600],
+			['support/tokenizer.json', Buffer.from('{}\n'), 0o600],
+		]],
+		[artifactDescriptor('pulse-model', 'model', '3'.repeat(64)), [['model.safetensors', tinySafetensors(), 0o600]]],
+	];
+	for (const [descriptor, files] of fixtures) {
+		await activateArtifactVersion(descriptor, join(dataDir, 'unused'), {
+			installRoot, treeManifest: artifactTree(files), testOnlyMaterializer: true,
+			materialize: async (_source, target) => {
+				for (const [path, bytes, mode] of files) {
+					const destination = join(target, path);
+					mkdirSync(join(destination, '..'), { recursive: true, mode: 0o700 });
+					writeFileSync(destination, bytes, { mode });
+					chmodSync(destination, mode);
+				}
+			},
+		});
+	}
+	writeActivatedArtifactSet({
+		schema: 'pulse.verified_release_manifest.v1', manifest_digest: 'a'.repeat(64),
+		version: '0.8.0', epoch: 8,
+		artifacts: Object.fromEntries(fixtures.map(([descriptor]) => [descriptor.kind, descriptor])),
+	}, { installRoot });
+	const vault = { data_dir: join(dataDir, 'vault') };
+	return resolveManagedRuntime(vault, {
+		installRoot,
+		verifiedActivations: {
+			 daemon: readActivatedArtifact('pulse-daemon', { installRoot, expectedKind: 'daemon' }),
+			 embedderRuntime: readActivatedArtifact('pulse-embedder-runtime', { installRoot, expectedKind: 'embedder-runtime' }),
+			 model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model' }),
+		},
+	});
+}
 
 test('installed runtime proxies only read-only Team tools through the exact current binding', async () => {
 	const binding = {
@@ -121,7 +189,7 @@ test('connect and lazy reconciliation serialize on one vault activation lock', a
 	await releaseSecond();
 });
 
-test('product activation admits only one exact runtime and daemon digest pair', () => {
+test('legacy v2 product activation is explicitly non-ready', () => {
 	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-test.'));
 	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
 	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
@@ -144,11 +212,60 @@ test('product activation admits only one exact runtime and daemon digest pair', 
 		activated_at: '2026-07-14T10:00:00Z',
 	};
 	writeFileSync(activationPath, JSON.stringify(activation), { mode: 0o600 });
-	assert.equal(readProductActivation(dataDir).daemon_digest, activation.daemon_digest);
-	writeFileSync(activationPath, JSON.stringify({ ...activation, extra_authority: true }), { mode: 0o600 });
-	assert.throws(() => readProductActivation(dataDir), /product_activation_invalid/);
-	writeFileSync(activationPath, JSON.stringify({ ...activation, daemon_digest: 'b'.repeat(64) }), { mode: 0o600 });
-	assert.throws(() => readProductActivation(dataDir), /product_activation_daemon_digest_mismatch/);
+	assert.throws(
+		() => readProductActivation(dataDir),
+		/product_activation_v2_not_ready/,
+		'legacy activation must require repair instead of silently restarting without managed retrieval',
+	);
+});
+
+test('v3 product activation binds runtime and shared artifacts without pinning one project vault', async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-v3.'));
+	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
+	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
+	mkdirSync(join(runtimeRoot, 'src'), { recursive: true, mode: 0o700 });
+	writeFileSync(runtimePath, '#!/usr/bin/env node\n', { mode: 0o700 });
+	const runtimeDigest = 'a'.repeat(64);
+	writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify({
+		schema: 'pulse.codex_runtime.v1', tree_digest: runtimeDigest, entrypoint: 'src/cli.js',
+	}), { mode: 0o600 });
+	const managed = await managedActivationFixture(dataDir);
+	const activation = {
+		activated_at: '2026-07-15T10:00:00Z',
+		daemon_activation_digest: managed.daemon.activation_digest,
+		daemon_artifact_id: managed.daemon.artifact_id,
+		daemon_artifact_sha256: managed.daemon.artifact_sha256,
+		daemon_digest: managed.daemon.digest,
+		// macOS reports /var artifact roots as /private/var when a trusted
+		// executable is canonicalized by the supervisor.
+		daemon_path: realpathSync(managed.daemon.path),
+		daemon_tree_digest: managed.daemon.tree_digest,
+		embedder_runtime_activation_digest: managed.embedder_runtime.activation_digest,
+		embedder_runtime_artifact_id: managed.embedder_runtime.artifact_id,
+		embedder_runtime_artifact_sha256: managed.embedder_runtime.artifact_sha256,
+		embedder_runtime_tree_digest: managed.embedder_runtime.tree_digest,
+		model_activation_digest: managed.model.activation_digest,
+		model_artifact_id: managed.model.artifact_id,
+		model_artifact_sha256: managed.model.artifact_sha256,
+		model_tree_digest: managed.model.tree_digest,
+		runtime_path: runtimePath,
+		runtime_tree_digest: runtimeDigest,
+		schema: 'pulse.product_activation.v3',
+	};
+	const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+	writeFileSync(activationPath, JSON.stringify(activation), { mode: 0o600 });
+
+	const admitted = readProductActivation(dataDir);
+	assert.equal(admitted.daemon_digest, managed.daemon.digest);
+	assert.equal(admitted.model_tree_digest, managed.model.tree_digest);
+	assert.equal('managed_embedder_config_path' in admitted, false);
+	writeFileSync(activationPath, JSON.stringify({
+		...activation, model_tree_digest: 'f'.repeat(64),
+	}), { mode: 0o600 });
+	assert.throws(
+		() => readProductActivation(dataDir),
+		/product_activation_artifact_identity_mismatch/,
+	);
 });
 
 function fixture() {

@@ -17,6 +17,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/contextquery"
 	"github.com/nkkmnk/pulse/internal/outbox"
 	"github.com/nkkmnk/pulse/internal/prompt"
+	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
@@ -467,6 +468,39 @@ func TestContextQueryRouteReturnsTypedResult(t *testing.T) {
 	}
 	if got.SchemaVersion != contextquery.SchemaVersion || got.Query != "x" {
 		t.Fatalf("got = %#v", got)
+	}
+}
+
+func TestRetrieveEmptyStoreReturnsStableEventIDsArray(t *testing.T) {
+	vault, err := store.Open(filepath.Join(t.TempDir(), "empty-retrieval.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = vault.Close() })
+	engine := retrieve.New(retrieve.Config{Store: vault, Embedder: productTestEmbedder{}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{IPCSecret: "secret", Store: vault, Retrieval: engine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/retrieve", strings.NewReader(
+		`{"query":"managed readiness","mode":"factual","top_k":1}`,
+	))
+	req.Header.Set("X-Pulse-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body["event_ids"]); got != "[]" {
+		t.Fatalf("event_ids = %s, want []", got)
 	}
 }
 

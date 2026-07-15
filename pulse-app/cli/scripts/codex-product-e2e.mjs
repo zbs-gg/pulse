@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync,
+	  closeSync,
 	  existsSync,
+	  fstatSync,
 	  lstatSync,
 	  mkdirSync,
   mkdtempSync,
-  readFileSync,
+	  openSync,
+	  readFileSync,
+	  readSync,
   readdirSync,
 	  rmSync,
 	  symlinkSync,
@@ -21,11 +25,25 @@ import { fileURLToPath } from 'node:url';
 import {
   bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
 } from '../src/workspace-binding.js';
+import { materializeVerifiedDmg } from '../src/artifact-installer.js';
+import {
+	canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
+} from '../src/release-manifest.js';
+import { writeSyntheticReleaseFixture } from './product-release-fixture.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
 const repoRoot = resolve(cliRoot, '..', '..');
 const pulseAppRoot = resolve(cliRoot, '..');
+const requireRealMLX = process.env.PULSE_CODEX_E2E_REQUIRE_REAL_MLX === '1';
+const realEmbedderDmg = process.env.PULSE_CODEX_E2E_REAL_EMBEDDER_DMG;
+const realModelFile = process.env.PULSE_CODEX_E2E_REAL_MODEL;
+const realReleaseManifest = process.env.PULSE_CODEX_E2E_REAL_RELEASE_MANIFEST;
+const realReleaseRoot = process.env.PULSE_CODEX_E2E_REAL_RELEASE_ROOT;
+
+if (requireRealMLX && (!realEmbedderDmg || !realModelFile || !realReleaseManifest || !realReleaseRoot)) {
+	throw new Error('release real-MLX E2E requires the runtime DMG, model, signed release manifest, and pinned release root');
+}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -118,6 +136,65 @@ function packedTarball(root) {
   return join(root, tarballs[0]);
 }
 
+function digestFile(path) {
+	const descriptor = openSync(path, 'r');
+	try {
+		const stat = fstatSync(descriptor);
+		const hash = createHash('sha256');
+		const buffer = Buffer.allocUnsafe(1024 * 1024);
+		let offset = 0;
+		while (offset < stat.size) {
+			const count = readSync(descriptor, buffer, 0, Math.min(buffer.length, stat.size - offset), offset);
+			if (count < 1) throw new Error(`short read while hashing ${path}`);
+			hash.update(buffer.subarray(0, count));
+			offset += count;
+		}
+		return { bytes: stat.size, sha256: hash.digest('hex') };
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
+async function prepareRealMLXInputs(root) {
+	const manifestBytes = readFileSync(realReleaseManifest, 'utf8');
+	const envelope = JSON.parse(manifestBytes);
+	if (manifestBytes !== `${canonicalReleaseJSON(envelope)}\n`) {
+		throw new Error('real-MLX release manifest must be canonical');
+	}
+	const osVersion = run('/usr/bin/sw_vers', ['-productVersion']).stdout.trim();
+	const release = verifyReleaseManifestEnvelope(envelope, {
+		architecture: 'arm64', minimumAcceptedEpoch: envelope.payload.release.epoch,
+		now: new Date(), osVersion, packageVersion: '0.7.0', platform: 'darwin',
+		trustedKeys: pinnedReleaseKeyring(realReleaseRoot),
+	});
+	const runtimeDescriptor = release.artifacts['embedder-runtime'];
+	const modelDescriptor = release.artifacts.model;
+	const runtimeDigest = digestFile(realEmbedderDmg);
+	const modelDigest = digestFile(realModelFile);
+	if (runtimeDescriptor.id !== 'pulse-embedder-runtime' || runtimeDescriptor.bytes !== runtimeDigest.bytes ||
+		runtimeDescriptor.sha256 !== runtimeDigest.sha256 || modelDescriptor.id !== 'pulse-model' ||
+		modelDescriptor.bytes !== modelDigest.bytes || modelDescriptor.sha256 !== modelDigest.sha256) {
+		throw new Error('real-MLX inputs do not match the signed release descriptor');
+	}
+	const runtimeRoot = join(root, 'verified-real-embedder-runtime');
+	mkdirSync(runtimeRoot, { mode: 0o700 });
+	const materialized = await materializeVerifiedDmg(realEmbedderDmg, runtimeRoot, runtimeDescriptor);
+	const quality = JSON.parse(readFileSync(join(runtimeRoot, 'QUALITY.json'), 'utf8'));
+	if (quality.schema !== 'pulse.embedder.quality_gate.v1' || quality.quality_claimed !== true ||
+		quality.fixture !== 'pass' ||
+		quality.reference?.model_manifest_sha256 !== 'fa4361447341e16d2a95095ce369e67eafad53cfb93eac741418d722dac5f5f8' ||
+		quality.reference?.model_revision !== '5617a9f61b028005a4858fdac845db406aefb181' ||
+		quality.reference?.package !== 'FlagEmbedding' || quality.reference?.version !== '1.4.0' ||
+		quality.reference?.package_sha256 !== 'fb1856b312851591341cf4533187350e9ce43f66bbf195c66f25a73266ff7db9') {
+		throw new Error('real-MLX runtime lacks the exact production quality receipt');
+	}
+	return {
+		modelDescriptor, modelDigest, modelPath: realModelFile,
+		runtimeDescriptor, runtimeDigest, runtimePath: realEmbedderDmg,
+		runtimeRoot, runtimeTree: materialized.treeManifest,
+	};
+}
+
 const root = mkdtempSync(join(tmpdir(), 'pulse-codex-product.'));
 let runtimeStopped = false;
 try {
@@ -126,6 +203,8 @@ try {
   const workspace = join(root, 'workspace');
 	const workspaceB = join(root, 'workspace-b');
   const installRoot = join(root, 'packed-cli');
+	const pulseDataDir = join(root, 'pulse');
+	const artifactRoot = join(pulseDataDir, 'artifacts');
   mkdirSync(home, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(installRoot, { recursive: true });
@@ -138,41 +217,10 @@ try {
 		{ workspace: canonicalizeWorkspace(workspace), port, suffix: 'a' },
 		{ workspace: canonicalizeWorkspace(workspaceB), port: portB, suffix: 'b' },
 	]);
-  const daemon = join(root, 'pulse-product-daemon');
-  run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
-  chmodSync(daemon, 0o700);
-  const fakeEmbedHelper = join(root, 'fake-embed-helper.mjs');
-  const fakeEmbedModel = join(root, 'fake-embed-model');
-  mkdirSync(fakeEmbedModel, { recursive: true });
-  writeFileSync(fakeEmbedHelper, [
-    "import readline from 'node:readline';",
-    "process.stdout.write(JSON.stringify({id:'__startup__',ok:true})+'\\n');",
-    "const lines=readline.createInterface({input:process.stdin});",
-    "for await (const line of lines) { const request=JSON.parse(line); process.stdout.write(JSON.stringify({id:request.id,embeddings:request.texts.map(()=>[1,0,0,0])})+'\\n'); }",
-  ].join('\n'));
-
-  const tarball = packedTarball(root);
-  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball], {
-    cwd: root,
-    timeout: 120_000,
-  });
-  const packedCLI = join(installRoot, 'node_modules', '@zbs-gg', 'pulse', 'src', 'cli.js');
-  const env = {
-    ...process.env,
-    HOME: home,
-    CODEX_HOME: codexHome,
-    PULSE_DATA_DIR: join(root, 'pulse'),
-    PULSE_GO_BIN: daemon,
-    PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
-    PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
-    PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
-    PULSE_TRUST_MODE: 'test',
-    PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
-    PULSE_LOCAL_EMBED_PYTHON: process.execPath,
-    PULSE_LOCAL_EMBED_HELPER: fakeEmbedHelper,
-    PULSE_LOCAL_EMBED_MODEL: fakeEmbedModel,
-  };
-
+	const daemon = join(root, 'pulse-product-daemon');
+	run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
+	chmodSync(daemon, 0o700);
+	const daemonBytes = readFileSync(daemon);
 	const unhealthyDaemon = join(root, 'pulse-product-daemon-unhealthy.mjs');
 	writeFileSync(unhealthyDaemon, `#!${process.execPath}
 const fs = require('node:fs');
@@ -187,15 +235,79 @@ server.listen(Number(port), host);
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 `, { mode: 0o700 });
 	chmodSync(unhealthyDaemon, 0o700);
+	const releasePair = generateKeyPairSync('ed25519');
+	const releasePublicKey = releasePair.publicKey.export({ type: 'spki', format: 'pem' });
+	const releaseRootPath = join(root, 'release-root.pem');
+	writeFileSync(releaseRootPath, releasePublicKey, { mode: 0o600 });
+	const releaseKey = {
+		privateKey: releasePair.privateKey,
+		keyID: releaseKeyID(releasePublicKey),
+	};
+	const realInputs = requireRealMLX ? await prepareRealMLXInputs(root) : null;
+	let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 8, { realInputs });
+	const productEvidence = realInputs ? {
+		embedder: 'real-mlx-bge-m3', full_retrieval: true,
+		model_sha256: realInputs.modelDigest.sha256,
+		runtime_sha256: realInputs.runtimeDigest.sha256,
+		schema: 'pulse.codex_product_e2e.v1',
+	} : {
+		embedder: 'synthetic-protocol-fixture', full_retrieval: true,
+		schema: 'pulse.codex_product_e2e.v1',
+	};
+	assert.equal(existsSync(artifactRoot), false, 'packed provisioning must start with an empty artifact root');
+
+  const tarball = packedTarball(root);
+  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball], {
+    cwd: root,
+    timeout: 120_000,
+  });
+  const packedCLI = join(installRoot, 'node_modules', '@zbs-gg', 'pulse', 'src', 'cli.js');
+	const tools = join(root, 'tools');
+	mkdirSync(tools, { mode: 0o700 });
+	const codexExecutable = run('/usr/bin/which', ['codex']).stdout.trim();
+	symlinkSync(process.execPath, join(tools, 'node'));
+	symlinkSync(codexExecutable, join(tools, 'codex'));
+	symlinkSync('/usr/bin/git', join(tools, 'git'));
+  const env = {
+    ...process.env,
+    HOME: home,
+    CODEX_HOME: codexHome,
+		PATH: tools,
+    PULSE_DATA_DIR: pulseDataDir,
+    PULSE_BINDING_REGISTRY_PATH: bindingPaths.registryPath,
+    PULSE_BINDING_PUBLIC_KEY_PATH: bindingPaths.publicKeyPath,
+		PULSE_BINDING_ANCHOR_PATH: bindingPaths.anchorPath,
+		PULSE_TRUST_MODE: 'test',
+		PULSE_RELEASE_TEST_MODE: '1',
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
+		PULSE_CODEX_MARKETPLACE_SOURCE: repoRoot,
+	};
+	for (const name of [
+		'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
+		'PULSE_MANAGED_EMBEDDER_CONFIG', 'COHERE_API_KEY',
+	]) delete env[name];
+	assert.equal(existsSync(join(tools, 'go')), false);
+	assert.equal(existsSync(join(tools, 'python')), false);
+
 	const failedConnect = run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env: { ...env, PULSE_GO_BIN: unhealthyDaemon }, status: 1, timeout: 30_000,
+		cwd: workspace, env, status: 1, timeout: 30_000,
 	});
-	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /did not become ready/);
+	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /managed full-retrieval smoke|did not become ready/);
 	const pluginAfterFailure = run('codex', ['plugin', 'list', '--marketplace', 'zbs-gg'], { cwd: workspace, env });
 	assert.match(pluginAfterFailure.stdout, /pulse@zbs-gg\s+not installed/);
 	assert.equal(existsSync(join(root, 'pulse', 'runtime', 'codex', 'current')), false);
 	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
 	assert.equal(existsSync(join(codexHome, 'pulse', 'product-locators.json')), false);
+	const healthyDaemonBytes = Buffer.concat([daemonBytes, Buffer.from('\nPULSE_HEALTHY_AFTER_FAILED_ACTIVATION\n')]);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, healthyDaemonBytes, 8, { realInputs });
+	Object.assign(env, {
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
+	});
 
   const connected = run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env });
   assert.match(connected.stdout, /pulse@|Codex plugin installed/);
@@ -233,7 +345,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
 		}),
 	});
-	assert.match(`${rejectedMixedPair.stdout}${rejectedMixedPair.stderr}`, /runtime and activation are out of sync/);
+	assert.match(
+		`${rejectedMixedPair.stdout}${rejectedMixedPair.stderr}`,
+		/runtime and activation are out of sync/,
+	);
 	writeFileSync(activationPath, activationBeforeMismatch, { mode: 0o600 });
 	const installedRuntimeCLI = join(root, 'pulse', 'runtime', 'codex', 'current', 'src', 'cli.js');
 	const installedRuntimeCLIBytes = readFileSync(installedRuntimeCLI);
@@ -250,7 +365,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
 		}),
 	});
-	assert.match(`${rejectedTamperedRuntime.stdout}${rejectedTamperedRuntime.stderr}`, /runtime and activation are out of sync/);
+	assert.match(
+		`${rejectedTamperedRuntime.stdout}${rejectedTamperedRuntime.stderr}`,
+		/runtime and activation are out of sync/,
+	);
 	writeFileSync(installedRuntimeCLI, installedRuntimeCLIBytes, { mode: installedRuntimeCLIMode });
 
 	const runtimeSymlinkTarget = join(root, 'untrusted-runtime-target.mjs');
@@ -266,7 +384,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 			hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
 		}),
 	});
-	assert.match(`${rejectedRuntimeSymlink.stdout}${rejectedRuntimeSymlink.stderr}`, /trusted runtime contains a symlink: src\/cli\.js/);
+	assert.match(
+		`${rejectedRuntimeSymlink.stdout}${rejectedRuntimeSymlink.stderr}`,
+		/trusted runtime contains a symlink: src\/cli\.js/,
+	);
 	rmSync(installedRuntimeCLI);
 	writeFileSync(installedRuntimeCLI, installedRuntimeCLIBytes, { mode: installedRuntimeCLIMode });
 	const syntheticWithoutHostOptIn = { ...hookEnv };
@@ -460,19 +581,98 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.equal(report.trust.full_retrieval, true);
   assert.equal(report.trust.external_embedding_api, false);
 
+	const receiptBeforeHelperCrash = JSON.parse(readFileSync(
+		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+	));
+	const helperChildren = run('/usr/bin/pgrep', ['-P', String(receiptBeforeHelperCrash.pid)]).stdout
+		.trim().split(/\s+/).filter(Boolean).map(Number);
+	assert.equal(helperChildren.length, 1, 'managed daemon must own exactly one embedder helper');
+	process.kill(helperChildren[0], 'SIGKILL');
+	const healedAfterHelperCrash = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
+		cwd: workspace, env: hookEnv, timeout: 30_000, input: mcpInput,
+	});
+	assert.match(healedAfterHelperCrash.stdout, /"serverInfo"/);
+	const receiptAfterHelperCrash = JSON.parse(readFileSync(
+		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+	));
+	assert.notEqual(receiptAfterHelperCrash.pid, receiptBeforeHelperCrash.pid,
+		'helper death must restart the exact managed daemon generation once');
+	assert.equal(receiptAfterHelperCrash.executable_digest, receiptBeforeHelperCrash.executable_digest);
+	assert.equal(
+		receiptAfterHelperCrash.managed_embedder_config_digest,
+		receiptBeforeHelperCrash.managed_embedder_config_digest,
+	);
+
+	const receiptBeforeFailedManagedUpgrade = JSON.parse(readFileSync(
+		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+	));
+	const activationBeforeFailedManagedUpgrade = readFileSync(
+		join(root, 'pulse', 'runtime', 'product-daemon.json'),
+	);
+	const activeSetBeforeFailedManagedUpgrade = readFileSync(
+		join(root, 'pulse', 'artifacts', 'active-release.json'),
+	);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 9, { realInputs });
+	Object.assign(env, {
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
+	});
+	const failedManagedUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+		cwd: workspace, env, status: 1, timeout: 30_000,
+	});
+	assert.match(
+		`${failedManagedUpgrade.stdout}${failedManagedUpgrade.stderr}`,
+		/managed full-retrieval smoke|did not become ready/,
+	);
+	const receiptAfterFailedManagedUpgrade = JSON.parse(readFileSync(
+		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+	));
+	for (const field of [
+		'executable', 'executable_digest', 'managed_embedder_config_path', 'managed_embedder_config_digest',
+		'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest',
+		'model_activation_digest', 'model_tree_digest',
+	]) {
+		assert.equal(
+			receiptAfterFailedManagedUpgrade[field], receiptBeforeFailedManagedUpgrade[field],
+			`failed managed upgrade must restore receipt field ${field}`,
+		);
+	}
+	assert.deepEqual(
+		readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json')),
+		activationBeforeFailedManagedUpgrade,
+	);
+	assert.deepEqual(
+		readFileSync(join(root, 'pulse', 'artifacts', 'active-release.json')),
+		activeSetBeforeFailedManagedUpgrade,
+		'failed managed upgrade must restore the previous atomic artifact set',
+	);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, healthyDaemonBytes, 8, { realInputs });
+	Object.assign(env, {
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
+	});
+
 	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspaceB, env, timeout: 120_000 });
 	const receiptBv1 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
 	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// multi-workspace-runtime-v2\n`);
-	const daemonV2 = join(root, 'pulse-product-daemon-v2');
-	writeFileSync(daemonV2, Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_MULTI_WORKSPACE_V2\n')]), { mode: 0o700 });
-	chmodSync(daemonV2, 0o700);
-	run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env: { ...env, PULSE_GO_BIN: daemonV2 }, timeout: 120_000,
+	const daemonV2Bytes = Buffer.concat([healthyDaemonBytes, Buffer.from('\nPULSE_MULTI_WORKSPACE_V2\n')]);
+	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonV2Bytes, 8, { realInputs });
+	Object.assign(env, {
+		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
+		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
-	const activationV2 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
+	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env, timeout: 120_000 });
+	const activationV3 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
 	const receiptAv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
-	assert.equal(receiptAv2.executable_digest, activationV2.daemon_digest);
-	assert.notEqual(receiptBv1.executable_digest, activationV2.daemon_digest);
+	assert.equal(activationV3.schema, 'pulse.product_activation.v3');
+	assert.equal(receiptAv2.executable_digest, activationV3.daemon_digest);
+	assert.match(receiptAv2.managed_embedder_config_digest, /^[a-f0-9]{64}$/);
+	assert.equal('managed_embedder_config_path' in activationV3, false,
+		'global activation must not pin one project vault config');
+	assert.notEqual(receiptBv1.executable_digest, activationV3.daemon_digest);
 	const workspaceBResume = run(process.execPath, [hook, 'SessionStart'], {
 		cwd: workspaceB,
 		env: hookEnv,
@@ -484,8 +684,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	});
 	assert.match(JSON.parse(workspaceBResume.stdout).hookSpecificOutput.additionalContext, /pulse.context.v1/);
 	const receiptBv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
-	assert.equal(receiptBv2.executable_digest, activationV2.daemon_digest,
+	assert.equal(receiptBv2.executable_digest, activationV3.daemon_digest,
 		'first hook in another workspace must reconcile its vault before reading memory');
+	assert.notEqual(receiptBv2.managed_embedder_config_path, receiptAv2.managed_embedder_config_path,
+		'each project vault must keep its own private managed embedder config');
 
   const runtimeReceipt = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
   process.kill(runtimeReceipt.pid, 'SIGSTOP');
@@ -509,7 +711,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.equal(disconnectedReport.checks.plugin.ok, false);
   assert.equal(disconnectedReport.checks.capture.ok, false);
 
-  process.stdout.write('Pulse Codex packed-product E2E passed.\n');
+	process.stdout.write(`${JSON.stringify(productEvidence)}\n`);
+	process.stdout.write(requireRealMLX
+		? 'Pulse Codex packed-product real-MLX E2E passed.\n'
+		: 'Pulse Codex packed-product synthetic-protocol E2E passed.\n');
 } finally {
   if (!runtimeStopped) {
     const receiptPaths = [
@@ -523,5 +728,6 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
       } catch { /* no running fixture */ }
     }
   }
-  rmSync(root, { recursive: true, force: true });
+	if (process.env.PULSE_KEEP_CODEX_E2E_ROOT === '1') process.stderr.write(`kept Codex E2E root: ${root}\n`);
+	else rmSync(root, { recursive: true, force: true });
 }

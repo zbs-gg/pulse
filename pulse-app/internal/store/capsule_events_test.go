@@ -141,6 +141,42 @@ func TestRememberCapsuleProjectsNormalTierToLinkedTaggedEvent(t *testing.T) {
 	}
 }
 
+func TestUnindexedHostEventDocsMatchesLiveCanonicalEmbeddingText(t *testing.T) {
+	s := openCapsuleEventsStore(t)
+	ids, err := s.RememberCapsule(adviceCapsule(
+		normalAdviceItem("Keep restart recovery byte-for-byte aligned with live indexing."),
+	))
+	if err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	link := capsuleEventID(t, s, ids[0])
+	if !link.Valid {
+		t.Fatal("capsule projection missing")
+	}
+	res, err := s.DB().Exec(`
+		INSERT INTO events (title, description, scorer_version, ts, provenance, domain)
+		VALUES ('Release title', 'Release summary', 'host-extracted',
+		        '2026-07-01T09:00:00Z', 'interactive_memory', 'real')`)
+	if err != nil {
+		t.Fatalf("insert semantic event: %v", err)
+	}
+	semanticID, _ := res.LastInsertId()
+	docs, err := s.UnindexedHostEventDocs(10)
+	if err != nil {
+		t.Fatalf("unindexed docs: %v", err)
+	}
+	got := map[int64]string{}
+	for _, doc := range docs {
+		got[doc.EventID] = doc.Text
+	}
+	if got[link.Int64] != "Keep restart recovery byte-for-byte aligned with live indexing." {
+		t.Fatalf("capsule restart text = %q", got[link.Int64])
+	}
+	if got[semanticID] != "Release title\nRelease summary" {
+		t.Fatalf("semantic restart text = %q", got[semanticID])
+	}
+}
+
 func TestCapsuleEventProjectionEnvOptOut(t *testing.T) {
 	s := openCapsuleEventsStore(t)
 	t.Setenv("PULSE_CAPSULE_EVENTS", "off")
@@ -213,6 +249,37 @@ func TestBackfillCapsuleEventsIsIdempotent(t *testing.T) {
 	}
 	if got := countEvents(t, s); got != 2 {
 		t.Fatalf("expected 2 capsule events after double backfill, got %d", got)
+	}
+}
+
+func TestBackfillCapsuleEventsBatchBoundsEachProjectionTransaction(t *testing.T) {
+	s := openCapsuleEventsStore(t)
+	t.Setenv("PULSE_CAPSULE_EVENTS", "off")
+	ids, err := s.RememberCapsule(adviceCapsule(
+		normalAdviceItem("First bounded capsule event."),
+		normalAdviceItem("Second bounded capsule event."),
+		normalAdviceItem("Third bounded capsule event."),
+	))
+	if err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	t.Setenv("PULSE_CAPSULE_EVENTS", "")
+	first, err := s.BackfillCapsuleEventsBatch(2)
+	if err != nil {
+		t.Fatalf("first batch: %v", err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first batch = %d, want 2", len(first))
+	}
+	if !capsuleEventID(t, s, ids[0]).Valid || !capsuleEventID(t, s, ids[1]).Valid || capsuleEventID(t, s, ids[2]).Valid {
+		t.Fatalf("first bounded transaction projected the wrong capsules")
+	}
+	second, err := s.BackfillCapsuleEventsBatch(2)
+	if err != nil {
+		t.Fatalf("second batch: %v", err)
+	}
+	if len(second) != 1 || !capsuleEventID(t, s, ids[2]).Valid {
+		t.Fatalf("second batch = %#v, want final capsule", second)
 	}
 }
 
