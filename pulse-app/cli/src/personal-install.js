@@ -93,8 +93,8 @@ function nextAction(reasonCode) {
     binding_legacy: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     binding_repair_required: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     codex_activation_incomplete: 'Run pulse doctor codex --json and fix the first failed activation check.',
-		codex_hook_lifecycle_required: 'Open and use a normal new Codex task so the Pulse lifecycle can run, then run pulse install again.',
-		codex_native_lifecycle_attestation_unavailable: 'Use Pulse MCP tools explicitly for now; Codex 0.136 does not expose replayable native hook execution evidence to Pulse.',
+    codex_hook_lifecycle_required: 'Run pulse home to inspect the installed memory, then open and use a normal new Codex task so the Pulse lifecycle can run.',
+    codex_native_lifecycle_attestation_unavailable: 'Run pulse home to inspect the installed memory. Use Pulse MCP tools explicitly for now; Codex 0.136 does not expose replayable native hook execution evidence to Pulse.',
     codex_hook_trust_required: 'Approve the Pulse hook in Codex, then run pulse install again.',
     codex_identity_changed: 'Run pulse install-plan --json again and review the changed Codex executable before retrying.',
     codex_identity_invalid: 'Install the Codex CLI in a supported system location, then run pulse install-plan --json.',
@@ -129,7 +129,7 @@ function terminalResult(plan, {
     },
     preserved_data: true,
     next_action: outcome === 'ready'
-      ? 'Open a new Codex task in this project and create the first visible memory.'
+      ? 'Memory Home is opening now. Review the installed memory, then open a new Codex task in this project and create the first visible memory.'
       : nextAction(reasonCode),
   };
 }
@@ -381,13 +381,15 @@ export async function runPersonalInstall({
     if (health?.ready !== true || health?.full_retrieval !== true) {
       const reasonCode = health?.reason_code ?? (health?.warming ? 'model_warming' : 'full_retrieval_unavailable');
       if (![
-				'codex_activation_incomplete', 'codex_hook_lifecycle_required', 'codex_hook_trust_required',
-				'codex_native_lifecycle_attestation_unavailable',
-        'full_retrieval_unavailable', 'model_warming',
+        'presence_required', 'binding_repair_required', 'codex_activation_incomplete',
+        'codex_plugin_unavailable', 'codex_hook_lifecycle_required', 'codex_hook_trust_required',
+        'codex_native_lifecycle_attestation_unavailable', 'daemon_unavailable',
+        'full_retrieval_unavailable', 'local_embedder_warming', 'model_warming',
       ].includes(reasonCode)) {
         fail('health_status_invalid');
       }
-      const outcome = health?.warming ? 'warming' : 'action_required';
+      const outcome = health?.outcome ?? (health?.warming ? 'warming' : 'action_required');
+      if (!['warming', 'action_required'].includes(outcome)) fail('health_status_invalid');
       return await emitTerminal(deps, terminalResult(exact, {
         completedSteps,
         outcome,

@@ -39,6 +39,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/teamauth"
 	"github.com/nkkmnk/pulse/internal/teamjobs"
 	"github.com/nkkmnk/pulse/internal/teamread"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 const (
@@ -259,6 +260,16 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	if billingHost != "codex" && billingHost != "claude-code" && billingHost != "pulse-product" {
 		billingHost = "pulse-product"
 	}
+	homeOrigin := ""
+	var homePresence server.HomePresence
+	if kind != "" {
+		homeOrigin = "http://" + addr
+		presenceGate, err := userpresence.NewGate(userpresence.NewPlatformProver(), time.Now)
+		if err != nil {
+			return fmt.Errorf("configure Memory Home OS presence: %w", err)
+		}
+		homePresence = presenceGate
+	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,
 		Outbox:       ob,
@@ -276,6 +287,8 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		Retrieval:    retrievalEngine,
 		ContextQuery: contextQuery,
 		Health:       healthProvider,
+		HomeOrigin:   homeOrigin,
+		HomePresence: homePresence,
 	})
 	if err != nil {
 		return err

@@ -1645,6 +1645,10 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
 	prepared, err := prepareBoundPrivateCandidate(replacement, row.host, row.sessionID)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
@@ -1708,6 +1712,10 @@ func (s *Store) CancelMemoryTrayCandidate(candidateID string, expectedVersion in
 	row, err := loadTrayCandidateTx(tx, candidateID)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
 	if row.version == expectedVersion && row.state == "canceled" {
 		return loadLatestCandidateReceiptTx(tx, candidateID)
@@ -2002,6 +2010,76 @@ func (s *Store) ListMemoryTray(limit int) ([]MemoryTrayCandidateView, error) {
 		return nil, err
 	}
 	return scanMemoryTrayViews(s.db, rows)
+}
+
+// MemoryTrayPendingCandidate is the bounded candidate shape needed by a
+// trusted review surface. It deliberately omits receipt history and canonical
+// object projections so rendering or acknowledging one card stays O(1).
+type MemoryTrayPendingCandidate struct {
+	CandidateID   string                 `json:"candidate_id"`
+	Version       int                    `json:"version"`
+	ContentDigest string                 `json:"content_digest"`
+	Candidate     PrivateMemoryCandidate `json:"candidate"`
+}
+
+func (s *Store) ListPendingMemoryTrayCandidates(limit int) ([]MemoryTrayPendingCandidate, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	rows, err := s.db.Query(`
+		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
+		  FROM memory_tray_candidates candidate
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE candidate.state='pending'
+		   AND ledger.binding_digest=? AND ledger.policy_epoch=? AND ledger.resolver_epoch=?
+		 ORDER BY candidate.updated_at DESC, candidate.candidate_id
+		 LIMIT ?`, expectedBinding, expectedPolicy, expectedResolver, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates := make([]MemoryTrayPendingCandidate, 0)
+	for rows.Next() {
+		candidate, err := scanPendingMemoryTrayCandidate(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
+func (s *Store) GetPendingMemoryTrayCandidate(candidateID string, version int) (MemoryTrayPendingCandidate, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return MemoryTrayPendingCandidate{}, err
+	}
+	if !validTrayIdentifier(candidateID) || version < 1 {
+		return MemoryTrayPendingCandidate{}, errors.New("pending Memory Tray candidate identity is invalid")
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return scanPendingMemoryTrayCandidate(s.db.QueryRow(`
+		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
+		  FROM memory_tray_candidates candidate
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE candidate.candidate_id=? AND candidate.version=? AND candidate.state='pending'
+		   AND ledger.binding_digest=? AND ledger.policy_epoch=? AND ledger.resolver_epoch=?`,
+		candidateID, version, expectedBinding, expectedPolicy, expectedResolver))
+}
+
+func scanPendingMemoryTrayCandidate(scanner interface{ Scan(...any) error }) (MemoryTrayPendingCandidate, error) {
+	var candidate MemoryTrayPendingCandidate
+	var payload string
+	if err := scanner.Scan(&candidate.CandidateID, &candidate.Version, &candidate.ContentDigest, &payload); err != nil {
+		return MemoryTrayPendingCandidate{}, err
+	}
+	if err := json.Unmarshal([]byte(payload), &candidate.Candidate); err != nil {
+		return MemoryTrayPendingCandidate{}, err
+	}
+	return candidate, nil
 }
 
 func (s *Store) ListPendingMemoryTrayPage(afterCandidateID string, limit int) ([]MemoryTrayCandidateView, error) {

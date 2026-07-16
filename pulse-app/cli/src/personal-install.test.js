@@ -138,6 +138,7 @@ test('new install rechecks every durable fact and executes the security ordering
   assert.deepEqual(result.completed_steps, PERSONAL_INSTALL_STEPS);
   assert.equal(result.preserved_data, true);
   assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
+  assert.match(result.next_action, /Memory Home is opening/);
   assert.equal(run.receipts.at(-1).outcome, 'ready');
   assert.equal(run.receipts.at(-1).reason_code, 'installed');
   assert.deepEqual(

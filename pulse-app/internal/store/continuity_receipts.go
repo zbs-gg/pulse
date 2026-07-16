@@ -139,6 +139,14 @@ func (s *Store) continuityDeliveryAuthority() (string, string, bool) {
 	return binding, repository, trayBindingDigestPattern.MatchString(binding) && validTrayIdentifier(repository)
 }
 
+// ProductRuntimeBoundary returns the content-free workspace boundary used by
+// Memory Home. It intentionally exposes neither policy credentials nor any
+// stored memory body; callers receive only the already configured binding and
+// repository identifiers.
+func (s *Store) ProductRuntimeBoundary() (bindingDigest, repositoryID string, ok bool) {
+	return s.continuityDeliveryAuthority()
+}
+
 func (s *Store) validateContinuityDeliveryAuthority(bindingDigest, repositoryID string) error {
 	binding, repository, ok := s.continuityDeliveryAuthority()
 	if !ok {

@@ -46,6 +46,7 @@ export async function executePersonalInstallCommand({
   input = process.stdin,
   lock = acquireInstallLock,
   mode,
+  openHome = async () => {},
   output = process.stdout,
   errorOutput = process.stderr,
 } = {}) {
@@ -54,7 +55,7 @@ export async function executePersonalInstallCommand({
       typeof consentPrompt !== 'function' ||
       typeof dataDir !== 'string' || !input ||
       typeof output?.write !== 'function' || typeof errorOutput?.write !== 'function' ||
-      typeof lock !== 'function') {
+      typeof lock !== 'function' || typeof openHome !== 'function') {
     throw new TypeError('personal_install_command_invalid');
   }
   const json = argv.includes('--json');
@@ -89,8 +90,9 @@ export async function executePersonalInstallCommand({
     printResult(result, { json, stdout: output });
     return { exitCode: 1, result };
   }
+  let result;
   try {
-    const result = await runPersonalInstall({
+    result = await runPersonalInstall({
       plan,
       consent: true,
       mode,
@@ -98,8 +100,9 @@ export async function executePersonalInstallCommand({
       resumeEvidence: plan.current_state.install_receipt === 'resumable',
     });
     printResult(result, { json, stdout: output });
-    return { exitCode: result.outcome === 'ready' ? 0 : 1, result };
   } finally {
     releaseLock();
   }
+  if (result.outcome === 'ready' && !json) await openHome();
+  return { exitCode: result.outcome === 'ready' ? 0 : 1, result };
 }

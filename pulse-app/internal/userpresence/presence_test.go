@@ -10,10 +10,14 @@ import (
 type proverStub struct {
 	calls int
 	err   error
+	prove func()
 }
 
 func (p *proverStub) Prove(context.Context, Challenge) error {
 	p.calls++
+	if p.prove != nil {
+		p.prove()
+	}
 	return p.err
 }
 
@@ -46,6 +50,38 @@ func TestGateBindsPresenceToExactActionDigestNonceAndEpoch(t *testing.T) {
 	}
 	if prover.calls != 1 {
 		t.Fatalf("prover calls = %d", prover.calls)
+	}
+}
+
+func TestGateAllowsFreshHomeOpenPresence(t *testing.T) {
+	prover := &proverStub{}
+	gate, err := NewGate(prover, func() time.Time { return time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := validChallenge()
+	challenge.Action = ActionHomeOpen
+	challenge.Display = "Open Pulse Memory Home"
+	assertion, err := gate.Authorize(context.Background(), challenge)
+	if err != nil {
+		t.Fatalf("authorize home.open: %v", err)
+	}
+	if assertion.Action != challenge.Action || assertion.Digest != challenge.Digest || prover.calls != 1 {
+		t.Fatalf("home.open assertion=%#v prover calls=%d", assertion, prover.calls)
+	}
+}
+
+func TestGateRejectsPresenceThatCompletesAfterChallengeExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	prover := &proverStub{prove: func() { now = now.Add(61 * time.Second) }}
+	gate, err := NewGate(prover, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := validChallenge()
+	challenge.ExpiresAt = now.Add(time.Minute)
+	if _, err := gate.Authorize(context.Background(), challenge); !errors.Is(err, ErrPresenceExpired) {
+		t.Fatalf("late presence error=%v, want ErrPresenceExpired", err)
 	}
 }
 

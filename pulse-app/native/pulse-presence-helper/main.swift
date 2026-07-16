@@ -17,7 +17,7 @@ private let helperCapabilities = [
 ]
 private let allowedActions: Set<String> = [
     "binding.change", "vault.wipe", "airlock.approve",
-    "mandatory.activate", "membership.change",
+    "mandatory.activate", "membership.change", "home.open",
 ]
 private let allowedDPoPOwnerPaths: Set<String> = [
     "/owner/v1/approval",

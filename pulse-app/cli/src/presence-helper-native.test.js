@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test, { after, before } from 'node:test';
 import { dirname, join, resolve } from 'node:path';
@@ -60,6 +60,11 @@ test('native helper source builds and exposes the exact non-mutating capability 
     schema: 'pulse.presence_helper.contract.v1',
     version: 3,
   });
+});
+
+test('native helper permits the exact home.open user-presence action', () => {
+  const source = readFileSync(join(helperRoot, 'main.swift'), 'utf8');
+  assert.match(source, /"home\.open"/);
 });
 
 test('native helper source passes DER-to-P1363 known-answer and malformed vectors without Keychain access', {

@@ -19,6 +19,7 @@ const (
 	ActionAirlockApprove    Action = "airlock.approve"
 	ActionMandatoryActivate Action = "mandatory.activate"
 	ActionMembershipChange  Action = "membership.change"
+	ActionHomeOpen          Action = "home.open"
 )
 
 var (
@@ -89,6 +90,13 @@ func (g *Gate) Authorize(ctx context.Context, challenge Challenge) (Assertion, e
 	if err := g.prover.Prove(ctx, challenge); err != nil {
 		return Assertion{}, fmt.Errorf("%w", ErrPresenceDenied)
 	}
+	approvedAt := g.now().UTC()
+	if approvedAt.Before(now) {
+		return Assertion{}, ErrPresenceInvalid
+	}
+	if !approvedAt.Before(challenge.ExpiresAt.UTC()) {
+		return Assertion{}, ErrPresenceExpired
+	}
 	g.mu.Lock()
 	if _, replayed := g.used[key]; replayed {
 		g.mu.Unlock()
@@ -100,13 +108,13 @@ func (g *Gate) Authorize(ctx context.Context, challenge Challenge) (Assertion, e
 	return Assertion{
 		Action: challenge.Action, Digest: challenge.Digest,
 		NonceHash: hex.EncodeToString(nonceHash[:]), PolicyEpoch: challenge.PolicyEpoch,
-		ApprovedAt: now, ExpiresAt: challenge.ExpiresAt.UTC(),
+		ApprovedAt: approvedAt, ExpiresAt: challenge.ExpiresAt.UTC(),
 	}, nil
 }
 
 func validateChallenge(challenge Challenge, now time.Time) error {
 	switch challenge.Action {
-	case ActionBindingChange, ActionVaultWipe, ActionAirlockApprove, ActionMandatoryActivate, ActionMembershipChange:
+	case ActionBindingChange, ActionVaultWipe, ActionAirlockApprove, ActionMandatoryActivate, ActionMembershipChange, ActionHomeOpen:
 	default:
 		return ErrPresenceInvalid
 	}

@@ -113,7 +113,7 @@ func TestExistingVersion32DatabaseCannotUseRetroactiveManifestAsBootstrapProof(t
 	if err := team.DB().QueryRow(`SELECT count(*) FROM team_bootstrap_candidates`).Scan(&candidates); err != nil {
 		t.Fatal(err)
 	}
-	if manifestRows != 46 || candidates != 0 {
+	if manifestRows != 47 || candidates != 0 {
 		t.Fatalf("v32 adoption state: manifest=%d candidates=%d", manifestRows, candidates)
 	}
 }

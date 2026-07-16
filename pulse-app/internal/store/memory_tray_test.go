@@ -68,6 +68,168 @@ func presentTrayReceipt(t *testing.T, s *Store, receipt MemoryWriteReceipt, now 
 	return presented
 }
 
+func reopenDeskTrayWithStalePendingCandidate(t *testing.T) (*Store, MemoryWriteReceipt) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "desk-binding-scope.db")
+	const storeID = "store_desk_binding_scope_test"
+	bindingA := strings.Repeat("a", 64)
+	first, err := OpenVault(path, StoreKindDesk, storeID)
+	if err != nil {
+		t.Fatalf("open binding A: %v", err)
+	}
+	if err := first.ConfigureProductRuntimeAuthority(bindingA, 1, 2); err != nil {
+		_ = first.Close()
+		t.Fatalf("configure binding A: %v", err)
+	}
+	req := trayFinalizeRequest("Binding A private candidate must never appear under binding B.")
+	req.BindingDigest = bindingA
+	req.PolicyEpoch = 1
+	req.ResolverEpoch = 2
+	result, err := first.FinalizeTurn(req, time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC), 10*time.Second)
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("finalize binding A: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close binding A: %v", err)
+	}
+
+	second, err := OpenVault(path, StoreKindDesk, storeID)
+	if err != nil {
+		t.Fatalf("open binding B: %v", err)
+	}
+	if err := second.ConfigureProductRuntimeAuthority(strings.Repeat("b", 64), 3, 4); err != nil {
+		_ = second.Close()
+		t.Fatalf("configure binding B: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	return second, result.Receipts[0]
+}
+
+func TestPendingMemoryTrayCandidateReadsStayBoundedAndReceiptFree(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	result, err := s.FinalizeTurn(trayFinalizeRequest("Render this pending memory in Home."), now, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := result.Receipts[0]
+
+	pending, err := s.ListPendingMemoryTrayCandidates(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].CandidateID != want.CandidateID || pending[0].Version != want.CandidateVersion ||
+		pending[0].ContentDigest != want.ContentDigest || pending[0].Candidate.Capsule == nil {
+		t.Fatalf("pending candidates=%#v", pending)
+	}
+	exact, err := s.GetPendingMemoryTrayCandidate(want.CandidateID, want.CandidateVersion)
+	if err != nil || exact.CandidateID != want.CandidateID || exact.ContentDigest != want.ContentDigest {
+		t.Fatalf("exact pending=%#v err=%v", exact, err)
+	}
+	if _, err := s.GetPendingMemoryTrayCandidate(want.CandidateID, want.CandidateVersion+1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("wrong version error=%v, want sql.ErrNoRows", err)
+	}
+	if _, err := s.CancelMemoryTrayCandidate(want.CandidateID, want.CandidateVersion, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := s.ListPendingMemoryTrayCandidates(10); err != nil || len(pending) != 0 {
+		t.Fatalf("canceled pending=%#v err=%v", pending, err)
+	}
+}
+
+func TestPendingMemoryTrayHomeReadsHideStaleRuntimeAuthority(t *testing.T) {
+	s, stale := reopenDeskTrayWithStalePendingCandidate(t)
+
+	pending, err := s.ListPendingMemoryTrayCandidates(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("foreign runtime candidate leaked from list: %#v", pending)
+	}
+	if candidate, err := s.GetPendingMemoryTrayCandidate(stale.CandidateID, stale.CandidateVersion); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign runtime get returned candidate=%#v err=%v, want sql.ErrNoRows", candidate, err)
+	}
+
+	current := trayFinalizeRequest("Binding B current candidate remains visible and controllable.")
+	current.SessionID = "session_binding_b"
+	current.TurnID = "turn_binding_b"
+	current.SourceEventKey = "codex:session_binding_b:turn_binding_b:stop"
+	current.IdempotencyKey = "finalize_binding_b"
+	current.BindingDigest = strings.Repeat("b", 64)
+	current.PolicyEpoch = 3
+	current.ResolverEpoch = 4
+	result, err := s.FinalizeTurn(current, time.Date(2026, 7, 16, 10, 1, 0, 0, time.UTC), 10*time.Second)
+	if err != nil {
+		t.Fatalf("finalize current binding: %v", err)
+	}
+	pending, err = s.ListPendingMemoryTrayCandidates(10)
+	if err != nil || len(pending) != 1 || pending[0].CandidateID != result.Receipts[0].CandidateID {
+		t.Fatalf("current binding pending=%#v err=%v", pending, err)
+	}
+	if exact, err := s.GetPendingMemoryTrayCandidate(result.Receipts[0].CandidateID, 1); err != nil || exact.CandidateID != result.Receipts[0].CandidateID {
+		t.Fatalf("current binding exact=%#v err=%v", exact, err)
+	}
+}
+
+func TestPendingMemoryTrayControlsRejectStaleRuntimeAuthorityBeforeMutation(t *testing.T) {
+	type candidateSnapshot struct {
+		State, Digest, Payload, GraceExpires, UpdatedAt string
+		Version                                         int
+	}
+	readSnapshot := func(t *testing.T, s *Store, candidateID string) candidateSnapshot {
+		t.Helper()
+		var snapshot candidateSnapshot
+		if err := s.DB().QueryRow(`
+			SELECT state, version, content_digest, payload_json, grace_expires_at, updated_at
+			  FROM memory_tray_candidates WHERE candidate_id=?`, candidateID,
+		).Scan(&snapshot.State, &snapshot.Version, &snapshot.Digest, &snapshot.Payload, &snapshot.GraceExpires, &snapshot.UpdatedAt); err != nil {
+			t.Fatalf("read candidate snapshot: %v", err)
+		}
+		return snapshot
+	}
+
+	for _, control := range []struct {
+		name string
+		run  func(*Store, MemoryWriteReceipt) error
+	}{
+		{
+			name: "edit",
+			run: func(s *Store, stale MemoryWriteReceipt) error {
+				_, err := s.EditMemoryTrayCandidate(
+					stale.CandidateID, stale.CandidateVersion,
+					PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("Foreign binding edit must fail closed."))},
+					time.Date(2026, 7, 16, 10, 2, 0, 0, time.UTC), 10*time.Second,
+				)
+				return err
+			},
+		},
+		{
+			name: "cancel",
+			run: func(s *Store, stale MemoryWriteReceipt) error {
+				_, err := s.CancelMemoryTrayCandidate(
+					stale.CandidateID, stale.CandidateVersion,
+					time.Date(2026, 7, 16, 10, 2, 0, 0, time.UTC),
+				)
+				return err
+			},
+		},
+	} {
+		t.Run(control.name, func(t *testing.T) {
+			s, stale := reopenDeskTrayWithStalePendingCandidate(t)
+			before := readSnapshot(t, s, stale.CandidateID)
+			if err := control.run(s, stale); !errors.Is(err, ErrProductRuntimeMismatch) {
+				t.Fatalf("foreign runtime %s error=%v, want ErrProductRuntimeMismatch", control.name, err)
+			}
+			after := readSnapshot(t, s, stale.CandidateID)
+			if after != before {
+				t.Fatalf("foreign runtime %s mutated candidate: before=%#v after=%#v", control.name, before, after)
+			}
+		})
+	}
+}
+
 func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	desk, _ := openDeskTrayStore(t)
 	var disposition string
@@ -150,6 +312,66 @@ func TestMigration041AppliesOnlyToPersonalAndDesk(t *testing.T) {
 	}
 }
 
+func TestMigration047AddsPendingHomeOrderingIndex(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	var disposition string
+	if err := s.DB().QueryRow(`
+		SELECT disposition FROM schema_migration_applicability WHERE version=47`,
+	).Scan(&disposition); err != nil || disposition != "applied" {
+		t.Fatalf("desk migration 047 disposition=%q err=%v", disposition, err)
+	}
+
+	rows, err := s.DB().Query(`PRAGMA index_info(idx_memory_tray_pending_home)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns []string
+	for rows.Next() {
+		var sequence, cid int
+		var name string
+		if err := rows.Scan(&sequence, &cid, &name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(columns, ","); got != "state,updated_at,candidate_id" {
+		t.Fatalf("pending Home index columns=%q", got)
+	}
+
+	planRows, err := s.DB().Query(`EXPLAIN QUERY PLAN
+		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
+		  FROM memory_tray_candidates candidate
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE candidate.state='pending'
+		   AND ledger.binding_digest=? AND ledger.policy_epoch=? AND ledger.resolver_epoch=?
+		 ORDER BY candidate.updated_at DESC, candidate.candidate_id
+		 LIMIT ?`, testTrayBindingDigest, 0, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for planRows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := planRows.Scan(&id, &parent, &unused, &detail); err != nil {
+			planRows.Close()
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := planRows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "idx_memory_tray_pending_home") || strings.Contains(joined, "USE TEMP B-TREE FOR ORDER BY") {
+		t.Fatalf("pending Home query plan is not index-ordered:\n%s", joined)
+	}
+}
+
 func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk-v40.db")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)")
@@ -226,7 +448,7 @@ func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testi
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 46 || writer != 46 {
+	if reader != 47 || writer != 47 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }

@@ -927,11 +927,202 @@ test('viewer prints local authenticated viewer URL', () => {
   assert.match(result.stdout, /\/viewer\?key=/);
 });
 
-test('home exposes the existing local Memory Home surface', () => {
-  const { result } = run(['home']);
+const testHomeRouteScope = Buffer.alloc(32).toString('base64url');
+const testHomeRoutePath = `/home/s/${testHomeRouteScope}/`;
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /\/viewer\?key=/);
+test('home exchanges the daemon secret internally and opens a one-shot credential-free relay', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-session-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-session-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const daemonSecret = 'daemon-secret-must-never-escape';
+  const cookieValue = 'browser-session-must-never-escape';
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), daemonSecret);
+  const stub = await withPulseStub((req, body) => {
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/home/session');
+    assert.equal(req.headers['x-pulse-key'], daemonSecret);
+		assert.deepEqual(Object.keys(body), ['live_readiness']);
+		assert.deepEqual(Object.keys(body.live_readiness).sort(), [
+			'checked_at', 'next_action', 'outcome', 'reason_code', 'schema',
+		]);
+		assert.equal(body.live_readiness.schema, 'pulse.personal_live_readiness.v1');
+		assert.match(body.live_readiness.checked_at, /^\d{4}-\d{2}-\d{2}T.*Z$/);
+    return {
+      body: {
+        cookie_name: 'pulse_home',
+        cookie_value: cookieValue,
+        cookie_path: testHomeRoutePath,
+        max_age_seconds: 30,
+        target_url: `http://${req.headers.host}${testHomeRoutePath}`,
+      },
+    };
+  });
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PULSE_OPEN_DRY_RUN: '1',
+      PULSE_HOME_HANDOFF_TIMEOUT_MS: '1000',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
+    assert.equal(result.stderr, '');
+    assert.equal(stub.requests.length, 1);
+		assert.equal(stub.requests[0].method, 'POST');
+		assert.equal(stub.requests[0].url, '/home/session');
+		assert.equal(stub.requests[0].body.live_readiness.schema, 'pulse.personal_live_readiness.v1');
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      new RegExp(`${daemonSecret}|${cookieValue}|${testHomeRouteScope}|${stub.baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|key=|token=|session=|bootstrap`, 'i'),
+    );
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home rejects print-url instead of exposing a bootstrap capability', () => {
+  const { result } = run(['home', '--print-url']);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /pulse home does not support --print-url/);
+  assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
+});
+
+test('home rejects a daemon target with a query without echoing session credentials', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-target-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-target-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'target-daemon-secret');
+  const stub = await withPulseStub((req) => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'target-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://${req.headers.host}${testHomeRoutePath}?key=forbidden`,
+    },
+  }));
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /exact queryless scoped \/home target/);
+    assert.doesNotMatch(result.stdout + result.stderr, /target-daemon-secret|target-browser-session|key=forbidden/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home rejects non-canonical, mismatched, and broadened scoped handoffs', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-scoped-target-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-scoped-target-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const daemonSecret = 'scoped-target-daemon-secret';
+  const cookieValue = 'scoped-target-browser-session';
+  const otherRoutePath = `/home/s/${Buffer.alloc(32, 1).toString('base64url')}/`;
+  const nonCanonicalPath = `/home/s/${'A'.repeat(42)}B/`;
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), daemonSecret);
+  const cases = [
+    { cookiePath: testHomeRoutePath.slice(0, -1), targetPath: testHomeRoutePath },
+    { cookiePath: testHomeRoutePath, targetPath: otherRoutePath },
+    { cookiePath: nonCanonicalPath, targetPath: nonCanonicalPath },
+    { cookiePath: testHomeRoutePath, targetPath: `${testHomeRoutePath}assets/home.js` },
+    { cookiePath: testHomeRoutePath, targetPath: `${testHomeRoutePath}#fragment` },
+  ];
+  const stub = await withPulseStub((req) => {
+    const current = cases[stub.requests.length - 1];
+    return {
+      body: {
+        cookie_name: 'pulse_home', cookie_value: cookieValue,
+        cookie_path: current.cookiePath, max_age_seconds: 30,
+        target_url: `http://${req.headers.host}${current.targetPath}`,
+      },
+    };
+  });
+
+  try {
+    for (const current of cases) {
+      const result = await runInWorkspaceAsync([
+        'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+      ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+      assert.equal(result.status, 1, `accepted unsafe scoped handoff ${JSON.stringify(current)}`);
+      assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${daemonSecret}|${cookieValue}`));
+    }
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home stops reading an oversized daemon session response before JSON decoding', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-oversized-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-oversized-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'oversized-daemon-secret');
+  const stub = await withPulseStub(() => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'oversized-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://127.0.0.1:18789${testHomeRoutePath}`,
+      padding: 'x'.repeat(20 * 1024),
+    },
+  }));
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /oversized Memory Home session/);
+    assert.doesNotMatch(result.stdout + result.stderr, /oversized-daemon-secret|oversized-browser-session/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home bounds an unresponsive daemon session exchange', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-timeout-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-timeout-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'timeout-daemon-secret');
+  const server = createServer(async (req) => {
+    for await (const _chunk of req) { /* keep the response pending */ }
+  });
+  await new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', resolve);
+    server.on('error', reject);
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const startedAt = Date.now();
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PULSE_OPEN_DRY_RUN: '1',
+      PULSE_HOME_REQUEST_TIMEOUT_MS: '50',
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(Date.now() - startedAt < 2_000, 'home session request must fail within its bound');
+    assert.match(result.stderr, /Memory Home session request timed out/);
+    assert.doesNotMatch(result.stdout + result.stderr, /timeout-daemon-secret|key=|token=/i);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('viewer fails closed when product activation evidence exists but binding trust is broken', () => {

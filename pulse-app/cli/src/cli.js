@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { createServer, request as httpRequest } from 'node:http';
 import {
   appendFileSync,
   chmodSync,
@@ -29,6 +30,7 @@ import {
 import {
   buildPulseRequestHeaders,
   isLoopbackPulseBase,
+  requireLoopbackPulseIPC,
 } from './remote-auth-network.js';
 import { readTeamAuthProfile, runTeamLogin } from './team-login.js';
 import { inspectTeamInstallation, setTeamStatusExitCode } from './team-status.js';
@@ -59,6 +61,10 @@ import {
   PersonalInstallError,
   writePersonalInstallReceipt,
 } from './personal-install.js';
+import {
+  personalInstallHealthFromReadiness,
+  projectPersonalLiveReadiness,
+} from './personal-live-readiness.js';
 import {
   PersonalPrincipalError,
   ensurePersonalPrincipal,
@@ -199,8 +205,8 @@ Usage:
   pulse migrate preview <export-folder-or-json-or-zip> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate preview-people-graph <graph-dir-or-people-index> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate commit <preview-json-file> --confirm "import pulse graph" [--privacy private|sensitive|normal] [--open]
-  pulse home [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]
-  pulse viewer [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]   legacy alias
+  pulse home [--base <url>] [--data-dir <path>]
+  pulse viewer [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]   legacy inspection surface
   pulse status
   pulse export
   pulse import --file <path>
@@ -581,27 +587,7 @@ function personalInstallDependencies(plan) {
     activateCodex: async () => connectCodex({ codexExecutable }),
     inspectHealth: async ({ report: inspectedReport }) => {
       const report = inspectedReport ?? await codexDoctorReport({ codexExecutable });
-      if (!report.checks.retrieval.ok) {
-        return { ready: false, full_retrieval: false, reason_code: 'full_retrieval_unavailable' };
-      }
-		if (!report.checks.native_hook_trust?.ok) {
-        return { ready: false, full_retrieval: true, reason_code: 'codex_hook_trust_required' };
-      }
-		if (!report.checks.hooks.ok) {
-			return {
-				ready: false,
-				full_retrieval: true,
-				reason_code: report.checks.hooks.reason === 'codex_native_lifecycle_attestation_unavailable'
-					? 'codex_native_lifecycle_attestation_unavailable'
-					: 'codex_hook_lifecycle_required',
-			};
-		}
-      const ready = codexProductActivationReady(report);
-      return {
-        ready,
-        full_retrieval: true,
-        ...(ready ? {} : { reason_code: 'codex_activation_incomplete' }),
-      };
+      return personalInstallHealthFromReadiness(report.personal_live_readiness);
     },
     writeReceipt: async (receipt) => writePersonalInstallReceipt(receipt, { dataDir: resolve(DATA_DIR) }),
   };
@@ -1592,7 +1578,8 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 		  ? { ok: true, detail: 'SessionStart and one complete same-session lifecycle observed' }
       : { ok: false, reason: hookReadiness.reason, detail: hookReadiness.detail ?? hookReadiness.reason },
   };
-  const ready = Object.values(checks).every((check) => check.ok);
+  const personalLiveReadiness = projectPersonalLiveReadiness(checks, new Date());
+  const ready = personalLiveReadiness.outcome === 'ready';
   return {
 	product: `Pulse Codex ${runtime?.kind === 'desk' ? 'Desk' : runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'codex',
@@ -1602,6 +1589,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 			: 'Pulse Codex automatic lifecycle ready.'
       : 'Pulse Codex automatic lifecycle is not ready.',
     checks,
+		personal_live_readiness: personalLiveReadiness,
 		trust: {
       raw_transcript_capture: liveStatus?.raw_capture_enabled ?? null,
       backend_llm_enabled: liveStatus?.backend_llm_enabled ?? null,
@@ -1634,14 +1622,10 @@ async function runCodexDoctor(rest = []) {
       : report.trust.raw_transcript_capture === true ? 'on' : 'unknown';
     console.log(`\nPrivacy: backend LLM ${report.trust.backend_llm_enabled === false ? 'off' : 'unknown'}; raw transcript capture ${rawCapture}; external embedding API ${report.trust.external_embedding_api ? 'on' : 'off'}`);
     console.log(`Retrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
+    console.log(`Personal readiness: ${report.personal_live_readiness.outcome} (${report.personal_live_readiness.reason_code}) at ${report.personal_live_readiness.checked_at}`);
     console.log(`Verdict: ${report.verdict}`);
-    if (!report.checks.presence_trust.ok) console.log('Next: pulse trust install --confirm "install pulse presence helper"');
-		if (!report.checks.native_hook_trust?.ok) {
-			console.log('Next: start a new Codex task, open /hooks, trust the Pulse hook bundle, then complete one normal turn.');
-		} else if (report.checks.hooks.reason === 'codex_native_lifecycle_attestation_unavailable') {
-			console.log('Next: use Pulse MCP tools explicitly; Codex 0.136 does not expose replayable native hook execution evidence to Pulse.');
-		} else if (!report.checks.hooks.ok) {
-			console.log('Next: complete one normal Codex turn so Pulse can verify the automatic lifecycle.');
+		if (report.personal_live_readiness.outcome !== 'ready') {
+			console.log(`Next: ${report.personal_live_readiness.next_action.label}`);
 		}
   }
   if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
@@ -5955,22 +5939,20 @@ function openExternalURL(url) {
     console.log(`[pulse] opened browser: ${url}`);
     return;
   }
-  let opener;
-  let openerArgs;
-  if (process.platform === 'darwin') {
-    opener = 'open';
-    openerArgs = [url];
-  } else if (process.platform === 'win32') {
-    opener = 'cmd';
-    openerArgs = ['/c', 'start', '', url];
-  } else {
-    opener = 'xdg-open';
-    openerArgs = [url];
-  }
-  const result = spawnSync(opener, openerArgs, { stdio: 'ignore' });
-  if (result.status !== 0) {
-    throw new Error(`could not open browser automatically; open this URL manually: ${url}`);
-  }
+	const { opener, openerArgs } = browserOpenCommand(url);
+	const result = spawnSync(opener, openerArgs, { stdio: 'ignore' });
+	if (result.status !== 0) {
+		throw new Error(`could not open browser automatically; open this URL manually: ${url}`);
+	}
+}
+
+function browserOpenCommand(url) {
+	if (process.platform === 'darwin') {
+		return { opener: 'open', openerArgs: [url] };
+	} else if (process.platform === 'win32') {
+		return { opener: 'cmd', openerArgs: ['/c', 'start', '', url] };
+	}
+	return { opener: 'xdg-open', openerArgs: [url] };
 }
 
 async function loginTeam() {
@@ -6289,6 +6271,313 @@ function productActivationEvidenceForViewer() {
 	return settings?.hooks && Object.values(settings.hooks).some((entries) =>
 		Array.isArray(entries) && entries.some((entry) =>
 			Array.isArray(entry?.hooks) && entry.hooks.some((handler) => isPulseProductHookCommand(handler?.command))));
+}
+
+const HOME_SESSION_RESPONSE_MAX_BYTES = 16 * 1024;
+const HOME_SESSION_MAX_AGE_SECONDS = 60 * 60;
+const HOME_REQUEST_TIMEOUT_MS = 90_000;
+const HOME_REQUEST_TIMEOUT_MAX_MS = 120_000;
+const HOME_HANDOFF_TIMEOUT_MS = 60_000;
+
+function boundedHomeTimeout(name, fallback, maximum) {
+	return Math.min(positiveEnvInt(name, fallback), maximum);
+}
+
+function homeSessionCookie(session) {
+	return `${session.cookie_name}=${session.cookie_value}; Max-Age=${session.max_age_seconds}; Path=${session.cookie_path}; HttpOnly; SameSite=Strict`;
+}
+
+function canonicalHomeRoutePath(value) {
+	const match = /^\/home\/s\/([A-Za-z0-9_-]{43})\/$/.exec(value);
+	if (!match) return false;
+	try {
+		const decoded = Buffer.from(match[1], 'base64url');
+		return decoded.length === 32 && decoded.toString('base64url') === match[1];
+	} catch {
+		return false;
+	}
+}
+
+function validateHomeSessionResponse(value, baseURL) {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new Error('Pulse daemon returned an invalid Memory Home session.');
+	}
+	const cookieName = String(value.cookie_name ?? '');
+	const cookieValue = String(value.cookie_value ?? '');
+	const cookiePath = String(value.cookie_path ?? '');
+	const maxAgeSeconds = value.max_age_seconds;
+	if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(cookieName)) {
+		throw new Error('Pulse daemon returned an invalid Memory Home session.');
+	}
+	if (!/^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/.test(cookieValue)) {
+		throw new Error('Pulse daemon returned an invalid Memory Home session.');
+	}
+	if (!canonicalHomeRoutePath(cookiePath) || !Number.isInteger(maxAgeSeconds) ||
+		maxAgeSeconds < 1 || maxAgeSeconds > HOME_SESSION_MAX_AGE_SECONDS) {
+		throw new Error('Pulse daemon returned an invalid Memory Home session.');
+	}
+
+	let base;
+	let target;
+	try {
+		base = requireLoopbackPulseIPC(baseURL);
+		target = new URL(String(value.target_url ?? ''));
+	} catch {
+		throw new Error('Pulse daemon returned an invalid Memory Home target.');
+	}
+	const basePort = base.port || (base.protocol === 'https:' ? '443' : '80');
+	const targetPort = target.port || (target.protocol === 'https:' ? '443' : '80');
+	if (target.protocol !== base.protocol || target.hostname !== '127.0.0.1' ||
+		targetPort !== basePort || target.pathname !== cookiePath || !canonicalHomeRoutePath(target.pathname) ||
+		target.search || target.hash || target.username || target.password ||
+		target.href !== `${base.protocol}//${base.host}${cookiePath}`) {
+		throw new Error('Pulse daemon must return the exact queryless scoped /home target.');
+	}
+	return {
+		cookie_name: cookieName,
+		cookie_value: cookieValue,
+		cookie_path: cookiePath,
+		max_age_seconds: maxAgeSeconds,
+		target_url: target.href,
+	};
+}
+
+async function readBoundedHomeResponse(response) {
+	if (!response.body || typeof response.body.getReader !== 'function') {
+		throw new Error('home_session_response_invalid');
+	}
+	const reader = response.body.getReader();
+	const chunks = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > HOME_SESSION_RESPONSE_MAX_BYTES) {
+				await reader.cancel();
+				throw new Error('home_session_response_oversized');
+			}
+			chunks.push(Buffer.from(value));
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return Buffer.concat(chunks, total).toString('utf8');
+}
+
+async function requestHomeSession(baseURL, secret, liveReadiness) {
+	requireLoopbackPulseIPC(baseURL);
+	const timeoutMs = boundedHomeTimeout(
+		'PULSE_HOME_REQUEST_TIMEOUT_MS', HOME_REQUEST_TIMEOUT_MS, HOME_REQUEST_TIMEOUT_MAX_MS,
+	);
+	const controller = new AbortController();
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+	let response;
+	let responseText;
+	try {
+		response = await fetch(`${baseURL.replace(/\/$/, '')}/home/session`, {
+			method: 'POST',
+			headers: {
+				...buildPulseRequestHeaders(baseURL, { ipcSecret: secret }),
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ live_readiness: liveReadiness }),
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			throw new Error('daemon_rejected_home_session');
+		}
+		responseText = await readBoundedHomeResponse(response);
+	} catch (error) {
+		if (timedOut) throw new Error('Memory Home session request timed out.');
+		if (error?.message === 'daemon_rejected_home_session') {
+			throw new Error('Pulse daemon rejected the Memory Home session request.');
+		}
+		if (error?.message === 'home_session_response_oversized') {
+			throw new Error('Pulse daemon returned an oversized Memory Home session.');
+		}
+		if (error?.message === 'home_session_response_invalid') {
+			throw new Error('Pulse daemon returned an invalid Memory Home session.');
+		}
+		throw new Error('Memory Home session request failed.');
+	} finally {
+		clearTimeout(timer);
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(responseText);
+	} catch {
+		throw new Error('Pulse daemon returned an invalid Memory Home session.');
+	}
+	return validateHomeSessionResponse(parsed, baseURL);
+}
+
+function writeHomeRelayError(res, status, message, allow = '') {
+	res.statusCode = status;
+	res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+	res.setHeader('Cache-Control', 'no-store');
+	res.setHeader('Connection', 'close');
+	if (allow) res.setHeader('Allow', allow);
+	res.end(message);
+}
+
+function startHomeBrowserRelay(session) {
+	const timeoutMs = boundedHomeTimeout(
+		'PULSE_HOME_HANDOFF_TIMEOUT_MS', HOME_HANDOFF_TIMEOUT_MS, HOME_HANDOFF_TIMEOUT_MS,
+	);
+	let expectedHost = '';
+	let completed = false;
+	let timer;
+	let resolveCompletion;
+	let rejectCompletion;
+	const completion = new Promise((resolve, reject) => {
+		resolveCompletion = resolve;
+		rejectCompletion = reject;
+	});
+	const failRelay = (error) => {
+		if (completed) return;
+		completed = true;
+		clearTimeout(timer);
+		if (server.listening) server.close();
+		rejectCompletion(error);
+	};
+	const server = createServer((req, res) => {
+		if (req.headers.host !== expectedHost) {
+			writeHomeRelayError(res, 421, 'Misdirected request.');
+			return;
+		}
+		if (req.method !== 'GET') {
+			writeHomeRelayError(res, 405, 'Method not allowed.', 'GET');
+			return;
+		}
+		if (req.url !== '/') {
+			writeHomeRelayError(res, 404, 'Not found.');
+			return;
+		}
+		const fetchMode = String(req.headers['sec-fetch-mode'] ?? '').toLowerCase();
+		const fetchDestination = String(req.headers['sec-fetch-dest'] ?? 'document').toLowerCase();
+		if (fetchMode !== 'navigate' || fetchDestination !== 'document') {
+			writeHomeRelayError(res, 403, 'Navigation required.');
+			return;
+		}
+		if (completed) {
+			writeHomeRelayError(res, 410, 'Gone.');
+			return;
+		}
+		completed = true;
+		clearTimeout(timer);
+		res.statusCode = 303;
+		res.setHeader('Location', session.target_url);
+		res.setHeader('Set-Cookie', homeSessionCookie(session));
+		res.setHeader('Cache-Control', 'no-store');
+		res.setHeader('Referrer-Policy', 'no-referrer');
+		res.setHeader('Connection', 'close');
+		server.close();
+		res.end(() => resolveCompletion());
+	});
+
+	return new Promise((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(0, '127.0.0.1', () => {
+			server.removeListener('error', reject);
+			server.on('error', (error) => {
+				failRelay(new Error(`Memory Home browser handoff failed: ${error.code ?? 'listener_error'}.`));
+			});
+			const address = server.address();
+			expectedHost = `127.0.0.1:${address.port}`;
+			timer = setTimeout(() => {
+				failRelay(new Error('Memory Home browser handoff timed out.'));
+			}, timeoutMs);
+			resolve({
+				url: `http://${expectedHost}/`,
+				completion,
+				close: () => failRelay(new Error('Memory Home browser handoff interrupted.')),
+			});
+		});
+	});
+}
+
+async function openHomeBrowserURL(url, session) {
+	if (process.env.PULSE_OPEN_DRY_RUN === '1') {
+		const navigate = () => new Promise((resolve, reject) => {
+			const request = httpRequest(url, {
+				method: 'GET',
+				headers: { 'Sec-Fetch-Mode': 'navigate', Connection: 'close' },
+			}, (response) => {
+				response.resume();
+				response.once('end', () => resolve(response));
+			});
+			request.once('error', reject);
+			request.end();
+		});
+		const response = await navigate();
+		if (response.statusCode !== 303 || response.headers.location !== session.target_url ||
+			response.headers['set-cookie']?.[0] !== homeSessionCookie(session)) {
+			throw new Error('Memory Home browser handoff failed.');
+		}
+		let replayed = false;
+		try {
+			const replay = await navigate();
+			replayed = replay.statusCode === 303;
+		} catch {
+			// A closed listener is the expected one-shot result.
+		}
+		if (replayed) throw new Error('Memory Home browser handoff replayed unexpectedly.');
+		return;
+	}
+
+	const { opener, openerArgs } = browserOpenCommand(url);
+	const result = spawnSync(opener, openerArgs, { stdio: 'ignore' });
+	if (result.status !== 0) {
+		throw new Error('Could not open Memory Home automatically.');
+	}
+}
+
+async function runHome(rest) {
+	if (rest.includes('--print-url')) {
+		throw new Error('pulse home does not support --print-url because its browser handoff is one-shot.');
+	}
+	const explicitDataDir = getRestArg(rest, '--data-dir');
+	const explicitBaseURL = getRestArg(rest, '--base');
+	let product;
+	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
+		try {
+			await recoverBindingAuthority();
+			product = resolveCodexMcpRuntime(process.cwd());
+		} catch (error) {
+			if (productActivationEvidenceForViewer()) {
+				throw new Error(`Pulse product activation exists, but its bound vault cannot be trusted: ${error.message}`);
+			}
+			// Local Preview remains available only when this workspace has no product activation evidence.
+		}
+	}
+	const dataDir = resolve(explicitDataDir ?? product?.runtime.data_dir ?? DATA_DIR);
+	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
+	const doctor = await codexDoctorReport();
+	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness);
+	const relay = await startHomeBrowserRelay(session);
+	const interrupt = () => relay.close();
+	process.once('SIGINT', interrupt);
+	process.once('SIGTERM', interrupt);
+	try {
+		await openHomeBrowserURL(relay.url, session);
+		await relay.completion;
+		console.log('[pulse] Memory Home opened.');
+	} catch (error) {
+		relay.close();
+		await relay.completion.catch(() => {});
+		throw error;
+	} finally {
+		process.removeListener('SIGINT', interrupt);
+		process.removeListener('SIGTERM', interrupt);
+		relay.close();
+	}
 }
 
 async function runViewer(rest) {
@@ -8760,6 +9049,7 @@ async function main() {
       buildPlan: currentPersonalInstallPlan,
       dataDir: DATA_DIR,
       mode: command,
+      openHome: () => runHome([]),
     });
     if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
     return;
@@ -8928,7 +9218,12 @@ async function main() {
     return;
   }
 
-  if (command === 'home' || command === 'viewer') {
+  if (command === 'home') {
+    await runHome(args.slice(1));
+    return;
+  }
+
+  if (command === 'viewer') {
     await runViewer(args.slice(1));
     return;
   }

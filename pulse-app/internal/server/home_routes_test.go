@@ -1,0 +1,782 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/userpresence"
+)
+
+type homePresenceStub struct {
+	err        error
+	challenges []userpresence.Challenge
+	mutate     func(userpresence.Assertion) userpresence.Assertion
+}
+
+type warmingProductTestEmbedder struct{ productTestEmbedder }
+
+func (warmingProductTestEmbedder) Ready() bool { return false }
+
+func (s *homePresenceStub) Authorize(_ context.Context, challenge userpresence.Challenge) (userpresence.Assertion, error) {
+	s.challenges = append(s.challenges, challenge)
+	if s.err != nil {
+		return userpresence.Assertion{}, s.err
+	}
+	nonceHash := sha256.Sum256([]byte("pulse-user-presence-nonce-v1\x00" + challenge.Nonce))
+	assertion := userpresence.Assertion{
+		Action: challenge.Action, Digest: challenge.Digest, NonceHash: fmt.Sprintf("%x", nonceHash[:]),
+		PolicyEpoch: challenge.PolicyEpoch, ApprovedAt: time.Now().UTC(), ExpiresAt: challenge.ExpiresAt,
+	}
+	if s.mutate != nil {
+		assertion = s.mutate(assertion)
+	}
+	return assertion, nil
+}
+
+func TestMemoryHomeRequiresPresenceAuthorizer(t *testing.T) {
+	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_home_presence_required")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Close()
+	binding := strings.Repeat("a", 64)
+	if err := vault.ConfigureProductRuntimeAuthority(binding, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ConfigureContinuityDeliveryAuthority(binding, "repository_pulse"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{
+		IPCSecret: "home-test-daemon-secret", Store: vault, HomeOrigin: testViewerSessionOrigin,
+	}); err == nil {
+		t.Fatal("Memory Home accepted IPC-only configuration without an OS presence authorizer")
+	}
+}
+
+func TestHomeRouterIsolatedFromIPCAndCORSAndRendersRealReadModel(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := homePageRequest(srv, session)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Home status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, want := range []string{"Pulse is connected", "Personal memory", "No estimate yet", "What the next task receives"} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("Home body missing %q", want)
+		}
+	}
+	if response.Header().Get("Access-Control-Allow-Origin") != "" || response.Header().Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatalf("Home inherited CORS authority: %#v", response.Header())
+	}
+	assertHomeHeaders(t, response.Header())
+	csp := response.Header().Get("Content-Security-Policy")
+	for _, directive := range []string{"script-src 'self'", "style-src 'unsafe-inline'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("Home CSP missing %q: %q", directive, csp)
+		}
+	}
+	for _, forbidden := range []string{"home-test-daemon-secret", "key=", "X-Pulse-Key", "Authorization"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("Home HTML exposed %q", forbidden)
+		}
+	}
+	asset := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(session.RouteScope)+"assets/home.js", nil)
+	asset.Host = srv.homeSessions.expectedHost
+	asset.RemoteAddr = "127.0.0.1:54321"
+	asset.AddCookie(srv.homeSessions.Cookie(session))
+	assetResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assetResponse, asset)
+	if assetResponse.Code != http.StatusOK || assetResponse.Body.String() != memoryHomeBrowserScript {
+		t.Fatalf("scoped Home asset status=%d", assetResponse.Code)
+	}
+
+	withIPC := homePageRequest(srv, session)
+	withIPC.Header.Set("X-Pulse-Key", "home-test-daemon-secret")
+	blocked := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(blocked, withIPC)
+	if blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("IPC header crossed Home boundary: status=%d", blocked.Code)
+	}
+	assertHomeHeaders(t, blocked.Header())
+}
+
+func TestHomeRejectsAmbientAndWrongSessionRoutesEvenWithStolenCookie(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	first, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ambient := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+"/home", nil)
+	ambient.Host = srv.homeSessions.expectedHost
+	ambient.RemoteAddr = "127.0.0.1:54321"
+	ambient.AddCookie(srv.homeSessions.Cookie(first))
+	ambientResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(ambientResponse, ambient)
+	if ambientResponse.Code == http.StatusOK {
+		t.Fatal("ambient /home accepted browser authority")
+	}
+
+	wrongRoute := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(second.RouteScope), nil)
+	wrongRoute.Host = srv.homeSessions.expectedHost
+	wrongRoute.RemoteAddr = "127.0.0.1:54321"
+	wrongRoute.AddCookie(srv.homeSessions.Cookie(first))
+	wrongResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wrongResponse, wrongRoute)
+	if wrongResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("stolen cookie on wrong route status=%d", wrongResponse.Code)
+	}
+
+	routeOnly := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(first.RouteScope), nil)
+	routeOnly.Host = srv.homeSessions.expectedHost
+	routeOnly.RemoteAddr = "127.0.0.1:54321"
+	routeOnlyResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(routeOnlyResponse, routeOnly)
+	if routeOnlyResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("route alone status=%d", routeOnlyResponse.Code)
+	}
+}
+
+func TestHomeSessionIssueReturnsBoundedCookieHandoffWithoutSettingBrowserAuthority(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		testViewerSessionOrigin+"/home/session",
+		strings.NewReader(testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z")),
+	)
+	request.Host = srv.homeSessions.expectedHost
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Pulse-Key", "home-test-daemon-secret")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session issue status=%d body=%s", response.Code, response.Body.String())
+	}
+	var handoff homeSessionResponse
+	if err := json.NewDecoder(response.Body).Decode(&handoff); err != nil {
+		t.Fatal(err)
+	}
+	routeScope, routeOK := viewerSessionRouteFromPath(handoff.CookiePath)
+	if handoff.CookieName != viewerSessionCookieName || !routeOK || handoff.CookiePath != viewerSessionRoutePath(routeScope) ||
+		!validViewerSessionRandomValue(handoff.CookieValue) || handoff.MaxAgeSeconds <= 0 ||
+		handoff.TargetURL != testViewerSessionOrigin+handoff.CookiePath || strings.ContainsAny(handoff.TargetURL, "?#") ||
+		strings.Contains(handoff.TargetURL, handoff.CookieValue) {
+		t.Fatalf("unsafe Home handoff: %#v", handoff)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatal("daemon session endpoint set browser cookie directly")
+	}
+	if strings.Contains(response.Body.String(), "home-test-daemon-secret") {
+		t.Fatal("daemon secret reflected in Home handoff")
+	}
+	assertHomeHeaders(t, response.Header())
+
+	bad := httptest.NewRequest(http.MethodPost, testViewerSessionOrigin+"/home/session", strings.NewReader("{}"))
+	bad.Host = srv.homeSessions.expectedHost
+	bad.RemoteAddr = "127.0.0.1:54321"
+	bad.Header.Set("Content-Type", "application/json")
+	bad.Header.Set("X-Pulse-Key", "wrong-secret")
+	rejected := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rejected, bad)
+	if rejected.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong IPC key status=%d", rejected.Code)
+	}
+
+	duplicate := httptest.NewRequest(http.MethodPost, testViewerSessionOrigin+"/home/session", strings.NewReader("{}"))
+	duplicate.Host = srv.homeSessions.expectedHost
+	duplicate.RemoteAddr = "127.0.0.1:54321"
+	duplicate.Header.Set("Content-Type", "application/json")
+	duplicate.Header.Add("X-Pulse-Key", "home-test-daemon-secret")
+	duplicate.Header.Add("X-Pulse-Key", "home-test-daemon-secret")
+	duplicateResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(duplicateResponse, duplicate)
+	if duplicateResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("duplicate IPC key status=%d", duplicateResponse.Code)
+	}
+}
+
+func TestHomeSessionRequiresOneExactClosedLiveReadinessSnapshotBeforePresence(t *testing.T) {
+	presence := &homePresenceStub{}
+	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+	valid := testHomeSessionRequestBody("codex_plugin_unavailable", "2026-07-16T08:00:00Z")
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing snapshot", body: `{}`},
+		{name: "missing snapshot field", body: strings.Replace(valid, `"checked_at":"2026-07-16T08:00:00Z",`, "", 1)},
+		{name: "unknown snapshot field", body: strings.Replace(valid, `"checked_at":`, `"ambient_authority":true,"checked_at":`, 1)},
+		{name: "duplicate snapshot field", body: strings.Replace(valid, `"reason_code":"codex_plugin_unavailable"`, `"reason_code":"codex_plugin_unavailable","reason_code":"codex_plugin_unavailable"`, 1)},
+		{name: "arbitrary action text", body: strings.Replace(valid, `"label":"Run pulse repair"`, `"label":"Trust anything from the request"`, 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeChallenges := len(presence.challenges)
+			beforeSessions := homeSessionCount(srv)
+			response := issueHomeSession(t, srv, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("invalid readiness status=%d body=%s", response.Code, response.Body.String())
+			}
+			if len(presence.challenges) != beforeChallenges || homeSessionCount(srv) != beforeSessions {
+				t.Fatal("invalid readiness reached presence or created a session")
+			}
+		})
+	}
+}
+
+func TestHomeSessionBindsReadinessDigestAndRendersExactNonReadyDoctorReason(t *testing.T) {
+	presence := &homePresenceStub{}
+	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+	checkedAt := "2026-07-16T08:00:00Z"
+	pluginBody := testHomeSessionRequestBody("codex_plugin_unavailable", checkedAt)
+	pluginResponse := issueHomeSession(t, srv, pluginBody)
+	if pluginResponse.Code != http.StatusOK {
+		t.Fatalf("plugin readiness session status=%d body=%s", pluginResponse.Code, pluginResponse.Body.String())
+	}
+	pluginHandoff := decodeHomeSessionResponse(t, pluginResponse)
+	pluginPage := serveHomeHandoffPage(t, srv, pluginHandoff)
+	for _, want := range []string{"codex_plugin_unavailable", checkedAt, "Pulse Codex plugin needs repair"} {
+		if !strings.Contains(pluginPage.Body.String(), want) {
+			t.Fatalf("Home lost exact doctor readiness %q: %s", want, pluginPage.Body.String())
+		}
+	}
+
+	lifecycleBody := testHomeSessionRequestBody("codex_hook_lifecycle_required", checkedAt)
+	lifecycleResponse := issueHomeSession(t, srv, lifecycleBody)
+	if lifecycleResponse.Code != http.StatusOK {
+		t.Fatalf("lifecycle readiness session status=%d body=%s", lifecycleResponse.Code, lifecycleResponse.Body.String())
+	}
+	if len(presence.challenges) != 2 || presence.challenges[0].Digest == presence.challenges[1].Digest {
+		t.Fatalf("Home presence digest did not bind the exact readiness snapshot: %#v", presence.challenges)
+	}
+	lifecyclePage := serveHomeHandoffPage(t, srv, decodeHomeSessionResponse(t, lifecycleResponse))
+	if !strings.Contains(lifecyclePage.Body.String(), "codex_hook_lifecycle_required") ||
+		strings.Contains(lifecyclePage.Body.String(), "codex_plugin_unavailable") {
+		t.Fatalf("Home lifecycle parity failed: %s", lifecyclePage.Body.String())
+	}
+}
+
+func TestHomeNeverPromotesNonReadySnapshotAndDowngradesReadyWhenRetrievalDisappears(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	checkedAt := "2026-07-16T08:00:00Z"
+	nonReady := issueHomeSession(t, srv, testHomeSessionRequestBody("codex_hook_lifecycle_required", checkedAt))
+	if nonReady.Code != http.StatusOK {
+		t.Fatalf("non-ready session status=%d body=%s", nonReady.Code, nonReady.Body.String())
+	}
+	nonReadyPage := serveHomeHandoffPage(t, srv, decodeHomeSessionResponse(t, nonReady))
+	if !strings.Contains(nonReadyPage.Body.String(), "codex_hook_lifecycle_required") ||
+		strings.Contains(nonReadyPage.Body.String(), "personal_live_ready") {
+		t.Fatalf("healthy retrieval promoted supplied non-ready snapshot: %s", nonReadyPage.Body.String())
+	}
+
+	srv.cfg.Retrieval = nil
+	ready := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", checkedAt))
+	if ready.Code != http.StatusOK {
+		t.Fatalf("ready session status=%d body=%s", ready.Code, ready.Body.String())
+	}
+	readyPage := serveHomeHandoffPage(t, srv, decodeHomeSessionResponse(t, ready))
+	if !strings.Contains(readyPage.Body.String(), "full_retrieval_unavailable") ||
+		strings.Contains(readyPage.Body.String(), "personal_live_ready") || strings.Contains(readyPage.Body.String(), checkedAt) {
+		t.Fatalf("server failed to downgrade disappeared retrieval: %s", readyPage.Body.String())
+	}
+
+	srv.cfg.Retrieval = retrieve.New(retrieve.Config{Store: srv.cfg.Store, Embedder: warmingProductTestEmbedder{}})
+	warming := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", checkedAt))
+	if warming.Code != http.StatusOK {
+		t.Fatalf("warming session status=%d body=%s", warming.Code, warming.Body.String())
+	}
+	warmingPage := serveHomeHandoffPage(t, srv, decodeHomeSessionResponse(t, warming))
+	if !strings.Contains(warmingPage.Body.String(), "local_embedder_warming") ||
+		strings.Contains(warmingPage.Body.String(), "personal_live_ready") || strings.Contains(warmingPage.Body.String(), checkedAt) {
+		t.Fatalf("server failed to downgrade warming retrieval: %s", warmingPage.Body.String())
+	}
+}
+
+func TestHomeSessionIssueDeniesWithoutFreshOSPresenceAndCreatesNoSession(t *testing.T) {
+	presence := &homePresenceStub{err: userpresence.ErrPresenceDenied}
+	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+	response := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z"))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("denied presence status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(presence.challenges) != 1 {
+		t.Fatalf("presence challenges=%d, want 1", len(presence.challenges))
+	}
+	if count := homeSessionCount(srv); count != 0 {
+		t.Fatalf("denied OS presence created %d browser sessions", count)
+	}
+}
+
+func TestHomeSessionIssueBindsFreshContentFreePresenceToExactHomeBoundary(t *testing.T) {
+	presence := &homePresenceStub{}
+	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+	startedAt := time.Now().UTC()
+	checkedAt := "2026-07-16T08:00:00Z"
+	readiness := personalLiveReadinessForReason("personal_live_ready", checkedAt)
+	body := testHomeSessionRequestBody("personal_live_ready", checkedAt)
+	response := issueHomeSession(t, srv, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session issue status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(presence.challenges) != 1 {
+		t.Fatalf("presence challenges=%d, want 1", len(presence.challenges))
+	}
+	challenge := presence.challenges[0]
+	binding := strings.Repeat("a", 64)
+	wantDigest := expectedHomeOpenPresenceDigest(
+		"store_personal_home_routes", binding, "repository_pulse", testViewerSessionOrigin, readiness,
+	)
+	if challenge.Action != userpresence.ActionHomeOpen || challenge.Digest != wantDigest ||
+		challenge.PolicyEpoch != homeOpenPresencePolicyEpoch || challenge.Display != homeOpenPresenceDisplay ||
+		challenge.ExpiresAt.After(startedAt.Add(homeOpenPresenceTTL+time.Second)) || !challenge.ExpiresAt.After(startedAt) {
+		t.Fatalf("unsafe Home presence challenge: %#v", challenge)
+	}
+	for _, content := range []string{"store_personal_home_routes", binding, "repository_pulse", testViewerSessionOrigin} {
+		if strings.Contains(challenge.Display, content) || strings.Contains(challenge.Nonce, content) {
+			t.Fatalf("Home challenge exposed boundary content %q: %#v", content, challenge)
+		}
+	}
+	if count := homeSessionCount(srv); count != 1 {
+		t.Fatalf("approved OS presence created %d sessions, want 1", count)
+	}
+
+	second := issueHomeSession(t, srv, body)
+	if second.Code != http.StatusOK || len(presence.challenges) != 2 ||
+		presence.challenges[1].Nonce == challenge.Nonce {
+		t.Fatalf("Home session did not use a fresh single-use challenge: status=%d challenges=%#v", second.Code, presence.challenges)
+	}
+}
+
+func TestHomeSessionIssueRejectsMismatchedPresenceAssertionAndCreatesNoSession(t *testing.T) {
+	presence := &homePresenceStub{mutate: func(assertion userpresence.Assertion) userpresence.Assertion {
+		assertion.Digest = strings.Repeat("f", 64)
+		return assertion
+	}}
+	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+	response := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z"))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("mismatched assertion status=%d body=%s", response.Code, response.Body.String())
+	}
+	if count := homeSessionCount(srv); count != 0 {
+		t.Fatalf("mismatched assertion created %d sessions", count)
+	}
+}
+
+func TestHomePresentationCreatesExactReceiptAndGETCannotMutate(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	pending := newHomeRoutePending(t, vault, "presentation", "Show the exact memory before saving it.")
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, homePageRequest(srv, session))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Show the exact memory before saving it.") ||
+		!strings.Contains(page.Body.String(), `src="assets/home.js"`) {
+		t.Fatalf("pending card was not rendered: status=%d body=%s", page.Code, page.Body.String())
+	}
+	for _, forbidden := range []string{`action="/home/`, `src="/home/`, session.ID, session.RouteScope} {
+		if strings.Contains(page.Body.String(), forbidden) {
+			t.Fatalf("Home page exposed ambient authority %q", forbidden)
+		}
+	}
+
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"candidate_id":             {pending.CandidateID},
+		"expected_version":         {strconv.Itoa(pending.Version)},
+	}
+	present := homeMutationRequest(srv, session, "present", form)
+	presented := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(presented, present)
+	if presented.Code != http.StatusNoContent {
+		t.Fatalf("present status=%d body=%s", presented.Code, presented.Body.String())
+	}
+	var presentationCount int
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`, pending.CandidateID).Scan(&presentationCount); err != nil {
+		t.Fatal(err)
+	}
+	if presentationCount != 1 {
+		t.Fatalf("presentation receipts=%d, want 1", presentationCount)
+	}
+
+	get := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(session.RouteScope)+"present", nil)
+	get.Host = srv.homeSessions.expectedHost
+	get.RemoteAddr = "127.0.0.1:54321"
+	get.AddCookie(srv.homeSessions.Cookie(session))
+	getResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getResponse, get)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET presentation status=%d", getResponse.Code)
+	}
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`, pending.CandidateID).Scan(&presentationCount); err != nil {
+		t.Fatal(err)
+	}
+	if presentationCount != 1 {
+		t.Fatal("GET mutated presentation receipts")
+	}
+	assertHomeHeaders(t, getResponse.Header())
+}
+
+func TestHomeRoutePresentationGraceAndCommitCreatesCanonicalReceipt(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	pending := newHomeRoutePending(t, vault, "route_commit", "Commit only after the exact visible delay.")
+	clock := &viewerSessionTestClock{now: time.Now().UTC()}
+	srv.homePresentation.clock = clock.Now
+	srv.homeSessions.clock = clock.Now
+	srv.homePresentation.schedule = func(store.MemoryPresentationReceipt, time.Duration) {}
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"candidate_id":             {pending.CandidateID},
+		"expected_version":         {strconv.Itoa(pending.Version)},
+	}
+	presented := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(presented, homeMutationRequest(srv, session, "present", form))
+	if presented.Code != http.StatusNoContent {
+		t.Fatalf("present status=%d body=%s", presented.Code, presented.Body.String())
+	}
+
+	commitForm := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_version":         {strconv.Itoa(pending.Version)},
+	}
+	immediate := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(immediate, homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/commit", commitForm))
+	if immediate.Code != http.StatusTooEarly {
+		t.Fatalf("immediate commit status=%d body=%s", immediate.Code, immediate.Body.String())
+	}
+
+	clock.Advance(31 * time.Second)
+	committed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(committed, homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/commit", commitForm))
+	if committed.Code != http.StatusNoContent {
+		t.Fatalf("post-grace commit status=%d body=%s", committed.Code, committed.Body.String())
+	}
+	canonical := homeRouteCandidate(t, vault, pending.CandidateID)
+	if canonical.State != "committed" || canonical.CanonicalObjectID == "" ||
+		canonical.LatestReceipt.ReceiptID == "" || canonical.LatestReceipt.ObjectID != canonical.CanonicalObjectID ||
+		canonical.LatestReceipt.Status != store.MemoryWriteCreated {
+		t.Fatalf("route commit lacks canonical terminal proof: %#v", canonical)
+	}
+}
+
+func TestMemoryHomeBrowserScriptPresentsOnlyVisibleCardsAfterPaint(t *testing.T) {
+	for _, want := range []string{
+		"const maxConcurrentPresentations = 4;",
+		"new IntersectionObserver((entries) => {",
+		"entry.isIntersecting && entry.intersectionRatio > 0",
+		"document.visibilityState !== \"visible\"",
+		"requestAnimationFrame(() => requestAnimationFrame(() => {",
+		"observer.observe(card)",
+	} {
+		if !strings.Contains(memoryHomeBrowserScript, want) {
+			t.Errorf("Home browser script missing visible-card contract %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"for (let index = 0; index < cards.length; index += 4)",
+		"Promise.all(",
+	} {
+		if strings.Contains(memoryHomeBrowserScript, forbidden) {
+			t.Errorf("Home browser script still acknowledges rendered cards indiscriminately via %q", forbidden)
+		}
+	}
+}
+
+func TestMemoryHomeBrowserScriptIsolatesPresentationAndMutationFailures(t *testing.T) {
+	for _, want := range []string{
+		"Review delay did not start. Refresh Home to retry.",
+		"Review delay could not be confirmed. Refresh Home to retry.",
+		"present(card).finally(() => {",
+		"activePresentations -= 1;",
+		"if (!response.ok) {",
+		"showMutationFailure(form, message);",
+		"Action failed. Refresh Home and try again.",
+	} {
+		if !strings.Contains(memoryHomeBrowserScript, want) {
+			t.Errorf("Home browser script missing failure-isolation contract %q", want)
+		}
+	}
+}
+
+func TestHomeTrayEditThenCancelKeepsMemoryOutOfRecall(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	pending := newHomeRoutePending(t, vault, "edit_cancel", "Keep the original private summary.")
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := pending.Candidate
+	replacement.Capsule.Items[0].RedactedSummary = "Keep only the edited private summary."
+	replacementJSON, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/edit", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_version":         {strconv.Itoa(pending.Version)},
+		"candidate_json":           {string(replacementJSON)},
+	})
+	editResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(editResponse, edit)
+	if editResponse.Code != http.StatusNoContent {
+		t.Fatalf("edit status=%d body=%s", editResponse.Code, editResponse.Body.String())
+	}
+
+	edited := homeRouteCandidate(t, vault, pending.CandidateID)
+	if edited.Version != pending.Version+1 || edited.Candidate.Capsule.Items[0].RedactedSummary != "Keep only the edited private summary." || edited.GraceExpiresAt != "" {
+		t.Fatalf("edited candidate=%#v", edited)
+	}
+	cancel := homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/cancel", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_version":         {strconv.Itoa(edited.Version)},
+	})
+	cancelResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(cancelResponse, cancel)
+	if cancelResponse.Code != http.StatusNoContent {
+		t.Fatalf("cancel status=%d body=%s", cancelResponse.Code, cancelResponse.Body.String())
+	}
+	canceled := homeRouteCandidate(t, vault, pending.CandidateID)
+	if canceled.State != "canceled" || canceled.Candidate.Capsule != nil || canceled.Candidate.SemanticDelta != nil {
+		t.Fatalf("canceled candidate retained private content: %#v", canceled)
+	}
+	home, err := vault.BuildMemoryHomeData(store.MemoryHomeQuery{
+		RepositoryID: "repository_pulse", BindingDigest: strings.Repeat("a", 64), GeneratedAt: time.Now().UTC(),
+		LiveReadiness: store.MemoryHomeLiveReadiness{Outcome: store.MemoryHomeReadinessReady},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home.Memories.ActiveCount != 0 || len(home.Memories.LatestActive) != 0 {
+		t.Fatalf("canceled memory entered canonical recall: %#v", home.Memories)
+	}
+}
+
+func newHomeRoutePending(t *testing.T, vault *store.Store, suffix, summary string) store.MemoryTrayCandidateView {
+	t.Helper()
+	now := time.Now().UTC()
+	finalized, err := vault.FinalizeTurn(store.TurnFinalizeRequest{
+		Schema: store.TurnFinalizeRequestSchema, Host: "codex",
+		SessionID: "session_home_" + suffix, TurnID: "turn_home_" + suffix,
+		SourceEventKey: "event_home_" + suffix, IdempotencyKey: "idempotency_home_" + suffix,
+		BindingDigest: strings.Repeat("a", 64), PolicyEpoch: 1, ResolverEpoch: 1,
+		Candidates: []store.PrivateMemoryCandidate{{
+			Kind: store.PrivateMemoryCandidateCapsule,
+			Capsule: &store.MemoryCapsule{
+				Schema: store.MemoryCapsuleSchema,
+				Source: store.CapsuleSource{Host: "codex", ConversationScope: "current_turn", Timestamp: now.Format(time.RFC3339Nano)},
+				Items: []store.MemoryCapsuleItem{{
+					Kind: "decision", RedactedSummary: summary,
+					Confidence: 1, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project",
+				}},
+			},
+		}},
+	}, now, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finalized.Receipts) != 1 {
+		t.Fatalf("finalize receipts=%d, want 1", len(finalized.Receipts))
+	}
+	candidateID := finalized.Receipts[0].CandidateID
+	candidates, err := vault.ListMemoryTray(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range candidates {
+		if candidate.CandidateID == candidateID {
+			return candidate
+		}
+	}
+	t.Fatal("pending Home candidate not found")
+	return store.MemoryTrayCandidateView{}
+}
+
+func homeRouteCandidate(t *testing.T, vault *store.Store, candidateID string) store.MemoryTrayCandidateView {
+	t.Helper()
+	candidates, err := vault.ListMemoryTray(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range candidates {
+		if candidate.CandidateID == candidateID {
+			return candidate
+		}
+	}
+	t.Fatal("Home candidate not found")
+	return store.MemoryTrayCandidateView{}
+}
+
+func newHomeRouteFixture(t *testing.T) (*Server, *store.Store) {
+	return newHomeRouteFixtureWithPresence(t, &homePresenceStub{})
+}
+
+func newHomeRouteFixtureWithPresence(t *testing.T, presence HomePresence) (*Server, *store.Store) {
+	t.Helper()
+	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_home_routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = vault.Close() })
+	binding := strings.Repeat("a", 64)
+	if err := vault.ConfigureProductRuntimeAuthority(binding, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ConfigureContinuityDeliveryAuthority(binding, "repository_pulse"); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{
+		IPCSecret: "home-test-daemon-secret", Store: vault, HomeOrigin: testViewerSessionOrigin,
+		HomePresence:    presence,
+		TrayGracePeriod: 30 * time.Second, Billing: BillingStatus{Host: "codex", Mode: "host-extracted"},
+		Retrieval: retrieve.New(retrieve.Config{Store: vault, Embedder: productTestEmbedder{}}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, vault
+}
+
+func homePageRequest(srv *Server, session viewerSessionView) *http.Request {
+	request := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(session.RouteScope), nil)
+	request.Host = srv.homeSessions.expectedHost
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.AddCookie(srv.homeSessions.Cookie(session))
+	return request
+}
+
+func homeMutationRequest(srv *Server, session viewerSessionView, path string, form url.Values) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, testViewerSessionOrigin+viewerSessionRoutePath(session.RouteScope)+path, strings.NewReader(form.Encode()))
+	request.Host = srv.homeSessions.expectedHost
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Origin", testViewerSessionOrigin)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "cors")
+	request.Header.Set("Sec-Fetch-Dest", "empty")
+	request.Header.Set("Content-Type", viewerSessionFormMediaType)
+	request.AddCookie(srv.homeSessions.Cookie(session))
+	return request
+}
+
+func issueHomeSession(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, testViewerSessionOrigin+"/home/session", strings.NewReader(body))
+	request.Host = srv.homeSessions.expectedHost
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Pulse-Key", "home-test-daemon-secret")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func testHomeSessionRequestBody(reasonCode, checkedAt string) string {
+	contracts := map[string]struct {
+		outcome string
+		code    string
+		label   string
+	}{
+		"personal_live_ready":           {outcome: "ready", code: "continue_working", label: "Continue working"},
+		"codex_plugin_unavailable":      {outcome: "action_required", code: "repair_codex_plugin", label: "Run pulse repair"},
+		"codex_hook_lifecycle_required": {outcome: "action_required", code: "complete_codex_lifecycle", label: "Complete one normal Codex turn"},
+	}
+	contract, ok := contracts[reasonCode]
+	if !ok {
+		panic("unknown test Home readiness")
+	}
+	body, err := json.Marshal(map[string]any{"live_readiness": map[string]any{
+		"schema": "pulse.personal_live_readiness.v1", "outcome": contract.outcome,
+		"reason_code": reasonCode, "next_action": map[string]string{"code": contract.code, "label": contract.label},
+		"checked_at": checkedAt,
+	}})
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
+}
+
+func decodeHomeSessionResponse(t *testing.T, response *httptest.ResponseRecorder) homeSessionResponse {
+	t.Helper()
+	var handoff homeSessionResponse
+	if err := json.NewDecoder(response.Body).Decode(&handoff); err != nil {
+		t.Fatal(err)
+	}
+	return handoff
+}
+
+func serveHomeHandoffPage(t *testing.T, srv *Server, handoff homeSessionResponse) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, handoff.TargetURL, nil)
+	request.Host = srv.homeSessions.expectedHost
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.AddCookie(&http.Cookie{Name: handoff.CookieName, Value: handoff.CookieValue, Path: handoff.CookiePath})
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Home page status=%d body=%s", response.Code, response.Body.String())
+	}
+	return response
+}
+
+func homeSessionCount(srv *Server) int {
+	srv.homeSessions.mu.Lock()
+	defer srv.homeSessions.mu.Unlock()
+	return len(srv.homeSessions.sessions)
+}
+
+func expectedHomeOpenPresenceDigest(
+	storeID, bindingDigest, repositoryID, homeOrigin string,
+	readiness personalLiveReadinessSnapshot,
+) string {
+	readinessDigest := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-personal-live-readiness-v1", readiness.Schema, readiness.Outcome, readiness.ReasonCode,
+		readiness.NextAction.Code, readiness.NextAction.Label, readiness.CheckedAt,
+	}, "\x00")))
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-home-open-v2", storeID, bindingDigest, repositoryID, homeOrigin, fmt.Sprintf("%x", readinessDigest[:]),
+	}, "\x00")))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func assertHomeHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Cache-Control":          "no-store, private, max-age=0",
+		"Referrer-Policy":        "no-referrer",
+		"X-Frame-Options":        "DENY",
+		"X-Content-Type-Options": "nosniff",
+	} {
+		if got := header.Get(name); got != want {
+			t.Fatalf("%s=%q want %q", name, got, want)
+		}
+	}
+}

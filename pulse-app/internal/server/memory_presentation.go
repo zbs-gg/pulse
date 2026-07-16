@@ -34,6 +34,7 @@ const (
 	memoryPresentationBrowserValueBytes = 32
 	memoryPresentationMaxCapabilityTTL  = 2 * time.Minute
 	memoryPresentationMaxTokenBytes     = 4096
+	memoryPresentationScopedHomePath    = "/home/s/{route}/present"
 )
 
 var (
@@ -320,8 +321,12 @@ func (s *MemoryPresentationService) consumeNonce(nonce string, expiresAt, now ti
 }
 
 func (s *MemoryPresentationService) validBrowserRequest(r *http.Request) bool {
+	pathMatches := s != nil && r != nil && r.URL != nil && r.URL.EscapedPath() == s.expectedPath
+	if s != nil && s.expectedPath == memoryPresentationScopedHomePath && r != nil && r.URL != nil {
+		pathMatches = viewerSessionExactActionPath(r.URL.EscapedPath(), "present")
+	}
 	if r == nil || r.URL == nil || r.Method != http.MethodPost || r.Host != s.expectedHost ||
-		r.URL.EscapedPath() != s.expectedPath || r.URL.RawQuery != "" || r.URL.Fragment != "" {
+		!pathMatches || r.URL.RawQuery != "" || r.URL.Fragment != "" {
 		return false
 	}
 	for _, name := range []string{
@@ -363,6 +368,9 @@ func memoryPresentationLoopbackHost(host string) bool {
 }
 
 func validMemoryPresentationPath(value string) bool {
+	if value == memoryPresentationScopedHomePath {
+		return true
+	}
 	if value == "" || value != strings.TrimSpace(value) || !strings.HasPrefix(value, "/") ||
 		strings.ContainsAny(value, "?#\\\r\n\t") || strings.Contains(value, "//") || strings.Contains(value, "/../") ||
 		strings.HasSuffix(value, "/..") || strings.Contains(value, "/./") || strings.HasSuffix(value, "/.") {

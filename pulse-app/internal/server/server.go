@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/prompt"
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 // ClaudeAPI is the subset of claude.Client we need. Allows fakes in tests.
@@ -30,6 +32,12 @@ type ClaudeAPI interface {
 
 type ContextQueryAPI interface {
 	Query(context.Context, contextquery.ContextQueryRequest) (*contextquery.ContextResult, error)
+}
+
+// HomePresence is the OS-backed user-presence boundary required before a
+// browser session can be issued for Memory Home.
+type HomePresence interface {
+	Authorize(context.Context, userpresence.Challenge) (userpresence.Assertion, error)
 }
 
 // Config holds the dependencies a server needs.
@@ -55,6 +63,13 @@ type Config struct {
 	// TrayGracePeriod controls the visible private-write preview window for
 	// Personal/Desk product stores. Zero selects the product default (10s).
 	TrayGracePeriod time.Duration
+	// HomeOrigin is the exact loopback origin for the credential-free Personal
+	// or Desk Memory Home. Empty keeps the Home surface disabled (legacy Local
+	// Preview and tests that do not configure a product browser surface).
+	HomeOrigin string
+	// HomePresence authorizes each Memory Home session with a fresh native
+	// user-presence challenge. It is mandatory whenever HomeOrigin is enabled.
+	HomePresence HomePresence
 }
 
 type BillingStatus struct {
@@ -67,10 +82,12 @@ type BillingStatus struct {
 
 // Server wraps the chi router.
 type Server struct {
-	cfg            Config
-	started        time.Time
-	trayScheduleMu sync.Mutex
-	traySchedules  map[memoryTrayScheduleKey]*memoryTrayScheduleState
+	cfg              Config
+	started          time.Time
+	homeSessions     *viewerSessionManager
+	homePresentation *MemoryPresentationService
+	trayScheduleMu   sync.Mutex
+	traySchedules    map[memoryTrayScheduleKey]*memoryTrayScheduleState
 }
 
 func New(cfg Config) (*Server, error) {
@@ -90,6 +107,38 @@ func New(cfg Config) (*Server, error) {
 		cfg: cfg, started: time.Now(),
 		traySchedules: make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
 	}
+	if cfg.HomeOrigin != "" {
+		if cfg.HomePresence == nil {
+			return nil, errors.New("server: Memory Home requires OS-backed user presence")
+		}
+		parsedHomeOrigin, err := url.Parse(cfg.HomeOrigin)
+		if err != nil || parsedHomeOrigin.Scheme != "http" || parsedHomeOrigin.Hostname() != "127.0.0.1" || parsedHomeOrigin.Port() == "" {
+			return nil, errors.New("server: Memory Home requires an exact http://127.0.0.1 origin")
+		}
+		if cfg.Store == nil || (cfg.Store.StoreKind() != store.StoreKindPersonal && cfg.Store.StoreKind() != store.StoreKindDesk) {
+			return nil, errors.New("server: Memory Home requires a Personal or Desk store")
+		}
+		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); !ok {
+			return nil, errors.New("server: Memory Home requires an exact product runtime boundary")
+		}
+		homeSessions, err := newViewerSessionManager(viewerSessionConfig{
+			ExpectedOrigin: cfg.HomeOrigin, AbsoluteTTL: time.Hour, IdleTTL: 15 * time.Minute,
+			MaxSessions: 8, MaxBodyBytes: 64 << 10,
+		})
+		if err != nil {
+			return nil, err
+		}
+		homePresentation, err := NewMemoryPresentationService(MemoryPresentationServiceConfig{
+			Store: cfg.Store, Schedule: server.schedulePresentedMemory,
+			ExpectedOrigin: cfg.HomeOrigin, ExpectedPath: memoryPresentationScopedHomePath,
+			GracePeriod: cfg.TrayGracePeriod, CapabilityTTL: 45 * time.Second,
+		})
+		if err != nil {
+			return nil, err
+		}
+		server.homeSessions = homeSessions
+		server.homePresentation = homePresentation
+	}
 	if err := server.recoverMemoryTray(); err != nil {
 		return nil, err
 	}
@@ -100,6 +149,19 @@ func New(cfg Config) (*Server, error) {
 // Team remote must use NewTeam(...).Handler(); the two route registries never
 // compose so a local route cannot become reachable through team configuration.
 func (s *Server) Handler() http.Handler {
+	local := s.localHandler()
+	if s.homeSessions == nil {
+		return local
+	}
+	mux := http.NewServeMux()
+	home := s.homeHandler()
+	mux.Handle("/home", home)
+	mux.Handle("/home/", home)
+	mux.Handle("/", local)
+	return mux
+}
+
+func (s *Server) localHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
 	r.Use(s.authMiddleware)

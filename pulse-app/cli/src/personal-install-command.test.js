@@ -103,6 +103,7 @@ test('one-command orchestration carries the immutable plan into a healthy instal
   const stderr = sink();
   const expectedPlan = plan();
   let receivedPlan;
+  let homeOpened = false;
   const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
   const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
   const executed = await executePersonalInstallCommand({
@@ -126,6 +127,7 @@ test('one-command orchestration carries the immutable plan into a healthy instal
     input: { isTTY: false },
     lock: () => () => {},
     mode: 'install',
+    openHome: async () => { homeOpened = true; },
     output: stdout,
   });
 
@@ -134,4 +136,42 @@ test('one-command orchestration carries the immutable plan into a healthy instal
   assert.equal(executed.result.reason_code, 'already_installed');
   assert.equal(executed.result.receipt_ref, 'receipt_command_ready');
   assert.equal(JSON.parse(stdout.value()).outcome, 'ready');
+  assert.equal(homeOpened, false, 'machine-readable installs must not open a browser');
+});
+
+test('interactive one-command install opens Memory Home after releasing the install lock', async () => {
+  const stdout = sink();
+  const stderr = sink();
+  const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
+  const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
+  let lockReleased = false;
+  let homeOpened = false;
+  const executed = await executePersonalInstallCommand({
+    argv: [],
+    buildDependencies: () => ({
+      inspectRuntime: async () => ({ ready: true }), provisionRuntime: async () => {},
+      inspectPresence: async () => ({ ready: true }), installPresence: async () => {},
+      inspectPrincipal: async () => principal, createPrincipal: async () => principal,
+      inspectBinding: async () => ({ ready: true, binding }), createBinding: async () => binding,
+      inspectActivation: async () => ({ ready: true }), activateCodex: async () => {},
+      inspectHealth: async () => ({ ready: true, full_retrieval: true }),
+      writeReceipt: async () => 'receipt_command_ready',
+    }),
+    buildPlan: () => plan(),
+    consentPrompt: async () => true,
+    dataDir: '/tmp/pulse-personal-command',
+    errorOutput: stderr,
+    input: { isTTY: true },
+    lock: () => () => { lockReleased = true; },
+    mode: 'install',
+    openHome: async () => {
+      assert.equal(lockReleased, true, 'Home must open only after the install transaction unlocks');
+      homeOpened = true;
+    },
+    output: stdout,
+  });
+
+  assert.equal(executed.exitCode, 0);
+  assert.equal(homeOpened, true);
+  assert.match(executed.result.next_action, /Memory Home is opening/);
 });
