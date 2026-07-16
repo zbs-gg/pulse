@@ -7,7 +7,7 @@ export const INJECTION_SCHEMA = 'pulse.context.v1' as const;
 export const BINDING_SCHEMA = 'pulse.binding.v1' as const;
 export const CONTEXT_LEASE_SCHEMA = 'pulse.context_lease.v1' as const;
 
-export type LifecycleHost = 'codex' | 'claude-code';
+export type LifecycleHost = 'codex' | 'claude-code' | 'cursor';
 export type LifecycleEventKind =
   | 'session_start'
   | 'turn_start'
@@ -56,7 +56,7 @@ export function normalizeLifecycleEvent(
   event: LifecycleEventKind,
   rawInput: unknown,
 ): LifecycleEvent {
-  if (host !== 'codex' && host !== 'claude-code') throw new Error('unsupported_host');
+  if (host !== 'codex' && host !== 'claude-code' && host !== 'cursor') throw new Error('unsupported_host');
   if (!SUPPORTED_EVENTS.has(event)) throw new Error('unsupported_event');
   const input = record(rawInput, 'invalid_lifecycle_input');
   for (const field of Object.keys(input).map((field) => field.trim().toLowerCase()).sort()) {

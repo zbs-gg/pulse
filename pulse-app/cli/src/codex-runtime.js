@@ -322,6 +322,7 @@ function canonicalJSON(value) {
 function hostSlug(host) {
   if (host === 'codex') return 'codex';
   if (host === 'claude-code') return 'claude-code';
+  if (host === 'cursor') return 'cursor';
   throw new Error('unsupported_host_adapter');
 }
 
@@ -416,7 +417,7 @@ export async function callBoundTeamTool(resolved, host, name, input, {
 	resolveBinding = resolveProductWorkspaceBinding,
 	teamRequest = callTeamRemoteTool,
 } = {}) {
-	if (!['codex', 'claude-code'].includes(host) || !isReadOnlyTeamTool(name) ||
+	if (!['codex', 'claude-code', 'cursor'].includes(host) || !isReadOnlyTeamTool(name) ||
 		!resolved?.binding || !/^[a-f0-9]{64}$/.test(resolved.binding.binding_digest ?? '') ||
 		!Number.isSafeInteger(resolved.binding.resolver_epoch) || resolved.binding.resolver_epoch < 1) {
 		throw new Error('product_team_tool_forbidden');
@@ -521,7 +522,7 @@ export async function callBoundLocalProductTool(resolved, host, name, input, {
   request = activatedBoundPulseRequest,
 } = {}) {
   const action = productToolAction(name);
-  if (!['codex', 'claude-code'].includes(host) || action === 'pulse_remember' ||
+  if (!['codex', 'claude-code', 'cursor'].includes(host) || action === 'pulse_remember' ||
       !resolved?.binding || !/^[a-f0-9]{64}$/.test(resolved.binding.binding_digest ?? '') ||
       !Number.isSafeInteger(resolved.binding.resolver_epoch) || resolved.binding.resolver_epoch < 1) {
     throw new Error('product_local_tool_forbidden');

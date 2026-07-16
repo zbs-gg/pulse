@@ -81,6 +81,8 @@ test('supported Codex-first Stage 1 plan is stable, explicit, and has no Go or P
     assert.equal(plan.contract_version, 1);
     assert.equal(plan.stage, 'personal_stage_1');
     assert.equal(plan.target_host, 'codex');
+    assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+    assert.equal(plan.activation_policy, 'all_detected_supported_hosts');
     assert.equal(plan.outcome, 'ready_to_install');
     assert.deepEqual(plan.reason_codes, []);
     assert.equal(plan.detected.workspace.checkout_kind, 'primary');

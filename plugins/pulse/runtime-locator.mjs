@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -89,20 +89,26 @@ function pluginTreeDigest(root) {
 }
 
 export function resolveProductEnvironment({ cwd = process.cwd(), env = process.env } = {}) {
+  const productHome = resolve(env.PULSE_HOME || join(homedir(), '.pulse'));
   const codexHome = resolve(env.CODEX_HOME || join(homedir(), '.codex'));
-  const path = join(codexHome, 'pulse', 'product-locators.json');
+  const sharedPath = join(productHome, 'product-locators.json');
+  const legacyCodexPath = join(codexHome, 'pulse', 'product-locators.json');
+  const path = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
   requirePrivateLocator(path);
   const locator = JSON.parse(readFileSync(path, 'utf8'));
   const canonical = canonicalWorkspace(cwd);
   const key = workspaceDigest(canonical);
-  const entry = locator?.schema === 'pulse.codex_product_locators.v1' ? locator.entries?.[key] : undefined;
+  const validLocatorSchema = path === sharedPath
+    ? locator?.schema === 'pulse.product_locators.v1'
+    : locator?.schema === 'pulse.codex_product_locators.v1';
+  const entry = validLocatorSchema ? locator.entries?.[key] : undefined;
 	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
   if (!entry || entry.workspace_digest !== key ||
 			Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
       !['production', 'test'].includes(entry.trust_mode) ||
 			![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
         .every((value) => typeof value === 'string' && isAbsolute(value))) {
-    throw new Error('Pulse product locator is missing or invalid for this workspace; run `pulse connect codex` again.');
+    throw new Error('Pulse product locator is missing or invalid for this workspace; run `pulse install` again.');
   }
 	if (entry.trust_mode === 'test' && env.PULSE_TRUST_MODE !== 'test') {
 		throw new Error('Pulse synthetic test locator requires an explicitly test-mode host process; production trust is not active.');

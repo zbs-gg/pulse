@@ -57,9 +57,10 @@ const RUNTIME_MODE = resolveRuntimeMode(process.env.PULSE_RUNTIME_MODE, HTTP_REQ
 type EngineMode = 'auto' | 'daemon' | 'standalone';
 const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
 const PRODUCT_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex' ||
-  process.env.PULSE_HOST_ADAPTER === 'claude-code';
+  process.env.PULSE_HOST_ADAPTER === 'claude-code' ||
+  process.env.PULSE_HOST_ADAPTER === 'cursor';
 const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
-  ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code'
+  ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code' | 'cursor'
   : undefined;
 const PRODUCT_TEAM_BINDING = PRODUCT_HOST_ADAPTER && process.env.PULSE_PRODUCT_BINDING_MODE === 'team';
 
@@ -201,7 +202,7 @@ interface MemoryCapsule {
 
 interface HostTurnContext {
   schema: string;
-  host: 'codex' | 'claude-code';
+  host: 'codex' | 'claude-code' | 'cursor';
   session_id: string;
   turn_id: string;
   workspace: string;
@@ -467,25 +468,25 @@ function productRuntimeResolution() {
 interface ProductRuntimeModule {
   consumeHostToolLease(
     resolved: ReturnType<typeof productRuntimeResolution>,
-    host: 'codex' | 'claude-code',
+    host: 'codex' | 'claude-code' | 'cursor',
     name: string,
     input: unknown,
   ): HostTurnContext;
   writeHostFinalizeMarker(
     resolved: ReturnType<typeof productRuntimeResolution>,
     event: HostTurnContext,
-    host: 'codex' | 'claude-code',
+    host: 'codex' | 'claude-code' | 'cursor',
     result: unknown,
   ): unknown;
   callBoundTeamTool(
     resolved: ReturnType<typeof productRuntimeResolution>,
-    host: 'codex' | 'claude-code',
+    host: 'codex' | 'claude-code' | 'cursor',
     name: string,
     input: unknown,
   ): Promise<unknown>;
   callBoundLocalProductTool(
     resolved: ReturnType<typeof productRuntimeResolution>,
-    host: 'codex' | 'claude-code',
+    host: 'codex' | 'claude-code' | 'cursor',
     name: string,
     input: unknown,
   ): Promise<unknown>;

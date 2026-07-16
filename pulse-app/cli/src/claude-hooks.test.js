@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import * as claudeHooks from './claude-hooks.js';
-import { normalizeClaudeHook } from './host-adapter.js';
+import { normalizeClaudeHook, normalizeCursorHook } from './host-adapter.js';
 import { handleClaudeHook, recordClaudeHookReadiness } from './claude-hooks.js';
 
 const base = {
@@ -70,6 +70,28 @@ test('official Claude fixtures use prompt_id and discard prompt, transcript, and
   });
   assert.match(session.turn_id, /^session_[a-f0-9]{64}$/);
   assert.equal(session.model, 'claude_model_unavailable');
+});
+
+test('official Cursor fixtures normalize to the shared lifecycle schema without prompt or transcript content', () => {
+  const turn = normalizeCursorHook('beforeSubmitPrompt', {
+    conversation_id: 'cursor-session-01', generation_id: 'cursor-generation-01',
+    cwd: '/workspace/pulse', model: 'cursor-model',
+    prompt: 'raw private prompt must never persist',
+    transcript_path: '/private/cursor/transcript.jsonl',
+  });
+  assert.equal(turn.host, 'cursor');
+  assert.equal(turn.event, 'turn_start');
+  assert.equal(turn.session_id, 'cursor-session-01');
+  assert.equal(turn.turn_id, 'cursor-generation-01');
+  assert.equal(turn.workspace, '/workspace/pulse');
+  assert.doesNotMatch(JSON.stringify(turn), /raw private prompt|transcript/);
+
+  const session = normalizeCursorHook('sessionStart', {
+    session_id: 'cursor-session-01', workspace_roots: ['/workspace/pulse'], composer_mode: 'agent',
+  });
+  assert.equal(session.host, 'cursor');
+  assert.match(session.turn_id, /^session_[a-f0-9]{64}$/);
+  assert.equal(session.model, 'cursor_model_unavailable');
 });
 
 test('Claude SessionStart injects the same bound continuity contract', async () => {

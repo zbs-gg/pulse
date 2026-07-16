@@ -55,10 +55,13 @@ function pruneEmptyDirectories(root) {
 
 function writeProductEdgeFixture(target) {
 	mkdirSync(join(target, 'marketplace', '.agents', 'plugins'), { recursive: true, mode: 0o700 });
+	mkdirSync(join(target, 'marketplace', '.claude-plugin'), { recursive: true, mode: 0o700 });
 	cpSync(join(repoRoot, '.agents', 'plugins', 'marketplace.json'),
 		join(target, 'marketplace', '.agents', 'plugins', 'marketplace.json'), {
 			recursive: true, dereference: true,
 		});
+	cpSync(join(repoRoot, '.claude-plugin', 'marketplace.json'),
+		join(target, 'marketplace', '.claude-plugin', 'marketplace.json'), { dereference: true });
 	cpSync(join(repoRoot, 'plugins', 'pulse'), join(target, 'marketplace', 'plugins', 'pulse'), {
 		recursive: true, dereference: true,
 	});

@@ -34,11 +34,16 @@ test('capture state writes both preview and exact bound Personal vault markers',
     globalDataDir, binding, host: 'claude-code', enabled: false, reason: 'host_disconnected',
     changedAt: new Date('2026-07-14T09:02:00Z'),
   });
+  writeCaptureStateFiles({
+    globalDataDir, binding, host: 'cursor', enabled: true, reason: 'host_connected',
+    changedAt: new Date('2026-07-14T09:03:00Z'),
+  });
   for (const path of paths) {
     const state = JSON.parse(readFileSync(path, 'utf8'));
     assert.equal(state.enabled, true);
     assert.equal(captureEnabledForHost(state, 'codex'), true);
     assert.equal(captureEnabledForHost(state, 'claude-code'), false);
+    assert.equal(captureEnabledForHost(state, 'cursor'), true);
     assert.equal(state.hosts['claude-code'].reason, 'host_disconnected');
   }
 });

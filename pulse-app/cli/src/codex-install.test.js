@@ -21,10 +21,13 @@ import {
 	parsePulsePluginList,
 	pulseProductMcpShadowFiles,
 	readCodexProductLocator,
+	readProductLocator,
 	removeCodexProductLocator,
+	removeProductLocator,
 	resolveSignedCodexProductEdge,
 	rollbackCodexRuntimeInstall,
 	writeCodexProductLocator,
+	writeProductLocator,
 } from './codex-install.js';
 import { recordCodexHookReadiness } from './codex-hooks.js';
 
@@ -314,6 +317,26 @@ test('product locators are exact and workspace removal preserves other connectio
 			() => readCodexProductLocator({ codexHome, binding: bindingB }),
 			/Codex product locator is invalid/,
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('host-neutral product locator carries one workspace authority across all harnesses', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-product-locators-'));
+	try {
+		const productHome = join(root, '.pulse');
+		const binding = { workspace: { canonical_path: join(root, 'workspace') } };
+		const path = writeProductLocator({
+			productHome, binding, dataDir: join(root, 'data'),
+			registryPath: join(root, 'registry.json'), publicKeyPath: join(root, 'key.pem'),
+			anchorPath: join(root, 'anchor.json'), trustMode: 'test',
+		});
+		assert.equal(path, join(productHome, 'product-locators.json'));
+		assert.equal(readProductLocator({ productHome, binding }).entry.data_dir, join(root, 'data'));
+		assert.equal(JSON.parse(readFileSync(path, 'utf8')).schema, 'pulse.product_locators.v1');
+		assert.equal(removeProductLocator({ productHome, binding }).remaining, 0);
+		assert.equal(existsSync(path), false);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

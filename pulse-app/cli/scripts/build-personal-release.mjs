@@ -216,8 +216,11 @@ function buildPluginRuntime(output, work) {
 
   const staging = join(work, 'Pulse Plugin Runtime');
   mkdirSync(join(staging, 'marketplace', '.agents', 'plugins'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(staging, 'marketplace', '.claude-plugin'), { recursive: true, mode: 0o700 });
   cpSync(join(repoRoot, '.agents', 'plugins', 'marketplace.json'),
     join(staging, 'marketplace', '.agents', 'plugins', 'marketplace.json'), { dereference: true });
+  cpSync(join(repoRoot, '.claude-plugin', 'marketplace.json'),
+    join(staging, 'marketplace', '.claude-plugin', 'marketplace.json'), { dereference: true });
   cpSync(join(repoRoot, 'plugins', 'pulse'), join(staging, 'marketplace', 'plugins', 'pulse'), {
     recursive: true, dereference: true,
   });

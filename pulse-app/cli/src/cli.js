@@ -78,6 +78,9 @@ import {
   runCodexHookCLI,
 } from './codex-hooks.js';
 import { claudeHookContractDigest, claudeWorkspaceDigest, runClaudeHookCLI } from './claude-hooks.js';
+import { activateClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
+import { runCursorHookCLI } from './cursor-hooks.js';
+import { cursorHomePath, inspectCursorPlugin, installCursorPlugin } from './cursor-install.js';
 import {
 	codexProductActivationReady,
 	codexMarketplaceDoctorCheck,
@@ -99,6 +102,7 @@ import {
 	resolveSignedCodexProductEdge,
   rollbackCodexRuntimeInstall,
   writeCodexProductLocator,
+	writeProductLocator,
 } from './codex-install.js';
 import { codexHookExecutionDigest, validateHookReadiness } from './host-adapter.js';
 import {
@@ -158,6 +162,9 @@ Usage:
   pulse codex-hook SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PreCompact|PostCompact|SubagentStart|SubagentStop|Stop
   pulse claude-mcp
   pulse claude-hook SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PreCompact|PostCompact|SubagentStart|SubagentStop|Stop
+  pulse cursor-mcp
+  pulse cursor-hook sessionStart|beforeSubmitPrompt|preToolUse|postToolUse|preCompact|stop
+  pulse connect cursor
   pulse install-plan [--json]
   pulse install [--json]
   pulse repair [--json]
@@ -354,6 +361,11 @@ function privateStateFileStatus(path) {
   }
 }
 
+function writeProductLocators(options) {
+	writeProductLocator({ ...options, productHome: join(homedir(), '.pulse') });
+	return writeCodexProductLocator(options);
+}
+
 function personalInstallReceiptStatus(workspace) {
   const journalPath = join(DATA_DIR, 'runtime', 'install-journal.json');
   const journalStatus = privateStateFileStatus(journalPath);
@@ -429,7 +441,7 @@ function inspectPersonalPreflightState(workspace) {
   } catch {
     if (existsSync(join(DATA_DIR, 'runtime', 'product-daemon.json'))) daemonStatus = 'invalid';
   }
-  const pluginStatus = privateStateFileStatus(join(codexHomePath(), 'pulse', 'product-locators.json'));
+  const pluginStatus = privateStateFileStatus(join(homedir(), '.pulse', 'product-locators.json'));
   const activationSetStatus = privateStateFileStatus(join(DATA_DIR, 'artifacts', 'active-release.json'));
   const hookTrustStatus = privateStateFileStatus(join(DATA_DIR, 'codex-hook-readiness.json'));
   return {
@@ -576,15 +588,31 @@ function personalInstallDependencies(plan) {
     createPrincipal: async () => ensurePersonalPrincipal({ consentGranted: true }),
     inspectBinding: async ({ principal, plan }) => existingPersonalBinding(principal, plan),
     createBinding: async ({ principal, plan }) => createPersonalBindingForInstall(principal, plan),
-    inspectActivation: async () => {
+    inspectActivation: async ({ binding }) => {
       try {
         const report = await codexDoctorReport({ codexExecutable });
-        return { ready: codexProductActivationReady(report), report };
+        if (!codexProductActivationReady(report)) return { ready: false, report };
+        const capture = safeReadJSON(join(vaultRuntimeFromBinding(binding).data_dir, 'capture-state.json'));
+        const edge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
+        if (claudeProductVersionCheck().ok) {
+          const claude = inspectClaudeNativeProductPlugin(edge);
+          if (!captureEnabledForHost(capture, 'claude-code') || !claude.ok) return { ready: false, report };
+        }
+        if (cursorInstallationDetected()) {
+          const cursor = inspectCursorPlugin({
+            cursorHome: cursorHomePath(), expectedDigest: edge.plugin_tree_digest,
+          });
+          if (!captureEnabledForHost(capture, 'cursor') || !cursor.ready) return { ready: false, report };
+        }
+        return { ready: true, report };
       } catch {
         return { ready: false };
       }
     },
-    activateCodex: async () => connectCodex({ codexExecutable }),
+    activateCodex: async () => {
+      await connectCodex({ codexExecutable });
+      if (cursorInstallationDetected()) await connectCursor();
+    },
     inspectHealth: async ({ report: inspectedReport }) => {
       const report = inspectedReport ?? await codexDoctorReport({ codexExecutable });
       return personalInstallHealthFromReadiness(report.personal_live_readiness);
@@ -726,7 +754,7 @@ async function runMcpServer() {
 }
 
 async function runProductMcpServer(host) {
-  if (!['codex', 'claude-code'].includes(host)) throw new Error('unsupported product MCP host');
+  if (!['codex', 'claude-code', 'cursor'].includes(host)) throw new Error('unsupported product MCP host');
   await recoverBindingAuthority();
   const resolved = resolveCodexMcpRuntime(process.cwd());
   // Binding resolution intentionally accepts a nested launch directory. The
@@ -780,6 +808,10 @@ async function runCodexMcpServer() {
 
 async function runClaudeMcpServer() {
   await runProductMcpServer('claude-code');
+}
+
+async function runCursorMcpServer() {
+  await runProductMcpServer('cursor');
 }
 
 function codexCommand(args, { executable = 'codex' } = {}) {
@@ -1085,6 +1117,7 @@ function activationFilePaths(binding, { includeClaude = false, includeCodex = fa
 			...artifactActivationFilePaths(DATA_DIR),
 			...captureStatePaths(DATA_DIR, binding),
 			join(DATA_DIR, 'runtime', 'product-daemon.json'),
+			join(homedir(), '.pulse', 'product-locators.json'),
 			resolve(process.cwd(), '.gitignore'),
 		];
 	if (binding) {
@@ -1127,17 +1160,10 @@ async function connectCodexActivation({ codexExecutable = 'codex' } = {}) {
     const previousDaemon = inspectVaultRuntime(resolved.runtime);
     if (previousDaemon.status === 'running') await assertVaultRuntimeHealthy(resolved.runtime);
     const captureBefore = safeReadJSON(join(resolved.runtime.data_dir, 'capture-state.json'));
-    const claudeActive = captureEnabledForHost(captureBefore, 'claude-code');
-    if (claudeActive) requireClaudeProductVersion();
-    const previousClaudeMcp = claudeActive ? checkClaudeProductMCP() : undefined;
-    const previousClaudeRuntime = previousClaudeMcp?.ok
-      ? inspectCodexRuntimeAt(previousClaudeMcp.runtime_path)
-      : { ok: false, detail: previousClaudeMcp?.detail ?? 'Claude Code MCP is unavailable' };
-    if (claudeActive && !previousClaudeRuntime.ok) {
-      throw new Error('cannot upgrade shared runtime: active Claude Code registration has no restorable Pulse runtime');
-    }
+    const claudeLegacyActive = captureEnabledForHost(captureBefore, 'claude-code');
+    const claudeNativeTarget = process.env.PULSE_TRUST_MODE !== 'test' && claudeProductVersionCheck().ok;
     const snapshots = snapshotLocalFiles(activationFilePaths(resolved.binding, {
-      includeClaude: claudeActive, includeCodex: true,
+      includeClaude: claudeLegacyActive || claudeNativeTarget, includeCodex: true,
     }));
 		const codexTransaction = snapshotCodexHostActivation(codexExecutable);
     let installedRuntime;
@@ -1177,10 +1203,6 @@ async function connectCodexActivation({ codexExecutable = 'codex' } = {}) {
       await assertVaultRuntimeHealthy(resolved.runtime);
       writeProductDaemonActivation(managedRuntime, installedRuntime);
       migration = migrateLegacyPulseHookFiles({ cwd: process.cwd() });
-      if (claudeActive) {
-        installClaudeCode(installedRuntime.path, { requireExternal: true });
-        installClaudeCodeHooks(installedRuntime.path, installedRuntime.digest);
-      }
       writeCaptureStateFiles({
         globalDataDir: DATA_DIR,
         binding: resolved.binding,
@@ -1189,7 +1211,7 @@ async function connectCodexActivation({ codexExecutable = 'codex' } = {}) {
         reason: 'codex_plugin_connected',
       });
       const defaults = defaultBindingPaths();
-      writeCodexProductLocator({
+      writeProductLocators({
         codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
         registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
         publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
@@ -1206,11 +1228,6 @@ async function connectCodexActivation({ codexExecutable = 'codex' } = {}) {
           if (!rollback.ok) failures.push(new Error(`runtime rollback failed: ${rollback.detail}`));
         } catch (failure) { failures.push(failure); }
       }
-      try {
-        if (claudeActive && previousClaudeRuntime.ok) {
-          installClaudeCode(previousClaudeRuntime.path, { requireExternal: true });
-        }
-      } catch (failure) { failures.push(failure); }
       try { await stopUpgradedVaultBeforeFileRestore(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
       try { restoreLocalFiles(snapshots); } catch (failure) { failures.push(failure); }
       try { await restoreVaultAfterFailedConnect(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
@@ -1223,6 +1240,17 @@ async function connectCodexActivation({ codexExecutable = 'codex' } = {}) {
       throw error;
     }
 		discardPluginTreeSnapshot(codexTransaction.pluginTree);
+    if (claudeNativeTarget) {
+      activateClaudePlugin(managedRuntime.product_edge);
+      removeLegacyClaudeProductRegistration();
+      writeCaptureStateFiles({
+        globalDataDir: DATA_DIR,
+        binding: resolved.binding,
+        host: 'claude-code',
+        enabled: true,
+        reason: 'claude_code_native_plugin_connected',
+      });
+    }
     console.log(`[pulse] Codex plugin installed from ${source}`);
     console.log(`[pulse] Trusted local runtime installed: ${installedRuntime.digest}`);
     if (migration.removed > 0) {
@@ -1867,6 +1895,19 @@ function commandOnPath(name) {
   return false;
 }
 
+function cursorInstallationDetected() {
+  return commandOnPath('cursor') || commandOnPath('cursor-agent') ||
+    existsSync('/Applications/Cursor.app') || existsSync(join(homedir(), 'Applications', 'Cursor.app'));
+}
+
+function inspectClaudeNativeProductPlugin(edge) {
+	const result = spawnSync('claude', ['plugin', 'list', '--json'], {
+		encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, killSignal: 'SIGTERM',
+	});
+	if (result.status !== 0) return { ok: false, reason: 'claude_plugin_list_failed' };
+	return inspectCodexPluginCompatibility(parseClaudePluginList(result.stdout), edge);
+}
+
 function requireCommand(name) {
   if (!commandOnPath(name)) {
     throw new Error(`missing required command: ${name}`);
@@ -2283,6 +2324,29 @@ function installClaudeCodeHooks(runtimePath, runtimeDigest, { dryRun = false } =
   ensureGitignoreEntry('.claude/settings.local.json');
   console.log(`[pulse] Claude Code continuity hooks written to ${path}`);
   console.log('[pulse] .claude/settings.local.json was added to .gitignore');
+}
+
+function removeLegacyClaudeProductRegistration() {
+	removeClaudeCodeExternalRegistration();
+	const mcpPath = resolve(process.cwd(), '.mcp.json');
+	if (existsSync(mcpPath)) {
+		const current = JSON.parse(readFileSync(mcpPath, 'utf8'));
+		if (current.mcpServers && typeof current.mcpServers === 'object' && Object.hasOwn(current.mcpServers, 'pulse')) {
+			delete current.mcpServers.pulse;
+			atomicWriteJSON(mcpPath, current);
+		}
+	}
+	const settingsPath = resolve(process.cwd(), '.claude', 'settings.local.json');
+	if (!existsSync(settingsPath)) return;
+	const current = JSON.parse(readFileSync(settingsPath, 'utf8'));
+	if (!current.hooks || typeof current.hooks !== 'object') return;
+	for (const [event, entries] of Object.entries(current.hooks)) {
+		const kept = withoutPulseHookEntries(Array.isArray(entries) ? entries : []);
+		if (kept.length > 0) current.hooks[event] = kept;
+		else delete current.hooks[event];
+	}
+	if (Object.keys(current.hooks).length === 0) delete current.hooks;
+	atomicWriteJSON(settingsPath, current);
 }
 
 async function disconnectClaudeCode() {
@@ -2899,6 +2963,35 @@ async function connectClaudeCode() {
 	}
 }
 
+async function connectCursor() {
+	const release = await acquireProductActivationLock();
+	try {
+		await recoverBindingAuthority();
+		const resolved = resolveCodexMcpRuntime(process.cwd());
+		const productState = readProductActivationBundle(DATA_DIR);
+		const edge = committedCodexProductEdge(productState);
+		const installed = installCursorPlugin(edge.plugin_root, {
+			cursorHome: cursorHomePath(), expectedDigest: edge.plugin_tree_digest,
+		});
+		writeCaptureStateFiles({
+			globalDataDir: DATA_DIR, binding: resolved.binding, host: 'cursor', enabled: true,
+			reason: 'cursor_plugin_connected',
+		});
+		const defaults = defaultBindingPaths();
+		writeProductLocators({
+			codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
+			registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+			publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+			anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+			trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+		});
+		console.log(`[pulse] Cursor plugin ${installed.reused ? 'already connected' : 'connected'} to the shared ${resolved.runtime.kind} vault.`);
+		console.log('[pulse] Reload Cursor once so it discovers the local Pulse plugin.');
+	} finally {
+		await release();
+	}
+}
+
 async function connectClaudeCodeActivation(remoteControl) {
   requireClaudeProductVersion();
   for (const path of [
@@ -2968,16 +3061,14 @@ async function connectClaudeCodeActivation(remoteControl) {
       globalDataDir: DATA_DIR, binding: resolved.binding, host: 'claude-code', enabled: true,
       reason: 'claude_code_product_connected',
     });
-		if (codexActive) {
-			const defaults = defaultBindingPaths();
-			writeCodexProductLocator({
-				codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
-					registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
-					publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
-					anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
-				trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
-			});
-		}
+		const defaults = defaultBindingPaths();
+		writeProductLocators({
+			codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
+			registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+			publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+			anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+			trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+		});
     finalizeCodexRuntimeInstall(DATA_DIR);
 		commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
   } catch (error) {
@@ -9007,6 +9098,11 @@ async function main() {
     return;
   }
 
+  if (command === 'cursor-mcp') {
+    await runCursorMcpServer();
+    return;
+  }
+
   if (command === 'codex-hook') {
     await recoverBindingAuthority();
     await runCodexHookCLI(args[1]);
@@ -9016,6 +9112,12 @@ async function main() {
   if (command === 'claude-hook') {
     await recoverBindingAuthority();
     await runClaudeHookCLI(args[1]);
+    return;
+  }
+
+  if (command === 'cursor-hook') {
+    await recoverBindingAuthority();
+    await runCursorHookCLI(args[1]);
     return;
   }
 
@@ -9166,11 +9268,15 @@ async function main() {
       await connectCodex();
       return;
     }
+    if (target === 'cursor') {
+      await connectCursor();
+      return;
+    }
     if (target === 'chatgpt' || target === 'claude-chat') {
       connectRemoteHost(target);
       return;
     }
-    throw new Error('v1 supports: pulse connect codex | claude-code | chatgpt | claude-chat');
+    throw new Error('v1 supports: pulse connect codex | claude-code | cursor | chatgpt | claude-chat');
   }
 
   if (command === 'connect-smoke') {

@@ -23,6 +23,16 @@ const HOST_EVENTS = new Map([
   ['SubagentStop', 'subagent_stop'],
   ['Stop', 'turn_finalize'],
 ]);
+const CURSOR_EVENTS = new Map([
+  ['sessionStart', 'SessionStart'],
+  ['beforeSubmitPrompt', 'UserPromptSubmit'],
+  ['preToolUse', 'PreToolUse'],
+  ['postToolUse', 'PostToolUse'],
+  ['preCompact', 'PreCompact'],
+  ['subagentStart', 'SubagentStart'],
+  ['subagentStop', 'SubagentStop'],
+  ['stop', 'Stop'],
+]);
 const CONTINUITY_DELIVERY = Symbol('pulse.continuity_delivery');
 
 export function isStableHostID(value) {
@@ -124,6 +134,36 @@ export function normalizeClaudeHook(eventName, rawInput) {
     input.turn_id = safeString(rawInput?.prompt_id, 'invalid_prompt_id', { stable: true });
   }
   return normalizeHostHook('claude-code', eventName, input);
+}
+
+export function normalizeCursorHook(eventName, rawInput) {
+  const nativeEvent = CURSOR_EVENTS.get(eventName);
+  if (!nativeEvent) throw new Error('unsupported_cursor_hook');
+  const raw = record(rawInput, 'invalid_cursor_hook_input');
+  for (const field of Object.keys(raw).map((item) => item.trim().toLowerCase())) {
+    if (AUTHORITY_FIELDS.has(field)) throw new Error(`authority_field_forbidden:${field}`);
+  }
+  const workspaceRoots = raw.workspace_roots;
+  const cwd = raw.cwd ?? (
+    Array.isArray(workspaceRoots) && workspaceRoots.length === 1 ? workspaceRoots[0] : undefined
+  );
+  const input = {
+    hook_event_name: nativeEvent,
+    session_id: raw.session_id ?? raw.conversation_id,
+    cwd,
+    model: raw.model ?? 'cursor_model_unavailable',
+    stop_hook_active: raw.stop_hook_active ?? (
+      nativeEvent === 'Stop' && Number.isSafeInteger(raw.loop_count) ? raw.loop_count > 0 : false
+    ),
+  };
+  if (nativeEvent !== 'SessionStart') input.turn_id = raw.generation_id;
+  if (nativeEvent === 'SessionStart') input.source = raw.source ?? raw.composer_mode ?? 'startup';
+  if (nativeEvent === 'PreCompact') input.trigger = raw.trigger ?? 'auto';
+  if (nativeEvent === 'PreToolUse' || nativeEvent === 'PostToolUse') input.tool_name = raw.tool_name;
+  if (nativeEvent === 'SubagentStart' || nativeEvent === 'SubagentStop') {
+    input.agent_type = raw.subagent_type ?? raw.agent_type;
+  }
+  return normalizeHostHook('cursor', nativeEvent, input);
 }
 
 export function lifecycleIdempotencyKey(event) {
@@ -397,7 +437,7 @@ export function isDestructivePulseTool(toolName) {
 }
 
 export function isDestructivePulseShellInvocation(toolName, toolInput) {
-  if (!/^Bash$/i.test(toolName ?? '') || typeof toolInput?.command !== 'string') return false;
+  if (!/^(?:Bash|Shell)$/i.test(toolName ?? '') || typeof toolInput?.command !== 'string') return false;
   const command = toolInput.command;
   // Deliberately broad: wrappers such as `script`, `env`, `sudo`, `exec`, or
   // `node /path/cli.js` must not turn an agent command into user presence.

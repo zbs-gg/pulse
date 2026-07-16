@@ -297,7 +297,8 @@ export function formatPersonalInstallPlan(plan) {
 Project: ${workspace?.canonical_path ?? 'unavailable'}
 Workspace: ${workspace?.workspace_id ?? 'unavailable'}
 Repository: ${workspace?.repository_id ?? 'unavailable'}
-Target: Codex on macOS Apple Silicon
+Supported harnesses: Claude Code, Codex, Cursor
+Activation: every compatible harness detected on this Mac
 Preflight: ${plan.outcome}
 
 Current state:
@@ -404,6 +405,8 @@ export function buildPersonalInstallPlan({
     product: 'Pulse Personal',
     stage: 'personal_stage_1',
     target_host: 'codex',
+    supported_hosts: ['claude-code', 'codex', 'cursor'],
+    activation_policy: 'all_detected_supported_hosts',
     outcome,
     reason_codes: reasons,
     next_action: planNextAction(outcome, reasons),
@@ -432,7 +435,9 @@ export function buildPersonalInstallPlan({
       { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
       { path: dirname(DEFAULT_TRUST_PATHS.publicKeyPath), purpose: 'root_owned_binding_trust', preserved_on_uninstall: true },
       { path: join(codexRoot, 'pulse', 'product-locators.json'), purpose: 'codex_workspace_locator', preserved_on_uninstall: false },
+      { path: join(resolve(home), '.pulse', 'product-locators.json'), purpose: 'shared_harness_workspace_locator', preserved_on_uninstall: false },
       { path: join(codexRoot, 'plugins'), purpose: 'codex_managed_pulse_plugin', preserved_on_uninstall: false },
+      { path: join(resolve(home), '.cursor', 'plugins', 'local', 'pulse'), purpose: 'cursor_local_pulse_plugin_if_detected', preserved_on_uninstall: false },
       { path: join(workspacePath, '.gitignore'), purpose: 'exclude_local_pulse_state', preserved_on_uninstall: false },
     ],
     network_effects: [
@@ -444,6 +449,7 @@ export function buildPersonalInstallPlan({
         total_bytes: verifiedRelease?.total_download_bytes ?? null,
       },
       { code: 'codex_plugin_activation', destination: 'Codex native plugin manager' },
+      { code: 'detected_harness_activation', destination: 'Claude Code, Codex, and Cursor local plugin surfaces' },
       { code: 'local_runtime', destination: '127.0.0.1 only' },
     ],
     privacy: {

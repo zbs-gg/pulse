@@ -57,7 +57,7 @@ export function createContinuityDeliveryOffer(resolved, event, payload, rendered
   if (typeof payload !== 'string' || payload.length === 0 ||
       !/^[a-f0-9]{64}$/.test(resolved?.binding?.binding_digest ?? '') ||
       !isStableHostID(resolved?.binding?.workspace?.repository_id) ||
-      !['codex', 'claude-code'].includes(event?.host) ||
+      !['codex', 'claude-code', 'cursor'].includes(event?.host) ||
       !['session_start', 'subagent_start'].includes(event?.event) ||
       !isStableHostID(event?.session_id) ||
       !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '')) {
@@ -177,7 +177,7 @@ export async function composeBoundResumeEvidence(resolved, event, {
   localTokenBudget = 800,
   commonsLimit = 8,
 } = {}) {
-  if (!resolved?.binding || !resolved?.runtime || !['codex', 'claude-code'].includes(host) ||
+  if (!resolved?.binding || !resolved?.runtime || !['codex', 'claude-code', 'cursor'].includes(host) ||
       typeof request !== 'function' || !Number.isInteger(localTokenBudget) || localTokenBudget < 256 ||
       localTokenBudget > 2000 || !Number.isInteger(commonsLimit) || commonsLimit < 1 || commonsLimit > 20) {
     throw new Error('compositor_configuration_invalid');

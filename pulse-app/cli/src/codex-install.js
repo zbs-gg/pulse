@@ -435,6 +435,81 @@ function codexProductWorkspaceDigest(canonicalPath) {
     .digest('hex');
 }
 
+export function readProductLocator({ productHome = join(homedir(), '.pulse'), binding }) {
+	if (!binding?.workspace?.canonical_path) throw new Error('Product locator binding is invalid');
+	const path = join(resolve(productHome), 'product-locators.json');
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
+		(info.mode & 0o077) !== 0 || info.size > 1024 * 1024) {
+		throw new Error('Product locator is unsafe');
+	}
+	const locator = JSON.parse(readFileSync(path, 'utf8'));
+	const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+	if (locator?.schema !== 'pulse.product_locators.v1' ||
+		!locator.entries || typeof locator.entries !== 'object' || Array.isArray(locator.entries) ||
+		Object.keys(locator).some((name) => !['schema', 'entries'].includes(name))) {
+		throw new Error('Product locator is invalid');
+	}
+	const entry = locator.entries[workspaceDigest];
+	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	if (!entry) throw new Error('Product locator is missing for this workspace');
+	if (entry.workspace_digest !== workspaceDigest ||
+		Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
+		!['production', 'test'].includes(entry.trust_mode) ||
+		![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
+			.every((value) => typeof value === 'string' && isAbsolute(value))) {
+		throw new Error('Product locator is invalid for this workspace');
+	}
+	return { path, entry };
+}
+
+export function writeProductLocator({
+	productHome = join(homedir(), '.pulse'), binding, dataDir, registryPath, publicKeyPath, anchorPath,
+	trustMode = 'production',
+}) {
+	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode) ||
+		![dataDir, registryPath, publicKeyPath, anchorPath]
+			.every((value) => typeof value === 'string' && isAbsolute(value))) {
+		throw new Error('Product locator input is invalid');
+	}
+	const path = join(resolve(productHome), 'product-locators.json');
+	let current = { schema: 'pulse.product_locators.v1', entries: {} };
+	if (existsSync(path)) {
+		const info = lstatSync(path);
+		const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+		if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+			throw new Error('Product locator is unsafe');
+		}
+		current = JSON.parse(readFileSync(path, 'utf8'));
+		if (current?.schema !== 'pulse.product_locators.v1' ||
+			!current.entries || typeof current.entries !== 'object' || Array.isArray(current.entries)) {
+			throw new Error('Product locator is invalid');
+		}
+	}
+	const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+	current.entries[workspaceDigest] = {
+		workspace_digest: workspaceDigest,
+		data_dir: resolve(dataDir),
+		registry_path: resolve(registryPath),
+		public_key_path: resolve(publicKeyPath),
+		anchor_path: resolve(anchorPath),
+		trust_mode: trustMode,
+	};
+	atomicWriteJSON(path, current);
+	return path;
+}
+
+export function removeProductLocator({ productHome = join(homedir(), '.pulse'), binding }) {
+	const { path } = readProductLocator({ productHome, binding });
+	const locator = JSON.parse(readFileSync(path, 'utf8'));
+	delete locator.entries[codexProductWorkspaceDigest(binding.workspace.canonical_path)];
+	const remaining = Object.keys(locator.entries).length;
+	if (remaining === 0) rmSync(path, { force: true });
+	else atomicWriteJSON(path, locator);
+	return { path, remaining };
+}
+
 export function readCodexProductLocator({ codexHome, binding }) {
 	if (!binding?.workspace?.canonical_path) throw new Error('Codex product locator binding is invalid');
 	const path = join(resolve(codexHome), 'pulse', 'product-locators.json');

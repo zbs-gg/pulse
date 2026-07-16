@@ -23,25 +23,30 @@ const base = {
   source: 'startup',
 };
 
-test('Codex and Claude normalize to one lifecycle schema with distinct provenance', () => {
+test('Codex, Claude, and Cursor normalize to one lifecycle schema with distinct provenance', () => {
   const { turn_id: _codexTurn, ...codexSessionStart } = base;
   const codex = normalizeLifecycleEvent('codex', 'session_start', codexSessionStart);
   const { turn_id: _claudeTurn, ...claudeSessionStart } = base;
   const claude = normalizeLifecycleEvent('claude-code', 'session_start', { ...claudeSessionStart, session_id: 'sess-2' });
+  const { turn_id: _cursorTurn, ...cursorSessionStart } = base;
+  const cursor = normalizeLifecycleEvent('cursor', 'session_start', { ...cursorSessionStart, session_id: 'sess-3' });
   assert.equal(codex.schema, LIFECYCLE_SCHEMA);
   assert.equal(claude.schema, LIFECYCLE_SCHEMA);
   assert.equal(codex.event, claude.event);
+  assert.equal(codex.event, cursor.event);
   assert.equal(codex.workspace, claude.workspace);
   assert.notEqual(codex.host, claude.host);
   assert.notEqual(codex.session_id, claude.session_id);
   assert.match(codex.turn_id, /^session_[a-f0-9]{64}$/);
   assert.match(claude.turn_id, /^session_[a-f0-9]{64}$/);
+  assert.match(cursor.turn_id, /^session_[a-f0-9]{64}$/);
 });
 
 test('only thread-scoped session_start may omit a native turn id', () => {
   const { turn_id: _turn, ...withoutTurn } = base;
   assert.doesNotThrow(() => normalizeLifecycleEvent('codex', 'session_start', withoutTurn));
   assert.doesNotThrow(() => normalizeLifecycleEvent('claude-code', 'session_start', withoutTurn));
+  assert.doesNotThrow(() => normalizeLifecycleEvent('cursor', 'session_start', withoutTurn));
   assert.throws(() => normalizeLifecycleEvent('codex', 'turn_start', withoutTurn), /invalid_turn_id/);
 });
 
