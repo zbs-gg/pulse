@@ -1,5 +1,9 @@
 # Install Pulse With Your AI Agent
 
+The host-neutral flow below becomes a public install path only after the
+matching signed preview is published. Before then, use it to audit this branch,
+not to claim the current npm preview already contains the feature.
+
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real
 memory across fresh tasks in a verified host. The maintained agent procedure is
@@ -28,7 +32,9 @@ same command or use `pulse repair`; verified Core and host work is reused.
 ## What the agent must show you
 
 ```bash
-pulse doctor <installed-host>
+pulse doctor claude-code  # when detected
+pulse doctor cursor       # when detected
+pulse doctor codex        # when detected
 pulse home
 ```
 
@@ -44,7 +50,9 @@ same project. A simulated corpus or source-checkout test is not a substitute.
 
 ```bash
 pulse repair
-pulse disconnect <host>
+pulse disconnect claude-code
+pulse disconnect cursor
+pulse disconnect codex
 ```
 
 Disconnect preserves memory. Whole-vault wipe is a separate OS-presence-bound
@@ -57,13 +65,16 @@ memory merely because the integration was removed.
 Please audit and install Pulse Personal for this project.
 
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
-2. Check `npm view @zbs-gg/pulse dist-tags --json`. Personal requires preview
-   0.7.0 or newer with its signed manifest and exact release assets.
+2. Check `npm view @zbs-gg/pulse dist-tags --json`. Host-neutral Personal
+   requires preview 0.7.0 or newer, `pulse.personal_install_plan.v2`, and its
+   signed manifest plus exact release assets.
 3. Explain every local write, privacy default, repair step, and removal step.
 4. Ask me before installing.
 5. After I approve, run:
      npx -y @zbs-gg/pulse@preview install
-6. Read `pulse doctor <installed-host>` literally and open `pulse home`.
+6. For every host returned in `host_status.hosts`, run its exact doctor command:
+   `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`.
+   Then run `pulse home`.
 7. Help me save one visible memory, start a fresh task, and show the
    continuity and token-economy receipts in Memory Home.
 

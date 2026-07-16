@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolveProductEnvironment } from '../runtime-locator.mjs';
 
-const productEnvironment = resolveProductEnvironment();
+const productEnvironment = resolveProductEnvironment({ host: 'codex' });
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted Codex runtime is missing; run `pulse connect codex` again.');

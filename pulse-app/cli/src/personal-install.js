@@ -5,6 +5,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
+import { SUPPORTED_HOST_IDS } from './supported-hosts.js';
 
 const STEP = Object.freeze({
   artifacts: 'artifacts_staged',
@@ -26,6 +27,7 @@ const ACTION_REQUIRED_CODES = new Set([
 	'codex_native_lifecycle_attestation_unavailable',
   'codex_hook_trust_required',
   'codex_activation_incomplete',
+	'codex_activation_rollback_failed',
   'codex_identity_changed',
   'codex_identity_invalid',
   'codex_login_required',
@@ -80,7 +82,7 @@ function exactDependencies(dependencies) {
 
 function exactPlan(plan) {
   const workspace = plan?.detected?.workspace;
-  if (!plan || plan.schema !== 'pulse.personal_install_plan.v1' || plan.contract_version !== 1 ||
+  if (!plan || plan.schema !== 'pulse.personal_install_plan.v2' || plan.contract_version !== 2 ||
       !['ready_to_install', 'action_required', 'unsupported'].includes(plan.outcome) ||
       !Array.isArray(plan.reason_codes) || plan.reason_codes.some((code) => typeof code !== 'string' || code.length < 1) ||
       (plan.outcome === 'ready_to_install' && (!workspace || typeof workspace.workspace_id !== 'string' ||
@@ -104,6 +106,7 @@ function nextAction(reasonCode) {
     binding_legacy: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     binding_repair_required: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     codex_activation_incomplete: 'Run pulse doctor codex --json and fix the first failed activation check.',
+		codex_activation_rollback_failed: 'Codex was left in an uncertain plugin state. Run pulse doctor codex --json and repair Codex before using this install.',
     codex_hook_lifecycle_required: 'Run pulse home to inspect the installed memory, then open and use a normal new Codex task so the Pulse lifecycle can run.',
     codex_native_lifecycle_attestation_unavailable: 'Run pulse home to inspect the installed memory. Use Pulse MCP tools explicitly for now; Codex 0.136 does not expose replayable native hook execution evidence to Pulse.',
     codex_hook_trust_required: 'Approve the Pulse hook in Codex, then run pulse install again.',
@@ -139,7 +142,7 @@ function terminalResult(plan, {
   const workspace = planWorkspace(plan);
   const normalizedHostStatus = normalizePersonalInstallHostStatus(hostStatus);
   return {
-    schema: 'pulse.personal_install_result.v1',
+    schema: 'pulse.personal_install_result.v2',
     outcome,
     reason_code: reasonCode,
     completed_steps: [...completedSteps],
@@ -152,8 +155,8 @@ function terminalResult(plan, {
     host_status: normalizedHostStatus,
     next_action: outcome === 'ready'
       ? normalizedHostStatus.parity === 'degraded'
-        ? 'Memory Home is opening now. Pulse is usable through a verified harness; run pulse repair to attach the remaining detected harnesses.'
-        : 'Memory Home is opening now. Review the installed memory, then open a new task in a verified harness and create the first visible memory.'
+        ? 'Run pulse home to inspect memory. Pulse is usable through a verified harness; run pulse repair to attach the remaining detected harnesses.'
+        : 'Run pulse home to inspect memory, then open a new task in a verified harness and create the first visible memory.'
       : nextAction(reasonCode),
   };
 }
@@ -161,12 +164,13 @@ function terminalResult(plan, {
 export function normalizePersonalInstallHostStatus(value) {
   if (value === undefined) return { product_ready: false, parity: 'blocked', hosts: [] };
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.product_ready !== 'boolean' ||
-      !['blocked', 'complete', 'degraded'].includes(value.parity) || !Array.isArray(value.hosts) || value.hosts.length > 3) {
+      !['blocked', 'complete', 'degraded'].includes(value.parity) || !Array.isArray(value.hosts) ||
+      value.hosts.length > SUPPORTED_HOST_IDS.length) {
     fail('host_status_invalid');
   }
   const seen = new Set();
   const hosts = value.hosts.map((host) => {
-    if (!host || typeof host !== 'object' || !['claude-code', 'codex', 'cursor'].includes(host.host) || seen.has(host.host) ||
+    if (!host || typeof host !== 'object' || !SUPPORTED_HOST_IDS.includes(host.host) || seen.has(host.host) ||
         typeof host.activated !== 'boolean' || typeof host.verified !== 'boolean' ||
         typeof host.lifecycle_ready !== 'boolean' || !SAFE_REASON_CODE.test(host.reason_code ?? '')) {
       fail('host_status_invalid');
@@ -361,6 +365,7 @@ export async function runPersonalInstall({
   const deps = exactDependencies(dependencies);
   const completedSteps = [];
   let mutated = false;
+  let lastHostStatus;
   try {
     const runtime = await verifiedStep({
       inspect: deps.inspectRuntime,
@@ -442,9 +447,29 @@ export async function runPersonalInstall({
       mutated = true;
     }
     const activationReady = activation?.product_ready === true || activation?.ready === true;
-    if (!activationReady) fail('supported_harness_activation_failed');
-    const hostStatus = activation?.product_ready === true
+    lastHostStatus = activation?.product_ready === true || activation?.product_ready === false
       ? normalizePersonalInstallHostStatus(activation)
+      : undefined;
+    const rollbackFailure = lastHostStatus?.hosts.find((host) => host.reason_code.endsWith('_rollback_failed'));
+    if (rollbackFailure) {
+      return await emitTerminal(deps, terminalResult(exact, {
+        completedSteps,
+        hostStatus: lastHostStatus,
+        outcome: 'action_required',
+        reasonCode: rollbackFailure.reason_code,
+      }));
+    }
+    if (!activationReady) {
+      const reasonCode = lastHostStatus?.hosts[0]?.reason_code ?? 'supported_harness_activation_failed';
+      return await emitTerminal(deps, terminalResult(exact, {
+        completedSteps,
+        hostStatus: lastHostStatus,
+        outcome: 'action_required',
+        reasonCode,
+      }));
+    }
+    const hostStatus = activation?.product_ready === true
+      ? lastHostStatus
       : { product_ready: true, parity: 'complete', hosts: [] };
     completedSteps.push(STEP.harnesses);
     await emitCheckpoint(deps, exact, completedSteps);

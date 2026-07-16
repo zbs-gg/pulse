@@ -85,8 +85,8 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     })]);
     const plan = plans[1][1];
 
-    assert.equal(plan.schema, 'pulse.personal_install_plan.v1');
-    assert.equal(plan.contract_version, 1);
+    assert.equal(plan.schema, 'pulse.personal_install_plan.v2');
+    assert.equal(plan.contract_version, 2);
     assert.equal(plan.stage, 'personal_stage_1');
     assert.equal('target_host' in plan, false);
     assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
@@ -286,6 +286,10 @@ test('custom canonical data directory owns runtime, artifact, cache, vault, and 
     assert.equal(writes.get('install_receipt'), join(dataDir, 'receipts', 'install', '<workspace_id>.json'));
     assert.equal(writes.get('device_local_principal'), join(home, '.pulse', 'identity', 'personal-principal.json'));
     assert.equal(writes.get('signed_workspace_binding_registry'), join(home, '.pulse', 'supervisor', 'workspace-bindings.json'));
+    assert.equal(
+      writes.get('codex_workspace_access'),
+      join(home, '.pulse', 'product-host-access', '<workspace_digest>', 'codex.json'),
+    );
     assert.throws(() => buildPersonalInstallPlan({ dataDir: 'relative' }), /install_plan_path_invalid/);
     assert.throws(() => buildPersonalInstallPlan({ dataDir: `${root}/nested/../pulse-data` }),
       /install_plan_path_invalid/);

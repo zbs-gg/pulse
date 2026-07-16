@@ -92,33 +92,49 @@ export async function inspectDetectedPersonalHosts({ context, hosts, registry } 
 export async function activateDetectedPersonalHosts({ context, hosts, registry, prior } = {}) {
   const targets = exactTargets(hosts, registry, context);
   const previous = priorHostResults(prior, targets);
-  const results = [];
+  const attempts = new Map();
   for (const target of targets) {
     let before;
     try {
       const priorResult = previous.get(target.host);
       if (priorResult?.verified === true) {
-        results.push(hostResult(target.host, {
-          ready: true,
-          lifecycle_ready: priorResult.lifecycle_ready,
-          reason_code: priorResult.reason_code,
-        }, { activated: priorResult.activated }));
+        attempts.set(target.host, { activated: priorResult.activated });
         continue;
       }
       before = priorResult ? { ready: false } : await target.adapter.inspect(context);
       if (before?.ready === true) {
-        results.push(hostResult(target.host, before));
+        attempts.set(target.host, { activated: true });
         continue;
       }
       await target.adapter.activate(context);
-      const after = await target.adapter.inspect(context);
-      results.push(hostResult(target.host, after, { activated: true }));
+      attempts.set(target.host, { activated: true });
     } catch (error) {
-      results.push(hostResult(target.host, {
+      attempts.set(target.host, {
+        activated: before?.ready === true,
         reason_code: SAFE_REASON.test(error?.code ?? '')
           ? error.code
           : `${target.host.replaceAll('-', '_')}_activation_failed`,
-      }, { activated: before?.ready === true }));
+      });
+    }
+  }
+
+  // Mutations are serialized above, then every target is re-inspected. A prior
+  // verified result is only a skip hint; it is never final readiness evidence.
+  const results = [];
+  for (const target of targets) {
+    const attempt = attempts.get(target.host) ?? {};
+    try {
+      const current = await target.adapter.inspect(context);
+      results.push(hostResult(target.host, current?.ready === true ? current : {
+        ...current,
+        reason_code: attempt.reason_code ?? stableReason(target.host, current, 'activation_required'),
+      }, { activated: attempt.activated === true }));
+    } catch (error) {
+      results.push(hostResult(target.host, {
+        reason_code: attempt.reason_code ?? (SAFE_REASON.test(error?.code ?? '')
+          ? error.code
+          : `${target.host.replaceAll('-', '_')}_inspection_failed`),
+      }, { activated: attempt.activated === true }));
     }
   }
   return activationSummary(results);

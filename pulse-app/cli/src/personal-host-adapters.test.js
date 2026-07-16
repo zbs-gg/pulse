@@ -65,10 +65,10 @@ test('healthy adapters are reused and a failed secondary host degrades parity wi
     { host: 'claude-code', verified: true, reason_code: 'host_verified' },
     { host: 'codex', verified: false, reason_code: 'codex_hook_trust_required' },
   ]);
-  assert.deepEqual(calls, ['inspect:claude-code', 'activate:codex']);
+  assert.deepEqual(calls, ['inspect:claude-code', 'activate:codex', 'inspect:claude-code']);
 });
 
-test('activation reuses the prior verified matrix and returns fresh post-activation evidence', async () => {
+test('activation skips prior verified mutation but returns fresh evidence for every target', async () => {
   const calls = [];
   const cursorState = { ready: false };
   const registry = {
@@ -91,7 +91,35 @@ test('activation reuses the prior verified matrix and returns fresh post-activat
     prior,
   });
   assert.equal(result.parity, 'complete');
-  assert.deepEqual(calls, ['activate:cursor', 'inspect:cursor']);
+  assert.deepEqual(calls, ['activate:cursor', 'inspect:claude-code', 'inspect:cursor']);
+});
+
+test('a prior verified host that disappears cannot make the final result ready', async () => {
+  const claudeState = { ready: false };
+  const registry = {
+    'claude-code': adapter(claudeState, [], 'claude-code'),
+    codex: adapter({ ready: false }, [], 'codex'),
+    cursor: {
+      inspect: async () => ({ ready: false, lifecycle_ready: false, reason_code: 'cursor_activation_required' }),
+      activate: async () => { throw new Error('cursor unavailable'); },
+    },
+  };
+  const result = await activateDetectedPersonalHosts({
+    context: { store_id: 'store_personal_test' },
+    hosts: hosts('claude-code', 'cursor'),
+    registry,
+    prior: {
+      product_ready: true,
+      parity: 'degraded',
+      hosts: [
+        { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'host_verified' },
+        { host: 'cursor', activated: false, verified: false, lifecycle_ready: false, reason_code: 'cursor_activation_required' },
+      ],
+    },
+  });
+  assert.equal(result.product_ready, false);
+  assert.equal(result.parity, 'blocked');
+  assert.equal(result.hosts.every((host) => host.verified === false), true);
 });
 
 test('inspection never activates and reports zero verified hosts as not ready', async () => {

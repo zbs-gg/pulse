@@ -1,5 +1,9 @@
 # @zbs-gg/pulse
 
+Host-neutral Personal support in this branch is pending the matching signed
+preview publication. Do not read the current npm tag as containing these
+changes unless `install-plan --json` reports `pulse.personal_install_plan.v2`.
+
 ## Copy this to your AI agent
 
 ```text
@@ -13,7 +17,7 @@ backend OpenAI, Anthropic, or Cohere keys by default.
 Please:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check: npm view @zbs-gg/pulse dist-tags --json
-   Personal requires preview 0.7.0 or newer.
+   Host-neutral Personal requires preview 0.7.0 or newer and install-plan v2.
 3. Check for Apple Silicon, Node 20+, a Git project, and Claude Code, Cursor,
    or Codex.
 4. Explain what Pulse writes and how I can erase it.
@@ -21,7 +25,9 @@ Please:
 6. After I confirm, install:
    - Personal Pulse:
      npx -y @zbs-gg/pulse@preview install
-     pulse doctor <installed-host>
+     pulse doctor claude-code  # when detected
+     pulse doctor cursor       # when detected
+     pulse doctor codex        # when detected
      pulse home
    - Other MCP-compatible hosts:
      configure the host to run:
@@ -53,10 +59,10 @@ Not production.
 
 | Harness | Current support | Recommended path |
 |---|---|---|
-| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity. | `npx -y @zbs-gg/pulse@preview install` |
-| Claude Code | Native Personal plugin and lifecycle through the shared Core and vault. | `npx -y @zbs-gg/pulse@preview install` |
+| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity; pending matching signed preview. | Install after publication |
+| Claude Code | Native Personal plugin and lifecycle through the shared Core and vault; pending matching signed preview. | Install after publication |
 | Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | Native local plugin and lifecycle through the shared Core; no Cursor CLI required. | `npx -y @zbs-gg/pulse@preview install` |
+| Cursor | Native local plugin and lifecycle through the shared Core; no Cursor CLI required; pending matching signed preview. | Install after publication |
 | Windsurf | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
 | Gemini CLI | MCP-compatible when local MCP command servers are supported. | Agent-audited `npx -y @zbs-gg/pulse@preview mcp` |
 | LangChain / CrewAI / custom agents | Framework integration surface. | Run `pulse mcp` and call its tools |
@@ -71,7 +77,9 @@ Not production.
 
 ```bash
 npx -y @zbs-gg/pulse@preview install
-pulse doctor <installed-host>
+pulse doctor claude-code  # when detected
+pulse doctor cursor       # when detected
+pulse doctor codex        # when detected
 pulse home
 ```
 
@@ -119,7 +127,8 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
 - No old-chat import by default — ingest is explicit and consent-first.
 - Personal memory is local and project-bound; it never enters Git without a
   separate exact shared-memory approval.
-- Disconnect preserves memory: `pulse disconnect <host>`. Whole-vault wipe is
+- Disconnect preserves memory: use `pulse disconnect claude-code`,
+  `pulse disconnect cursor`, or `pulse disconnect codex`. Whole-vault wipe is
   separately protected by fresh macOS presence.
 
 Docs, agent install script, and source: https://github.com/zbs-gg/pulse

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -157,12 +158,47 @@ test('Cursor lifecycle readiness is content-free, cumulative, and requires the c
     for (const event of ['session_context', 'turn_capture', 'write_receipt', 'finalize']) {
       recordCursorLifecycleReadiness(local, event, new Date('2026-07-17T10:00:00Z'));
     }
+    const repeated = recordCursorLifecycleReadiness(local, 'turn_capture', new Date('2026-07-17T11:00:00Z'));
+    assert.equal(repeated.updated_at, '2026-07-17T10:00:00.000Z');
     const readiness = inspectCursorLifecycleReadiness(local);
     assert.equal(readiness.ready, true);
     assert.deepEqual(readiness.observed, {
       session_context: true, turn_capture: true, write_receipt: true, finalize: true,
     });
     assert.doesNotMatch(JSON.stringify(readiness), /cursor-session|prompt|transcript|\/workspace/);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent Cursor hook processes preserve independent lifecycle events', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-cursor-lifecycle-race.'));
+  const local = { ...resolved, runtime: { ...resolved.runtime, data_dir: dataDir } };
+  const runner = `
+    const { recordCursorLifecycleReadiness } = await import(process.env.PULSE_CURSOR_HOOKS_MODULE);
+    recordCursorLifecycleReadiness(JSON.parse(process.env.PULSE_CURSOR_RESOLVED), process.env.PULSE_CURSOR_EVENT, new Date('2026-07-17T12:00:00Z'));
+  `;
+  const invoke = (event) => new Promise((resolveChild, rejectChild) => {
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', runner], {
+      env: {
+        ...process.env,
+        PULSE_CURSOR_HOOKS_MODULE: new URL('./cursor-hooks.js', import.meta.url).href,
+        PULSE_CURSOR_RESOLVED: JSON.stringify(local),
+        PULSE_CURSOR_EVENT: event,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', rejectChild);
+    child.once('exit', (status) => status === 0
+      ? resolveChild()
+      : rejectChild(new Error(`cursor lifecycle child exited ${status}: ${stderr}`)));
+  });
+  try {
+    await Promise.all(['session_context', 'turn_capture', 'write_receipt', 'finalize'].map(invoke));
+    assert.equal(inspectCursorLifecycleReadiness(local).ready, true);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

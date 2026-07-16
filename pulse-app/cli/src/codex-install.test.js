@@ -20,20 +20,24 @@ import {
 	parseCodexMarketplaceList,
 	parsePulsePluginList,
 	pulseProductMcpShadowFiles,
+	productHostAccessPath,
 	readCodexProductLocator,
+	readProductHostAccess,
 	readProductLocator,
 	removeCodexProductLocator,
+	removeProductHostAccess,
 	removeProductLocator,
 	resolveSignedCodexProductEdge,
 	rollbackCodexRuntimeInstall,
 	writeCodexProductLocator,
+	writeProductHostAccess,
 	writeProductLocator,
 } from './codex-install.js';
 import { recordCodexHookReadiness } from './codex-hooks.js';
 
 test('Codex product activation is not ready when exact marketplace provenance fails', () => {
 	const checks = Object.fromEntries([
-		'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+		'presence_trust', 'authority', 'codex', 'host_access', 'plugin', 'marketplace', 'plugin_mcp',
 		'mcp_shadow', 'legacy_hooks', 'binding', 'runtime', 'activation', 'vault', 'capture',
 	].map((name) => [name, { ok: true }]));
 	assert.equal(codexProductActivationReady({ checks }), true);
@@ -337,6 +341,32 @@ test('host-neutral product locator carries one workspace authority across all ha
 		assert.equal(JSON.parse(readFileSync(path, 'utf8')).schema, 'pulse.product_locators.v1');
 		assert.equal(removeProductLocator({ productHome, binding }).remaining, 0);
 		assert.equal(existsSync(path), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('workspace host-access markers disconnect one harness without breaking other workspaces', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-product-host-access-'));
+	try {
+		const productHome = join(root, '.pulse');
+		const bindingA = { workspace: { canonical_path: join(root, 'workspace-a') } };
+		const bindingB = { workspace: { canonical_path: join(root, 'workspace-b') } };
+		for (const [binding, host] of [
+			[bindingA, 'claude-code'], [bindingA, 'cursor'], [bindingB, 'claude-code'],
+		]) writeProductHostAccess({ productHome, binding, host });
+
+		assert.equal(readProductHostAccess({ productHome, binding: bindingA, host: 'claude-code' }).record.host, 'claude-code');
+		assert.equal(existsSync(productHostAccessPath({ productHome, binding: bindingA, host: 'cursor' })), true);
+		const first = removeProductHostAccess({ productHome, binding: bindingA, host: 'claude-code' });
+		assert.equal(first.remaining_for_workspace, 1);
+		assert.equal(first.remaining_for_host, 1);
+		assert.equal(readProductHostAccess({ productHome, binding: bindingA, host: 'cursor' }).record.host, 'cursor');
+		const second = removeProductHostAccess({ productHome, binding: bindingA, host: 'cursor' });
+		assert.equal(second.remaining_for_workspace, 0);
+		assert.equal(second.remaining_for_host, 0);
+		const final = removeProductHostAccess({ productHome, binding: bindingB, host: 'claude-code' });
+		assert.equal(final.remaining_for_host, 0);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

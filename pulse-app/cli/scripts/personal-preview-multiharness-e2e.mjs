@@ -109,7 +109,6 @@ function productFixture({ failHosts = [] } = {}) {
     failHosts: new Set(failHosts),
     calls: [],
     receipts: [],
-    memories: new Map(),
   };
   const context = {
     binding_id: 'binding_shared_product',
@@ -241,10 +240,6 @@ try {
   const allResult = await install(planFor(HOSTS), allHosts);
   assert.equal(allResult.host_status.parity, 'complete');
   assert.deepEqual([...allHosts.state.active].sort(), [...HOSTS].sort());
-  const sharedObject = Object.freeze({ object_id: 'memory_shared_cross_harness_01', summary: 'One shared Pulse vault.' });
-  allHosts.state.memories.set(sharedObject.object_id, sharedObject);
-  const recalledInCursor = allHosts.state.memories.get(sharedObject.object_id);
-  assert.equal(recalledInCursor, sharedObject);
   assert.equal(allHosts.context.store_id, 'store_personal_shared');
 
   const attachedLater = productFixture();
@@ -267,16 +262,16 @@ try {
   assert.equal(degraded.state.coreMutations, 1);
 
   process.stdout.write(`${JSON.stringify({
-    schema: 'pulse.personal_preview_multiharness.v1',
+    schema: 'pulse.personal_preview_multiharness_orchestration.v1',
     authority: 'synthetic-test',
     content_free: true,
     package_source: 'npm-pack',
-    command: 'npx -y @zbs-gg/pulse@preview install',
+    public_command_under_test: false,
     singleton_hosts: HOSTS,
     absent_harness_invocation: false,
     shared_binding: true,
-    shared_store: allHosts.context.store_id,
-    behavioral_cross_host_object_id: sharedObject.object_id,
+    synthetic_shared_store_id: allHosts.context.store_id,
+    daemon_backed_cross_host_recall: false,
     later_host_attachment: true,
     degraded_parity_repair: true,
     no_host_zero_mutation: true,
@@ -285,7 +280,7 @@ try {
     system_python_exposed: false,
     production_install_proof: false,
   })}\n`);
-  process.stdout.write('Pulse Personal packed Claude-only, Cursor-only, Codex-only, and shared-Core matrix passed.\n');
+  process.stdout.write('Pulse Personal packed host-neutral orchestration contract passed; physical install and cross-host recall remain release attestations.\n');
 } finally {
   if (process.env.PULSE_KEEP_PERSONAL_MULTIHARNESS_ROOT === '1') {
     process.stderr.write(`kept Personal multiharness root: ${root}\n`);

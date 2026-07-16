@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { acquireInstallLock } from './install-journal.js';
-import { executePersonalInstallCommand } from './personal-install-command.js';
+import {
+  executePersonalInstallCommand,
+  installPlanApprovalDigest,
+  requestConsent,
+} from './personal-install-command.js';
 
 function sink() {
   let value = '';
@@ -18,8 +22,8 @@ function sink() {
 
 function plan(overrides = {}) {
   return {
-    schema: 'pulse.personal_install_plan.v1',
-    contract_version: 1,
+    schema: 'pulse.personal_install_plan.v2',
+    contract_version: 2,
     outcome: 'ready_to_install',
     reason_codes: [],
     current_state: { install_receipt: 'missing' },
@@ -35,6 +39,7 @@ function plan(overrides = {}) {
     },
     rollback: { remove_codex_connection: 'pulse disconnect codex' },
     detected: {
+      hosts: [{ host: 'codex', activation_target: true }],
       workspace: {
         canonical_path: '/private/project',
         repository_id: 'repository_test',
@@ -44,6 +49,32 @@ function plan(overrides = {}) {
     ...overrides,
   };
 }
+
+test('a non-TTY agent install uses a plan-bound macOS human confirmation', async () => {
+  const exactPlan = plan();
+  const calls = [];
+  const approved = await requestConsent({
+    input: { isTTY: false },
+    output: { isTTY: false },
+    plan: exactPlan,
+    platform: 'darwin',
+    runDialog: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: 'button returned:Install\n', stderr: '' };
+    },
+  });
+  assert.equal(approved, true);
+  assert.equal(calls[0].command, '/usr/bin/osascript');
+  assert.match(calls[0].args[1], new RegExp(installPlanApprovalDigest(exactPlan).slice(0, 16)));
+  assert.match(calls[0].args[1], /workspace_test/);
+  assert.match(calls[0].args[1], /codex/);
+
+  const denied = await requestConsent({
+    input: { isTTY: false }, output: { isTTY: false }, plan: exactPlan, platform: 'darwin',
+    runDialog: () => ({ status: 1, stdout: '', stderr: 'User canceled.' }),
+  });
+  assert.equal(denied, false);
+});
 
 function readyActivation() {
   return {
@@ -105,7 +136,7 @@ test('preflight failure remains JSON-only on stdout and never asks for consent',
 
   assert.equal(executed.result.reason_code, 'binding_conflict');
   assert.equal(prompted, false);
-  assert.equal(JSON.parse(stdout.value()).schema, 'pulse.personal_install_result.v1');
+  assert.equal(JSON.parse(stdout.value()).schema, 'pulse.personal_install_result.v2');
   assert.doesNotMatch(stdout.value(), /Pulse Personal install/);
 });
 
@@ -186,5 +217,5 @@ test('interactive one-command install opens Memory Home after releasing the inst
 
   assert.equal(executed.exitCode, 0);
   assert.equal(homeOpened, true);
-  assert.match(executed.result.next_action, /Memory Home is opening/);
+  assert.match(executed.result.next_action, /Run pulse home/);
 });

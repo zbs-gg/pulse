@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { activateClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
+import { activateClaudePlugin, disableClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
 
 test('Claude plugin list parser returns only the exact Pulse marketplace identity', () => {
   const parsed = parseClaudePluginList(JSON.stringify([
@@ -43,6 +43,29 @@ test('Claude native activation adds the signed marketplace, installs, enables, a
     ['marketplace', 'add', '/signed/marketplace', '--scope', 'user'],
     ['install', 'pulse@zbs-gg', '--scope', 'user'],
     ['enable', 'pulse@zbs-gg', '--scope', 'user'],
+    ['list', '--json'],
+  ]);
+});
+
+test('Claude native disconnect disables the unused user plugin and verifies the result', () => {
+  const calls = [];
+  let listed = 0;
+  const result = disableClaudePlugin({
+    run: (args) => {
+      calls.push(args);
+      if (args[0] === 'list') {
+        listed += 1;
+        return { status: 0, stdout: JSON.stringify([{
+          id: 'pulse@zbs-gg', version: '0.7.0', enabled: listed === 1, installPath: '/cache/pulse',
+        }]), stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(result.disabled, true);
+  assert.deepEqual(calls, [
+    ['list', '--json'],
+    ['disable', 'pulse@zbs-gg', '--scope', 'user'],
     ['list', '--json'],
   ]);
 });

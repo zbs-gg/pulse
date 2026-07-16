@@ -64,7 +64,7 @@
   },
   "scripts": {
     "check": "node src/cli.js --help",
-    "test": "node --test src/*.test.js",
+    "test": "node --test --test-concurrency=1 src/*.test.js",
     "test:codex-product": "node scripts/codex-product-e2e.mjs",
     "test:personal-clean-room": "node scripts/personal-preview-clean-room.mjs",
     "test:personal-interruption": "node scripts/personal-preview-interruption-e2e.mjs",

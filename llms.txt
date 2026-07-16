@@ -17,7 +17,9 @@ do by default, and how I can erase it. Ask my confirmation before installing.
 
 For Personal Pulse when Claude Code, Cursor, or Codex is installed:
   npx -y @zbs-gg/pulse@preview install
-  pulse doctor <installed-host>
+  pulse doctor claude-code  # when detected
+  pulse doctor cursor       # when detected
+  pulse doctor codex        # when detected
   pulse home
 
 For other MCP-compatible hosts:
@@ -36,7 +38,8 @@ closest text match — shows why that memory surfaced, shows the continuity pack
 the next agent receives, and wipes on one command. Host-extracted structured
 capsules only; raw transcript capture is off by default (the store rejects
 transcript/secret/path-like content); no backend model API keys by default.
-Developer preview; host-neutral across Claude Code, Cursor, and Codex; not production.
+Developer preview; host-neutral Claude Code, Cursor, and Codex support is
+pending the matching signed preview publication; not production.
 
 ## Compatible harnesses
 
@@ -58,8 +61,9 @@ Developer preview; host-neutral across Claude Code, Cursor, and Codex; not produ
   in this preview.
 
 Primary install (Pulse Personal):
-`npx -y @zbs-gg/pulse@preview install` then `pulse doctor <installed-host>`
-then `pulse home`. Requires Apple Silicon, Node 20+, a Git project, and any one
+`npx -y @zbs-gg/pulse@preview install`, then run the exact doctor command for
+each detected host (`claude-code`, `cursor`, or `codex`), then `pulse home`.
+Requires Apple Silicon, Node 20+, a Git project, and any one
 of Claude Code, Cursor, or Codex. It requires no Go, Python, Make, Docker, or
 model API key. The optional demo seeds an isolated SIMULATED corpus and proves:
 same query in three user states returns different justified episodes

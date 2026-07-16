@@ -88,7 +88,10 @@ function pluginTreeDigest(root) {
 	return trustedTreeDigest(root, { label: 'Pulse trusted plugin' });
 }
 
-export function resolveProductEnvironment({ cwd = process.cwd(), env = process.env } = {}) {
+export function resolveProductEnvironment({ cwd = process.cwd(), env = process.env, host } = {}) {
+  if (!['claude-code', 'codex', 'cursor'].includes(host)) {
+    throw new Error('Pulse product host identity is missing or invalid.');
+  }
   const productHome = resolve(env.PULSE_HOME || join(homedir(), '.pulse'));
   const codexHome = resolve(env.CODEX_HOME || join(homedir(), '.codex'));
   const sharedPath = join(productHome, 'product-locators.json');
@@ -115,6 +118,14 @@ export function resolveProductEnvironment({ cwd = process.cwd(), env = process.e
 	}
 	if (entry.trust_mode === 'production' && env.PULSE_TRUST_MODE === 'test') {
 		throw new Error('Pulse host trust mode does not match the production product locator.');
+	}
+	const hostAccessPath = join(productHome, 'product-host-access', key, `${host}.json`);
+	requirePrivateLocator(hostAccessPath);
+	const hostAccess = JSON.parse(readFileSync(hostAccessPath, 'utf8'));
+	if (hostAccess?.schema !== 'pulse.product_host_access.v1' || hostAccess.host !== host ||
+		hostAccess.workspace_digest !== key ||
+		Object.keys(hostAccess).sort().join('\0') !== ['host', 'schema', 'workspace_digest'].sort().join('\0')) {
+		throw new Error(`Pulse ${host} integration is disconnected; run pulse install or pulse repair.`);
 	}
 	const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
 	requirePrivateLocator(activationPath);

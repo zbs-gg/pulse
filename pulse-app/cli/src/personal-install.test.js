@@ -14,8 +14,8 @@ import {
 
 function supportedPlan(overrides = {}) {
   return {
-    schema: 'pulse.personal_install_plan.v1',
-    contract_version: 1,
+    schema: 'pulse.personal_install_plan.v2',
+    contract_version: 2,
     outcome: 'ready_to_install',
     reason_codes: [],
     detected: {
@@ -151,7 +151,7 @@ test('new install rechecks every durable fact and executes the security ordering
   assert.deepEqual(result.completed_steps, PERSONAL_INSTALL_STEPS);
   assert.equal(result.preserved_data, true);
   assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
-  assert.match(result.next_action, /Memory Home is opening/);
+  assert.match(result.next_action, /Run pulse home/);
   assert.equal(run.receipts.at(-1).outcome, 'ready');
   assert.equal(run.receipts.at(-1).reason_code, 'installed');
   assert.deepEqual(
@@ -194,6 +194,27 @@ test('one verified harness makes the product ready while secondary parity stays 
   assert.match(result.next_action, /run pulse repair/);
   assert.equal(activationAttempts, 1, 'unfinished secondary host is retried without blocking the healthy primary');
   assert.equal(run.receipts.at(-1).host_status.hosts[1].reason_code, 'cursor_lifecycle_required');
+});
+
+test('a host rollback failure blocks readiness even when another host is verified', async () => {
+  const run = harness();
+  const unsafe = {
+    product_ready: true,
+    parity: 'degraded',
+    hosts: [
+      { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'claude_plugin_verified' },
+      { host: 'codex', activated: false, verified: false, lifecycle_ready: false, reason_code: 'codex_activation_rollback_failed' },
+    ],
+  };
+  run.dependencies.inspectActivation = async () => unsafe;
+  run.dependencies.activateHosts = async () => unsafe;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'codex_activation_rollback_failed');
+  assert.equal(result.host_status.hosts[0].verified, true);
+  assert.match(result.next_action, /uncertain plugin state/);
 });
 
 test('already healthy install is idempotent and finishes with an already-installed receipt', async () => {
@@ -267,7 +288,7 @@ test('a fresh process resumes from durable inspected facts without repeating the
     const initial = { runtime: false, presence: false, principal: null, binding: null, core: false, activation: false, health: false, runtime_mutations: 0, core_mutations: 0 };
     const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : initial;
     const save = () => fs.writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
-    const plan = { schema: 'pulse.personal_install_plan.v1', contract_version: 1, outcome: 'ready_to_install', reason_codes: [], detected: { workspace: { workspace_id: 'workspace_test', repository_id: 'repository_test', canonical_path: '/private/project' } } };
+    const plan = { schema: 'pulse.personal_install_plan.v2', contract_version: 2, outcome: 'ready_to_install', reason_codes: [], detected: { workspace: { workspace_id: 'workspace_test', repository_id: 'repository_test', canonical_path: '/private/project' } } };
     const dependencies = {
       inspectRuntime: async () => ({ ready: state.runtime }),
       provisionRuntime: async () => { state.runtime = true; state.runtime_mutations += 1; save(); },

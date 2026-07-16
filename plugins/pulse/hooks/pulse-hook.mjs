@@ -8,7 +8,7 @@ import { resolveProductEnvironment } from '../runtime-locator.mjs';
 const eventName = process.argv[2];
 const hookRoot = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(hookRoot, '..');
-const productEnvironment = resolveProductEnvironment();
+const productEnvironment = resolveProductEnvironment({ host: 'codex' });
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 const runtimeRoot = resolve(cliPath, '..', '..');
 const runtimeManifest = JSON.parse(readFileSync(join(runtimeRoot, 'runtime-manifest.json'), 'utf8'));

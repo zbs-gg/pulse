@@ -430,7 +430,7 @@ test('install-plan --json exposes the host-neutral Personal product contract wit
 
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
-  assert.equal(plan.schema, 'pulse.personal_install_plan.v1');
+  assert.equal(plan.schema, 'pulse.personal_install_plan.v2');
   assert.equal('target_host' in plan, false);
   assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
   assert.deepEqual(plan.detected.hosts.map((host) => host.host), ['claude-code', 'codex', 'cursor']);
@@ -457,7 +457,7 @@ test('Personal install --json keeps stdout machine-readable', () => {
 
   assert.notEqual(result.status, 0);
   const terminal = JSON.parse(result.stdout);
-  assert.equal(terminal.schema, 'pulse.personal_install_result.v1');
+  assert.equal(terminal.schema, 'pulse.personal_install_result.v2');
   assert.equal(terminal.outcome, 'action_required');
   assert.match(result.stderr, /Pulse Personal install/);
   assert.doesNotMatch(result.stdout, /Pulse Personal install/);
@@ -476,7 +476,7 @@ test('complete pre-consent plan never executes a project-local Codex from PATH',
   const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PATH: `${bin}:/usr/bin:/bin` });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).schema, 'pulse.personal_install_plan.v1');
+  assert.equal(JSON.parse(result.stdout).schema, 'pulse.personal_install_plan.v2');
   assert.equal(existsSync(marker), false);
 });
 

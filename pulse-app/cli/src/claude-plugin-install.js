@@ -63,3 +63,19 @@ export function activateClaudePlugin(edge, {
   if (!verified?.ok) throw new Error(`claude_plugin_verification_failed:${verified?.reason ?? 'unknown'}`);
   return { ...verified, plugin: after, reused: before.installed };
 }
+
+export function disableClaudePlugin({
+  executable = 'claude',
+  run = (args) => claudePluginCommand(args, executable),
+} = {}) {
+  const beforeResult = run(['list', '--json']);
+  requireSuccess(beforeResult, 'list_before_disable');
+  const before = parseClaudePluginList(beforeResult.stdout);
+  if (!before.installed || !before.enabled) return { disabled: false, plugin: before };
+  requireSuccess(run(['disable', 'pulse@zbs-gg', '--scope', 'user']), 'disable');
+  const afterResult = run(['list', '--json']);
+  requireSuccess(afterResult, 'list_after_disable');
+  const after = parseClaudePluginList(afterResult.stdout);
+  if (after.installed && after.enabled) throw new Error('claude_plugin_disable_verification_failed');
+  return { disabled: true, plugin: after };
+}

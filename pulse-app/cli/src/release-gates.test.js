@@ -60,6 +60,13 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(attestation, /content_free/);
 	assert.match(attestation, /synthetic_authority_forbidden/);
 	assert.doesNotMatch(attestation, /PULSE_RELEASE_TEST_MODE\s*=\s*['\"]1/);
+	const multiharness = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'personal-preview-multiharness-e2e.mjs'), 'utf8',
+	);
+	assert.match(multiharness, /personal_preview_multiharness_orchestration\.v1/);
+	assert.match(multiharness, /production_install_proof:\s*false/);
+	assert.match(multiharness, /daemon_backed_cross_host_recall:\s*false/);
+	assert.doesNotMatch(multiharness, /behavioral_cross_host_object_id|state\.memories/);
 	for (const relative of [
 		'README.md', 'AGENTS.md', 'docs/INSTALL_WITH_AGENT.md',
 		'docs/PERSONAL_PULSE_ONBOARDING.md', 'pulse-app/cli/README.md',
@@ -69,12 +76,16 @@ test('release verification includes packed Personal clean-room, interruption, ph
 			`${relative} must lead with the one-command Personal install`);
 		assert.match(document, /Codex/);
 		assert.match(document, /Memory Home/);
+		assert.doesNotMatch(document, /pulse (?:doctor|disconnect) <(?:installed-host|host)>/,
+			`${relative} must publish executable host commands, not angle-bracket placeholders`);
 	}
 	const onboarding = readFileSync(join(root, 'docs', 'PERSONAL_PULSE_ONBOARDING.md'), 'utf8');
 	assert.match(onboarding, /does not require\s+Go, Python, Make, Docker, or a\s+model API key/i);
 	assert.match(onboarding, /collecting|estimated|measured/i);
 	assert.match(onboarding, /pulse repair/);
-	assert.match(onboarding, /pulse disconnect <host>/);
+	assert.match(onboarding, /pulse disconnect claude-code/);
+	assert.match(onboarding, /pulse disconnect cursor/);
+	assert.match(onboarding, /pulse disconnect codex/);
 	const releaseFixture = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'product-release-fixture.mjs'), 'utf8',
 	);

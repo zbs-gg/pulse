@@ -1,5 +1,9 @@
 # Personal Pulse onboarding
 
+Publication status: this host-neutral flow is branch-ready but is not a claim
+about the current npm `preview` tag until the matching signed artifacts and
+physical clean-machine attestation are published.
+
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
 
@@ -55,7 +59,9 @@ the Personal vault and does not repeat already verified runtime work.
 ## The first screen after install: Memory Home
 
 ```bash
-pulse doctor <installed-host>
+pulse doctor claude-code  # when detected
+pulse doctor cursor       # when detected
+pulse doctor codex        # when detected
 pulse home
 ```
 
@@ -96,7 +102,9 @@ and cannot replace it.
 Remove one host integration while preserving memory:
 
 ```bash
-pulse disconnect <host>
+pulse disconnect claude-code
+pulse disconnect cursor
+pulse disconnect codex
 ```
 
 Whole-vault wipe is separately protected by fresh macOS presence. Disconnect,
@@ -104,10 +112,10 @@ repair, and ordinary uninstall never imply permission to delete memory.
 
 ## What blocks publication
 
-The deterministic gates run from `npm pack` and prove Claude-only, Cursor-only,
-Codex-only, multihost shared-Core, interrupted-download resume, repair, packed
-Git Team modules, and no external publication. They expose no Go or Python and
-are intentionally labeled synthetic.
+The deterministic gates run from `npm pack` and cover host-neutral orchestration,
+interrupted-download resume, repair, packed Git Team modules, and no external
+publication. They expose no Go or Python and are intentionally labeled
+synthetic; they are not physical product-install or cross-host recall proof.
 
 Before publishing the preview, a clean physical Apple Silicon Mac must also
 pass the content-free release attestation against production authority, real

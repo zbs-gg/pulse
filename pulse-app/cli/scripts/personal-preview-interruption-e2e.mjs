@@ -120,7 +120,7 @@ try {
     const empty = { runtime:false, presence:false, principal:null, binding:null, core:false, activation:false, health:false, runtime_mutations:0, core_mutations:0 };
     const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : empty;
     const save = () => fs.writeFileSync(statePath, JSON.stringify(state), { mode:0o600 });
-    const plan = { schema:'pulse.personal_install_plan.v1', contract_version:1, outcome:'ready_to_install', reason_codes:[], detected:{ workspace:{ workspace_id:'workspace_packed', repository_id:'repository_packed', canonical_path:'/private/project' }, hosts:[{host:'cursor',detected:true,compatible:true,activation_target:true}] } };
+    const plan = { schema:'pulse.personal_install_plan.v2', contract_version: 2, outcome:'ready_to_install', reason_codes:[], detected:{ workspace:{ workspace_id:'workspace_packed', repository_id:'repository_packed', canonical_path:'/private/project' }, hosts:[{host:'cursor',detected:true,compatible:true,activation_target:true}] } };
     const dependencies = {
       inspectRuntime: async () => ({ ready:state.runtime }),
       provisionRuntime: async () => { state.runtime=true; state.runtime_mutations+=1; save(); },

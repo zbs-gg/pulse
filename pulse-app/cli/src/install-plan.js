@@ -9,7 +9,7 @@ import { personalPrincipalPath } from './personal-principal.js';
 import { DEFAULT_TRUST_PATHS } from './trust-helper.js';
 import { canonicalizeWorkspace, defaultBindingPaths } from './workspace-binding.js';
 
-const SCHEMA = 'pulse.personal_install_plan.v1';
+const SCHEMA = 'pulse.personal_install_plan.v2';
 const MINIMUM_MEMORY_BYTES = 8 * 1024 ** 3;
 const INSTALL_HEADROOM_BYTES = 2 * 1024 ** 3;
 const CURRENT_STATE_KEYS = Object.freeze([
@@ -225,7 +225,7 @@ function formatBytes(bytes) {
 }
 
 export function formatPersonalInstallPlan(plan) {
-  if (!plan || plan.schema !== SCHEMA || plan.contract_version !== 1) {
+  if (!plan || plan.schema !== SCHEMA || plan.contract_version !== 2) {
     throw new TypeError('install_plan_invalid');
   }
   const workspace = plan.detected?.workspace;
@@ -366,7 +366,7 @@ export function buildPersonalInstallPlan({
   const outcome = unsupported ? 'unsupported' : reasons.length > 0 ? 'action_required' : 'ready_to_install';
   return {
     schema: SCHEMA,
-    contract_version: 1,
+    contract_version: 2,
     product: 'Pulse Personal',
     stage: 'personal_stage_1',
     supported_hosts: [...SUPPORTED_HOST_IDS],
@@ -400,6 +400,11 @@ export function buildPersonalInstallPlan({
       { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
       { path: dirname(DEFAULT_TRUST_PATHS.publicKeyPath), purpose: 'root_owned_binding_trust', preserved_on_uninstall: true },
       { path: join(resolve(home), '.pulse', 'product-locators.json'), purpose: 'shared_harness_workspace_locator', preserved_on_uninstall: false },
+      ...compatibleHosts.map((host) => ({
+        path: join(resolve(home), '.pulse', 'product-host-access', '<workspace_digest>', `${host.host}.json`),
+        purpose: `${host.host.replaceAll('-', '_')}_workspace_access`,
+        preserved_on_uninstall: false,
+      })),
       ...(codex?.activation_target ? [
         { path: join(codexRoot, 'pulse', 'product-locators.json'), purpose: 'codex_workspace_locator', preserved_on_uninstall: false },
         { path: join(codexRoot, 'plugins'), purpose: 'codex_managed_pulse_plugin', preserved_on_uninstall: false },

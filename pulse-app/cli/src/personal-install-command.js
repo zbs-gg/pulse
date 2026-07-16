@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
 
@@ -26,8 +28,47 @@ function printResult(result, { json, stdout }) {
   writeLine(stdout, `Next: ${result.next_action}`);
 }
 
-async function requestConsent({ input, output }) {
-  if (!input.isTTY || !output.isTTY) return false;
+export function installPlanApprovalDigest(plan) {
+  if (!plan || plan.schema !== 'pulse.personal_install_plan.v2' || plan.contract_version !== 2) {
+    throw new TypeError('personal_install_approval_plan_invalid');
+  }
+  return createHash('sha256')
+    .update('pulse-personal-install-approval-v1\x1f')
+    .update(JSON.stringify(plan))
+    .digest('hex');
+}
+
+function appleScriptString(value) {
+  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+export async function requestConsent({
+  input,
+  output,
+  plan,
+  platform = process.platform,
+  runDialog = spawnSync,
+}) {
+  if (!input.isTTY || !output.isTTY) {
+    if (platform !== 'darwin') return false;
+    const digest = installPlanApprovalDigest(plan);
+    const hosts = (plan.detected?.hosts ?? [])
+      .filter((host) => host.activation_target === true)
+      .map((host) => host.host)
+      .join(', ');
+    const message = [
+      'Install Pulse Personal for this exact project?',
+      `Project: ${plan.detected?.workspace?.workspace_id ?? 'unknown'}`,
+      `Hosts: ${hosts || 'none'}`,
+      `Plan: ${digest.slice(0, 16)}`,
+      'Memory stays local. Raw transcript capture and backend model calls stay off.',
+    ].join('  ');
+    const script = `display dialog ${appleScriptString(message)} buttons {"Cancel", "Install"} default button "Cancel" cancel button "Cancel" with title "Pulse Personal"`;
+    const result = runDialog('/usr/bin/osascript', ['-e', script], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, killSignal: 'SIGTERM',
+    });
+    return result?.status === 0 && /button returned:Install/.test(result.stdout ?? '');
+  }
   const prompt = createInterface({ input, output });
   try {
     const answer = await prompt.question('\nInstall Pulse Personal for this exact project? [y/N] ');
@@ -76,7 +117,7 @@ export async function executePersonalInstallCommand({
     writeLine(json ? errorOutput : output,
       '\n[pulse] --yes cannot approve disclosure, macOS presence, binding replacement, hook trust, downgrade, or wipe.');
   }
-  const consent = await consentPrompt({ input, output: json ? errorOutput : output });
+  const consent = await consentPrompt({ input, output: json ? errorOutput : output, plan });
   if (!consent) {
     const result = await runPersonalInstall({ plan, consent: false, mode });
     printResult(result, { json, stdout: output });

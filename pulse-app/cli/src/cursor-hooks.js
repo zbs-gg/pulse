@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -29,13 +29,13 @@ const HOST = 'cursor';
 const MAX_HOOK_INPUT = 1 << 20;
 const LIFECYCLE_EVENTS = Object.freeze(['session_context', 'turn_capture', 'write_receipt', 'finalize']);
 
-function lifecyclePath(resolved) {
+function lifecycleDirectory(resolved) {
   const dataDir = resolved?.runtime?.data_dir;
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
       !/^[a-f0-9]{64}$/.test(resolved?.binding?.binding_digest ?? '')) {
     throw new Error('cursor_lifecycle_context_invalid');
   }
-  return join(dataDir, 'runtime', 'cursor-lifecycle.json');
+  return join(dataDir, 'runtime', 'cursor-lifecycle');
 }
 
 function privateDirectory(path) {
@@ -62,49 +62,60 @@ function cursorLifecycleResult(record) {
 }
 
 export function inspectCursorLifecycleReadiness(resolved) {
-  const path = lifecyclePath(resolved);
-  try {
-    const info = lstatSync(path);
-    const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid ||
-        (info.mode & 0o077) !== 0 || info.size > 4096) throw new Error('unsafe');
-    const record = JSON.parse(readFileSync(path, 'utf8'));
-    if (record?.schema !== 'pulse.cursor_lifecycle_readiness.v1' ||
-        record.binding_digest !== resolved.binding.binding_digest ||
-        Object.keys(record.observed ?? {}).sort().join('\0') !== [...LIFECYCLE_EVENTS].sort().join('\0') ||
-        Object.values(record.observed).some((value) => typeof value !== 'boolean') ||
-        Number.isNaN(Date.parse(record.updated_at))) throw new Error('invalid');
-    return cursorLifecycleResult(record);
-  } catch {
-    return { ready: false, observed: emptyObserved(), reason_code: 'cursor_lifecycle_required' };
+  const directory = lifecycleDirectory(resolved);
+  const observed = emptyObserved();
+  let updatedAt;
+  for (const event of LIFECYCLE_EVENTS) {
+    const path = join(directory, `${event}.json`);
+    try {
+      const info = lstatSync(path);
+      const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid ||
+          (info.mode & 0o077) !== 0 || info.size > 2048) throw new Error('unsafe');
+      const record = JSON.parse(readFileSync(path, 'utf8'));
+      if (record?.schema !== 'pulse.cursor_lifecycle_event.v1' ||
+          record.binding_digest !== resolved.binding.binding_digest || record.event !== event ||
+          Number.isNaN(Date.parse(record.observed_at))) throw new Error('invalid');
+      observed[event] = true;
+      if (!updatedAt || Date.parse(record.observed_at) > Date.parse(updatedAt)) updatedAt = record.observed_at;
+    } catch {
+      // Each immutable event marker is independent; a missing or unsafe marker
+      // cannot erase evidence already recorded by another hook process.
+    }
   }
+  return cursorLifecycleResult({ observed, updated_at: updatedAt });
 }
 
 export function recordCursorLifecycleReadiness(resolved, event, now = new Date()) {
   if (!LIFECYCLE_EVENTS.includes(event) || !(now instanceof Date) || Number.isNaN(now.valueOf())) {
     throw new Error('cursor_lifecycle_event_invalid');
   }
-  const path = lifecyclePath(resolved);
+  const directory = lifecycleDirectory(resolved);
   privateDirectory(resolve(resolved.runtime.data_dir));
-  privateDirectory(dirname(path));
+  privateDirectory(dirname(directory));
+  privateDirectory(directory);
   const current = inspectCursorLifecycleReadiness(resolved);
+  if (current.observed[event] === true) return current;
   const record = {
-    schema: 'pulse.cursor_lifecycle_readiness.v1',
+    schema: 'pulse.cursor_lifecycle_event.v1',
     binding_digest: resolved.binding.binding_digest,
-    observed: { ...current.observed, [event]: true },
-    updated_at: now.toISOString(),
+    event,
+    observed_at: now.toISOString(),
   };
-  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
+  const path = join(directory, `${event}.json`);
+  const temporary = join(directory, `.${event}.${process.pid}.${randomBytes(8).toString('hex')}.new`);
   try {
     writeFileSync(temporary, `${JSON.stringify(record)}\n`, { flag: 'wx', mode: 0o600 });
     chmodSync(temporary, 0o600);
     const descriptor = openSync(temporary, 'r');
     try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
     renameSync(temporary, path);
+    const directoryDescriptor = openSync(directory, 'r');
+    try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
   } finally {
     rmSync(temporary, { force: true });
   }
-  return cursorLifecycleResult(record);
+  return inspectCursorLifecycleReadiness(resolved);
 }
 
 function opaqueTurnCorrelation(kind, value) {

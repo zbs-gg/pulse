@@ -353,7 +353,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const personalPlan = JSON.parse(run(process.execPath, [packedCLI, 'install-plan', '--json'], {
 		cwd: workspace, env,
 	}).stdout);
-	assert.equal(personalPlan.schema, 'pulse.personal_install_plan.v1');
+	assert.equal(personalPlan.schema, 'pulse.personal_install_plan.v2');
 	assert.equal(personalPlan.outcome, 'action_required');
 	assert.deepEqual(personalPlan.reason_codes, ['synthetic_authority_forbidden']);
 	assert.equal('target_host' in personalPlan, false);

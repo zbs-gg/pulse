@@ -19,10 +19,11 @@ import { migrateLegacyPulseHookConfig } from './host-adapter.js';
 
 const RUNTIME_MANIFEST = 'runtime-manifest.json';
 const MARKETPLACE_SNAPSHOT_MANIFEST = 'snapshot.json';
+const PRODUCT_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
 
 export function codexProductActivationReady(report) {
 	const required = [
-		'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+		'presence_trust', 'authority', 'codex', 'host_access', 'plugin', 'marketplace', 'plugin_mcp',
 		'mcp_shadow', 'legacy_hooks', 'binding', 'runtime', 'activation', 'vault', 'capture',
 	];
 	return required.every((name) => report?.checks?.[name]?.ok === true);
@@ -508,6 +509,91 @@ export function removeProductLocator({ productHome = join(homedir(), '.pulse'), 
 	if (remaining === 0) rmSync(path, { force: true });
 	else atomicWriteJSON(path, locator);
 	return { path, remaining };
+}
+
+export function productHostAccessPath({ productHome = join(homedir(), '.pulse'), binding, host }) {
+	if (!binding?.workspace?.canonical_path || !PRODUCT_HOSTS.includes(host)) {
+		throw new Error('Product host access input is invalid');
+	}
+	return join(
+		resolve(productHome), 'product-host-access',
+		codexProductWorkspaceDigest(binding.workspace.canonical_path), `${host}.json`,
+	);
+}
+
+function requirePrivateDirectory(path) {
+	mkdirSync(path, { recursive: true, mode: 0o700 });
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+		throw new Error('Product host access directory is unsafe');
+	}
+}
+
+function readProductHostAccessPath(path, workspaceDigest, host) {
+	const info = lstatSync(path);
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
+		(info.mode & 0o077) !== 0 || info.size > 2048) {
+		throw new Error('Product host access marker is unsafe');
+	}
+	const record = JSON.parse(readFileSync(path, 'utf8'));
+	if (record?.schema !== 'pulse.product_host_access.v1' || record.host !== host ||
+		record.workspace_digest !== workspaceDigest ||
+		Object.keys(record).sort().join('\0') !== ['host', 'schema', 'workspace_digest'].sort().join('\0')) {
+		throw new Error('Product host access marker is invalid');
+	}
+	return record;
+}
+
+export function readProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+	const path = productHostAccessPath({ productHome, binding, host });
+	return {
+		path,
+		record: readProductHostAccessPath(path, codexProductWorkspaceDigest(binding.workspace.canonical_path), host),
+	};
+}
+
+export function writeProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+	const path = productHostAccessPath({ productHome, binding, host });
+	requirePrivateDirectory(resolve(productHome));
+	requirePrivateDirectory(join(resolve(productHome), 'product-host-access'));
+	requirePrivateDirectory(dirname(path));
+	atomicWriteJSON(path, {
+		schema: 'pulse.product_host_access.v1',
+		workspace_digest: codexProductWorkspaceDigest(binding.workspace.canonical_path),
+		host,
+	});
+	readProductHostAccess({ productHome, binding, host });
+	return path;
+}
+
+export function removeProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+	const path = productHostAccessPath({ productHome, binding, host });
+	if (existsSync(path)) readProductHostAccess({ productHome, binding, host });
+	rmSync(path, { force: true });
+	const root = join(resolve(productHome), 'product-host-access');
+	const workspaceDirectory = dirname(path);
+	const workspaceMarkers = existsSync(workspaceDirectory)
+		? readdirSync(workspaceDirectory).filter((name) => PRODUCT_HOSTS.some((candidate) => name === `${candidate}.json`))
+		: [];
+	if (workspaceMarkers.length === 0) rmSync(workspaceDirectory, { recursive: true, force: true });
+	let remainingForHost = 0;
+	if (existsSync(root)) {
+		for (const workspaceDigest of readdirSync(root)) {
+			if (!/^[a-f0-9]{64}$/.test(workspaceDigest)) throw new Error('Product host access directory is invalid');
+			const candidate = join(root, workspaceDigest, `${host}.json`);
+			if (!existsSync(candidate)) continue;
+			readProductHostAccessPath(candidate, workspaceDigest, host);
+			remainingForHost += 1;
+		}
+		if (readdirSync(root).length === 0) rmSync(root, { recursive: true, force: true });
+	}
+	return {
+		path,
+		remaining_for_host: remainingForHost,
+		remaining_for_workspace: workspaceMarkers.length,
+	};
 }
 
 export function readCodexProductLocator({ codexHome, binding }) {

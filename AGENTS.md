@@ -5,6 +5,10 @@ to install it, your job is to audit first, explain the exact local changes,
 obtain consent, run the one Personal command, and report the real readiness
 state. Claude Code, Cursor, and Codex are equal release-gated bootstrap hosts.
 
+Publication gate: these host-neutral instructions apply to the public npm path
+only when `preview` contains `pulse.personal_install_plan.v2` and the matching
+signed artifacts. Until then, report this branch as pending publication.
+
 The product promise is concrete: a normal memory is shown before it is saved,
 survives into a fresh task in a verified host, carries provenance and retrieval reasons,
 and appears in Memory Home with honest token-economy evidence.
@@ -13,7 +17,8 @@ and appears in Memory Home with honest token-economy evidence.
 
 1. Inspect this repository or the exact npm package.
 2. Run `npm view @zbs-gg/pulse dist-tags --json`. The Personal path described
-   here requires the `preview` release that contains version `0.7.0` or newer.
+   here requires the `preview` release that contains version `0.7.0` or newer
+   and emits `pulse.personal_install_plan.v2`.
 3. Check for an Apple Silicon Mac, Node 20+, a Git project, and at least one of
    Claude Code, Cursor, or Codex.
 4. Explain the install in plain language:
@@ -48,7 +53,9 @@ degraded parity until repaired.
 ## 3. Read the real verdict
 
 ```bash
-pulse doctor <installed-host>
+pulse doctor claude-code  # when Claude Code was detected
+pulse doctor cursor       # when Cursor was detected
+pulse doctor codex        # when Codex was detected
 pulse home
 ```
 
@@ -79,7 +86,9 @@ receipts. Do not use the simulated demo as a substitute for this proof.
 
 ```bash
 pulse repair
-pulse disconnect <host>
+pulse disconnect claude-code
+pulse disconnect cursor
+pulse disconnect codex
 ```
 
 Disconnecting removes that host integration and preserves the local vault.
