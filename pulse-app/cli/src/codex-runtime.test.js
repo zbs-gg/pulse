@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
 	acquireVaultActivationLock,
+  callBoundLocalProductTool,
   callBoundTeamTool,
   consumeCodexToolLease,
 	readProductActivation,
@@ -385,6 +386,46 @@ test('Codex tool lease joins stdio MCP without CODEX_THREAD_ID and is single-use
   assert.equal(consumed.session_id, event.session_id);
   assert.equal(consumed.turn_id, event.turn_id);
   assert.throws(() => consumeCodexToolLease(resolved, toolName, args, now), /unavailable/);
+});
+
+test('bound local source registration consumes a host lease and sends metadata only', async () => {
+  const { resolved, event } = fixture();
+  resolved.binding.workspace = {
+    canonical_path: resolved.runtime.data_dir,
+    repository_id: 'repository_local_tools',
+  };
+  resolved.runtime.base_url = 'http://127.0.0.1:18801';
+  const now = new Date('2026-07-16T10:00:00Z');
+  const toolName = 'mcp__pulse-product__pulse_source_register';
+  const input = { locator: 'notes/team.md' };
+  writeCodexToolLease(resolved, event, toolName, input, 'tool-source-register', now);
+  const calls = [];
+  const result = await callBoundLocalProductTool(resolved, 'codex', 'pulse_source_register', input, {
+    now,
+    resolveBinding: () => resolved.binding,
+    runtimeFromBinding: () => resolved.runtime,
+    portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
+    readSourceWindow: () => ({
+      schema: 'pulse.project_source.window.v1', portable_project_id: 'project_0123456789abcdef0123456789abcdef',
+      repository_id: 'repository_local_tools', source_kind: 'repository_text', locator: 'notes/team.md',
+      version_digest: 'b'.repeat(64), byte_count: 88, cursor: 0, next_cursor: 1,
+      status: 'complete', content: 'private source bytes', withheld: [],
+    }),
+    request: async (_resolved, path, options) => {
+      calls.push({ path, options });
+      return { schema: 'pulse.project_source.register.v1', source_id: 'source_local_01' };
+    },
+  });
+  assert.equal(result.source_id, 'source_local_01');
+  assert.equal(calls[0].path, '/project/sources/register');
+  assert.equal(calls[0].options.body.locator, 'notes/team.md');
+  assert.doesNotMatch(JSON.stringify(calls), /private source bytes|content|withheld/);
+  await assert.rejects(
+    callBoundLocalProductTool(resolved, 'codex', 'pulse_source_register', input, {
+      now, resolveBinding: () => resolved.binding, runtimeFromBinding: () => resolved.runtime,
+    }),
+    /host_tool_lease_unavailable/,
+  );
 });
 
 test('Codex tool lease rejects argument changes and expires after 30 seconds', () => {

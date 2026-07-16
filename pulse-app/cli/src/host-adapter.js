@@ -206,6 +206,108 @@ export function renderAdditionalContext(evidence, lease) {
   ].join('\n');
 }
 
+const GIT_MEMORY_DIGEST = /^[a-f0-9]{64}$/;
+const GIT_MEMORY_CARD_MARKER = /^\[PULSE TEAM MEMORY CARDS v1 batch=([A-Za-z0-9][A-Za-z0-9._:-]{0,254}) generation=([1-9][0-9]*)\]$/gm;
+
+function gitMemoryDisplayString(value, code, maxLength = 1200) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > maxLength || CONTROL.test(value)) {
+    throw new Error(code);
+  }
+  return JSON.stringify(value);
+}
+
+function gitMemoryCardCandidate(candidate, batchID, index) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) ||
+      !STABLE_ID.test(candidate.candidate_id ?? '') || candidate.batch_id !== batchID ||
+      candidate.ordinal !== index || !Number.isSafeInteger(candidate.version) || candidate.version < 1 ||
+      candidate.state !== 'staged' || !STABLE_ID.test(candidate.kind ?? '') ||
+      candidate.audience !== 'project' || typeof candidate.confidence !== 'number' ||
+      candidate.confidence < 0 || candidate.confidence > 1 || !GIT_MEMORY_DIGEST.test(candidate.content_digest ?? '') ||
+      !Array.isArray(candidate.source_references) || candidate.source_references.length < 1 ||
+      !Array.isArray(candidate.advisory_warnings)) {
+    throw new Error('git_team_memory_card_candidate_invalid');
+  }
+  const sources = candidate.source_references.map((source) => {
+    if (!source || typeof source !== 'object' || Array.isArray(source) ||
+        !STABLE_ID.test(source.source_id ?? '') || !GIT_MEMORY_DIGEST.test(source.version_digest ?? '')) {
+      throw new Error('git_team_memory_card_source_invalid');
+    }
+    return `- ${source.source_id} @ ${source.version_digest}`;
+  });
+  const warnings = candidate.advisory_warnings.length === 0
+    ? ['- none']
+    : candidate.advisory_warnings.map((warning) => {
+      if (!warning || typeof warning !== 'object' || Array.isArray(warning) ||
+          !STABLE_ID.test(warning.code ?? '')) throw new Error('git_team_memory_card_warning_invalid');
+      return `- ${warning.code}: ${gitMemoryDisplayString(warning.summary, 'git_team_memory_card_warning_invalid', 500)}`;
+    });
+  return [
+    `Card ${index + 1}`,
+    `Memory: ${gitMemoryDisplayString(candidate.statement, 'git_team_memory_card_statement_invalid')}`,
+    `Kind: ${candidate.kind}`,
+    'Destination: this project shared memory',
+    `Confidence: ${candidate.confidence.toFixed(2)}`,
+    'Warnings:', ...warnings,
+    'Sources:', ...sources,
+    `Identity: ${candidate.candidate_id} v${candidate.version}`,
+    `Digest: ${candidate.content_digest}`,
+  ].join('\n');
+}
+
+export function renderGitTeamMemoryCards(batch) {
+  if (!batch || typeof batch !== 'object' || Array.isArray(batch) ||
+      batch.schema !== 'pulse.git_team_memory.inspect.v1' || !STABLE_ID.test(batch.batch_id ?? '') ||
+      !Number.isSafeInteger(batch.generation) || batch.generation < 1 || batch.host !== 'codex' ||
+      batch.state !== 'staged' || !STABLE_ID.test(batch.source_id ?? '') ||
+      !GIT_MEMORY_DIGEST.test(batch.source_version_digest ?? '') ||
+      typeof batch.source_locator !== 'string' || batch.source_locator.length < 1 || CONTROL.test(batch.source_locator) ||
+      !Array.isArray(batch.candidates) || batch.candidates.length < 1 || batch.candidates.length > 20) {
+    throw new Error('git_team_memory_card_batch_invalid');
+  }
+  const candidateDigests = [];
+  const cards = batch.candidates.map((candidate, index) => {
+    candidateDigests.push(candidate.content_digest);
+    return gitMemoryCardCandidate(candidate, batch.batch_id, index);
+  });
+  const block = [
+    `[PULSE TEAM MEMORY CARDS v1 batch=${batch.batch_id} generation=${batch.generation}]`,
+    `Source: ${gitMemoryDisplayString(batch.source_locator, 'git_team_memory_card_source_invalid', 512)} @ ${batch.source_version_digest}`,
+    '',
+    cards.join('\n\n'),
+    '',
+    'Reply exactly `ok` to approve only these cards for this project.',
+    'Editing any card requires a new presentation. This does not push or open a PR.',
+    '[/PULSE TEAM MEMORY CARDS v1]',
+  ].join('\n');
+  return Object.freeze({
+    block,
+    batch_id: batch.batch_id,
+    batch_generation: batch.generation,
+    candidate_digests: Object.freeze(candidateDigests),
+    card_block_digest: createHash('sha256').update(block).digest('hex'),
+  });
+}
+
+export function gitTeamMemoryCardMarkers(message) {
+  if (typeof message !== 'string' || message.length > 1 << 20) return [];
+  const found = [];
+  GIT_MEMORY_CARD_MARKER.lastIndex = 0;
+  for (const match of message.matchAll(GIT_MEMORY_CARD_MARKER)) {
+    found.push({ batch_id: match[1], batch_generation: Number(match[2]) });
+  }
+  return found;
+}
+
+export function verifyGitTeamMemoryCardBlock(message, expected) {
+  if (typeof message !== 'string' || typeof expected?.block !== 'string' ||
+      !GIT_MEMORY_DIGEST.test(expected.card_block_digest ?? '') ||
+      createHash('sha256').update(expected.block).digest('hex') !== expected.card_block_digest) return false;
+  const markers = gitTeamMemoryCardMarkers(message);
+  if (markers.length !== 1 || markers[0].batch_id !== expected.batch_id ||
+      markers[0].batch_generation !== expected.batch_generation) return false;
+  return message.split(expected.block).length === 2;
+}
+
 export function contextLease(binding, now, ttlMs = 30_000) {
   if (!binding || !/^[a-f0-9]{64}$/.test(binding.binding_digest ?? '') ||
       !Number.isSafeInteger(binding.resolver_epoch) || binding.resolver_epoch < 1) {
@@ -269,12 +371,13 @@ export function isDestructivePulseShellInvocation(toolName, toolInput) {
   // False-positive denial is safer than allowing a destructive invocation.
   return /(?:^|[\s'";&|()])(?:[^\s'";&|()]*\/)?(?:pulse|cli\.js)\s+(?:wipe|delete)(?=$|[\s'";&|()])/i.test(command) ||
     /\/(?:memory\/wipe|memory\/delete)(?:\s|[?'"\\]|$)/i.test(command) ||
+    /\/project\/shared-memory\/review\/(?:present|exact-ok)(?:\s|[?'"\\]|$)/i.test(command) ||
     /(?:^|[\s'"=])(?:~\/\.pulse|\$HOME\/\.pulse|\/[^\s'";|]+\/\.pulse)\/secret\.key(?:[\s'";|]|$)/i.test(command);
 }
 
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
-    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status)$/i.test(toolName);
+    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards))$/i.test(toolName);
 }
 
 export function hookBundleDigest(bytes) {

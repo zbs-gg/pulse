@@ -31,6 +31,8 @@ import {
 } from './local-supervisor.js';
 import { captureEnabledForHost } from './capture-state.js';
 import { callTeamRemoteTool, isReadOnlyTeamTool } from './team-remote-client.js';
+import { renderGitTeamMemoryCards } from './host-adapter.js';
+import { ensureBoundPortableProjectID, readBoundProjectSourceWindow } from './project-source.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
@@ -322,8 +324,19 @@ function hostSlug(host) {
   throw new Error('unsupported_host_adapter');
 }
 
+const LOCAL_PRODUCT_TOOL_ACTIONS = new Set([
+  'pulse_remember',
+  'pulse_source_register', 'pulse_source_window', 'pulse_source_status',
+  'pulse_shared_stage', 'pulse_shared_inspect', 'pulse_shared_edit',
+  'pulse_shared_reject', 'pulse_shared_cards',
+]);
+
 function productToolAction(toolName) {
-  if (typeof toolName === 'string' && /(?:^|__)pulse_remember$/i.test(toolName)) return 'pulse_remember';
+  if (typeof toolName === 'string') {
+    const match = toolName.match(/(?:^|__)(pulse_[a-z_]+)$/i);
+    const action = match?.[1]?.toLowerCase();
+    if (LOCAL_PRODUCT_TOOL_ACTIONS.has(action)) return action;
+  }
   throw new Error('invalid_product_tool_action');
 }
 
@@ -470,6 +483,122 @@ export async function boundPulseRequest(resolved, path, options = {}) {
 export async function activatedBoundPulseRequest(resolved, path, options = {}) {
 	await ensureActivatedVaultRuntime(resolved);
 	return boundPulseRequest(resolved, path, options);
+}
+
+function closedLocalToolInput(input, allowed, required = allowed) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      Object.keys(input).some((key) => !allowed.includes(key)) ||
+      required.some((key) => input[key] === undefined)) {
+    throw new Error('product_local_tool_input_invalid');
+  }
+  return input;
+}
+
+function localGitMemoryAuthority(resolved, portableProjectID) {
+  const projectID = portableProjectID(resolved);
+  const repositoryID = resolved?.binding?.workspace?.repository_id;
+  const bindingDigest = resolved?.binding?.binding_digest;
+  if (!/^project_[a-f0-9]{32}$/.test(projectID ?? '') ||
+      typeof repositoryID !== 'string' || !repositoryID.startsWith('repository_') ||
+      !/^[a-f0-9]{64}$/.test(bindingDigest ?? '')) {
+    throw new Error('product_local_tool_authority_invalid');
+  }
+  return {
+    portable_project_id: projectID,
+    repository_id: repositoryID,
+    binding_digest: bindingDigest,
+  };
+}
+
+export async function callBoundLocalProductTool(resolved, host, name, input, {
+  now = new Date(),
+  resolveBinding = resolveProductWorkspaceBinding,
+  runtimeFromBinding = vaultRuntimeFromBinding,
+  portableProjectID = ensureBoundPortableProjectID,
+  readSourceWindow = readBoundProjectSourceWindow,
+  request = activatedBoundPulseRequest,
+} = {}) {
+  const action = productToolAction(name);
+  if (!['codex', 'claude-code'].includes(host) || action === 'pulse_remember' ||
+      !resolved?.binding || !/^[a-f0-9]{64}$/.test(resolved.binding.binding_digest ?? '') ||
+      !Number.isSafeInteger(resolved.binding.resolver_epoch) || resolved.binding.resolver_epoch < 1) {
+    throw new Error('product_local_tool_forbidden');
+  }
+  const binding = resolveBinding({ cwd: process.cwd() });
+  if (binding.binding_digest !== resolved.binding.binding_digest ||
+      binding.resolver_epoch !== resolved.binding.resolver_epoch ||
+      binding.workspace?.canonical_path !== resolved.binding.workspace?.canonical_path) {
+    throw new Error('product_local_binding_changed');
+  }
+  const current = { binding, runtime: runtimeFromBinding(binding) };
+  const turn = consumeHostToolLease(current, host, action, input, now);
+  const authority = localGitMemoryAuthority(current, portableProjectID);
+
+  if (action === 'pulse_source_window') {
+    return readSourceWindow(current, closedLocalToolInput(
+      input, ['locator', 'cursor', 'max_bytes', 'expected_version_digest'],
+      ['locator', 'cursor', 'max_bytes'],
+    ));
+  }
+  if (action === 'pulse_source_register') {
+    const body = closedLocalToolInput(input, ['locator']);
+    const observed = readSourceWindow(current, { locator: body.locator, cursor: 0, max_bytes: 64 });
+    return request(current, '/project/sources/register', { body: {
+      schema: 'pulse.project_source.register.v1', ...authority,
+      source_kind: observed.source_kind, locator: observed.locator,
+      version_digest: observed.version_digest, byte_count: observed.byte_count,
+      observed_at: now.toISOString(),
+    } });
+  }
+  if (action === 'pulse_source_status') {
+    const body = closedLocalToolInput(input, ['source_id']);
+    return request(current, '/project/sources/status', { body: {
+      schema: 'pulse.project_source.status.v1', ...authority, source_id: body.source_id,
+    } });
+  }
+  if (action === 'pulse_shared_stage') {
+    const body = closedLocalToolInput(input,
+      ['source_id', 'source_version_digest', 'candidates', 'raw_input_included']);
+    return request(current, '/project/shared-memory/review/stage', { body: {
+      schema: 'pulse.git_team_memory.stage.v1', ...authority,
+      host, task_id: turn.turn_id,
+      idempotency_key: `shared_stage_${hostToolInputDigest(host, action, input)}`,
+      source_id: body.source_id, source_version_digest: body.source_version_digest,
+      candidates: body.candidates, raw_input_included: body.raw_input_included,
+    } });
+  }
+  if (action === 'pulse_shared_inspect' || action === 'pulse_shared_cards') {
+    const body = closedLocalToolInput(input, ['batch_id']);
+    const batch = await request(current, '/project/shared-memory/review/inspect', { body: {
+      schema: 'pulse.git_team_memory.inspect.v1', ...authority, batch_id: body.batch_id,
+    } });
+    if (action === 'pulse_shared_inspect') return batch;
+    const cards = renderGitTeamMemoryCards(batch);
+    return {
+      schema: 'pulse.git_team_memory.cards.v1', batch_id: cards.batch_id,
+      batch_generation: cards.batch_generation, card_block: cards.block,
+      card_block_digest: cards.card_block_digest, candidate_digests: cards.candidate_digests,
+    };
+  }
+  if (action === 'pulse_shared_edit') {
+    const body = closedLocalToolInput(input, ['candidate_id', 'expected_version', 'candidate']);
+    return request(current, `/project/shared-memory/review/candidates/${encodeURIComponent(body.candidate_id)}/edit`, {
+      body: {
+        schema: 'pulse.git_team_memory.edit.v1', ...authority,
+        candidate_id: body.candidate_id, expected_version: body.expected_version, candidate: body.candidate,
+      },
+    });
+  }
+  if (action === 'pulse_shared_reject') {
+    const body = closedLocalToolInput(input, ['candidate_id', 'expected_version', 'reason_code']);
+    return request(current, `/project/shared-memory/review/candidates/${encodeURIComponent(body.candidate_id)}/reject`, {
+      body: {
+        schema: 'pulse.git_team_memory.reject.v1', ...authority,
+        candidate_id: body.candidate_id, expected_version: body.expected_version, reason_code: body.reason_code,
+      },
+    });
+  }
+  throw new Error('product_local_tool_forbidden');
 }
 
 export function codexTurnContextPath(dataDir, sessionID) {

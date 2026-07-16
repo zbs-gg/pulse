@@ -23,14 +23,15 @@ const frozenMigration045SHA256 = "8f5d60553d7edffd23bafecc27e57a2d82614f266576d1
 const frozenMigration046SHA256 = "7b2f0714a2f0235d73c388aa493ab3a770da8148c90a8419b8940d5edb14b72b"
 const frozenMigration047SHA256 = "9c1fc194912c5c2863a3a1e687562774e7c94444b6de363c6fd5038a2f29eb6a"
 const frozenMigration048SHA256 = "218f1ca42ab472e0ae7fe23beee78d33839ee8565d14589f4528f61fef67cf6e"
+const frozenMigration049SHA256 = "bcfee1bd56ffb726f399356eeb12abe4ee4f267b11a9fb36cf4e27646bc3aca4"
 
 func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 	migrations, err := loadMigrationSet(migrationsFS)
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if got := migrations[len(migrations)-1].Version; got != 48 {
-		t.Fatalf("latest migration = %d, want 48", got)
+	if got := migrations[len(migrations)-1].Version; got != 49 {
+		t.Fatalf("latest migration = %d, want 49", got)
 	}
 	for i, migration := range migrations {
 		if migration.Version != i+1 {
@@ -51,9 +52,11 @@ func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 		migrations[46].Name != "047_memory_tray_pending_home_index.sql" ||
 		migrations[46].SHA256 != frozenMigration047SHA256 ||
 		migrations[47].Name != "048_git_team_memory_review.sql" ||
-		migrations[47].SHA256 != frozenMigration048SHA256 {
-		t.Fatalf("post-foundation migration fingerprints changed: 042=%q 043=%q 045=%q 046=%q 047=%q 048=%q",
-			migrations[41].SHA256, migrations[42].SHA256, migrations[44].SHA256, migrations[45].SHA256, migrations[46].SHA256, migrations[47].SHA256)
+		migrations[47].SHA256 != frozenMigration048SHA256 ||
+		migrations[48].Name != "049_git_team_memory_hook_approval.sql" ||
+		migrations[48].SHA256 != frozenMigration049SHA256 {
+		t.Fatalf("post-foundation migration fingerprints changed: 042=%q 043=%q 045=%q 046=%q 047=%q 048=%q 049=%q",
+			migrations[41].SHA256, migrations[42].SHA256, migrations[44].SHA256, migrations[45].SHA256, migrations[46].SHA256, migrations[47].SHA256, migrations[48].SHA256)
 	}
 
 	s, err := Open(filepath.Join(t.TempDir(), "pulse.db"))
@@ -81,8 +84,8 @@ func TestMigrations035Through039UpgradeFrozenV34TeamStoreWithoutFingerprintDrift
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 48 {
-		t.Fatalf("migration count = %d, want 48", len(migrations))
+	if len(migrations) != 49 {
+		t.Fatalf("migration count = %d, want 49", len(migrations))
 	}
 	if migrations[33].Name != "034_team_object_policy.sql" ||
 		migrations[33].SHA256 != frozenMigration034SHA256 ||
@@ -184,7 +187,7 @@ func TestMigrations035Through039UpgradeFrozenV34TeamStoreWithoutFingerprintDrift
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 48 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 49 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
@@ -212,7 +215,7 @@ func TestMigrations036Through039UpgradeFrozenV35TeamStoreWithoutFingerprintDrift
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 48 || migrations[34].Name != "035_team_memory.sql" ||
+	if len(migrations) != 49 || migrations[34].Name != "035_team_memory.sql" ||
 		migrations[34].SHA256 != frozenMigration035SHA256 ||
 		migrations[35].Name != "036_team_graph_delta.sql" ||
 		migrations[35].SHA256 != frozenMigration036SHA256 ||
@@ -310,7 +313,7 @@ func TestMigrations036Through039UpgradeFrozenV35TeamStoreWithoutFingerprintDrift
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 48 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 49 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
@@ -337,7 +340,7 @@ func TestMigrations038And039UpgradeFrozenV37TeamStoreWithoutFingerprintDrift(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 48 || migrations[36].Name != "037_team_semantic_materializations.sql" ||
+	if len(migrations) != 49 || migrations[36].Name != "037_team_semantic_materializations.sql" ||
 		migrations[36].SHA256 != frozenMigration037SHA256 ||
 		migrations[37].Name != "038_team_deletion.sql" ||
 		migrations[37].SHA256 != frozenMigration038SHA256 ||
@@ -430,7 +433,7 @@ func TestMigrations038And039UpgradeFrozenV37TeamStoreWithoutFingerprintDrift(t *
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 48 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 49 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{

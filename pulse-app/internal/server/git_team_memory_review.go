@@ -72,3 +72,32 @@ func (s *Server) handleGitTeamMemoryReject(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, result)
 }
+
+func (s *Server) handleGitTeamMemoryPresent(w http.ResponseWriter, r *http.Request) {
+	var req store.GitTeamMemoryPresentationRequest
+	if err := decodeMemoryTrayBody(r, &req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.cfg.Store.PresentGitTeamMemoryCards(req, time.Now().UTC())
+	if err != nil {
+		writeGitMemoryReviewError(w, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleGitTeamMemoryExactOK(w http.ResponseWriter, r *http.Request) {
+	var req store.GitTeamMemoryExactOKRequest
+	if err := decodeMemoryTrayBody(r, &req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.cfg.Store.ApproveExactGitTeamMemoryOK(req, time.Now().UTC())
+	if err != nil {
+		writeGitMemoryReviewError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, result)
+}

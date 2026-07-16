@@ -259,6 +259,132 @@ interface SemanticDeltaBody {
   raw_input_included: false;
 }
 
+const SHARED_SOURCE_REF_SCHEMA = {
+  type: 'object',
+  properties: {
+    source_id: { type: 'string' },
+    version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  },
+  required: ['source_id', 'version_digest'],
+  additionalProperties: false,
+};
+
+const SHARED_WARNING_SCHEMA = {
+  type: 'object',
+  properties: {
+    code: { type: 'string', enum: ['weak_evidence', 'confidentiality', 'over_broad', 'contradiction', 'unclear_scope'] },
+    summary: { type: 'string', minLength: 1, maxLength: 240 },
+  },
+  required: ['code', 'summary'],
+  additionalProperties: false,
+};
+
+const SHARED_CANDIDATE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['fact', 'decision', 'preference', 'project_state', 'open_loop', 'correction', 'do_not_repeat'] },
+    statement: { type: 'string', minLength: 1, maxLength: 1200 },
+    audience: { type: 'string', const: 'project' },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    source_references: { type: 'array', minItems: 1, maxItems: 1, items: SHARED_SOURCE_REF_SCHEMA },
+    advisory_warnings: { type: 'array', maxItems: 4, items: SHARED_WARNING_SCHEMA },
+  },
+  required: ['kind', 'statement', 'audience', 'confidence', 'source_references', 'advisory_warnings'],
+  additionalProperties: false,
+};
+
+export const GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS = [
+  {
+    name: 'pulse_source_register',
+    description: 'Register the current version of one repository-local text or Markdown source. Pulse stores metadata only; source bytes stay ephemeral.',
+    inputSchema: {
+      type: 'object', properties: { locator: { type: 'string', minLength: 1, maxLength: 512 } },
+      required: ['locator'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_source_window',
+    description: 'Read one bounded, safety-filtered ephemeral window from a registered repository-local source for active-harness extraction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        locator: { type: 'string', minLength: 1, maxLength: 512 },
+        cursor: { type: 'integer', minimum: 0 },
+        max_bytes: { type: 'integer', minimum: 64, maximum: 32768 },
+        expected_version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      },
+      required: ['locator', 'cursor', 'max_bytes'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_source_status',
+    description: 'Inspect content-free registration and processing state for one project source.',
+    inputSchema: {
+      type: 'object', properties: { source_id: { type: 'string' } },
+      required: ['source_id'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_stage',
+    description: 'Stage bounded project-memory candidates extracted by the active harness. This cannot approve or publish them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source_id: { type: 'string' },
+        source_version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        candidates: { type: 'array', minItems: 1, maxItems: 20, items: SHARED_CANDIDATE_SCHEMA },
+        raw_input_included: { type: 'boolean', const: false },
+      },
+      required: ['source_id', 'source_version_digest', 'candidates', 'raw_input_included'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_inspect',
+    description: 'Inspect one staged or terminal shared-memory review batch and its current candidate versions.',
+    inputSchema: {
+      type: 'object', properties: { batch_id: { type: 'string' } },
+      required: ['batch_id'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_edit',
+    description: 'Edit one staged candidate by expected version. Any prior card presentation is invalidated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidate_id: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+        candidate: SHARED_CANDIDATE_SCHEMA,
+      },
+      required: ['candidate_id', 'expected_version', 'candidate'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_reject',
+    description: 'Reject one staged candidate by expected version. Rejected content never enters shared retrieval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidate_id: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+        reason_code: { type: 'string', const: 'user_rejected' },
+      },
+      required: ['candidate_id', 'expected_version', 'reason_code'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_cards',
+    description: 'Render the exact canonical human-readable card block for one staged batch. The next trusted Stop hook must observe this block before exact ok can approve it.',
+    inputSchema: {
+      type: 'object', properties: { batch_id: { type: 'string' } },
+      required: ['batch_id'], additionalProperties: false,
+    },
+  },
+];
+
+const GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES = new Set(
+  GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS.map(({ name }) => name),
+);
+
 interface DevOAuthCode {
   clientId: string;
   redirectUri: string;
@@ -336,6 +462,12 @@ interface ProductRuntimeModule {
     name: string,
     input: unknown,
   ): Promise<unknown>;
+  callBoundLocalProductTool(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code',
+    name: string,
+    input: unknown,
+  ): Promise<unknown>;
 }
 
 async function productRuntimeModule(): Promise<ProductRuntimeModule> {
@@ -388,6 +520,14 @@ async function callProductTeamTool(name: string, input: unknown): Promise<unknow
   if (!PRODUCT_HOST || !PRODUCT_TEAM_BINDING) throw new Error('Pulse Team binding is unavailable');
   const runtime = await productRuntimeModule();
   return runtime.callBoundTeamTool(productRuntimeResolution(), PRODUCT_HOST, name, input);
+}
+
+async function callProductLocalTool(name: string, input: unknown): Promise<unknown> {
+  if (!PRODUCT_HOST || !GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES.has(name)) {
+    throw new Error('Pulse local product tool is unavailable');
+  }
+  const runtime = await productRuntimeModule();
+  return runtime.callBoundLocalProductTool(productRuntimeResolution(), PRODUCT_HOST, name, input);
 }
 
 function jsonText(value: unknown) {
@@ -971,9 +1111,12 @@ export function createPulseMcpServer(
     const localTools = PRODUCT_HOST_ADAPTER
       ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
       : tools;
-    if (!PRODUCT_TEAM_BINDING) return { tools: localTools };
+    const productTools = PRODUCT_HOST_ADAPTER
+      ? [...localTools, ...GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS]
+      : localTools;
+    if (!PRODUCT_TEAM_BINDING) return { tools: productTools };
     const { TEAM_INSTALLED_READ_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
-    return { tools: [...localTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
+    return { tools: [...productTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -1047,6 +1190,9 @@ export function createPulseMcpServer(
           if (remoteResult) return remoteResult;
           throw error;
         }
+      }
+      if (PRODUCT_HOST_ADAPTER && GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES.has(name)) {
+        return jsonText(await callProductLocalTool(name, args));
       }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);

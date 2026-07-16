@@ -16,7 +16,9 @@ import {
   hookBundleDigest,
   migrateLegacyPulseHookConfig,
   normalizeCodexHook,
+  renderGitTeamMemoryCards,
   renderPulseContext,
+  verifyGitTeamMemoryCardBlock,
   validateHookReadiness,
 } from './host-adapter.js';
 import {
@@ -64,6 +66,139 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '.
 function opaque(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
 }
+
+function sharedMemoryBatch() {
+  return {
+    schema: 'pulse.git_team_memory.inspect.v1',
+    batch_id: 'shared_batch_cards_01', portable_project_id: 'project_0123456789abcdef0123456789abcdef',
+    source_id: 'source_cards_01', source_version_digest: 'b'.repeat(64),
+    source_locator: 'notes/team.md', host: 'codex', task_id: 'task_cards_01', generation: 1,
+    state: 'staged', created_at: '2026-07-16T10:00:00Z', updated_at: '2026-07-16T10:00:00Z',
+    candidates: [{
+      candidate_id: 'shared_candidate_cards_01', batch_id: 'shared_batch_cards_01', ordinal: 0,
+      version: 1, state: 'staged', kind: 'decision',
+      statement: 'Use the approved brief before drafting the launch page.', audience: 'project',
+      confidence: 0.91,
+      source_references: [{ source_id: 'source_cards_01', version_digest: 'b'.repeat(64) }],
+      advisory_warnings: [{ code: 'weak_evidence', summary: 'Confirm with the project owner.' }],
+      content_digest: 'c'.repeat(64), created_at: '2026-07-16T10:00:00Z',
+    }],
+  };
+}
+
+test('shared-memory cards are canonical, readable, and reject altered or duplicate blocks', () => {
+  const cards = renderGitTeamMemoryCards(sharedMemoryBatch());
+  assert.match(cards.block, /^\[PULSE TEAM MEMORY CARDS v1 batch=shared_batch_cards_01 generation=1\]/);
+  assert.match(cards.block, /Use the approved brief before drafting the launch page/);
+  assert.match(cards.block, /Reply exactly `ok`/);
+  assert.deepEqual(cards.candidate_digests, ['c'.repeat(64)]);
+  assert.match(cards.card_block_digest, /^[a-f0-9]{64}$/);
+  assert.equal(verifyGitTeamMemoryCardBlock(`Here are the cards:\n\n${cards.block}`, cards), true);
+  assert.equal(verifyGitTeamMemoryCardBlock(cards.block.replace('approved brief', 'private transcript'), cards), false);
+  assert.equal(verifyGitTeamMemoryCardBlock(`${cards.block}\n${cards.block}`, cards), false);
+});
+
+test('trusted Stop presents only the exact canonical shared-memory card block without persisting assistant text', async () => {
+  const batch = sharedMemoryBatch();
+  const cards = renderGitTeamMemoryCards(batch);
+  const calls = [];
+  const sharedResolved = {
+    ...resolved,
+    binding: { ...resolved.binding, workspace: { ...resolved.binding.workspace, repository_id: 'repository_cards_01' } },
+  };
+  const output = await handleCodexHook('Stop', {
+    ...base, hook_event_name: 'Stop', stop_hook_active: false,
+    last_assistant_message: `Cards ready for review.\n\n${cards.block}`,
+  }, {
+    resolveRuntime: () => sharedResolved,
+    portableProjectID: () => batch.portable_project_id,
+    readFinalizeMarker: () => { throw new Error('not finalized'); },
+    request: async (_resolved, path, options) => {
+      calls.push({ path, options });
+      if (path === '/project/shared-memory/review/inspect') return batch;
+      if (path === '/project/shared-memory/review/present') {
+        return {
+          schema: 'pulse.git_team_memory.presentation.v1', presentation_id: 'card_presentation_01',
+          generation_id: 'card_generation_01', batch_id: batch.batch_id, batch_generation: 1,
+          card_block_digest: cards.card_block_digest, candidate_digests: cards.candidate_digests,
+          state: 'presented', presented_at: '2026-07-16T10:00:00Z', expires_at: '2026-07-16T10:10:00Z',
+        };
+      }
+      if (path === '/turn/no-change') return { status: 'no_change' };
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  assert.match(output.systemMessage ?? JSON.stringify({ output, calls }), /card_presentation_01/);
+  assert.deepEqual(calls.map((item) => item.path), [
+    '/project/shared-memory/review/inspect',
+    '/project/shared-memory/review/present',
+    '/turn/no-change',
+  ]);
+  assert.equal(calls[1].options.body.card_block_digest, cards.card_block_digest);
+  assert.deepEqual(calls[1].options.body.candidate_digests, cards.candidate_digests);
+  assert.doesNotMatch(JSON.stringify(calls), /Cards ready for review|Use the approved brief/);
+});
+
+test('UserPromptSubmit mints a shared-memory lease only for exact normalized ok', async () => {
+  const calls = [];
+  const sharedResolved = {
+    ...resolved,
+    binding: { ...resolved.binding, workspace: { ...resolved.binding.workspace, repository_id: 'repository_cards_01' } },
+  };
+  const lease = {
+    schema: 'pulse.git_team_memory.approval_lease.v1', lease_id: 'approval_lease_01',
+    presentation_id: 'card_presentation_01', batch_id: 'shared_batch_cards_01', batch_generation: 1,
+    candidate_digests: ['c'.repeat(64)], authority_digest: 'd'.repeat(64), state: 'issued',
+    issued_at: '2026-07-16T10:00:01Z', expires_at: '2026-07-16T10:00:31Z',
+  };
+  const exact = await handleCodexHook('UserPromptSubmit', {
+    ...base, prompt: '  OK  ',
+  }, {
+    now: () => new Date('2026-07-16T10:00:01Z'),
+    resolveRuntime: () => sharedResolved,
+    portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
+    writeTurnContext: () => ({}),
+    request: async (_resolved, path, options) => {
+      calls.push({ path, options });
+      return lease;
+    },
+  });
+  assert.deepEqual(calls.map((item) => item.path), ['/project/shared-memory/review/exact-ok'], JSON.stringify(exact));
+  assert.match(exact.hookSpecificOutput.additionalContext, /approval_lease_01/);
+  assert.doesNotMatch(JSON.stringify(calls), /  OK  /);
+
+  calls.length = 0;
+  const longer = await handleCodexHook('UserPromptSubmit', {
+    ...base, prompt: 'ok, but change the second card',
+  }, {
+    resolveRuntime: () => sharedResolved,
+    writeTurnContext: () => ({}),
+    request: async (_resolved, path, options) => { calls.push({ path, options }); return lease; },
+  });
+  assert.equal(calls.length, 0);
+  assert.doesNotMatch(longer.hookSpecificOutput.additionalContext, /approval_lease_01/);
+});
+
+test('ordinary exact ok without pending cards keeps normal Pulse context instead of degrading', async () => {
+  const sharedResolved = {
+    ...resolved,
+    binding: { ...resolved.binding, workspace: { ...resolved.binding.workspace, repository_id: 'repository_cards_01' } },
+  };
+  const output = await handleCodexHook('UserPromptSubmit', { ...base, prompt: 'ok' }, {
+    resolveRuntime: () => sharedResolved,
+    portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
+    writeTurnContext: () => ({}),
+    request: async () => {
+      const error = new Error('pulse_http_409:git team memory approval is unavailable');
+      error.status = 409;
+      throw error;
+    },
+  });
+  assert.equal(output.continue, true);
+  assert.equal(output.systemMessage, undefined);
+  assert.match(output.hookSpecificOutput.additionalContext, /pulse\.context_lease/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /approval lease/);
+});
 
 function testTreeDigest(root) {
 	const hash = createHash('sha256');
@@ -402,6 +537,27 @@ test('PreToolUse mints one content-free exact-argument lease for pulse_remember'
   assert.equal(leases[0][4], 'tool-memory-lease');
 });
 
+test('PreToolUse mints the same host lease for local shared-memory tools', async () => {
+  const leases = [];
+  const toolInput = { locator: 'notes/team.md', cursor: 0, max_bytes: 512 };
+  const output = await handleCodexHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__pulse-product__pulse_source_window',
+    tool_input: toolInput,
+    tool_use_id: 'tool-source-window-lease',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...values) => leases.push(values),
+  });
+  assert.deepEqual(output, {});
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0][2], 'mcp__pulse-product__pulse_source_window');
+  assert.deepEqual(leases[0][3], toolInput);
+});
+
 test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before shell execution', async () => {
   for (const command of [
     'pulse wipe --confirm "wipe pulse memory"',
@@ -409,6 +565,8 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
     "script -q /dev/null pulse wipe --confirm 'wipe pulse memory'",
     'script -q /dev/null node /opt/pulse/src/cli.js delete --id pulse:1',
     'curl -X POST http://127.0.0.1:18801/memory/wipe',
+    'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/exact-ok',
+    'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/present',
     'cat ~/.pulse/secret.key',
   ]) {
     const output = await handleCodexHook('PreToolUse', {

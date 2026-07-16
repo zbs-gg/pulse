@@ -12,7 +12,7 @@ func TestMigration038InstallsMetadataOnlyDeletionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 48 || migrations[37].Version != 38 ||
+	if len(migrations) != 49 || migrations[37].Version != 38 ||
 		migrations[37].Name != "038_team_deletion.sql" {
 		t.Fatalf("migration 038 = %+v (count %d), want frozen 038_team_deletion.sql", migrations[37], len(migrations))
 	}

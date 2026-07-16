@@ -19,12 +19,15 @@ import {
   contextLease,
   eventBoundContextLease,
   extractPulseReceiptRefs,
+  gitTeamMemoryCardMarkers,
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
   isGuardedCodexTool,
   isTrustedPulseProductTool,
   normalizeCodexHook,
   renderAdditionalContext,
+  renderGitTeamMemoryCards,
+  verifyGitTeamMemoryCardBlock,
 } from './host-adapter.js';
 import {
 	activatedBoundPulseRequest,
@@ -35,6 +38,7 @@ import {
   writeCodexToolLease,
   writeCodexTurnContext,
 } from './codex-runtime.js';
+import { ensureBoundPortableProjectID } from './project-source.js';
 import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
@@ -96,6 +100,67 @@ function threadContext(resolved, event) {
 
 function opaqueTurnCorrelation(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
+}
+
+function sharedMemoryAuthority(resolved, dependencies) {
+  const portableProjectID = (dependencies.portableProjectID ?? ensureBoundPortableProjectID)(resolved);
+  const repositoryID = resolved?.binding?.workspace?.repository_id;
+  const bindingDigest = resolved?.binding?.binding_digest;
+  if (!/^project_[a-f0-9]{32}$/.test(portableProjectID ?? '') ||
+      typeof repositoryID !== 'string' || !repositoryID.startsWith('repository_') ||
+      !/^[a-f0-9]{64}$/.test(bindingDigest ?? '')) {
+    throw new Error('git_team_memory_hook_authority_unavailable');
+  }
+  return {
+    portable_project_id: portableProjectID,
+    repository_id: repositoryID,
+    binding_digest: bindingDigest,
+  };
+}
+
+function exactGitTeamMemoryOK(value) {
+  return typeof value === 'string' && value.normalize('NFC').trim().toLowerCase() === 'ok';
+}
+
+async function presentGitTeamMemoryCards(resolved, event, rawInput, request, dependencies) {
+  const markers = gitTeamMemoryCardMarkers(rawInput.last_assistant_message);
+  if (markers.length === 0) return undefined;
+  if (markers.length !== 1) throw new Error('git_team_memory_card_presentation_ambiguous');
+  const authority = sharedMemoryAuthority(resolved, dependencies);
+  const batch = await request(resolved, '/project/shared-memory/review/inspect', {
+    body: {
+      schema: 'pulse.git_team_memory.inspect.v1', ...authority, batch_id: markers[0].batch_id,
+    },
+  });
+  const cards = renderGitTeamMemoryCards(batch);
+  if (cards.batch_generation !== markers[0].batch_generation ||
+      !verifyGitTeamMemoryCardBlock(rawInput.last_assistant_message, cards)) {
+    throw new Error('git_team_memory_card_presentation_mismatch');
+  }
+  return request(resolved, '/project/shared-memory/review/present', {
+    body: {
+      schema: 'pulse.git_team_memory.presentation.v1', ...authority,
+      batch_id: cards.batch_id, batch_generation: cards.batch_generation,
+      host: 'codex', task_id: batch.task_id,
+      session_ref: opaqueTurnCorrelation('session', event.session_id),
+      turn_ref: opaqueTurnCorrelation('turn', event.turn_id),
+      source_event_digest: event.source_event_key.slice('event_'.length),
+      card_block_digest: cards.card_block_digest,
+      candidate_digests: cards.candidate_digests,
+    },
+  });
+}
+
+async function approveExactGitTeamMemoryOK(resolved, event, rawInput, request, dependencies) {
+  if (!exactGitTeamMemoryOK(rawInput.prompt)) return undefined;
+  const authority = sharedMemoryAuthority(resolved, dependencies);
+  return request(resolved, '/project/shared-memory/review/exact-ok', {
+    body: {
+      schema: 'pulse.git_team_memory.exact_ok.v1', ...authority, host: 'codex',
+      session_ref: opaqueTurnCorrelation('session', event.session_id),
+      prompt_event_digest: event.source_event_key.slice('event_'.length),
+    },
+  });
 }
 
 function receiptMatchesEvent(receipt, ref, marker, event) {
@@ -199,7 +264,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.readTurnContext ?? readCodexTurnContext)(resolved, stopEvent, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (rawInput.tool_name === 'mcp__pulse-product__pulse_remember') {
+      if (isTrustedPulseProductTool(rawInput.tool_name)) {
         (dependencies.writeToolLease ?? writeCodexToolLease)(
           resolved, stopEvent, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -223,11 +288,20 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     if (eventName === 'UserPromptSubmit') {
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
+      let approval;
+      try {
+        approval = await approveExactGitTeamMemoryOK(resolved, event, rawInput, request, dependencies);
+      } catch (error) {
+        if (error?.status !== 409 || !/approval is unavailable/.test(error.message ?? '')) throw error;
+      }
+      const approvalContext = approval
+        ? `\nPulse shared-memory approval lease (host-owned; single-use): ${JSON.stringify(approval)}`
+        : '';
       return healthy({
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: renderAdditionalContext([], contextLease(resolved.binding, now)),
+          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}`,
         },
       });
     }
@@ -271,6 +345,13 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       return healthy({});
     }
     if (eventName === 'Stop') {
+      const presentation = await presentGitTeamMemoryCards(resolved, event, rawInput, request, dependencies);
+      if (presentation) {
+        await finalizeNoChange(resolved, event, request);
+        return healthy({
+          systemMessage: `Pulse shared-memory cards presented: ${presentation.presentation_id}`,
+        });
+      }
       try {
         (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, event);
         return healthy({});

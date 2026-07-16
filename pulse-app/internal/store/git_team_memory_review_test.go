@@ -160,3 +160,189 @@ func TestGitTeamMemoryStageRejectsStaleSourceBeforeDurableRows(t *testing.T) {
 		t.Fatalf("stale source persisted %d candidates", count)
 	}
 }
+
+func TestGitTeamMemoryTrustedPresentationAndExactOKIssueSingleUseLease(t *testing.T) {
+	vault, _ := openGitMemoryDeskStore(t)
+	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	source, err := vault.RegisterProjectSource(
+		gitMemorySourceRegistration("notes/team.md", strings.Repeat("b", 64), 120), now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageSharedReviewRequest(source,
+		safeSharedReviewCandidate("Use the approved project brief before drafting a launch page."))
+	stage.TaskID = "session_git_memory_approval"
+	staged, err := vault.StageGitTeamMemoryReview(stage, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := staged.Candidates[0]
+	presented, err := vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+		Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex",
+		TaskID: stage.TaskID, SessionRef: "session:" + strings.Repeat("1", 64),
+		TurnRef: "turn:" + strings.Repeat("2", 64), SourceEventDigest: strings.Repeat("3", 64),
+		CardBlockDigest: strings.Repeat("4", 64), CandidateDigests: []string{candidate.ContentDigest},
+	}, now)
+	if err != nil || presented.State != "presented" || presented.BatchID != staged.BatchID {
+		t.Fatalf("presentation = %#v, err=%v", presented, err)
+	}
+	lease, err := vault.ApproveExactGitTeamMemoryOK(GitTeamMemoryExactOKRequest{
+		Schema: GitTeamMemoryExactOKSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		Host: "codex", SessionRef: "session:" + strings.Repeat("1", 64),
+		PromptEventDigest: strings.Repeat("5", 64),
+	}, now.Add(time.Second))
+	if err != nil || lease.State != "issued" || lease.BatchID != staged.BatchID ||
+		len(lease.CandidateDigests) != 1 || lease.CandidateDigests[0] != candidate.ContentDigest {
+		t.Fatalf("lease = %#v, err=%v", lease, err)
+	}
+	inspected, err := vault.InspectGitTeamMemoryReview(GitTeamMemoryInspectRequest{
+		Schema: GitTeamMemoryInspectSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding, BatchID: staged.BatchID,
+	})
+	if err != nil || inspected.State != "approved" || inspected.Candidates[0].State != "approved" {
+		t.Fatalf("approved batch = %#v, err=%v", inspected, err)
+	}
+	consumed, err := vault.ConsumeGitTeamMemoryApprovalLease(lease.LeaseID, now.Add(2*time.Second))
+	if err != nil || consumed.State != "consumed" {
+		t.Fatalf("consume = %#v, err=%v", consumed, err)
+	}
+	if _, err := vault.ConsumeGitTeamMemoryApprovalLease(lease.LeaseID, now.Add(3*time.Second)); !errors.Is(err, ErrGitTeamMemoryApprovalUnavailable) {
+		t.Fatalf("replayed lease error = %v", err)
+	}
+}
+
+func TestGitTeamMemoryEditInvalidatesTrustedPresentation(t *testing.T) {
+	vault, _ := openGitMemoryDeskStore(t)
+	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	source, err := vault.RegisterProjectSource(
+		gitMemorySourceRegistration("notes/team.md", strings.Repeat("b", 64), 120), now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageSharedReviewRequest(source,
+		safeSharedReviewCandidate("Use the approved project brief before drafting a launch page."))
+	stage.TaskID = "session_git_memory_edit"
+	staged, err := vault.StageGitTeamMemoryReview(stage, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := staged.Candidates[0]
+	_, err = vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+		Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex", TaskID: stage.TaskID,
+		SessionRef: "session:" + strings.Repeat("6", 64), TurnRef: "turn:" + strings.Repeat("7", 64),
+		SourceEventDigest: strings.Repeat("8", 64), CardBlockDigest: strings.Repeat("9", 64),
+		CandidateDigests: []string{candidate.ContentDigest},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editedInput := safeSharedReviewCandidate("Use the approved project brief and current constraints before drafting.")
+	editedInput.SourceReferences[0].SourceID = source.SourceID
+	editedInput.SourceReferences[0].VersionDigest = source.VersionDigest
+	if _, err := vault.EditGitTeamMemoryCandidate(GitTeamMemoryEditRequest{
+		Schema: GitTeamMemoryEditSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		CandidateID: candidate.CandidateID, ExpectedVersion: 1, Candidate: editedInput,
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.ApproveExactGitTeamMemoryOK(GitTeamMemoryExactOKRequest{
+		Schema: GitTeamMemoryExactOKSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		Host: "codex", SessionRef: "session:" + strings.Repeat("6", 64),
+		PromptEventDigest: strings.Repeat("a", 64),
+	}, now.Add(2*time.Second)); !errors.Is(err, ErrGitTeamMemoryApprovalUnavailable) {
+		t.Fatalf("edited presentation approval error = %v", err)
+	}
+}
+
+func TestGitTeamMemoryExactOKRejectsWrongTaskExpiredAndAmbiguousPresentations(t *testing.T) {
+	vault, _ := openGitMemoryDeskStore(t)
+	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	source, err := vault.RegisterProjectSource(
+		gitMemorySourceRegistration("notes/team.md", strings.Repeat("b", 64), 120), now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := func(taskID, sessionRef, eventDigest, cardDigest, idempotency string, at time.Time) GitTeamMemoryBatchView {
+		t.Helper()
+		stage := stageSharedReviewRequest(source,
+			safeSharedReviewCandidate("Use the approved project brief before drafting a launch page."))
+		stage.TaskID = taskID
+		stage.IdempotencyKey = idempotency
+		staged, err := vault.StageGitTeamMemoryReview(stage, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+			Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+			RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+			BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex", TaskID: taskID,
+			SessionRef: sessionRef, TurnRef: "turn:" + strings.Repeat("d", 64),
+			SourceEventDigest: eventDigest, CardBlockDigest: cardDigest,
+			CandidateDigests: []string{staged.Candidates[0].ContentDigest},
+		}, at); err != nil {
+			t.Fatal(err)
+		}
+		return staged
+	}
+
+	wrongStage := stageSharedReviewRequest(source,
+		safeSharedReviewCandidate("Use the approved project brief before drafting a launch page."))
+	wrongStage.TaskID = "task_expected"
+	wrongStage.IdempotencyKey = "stage_wrong_task"
+	wrong, err := vault.StageGitTeamMemoryReview(wrongStage, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+		Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		BatchID: wrong.BatchID, BatchGeneration: wrong.Generation, Host: "codex", TaskID: "task_wrong",
+		SessionRef: "session:" + strings.Repeat("e", 64), TurnRef: "turn:" + strings.Repeat("f", 64),
+		SourceEventDigest: strings.Repeat("1", 64), CardBlockDigest: strings.Repeat("2", 64),
+		CandidateDigests: []string{wrong.Candidates[0].ContentDigest},
+	}, now); !errors.Is(err, ErrGitTeamMemoryVersionConflict) {
+		t.Fatalf("wrong task presentation error = %v", err)
+	}
+
+	expiredSession := "session:" + strings.Repeat("3", 64)
+	expiredBatch := present("task_expired", expiredSession, strings.Repeat("4", 64), strings.Repeat("5", 64), "stage_expired", now)
+	if _, err := vault.ApproveExactGitTeamMemoryOK(GitTeamMemoryExactOKRequest{
+		Schema: GitTeamMemoryExactOKSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		Host: "codex", SessionRef: expiredSession, PromptEventDigest: strings.Repeat("6", 64),
+	}, now.Add(11*time.Minute)); !errors.Is(err, ErrGitTeamMemoryApprovalUnavailable) {
+		t.Fatalf("expired presentation approval error = %v", err)
+	}
+	represented, err := vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+		Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		BatchID: expiredBatch.BatchID, BatchGeneration: expiredBatch.Generation, Host: "codex", TaskID: "task_expired",
+		SessionRef: expiredSession, TurnRef: "turn:" + strings.Repeat("e", 64),
+		SourceEventDigest: strings.Repeat("f", 64), CardBlockDigest: strings.Repeat("5", 64),
+		CandidateDigests: []string{expiredBatch.Candidates[0].ContentDigest},
+	}, now.Add(11*time.Minute))
+	if err != nil || represented.State != "presented" || represented.PresentationID == "" {
+		t.Fatalf("re-present expired cards = %#v, err=%v", represented, err)
+	}
+
+	ambiguousSession := "session:" + strings.Repeat("7", 64)
+	present("task_ambiguous_one", ambiguousSession, strings.Repeat("8", 64), strings.Repeat("9", 64), "stage_ambiguous_one", now)
+	present("task_ambiguous_two", ambiguousSession, strings.Repeat("a", 64), strings.Repeat("c", 64), "stage_ambiguous_two", now)
+	if _, err := vault.ApproveExactGitTeamMemoryOK(GitTeamMemoryExactOKRequest{
+		Schema: GitTeamMemoryExactOKSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		Host: "codex", SessionRef: ambiguousSession, PromptEventDigest: strings.Repeat("d", 64),
+	}, now.Add(time.Second)); !errors.Is(err, ErrGitTeamMemoryApprovalAmbiguous) {
+		t.Fatalf("ambiguous presentation approval error = %v", err)
+	}
+}
