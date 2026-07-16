@@ -290,12 +290,16 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 8, { realInputs });
 	const productEvidence = realInputs ? {
 		authority: 'synthetic-test', production_install_proof: false,
+		package_source: 'npm-pack', system_go_exposed: false, system_python_exposed: false,
+		git_team_modules_packaged: true, external_publication_performed: false,
 		embedder: 'real-mlx-bge-m3', full_retrieval: true,
 		model_sha256: realInputs.modelDigest.sha256,
 		runtime_sha256: realInputs.runtimeDigest.sha256,
 		schema: 'pulse.codex_product_e2e.v1',
 	} : {
 		authority: 'synthetic-test', production_install_proof: false,
+		package_source: 'npm-pack', system_go_exposed: false, system_python_exposed: false,
+		git_team_modules_packaged: true, external_publication_performed: false,
 		embedder: 'synthetic-protocol-fixture', full_retrieval: true,
 		schema: 'pulse.codex_product_e2e.v1',
 	};
@@ -307,6 +311,15 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
     timeout: 120_000,
   });
   const packedCLI = join(installRoot, 'node_modules', '@zbs-gg', 'pulse', 'src', 'cli.js');
+	const packedPackageRoot = resolve(packedCLI, '..', '..');
+	for (const relative of [
+		'src/git-team-memory.js',
+		'src/project-source.js',
+		'vendor/pulse-mcp-dist/index.js',
+	]) {
+		assert.equal(existsSync(join(packedPackageRoot, relative)), true,
+			`packed Personal runtime must carry the dormant Git Team module ${relative}`);
+	}
 	const tools = join(root, 'tools');
 	mkdirSync(tools, { mode: 0o700 });
 	const codexExecutable = run('/usr/bin/which', ['codex']).stdout.trim();

@@ -1,92 +1,74 @@
 # Install Pulse With Your AI Agent
 
-Pulse is meant to be installed trust-first: your agent audits before
-anything is written. The agent-facing script is [`AGENTS.md`](../AGENTS.md)
-— audit → explain → confirm → install the Local Preview → `pulse doctor` →
-`pulse demo` (or say plainly that the machine only supports Safe Mode).
+Pulse is installed trust-first: your agent audits the exact package, explains
+the local changes, asks for consent, runs one command, and then proves one real
+memory across two Codex tasks. The maintained agent procedure is
+[`AGENTS.md`](../AGENTS.md).
 
-## Codex product path
+## The command
 
-The Codex product path is an installable repository marketplace plugin. It is
-separate from the legacy generic MCP fallback. `pulse connect codex` installs
-the marketplace plugin and an integrity-checked local runtime under
-`~/.pulse/runtime/codex/current`; trusted hooks and MCP use that pinned local
-copy and never run `npx` or fetch a moving package at execution time.
-
-The plugin bundles native Codex lifecycle hooks and a collision-resistant
-`pulse-product` stdio MCP launcher. It never configures `url` on that stdio
-server and it never reads `transcript_path` or `agent_transcript_path`.
-
-Before connecting real work, Pulse must already have a trusted workspace
-binding and an owner-controlled product daemon at
-`~/.pulse/bin/pulse-product-daemon`. Then run from the bound repository:
+From the Git project that should receive Personal memory:
 
 ```bash
-pulse connect codex
+npx @zbs-gg/pulse@preview install
 ```
 
-Start a new Codex task, open `/hooks`, inspect the exact Pulse commands, and
-trust them. Codex records trust against the hook definition hash; Pulse does
-not bypass that review. In `/mcp`, verify `pulse-product` is active. Automatic
-mode is ready only after a trusted hook has actually run, the exact bound
-Personal or Desk vault answers an authenticated live check, and doctor reports
-full retrieval through local MLX or an explicitly configured Cohere embedder.
+The Personal Codex installer verifies a signed release and provisions its own
+daemon, local embedding runtime, model, Codex plugin, and macOS presence helper.
+It does not require Go, Python, Make, Docker, a model API key, or manual config
+editing. Memory remains in a private project-bound local vault; raw transcript
+capture, backend model calls, old-chat import, and Personal-to-Git publication
+are off by default.
 
-To disconnect without deleting memory:
+The wizard may pause for two real human actions: the macOS presence prompt and
+trusting the exact Pulse hook set in Codex. Rerun the same command or use
+`pulse repair`; verified completed work is reused.
+
+## What the agent must show you
 
 ```bash
+pulse doctor codex
+pulse home
+```
+
+The only ready verdict is `Pulse Codex automatic lifecycle ready.` Memory Home
+must show the pending card before save, the saved receipt afterwards, the
+context offered to a fresh task, its acknowledgement state, and an honest
+token state: `collecting`, `estimated`, or `measured`.
+
+The proof is one normal memory from real work, then a fresh Codex task in the
+same project. A simulated corpus or source-checkout test is not a substitute.
+
+## Repair, disconnect, and data
+
+```bash
+pulse repair
 pulse disconnect codex
 ```
 
-For complete removal of the executable integration while preserving memory:
-
-```bash
-pulse disconnect codex
-pulse supervisor stop
-codex plugin marketplace remove zbs-gg
-rm -rf ~/.pulse/runtime/codex
-```
-
-Memory remains in its bound Personal or Desk vault. Individual deletion stays
-human-controlled. Whole-vault product wipe fails closed until the privileged
-OS-backed Pulse surface can issue a fresh `vault.wipe` presence assertion; a
-terminal, pseudo-terminal, confirmation phrase, hook, or HTTP caller is never
-accepted as that assertion. Local Preview keeps its separate exact-confirmation
-wipe contract.
-
-The plugin injects remembered text only as `pulse.context.v1` inert evidence.
-Human-approved practices remain a separate array. A model cannot choose the
-Vault, Team, role, audience, visibility, principal, or destination. Private
-writes first return a visible pending Memory Tray receipt and commit only after
-the grace period unless the user edits or cancels them.
+Disconnect preserves memory. Whole-vault wipe is a separate OS-presence-bound
+operation. The agent must not delete `~/.pulse`, another project vault, or any
+memory merely because the integration was removed.
 
 ## Copyable prompt
 
-The maintained copy of this prompt lives in the repo root
-[README](../README.md#copy-this-message-to-your-ai-agent). Short form:
-
 ```text
-Hi. Please check whether it is safe to install Pulse:
-https://github.com/zbs-gg/pulse
+Please audit and install Pulse Personal for this Codex project.
 
-Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
-Check: npm view @zbs-gg/pulse dist-tags
-Explain which harness path fits my setup, what Pulse writes, what it will not
-do by default, and how I can erase it. Ask my confirmation before installing.
+1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
+2. Check `npm view @zbs-gg/pulse dist-tags --json`. Personal requires preview
+   0.7.0 or newer with its signed manifest and exact release assets.
+3. Explain every local write, privacy default, repair step, and removal step.
+4. Ask me before installing.
+5. After I approve, run:
+     npx @zbs-gg/pulse@preview install
+6. Read `pulse doctor codex` literally and open `pulse home`.
+7. Help me save one visible memory, start a fresh Codex task, and show the
+   continuity and token-economy receipts in Memory Home.
 
-For Claude Code full local preview:
-  npx @zbs-gg/pulse@preview init claude-code
-  pulse doctor
-  pulse demo
-
-For other MCP-compatible hosts:
-  configure the host to run:
-  npx -y @zbs-gg/pulse@preview mcp
-  and say plainly that this is Safe Mode/fallback, not the full state-aware
-  Pulse engine.
-
-No old-chat import without separate confirmation. No raw transcripts. No
-secrets in output. Stop and explain if anything looks unsafe.
+Do not import old chats, store raw transcripts, print secrets, push Personal
+memory to Git, or call fallback/synthetic evidence the product.
 ```
 
-Security checklist for the agent: [`SECURITY_INSTALL_CHECKLIST.md`](SECURITY_INSTALL_CHECKLIST.md).
+Unsupported hosts may run `npx -y @zbs-gg/pulse@preview mcp`, but the agent
+must call it Safe Mode and say that full state-aware retrieval is not enabled.

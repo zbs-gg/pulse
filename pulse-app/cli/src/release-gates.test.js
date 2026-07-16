@@ -7,15 +7,28 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-test('release verification includes real Personal MLX, Team race, and portable deployment gates', () => {
+test('release verification includes packed Personal clean-room, interruption, physical attestation, real MLX, Team race, and portable deployment gates', () => {
   const makefile = readFileSync(join(root, 'Makefile'), 'utf8');
-  assert.match(makefile, /verify:[\s\S]*test:codex-team-packaging-contract/);
+  assert.match(makefile, /verify:[\s\S]*test:personal-clean-room[\s\S]*test:personal-interruption[\s\S]*test:codex-team-packaging-contract/);
+  assert.match(makefile, /^personal-preview-attestation:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent attest:personal-preview/m);
   assert.match(makefile, /^team-race-release:.*\n\tcd \$\(APP_DIR\) && \$\(GO\) test -race -count=1 -timeout 20m /m);
   assert.match(makefile, /^team-deploy-static-verify:/m);
   assert.match(makefile, /^personal-real-mlx-release:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent test:codex-product:real-mlx/m);
-  assert.match(makefile, /^release-verify:.*personal-real-mlx-release.*team-race-release.*team-deploy-static-verify/m);
+  assert.match(makefile, /^release-verify:.*personal-real-mlx-release.*personal-preview-attestation.*team-race-release.*team-deploy-static-verify/m);
 
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    packageJSON.scripts?.['test:personal-clean-room'],
+    'node scripts/personal-preview-clean-room.mjs',
+  );
+  assert.equal(
+    packageJSON.scripts?.['test:personal-interruption'],
+    'node scripts/personal-preview-interruption-e2e.mjs',
+  );
+  assert.equal(
+    packageJSON.scripts?.['attest:personal-preview'],
+    'node scripts/personal-preview-release-attestation.mjs',
+  );
   assert.equal(
     packageJSON.scripts?.['test:codex-product:real-mlx'],
     'PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs',
@@ -27,6 +40,36 @@ test('release verification includes real Personal MLX, Team race, and portable d
 	assert.match(productE2E, /materializeVerifiedDmg/);
 	assert.match(productE2E, /quality_claimed !== true/);
 	assert.doesNotMatch(productE2E, /materializeAdHocDmgForE2E|testOnlyMaterializer:\s*true/);
+	for (const script of [
+		'personal-preview-clean-room.mjs',
+		'personal-preview-interruption-e2e.mjs',
+		'personal-preview-release-attestation.mjs',
+	]) {
+		assert.notEqual(statSync(join(root, 'pulse-app', 'cli', 'scripts', script)).mode & 0o111, 0,
+			`${script} must be executable`);
+	}
+	const attestation = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'personal-preview-release-attestation.mjs'), 'utf8',
+	);
+	assert.match(attestation, /production_install_proof/);
+	assert.match(attestation, /content_free/);
+	assert.match(attestation, /synthetic_authority_forbidden/);
+	assert.doesNotMatch(attestation, /PULSE_RELEASE_TEST_MODE\s*=\s*['\"]1/);
+	for (const relative of [
+		'README.md', 'AGENTS.md', 'docs/INSTALL_WITH_AGENT.md',
+		'docs/PERSONAL_PULSE_ONBOARDING.md', 'pulse-app/cli/README.md',
+	]) {
+		const document = readFileSync(join(root, relative), 'utf8');
+		assert.match(document, /npx @zbs-gg\/pulse@preview install/,
+			`${relative} must lead with the one-command Personal install`);
+		assert.match(document, /Codex/);
+		assert.match(document, /Memory Home/);
+	}
+	const onboarding = readFileSync(join(root, 'docs', 'PERSONAL_PULSE_ONBOARDING.md'), 'utf8');
+	assert.match(onboarding, /does not require\s+Go, Python, Make, Docker, or a\s+model API key/i);
+	assert.match(onboarding, /collecting|estimated|measured/i);
+	assert.match(onboarding, /pulse repair/);
+	assert.match(onboarding, /pulse disconnect codex/);
 	const releaseFixture = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'product-release-fixture.mjs'), 'utf8',
 	);

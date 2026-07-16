@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test git-team-memory-e2e verify personal-real-mlx-release team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test git-team-memory-e2e verify personal-real-mlx-release personal-preview-attestation team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -82,7 +82,10 @@ team-race-release: ## Run the Team Go release suites under the race detector exa
 personal-real-mlx-release: ## Prove the packed Personal product against the real pinned MLX BGE-M3 artifacts
 	cd $(CLI_DIR) && $(NPM) run --silent test:codex-product:real-mlx
 
-release-verify: verify personal-real-mlx-release team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
+personal-preview-attestation: ## Require content-free proof from a clean physical Apple Silicon Personal install
+	cd $(CLI_DIR) && $(NPM) run --silent attest:personal-preview
+
+release-verify: verify personal-real-mlx-release personal-preview-attestation team-race-release team-deploy-static-verify ## Full release gate; live Linux systemd/Caddy validation remains separate
 
 verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
 	@verify_data=$$(mktemp -d "$${TMPDIR:-/tmp}/pulse-verify.XXXXXX") || exit 1; \
@@ -114,7 +117,8 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
 	       cd $(CLI_DIR) \
 	       && $(NPM) test --silent \
-	       && $(NPM) run --silent test:codex-product \
+	       && $(NPM) run --silent test:personal-clean-room \
+	       && $(NPM) run --silent test:personal-interruption \
 	       && $(NPM) run --silent test:claude-product \
 	       && $(NPM) run --silent test:codex-team-packaging-contract; \
 	     else \
