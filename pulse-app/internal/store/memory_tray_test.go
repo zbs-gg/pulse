@@ -448,7 +448,7 @@ func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testi
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 47 || writer != 47 {
+	if reader != 48 || writer != 48 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }

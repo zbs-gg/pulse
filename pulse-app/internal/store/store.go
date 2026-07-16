@@ -322,7 +322,7 @@ type persistedStoreIdentity struct {
 }
 
 func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStoreIdentity, error) {
-	return validateStoreIdentityForVersion(db, profile, 47)
+	return validateStoreIdentityForVersion(db, profile, 48)
 }
 
 func validateStoreIdentityForVersion(db *sql.DB, profile storeOpenProfile, schemaVersion int) (persistedStoreIdentity, error) {

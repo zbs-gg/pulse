@@ -203,6 +203,12 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/continuity/observe", s.handleContinuityObserve)
 		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
+			r.Post("/project/sources/register", s.handleProjectSourceRegister)
+			r.Post("/project/sources/status", s.handleProjectSourceStatus)
+			r.Post("/project/shared-memory/review/stage", s.handleGitTeamMemoryStage)
+			r.Post("/project/shared-memory/review/inspect", s.handleGitTeamMemoryInspect)
+			r.Post("/project/shared-memory/review/candidates/{id}/edit", s.handleGitTeamMemoryEdit)
+			r.Post("/project/shared-memory/review/candidates/{id}/reject", s.handleGitTeamMemoryReject)
 		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)
