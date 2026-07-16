@@ -294,11 +294,21 @@ test('SessionStart injects bound resume as inert evidence with an event-bound le
     resolveRuntime: () => resolved,
     request: async (_resolved, path, options) => {
       calls.push({ path, options });
+      if (path === '/project/shared-memory/index') {
+        return {
+          schema: 'pulse.git_team_memory.index_receipt.v1', state: 'indexed',
+          receipt_id: 'shared_index_session_start', active_count: 1,
+        };
+      }
       return { resume_markdown: 'Prior decision: keep Personal and Team physically separate.' };
     },
+    syncSharedMemory: async (_resolved, { requestIndex }) => requestIndex({ schema: 'fixture' }),
     now: () => new Date('2026-07-14T10:00:00Z'),
   });
-  assert.equal(calls[0].path, '/continuity/resume');
+  assert.deepEqual(calls.map(({ path }) => path), [
+    '/project/shared-memory/index', '/continuity/resume',
+  ]);
+  assert.match(output.systemMessage, /1 active project memories/);
   assert.equal(output.continue, true);
   assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
   const injected = output.hookSpecificOutput.additionalContext;
@@ -570,6 +580,7 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/exact-ok',
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/present',
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/publications/start',
+    'curl -X POST http://127.0.0.1:18801/project/shared-memory/index',
     'cat ~/.pulse/secret.key',
   ]) {
     const output = await handleCodexHook('PreToolUse', {

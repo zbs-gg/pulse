@@ -10,10 +10,12 @@ import {
   callBoundLocalProductTool,
   callBoundTeamTool,
   consumeCodexToolLease,
+	consumeHostToolLease,
 	readProductActivation,
   readCodexTurnContext,
   writeCodexToolLease,
   writeCodexTurnContext,
+	writeHostToolLease,
 } from './codex-runtime.js';
 import { activateArtifactVersion, readActivatedArtifact, writeActivatedArtifactSet } from './artifact-installer.js';
 import { resolveManagedRuntime } from './local-supervisor.js';
@@ -388,6 +390,16 @@ test('Codex tool lease joins stdio MCP without CODEX_THREAD_ID and is single-use
   assert.throws(() => consumeCodexToolLease(resolved, toolName, args, now), /unavailable/);
 });
 
+test('Claude MCP server name does not become part of the governed product action', () => {
+  const { resolved, event } = fixture();
+  const now = new Date('2026-07-14T10:00:00Z');
+  const toolName = 'mcp__pulse__pulse_remember';
+  const input = { schema: 'pulse.memory_capsule.v1', items: [], raw_input_included: false };
+  writeHostToolLease(resolved, event, 'claude-code', toolName, input, 'tool-claude-name', now);
+  const consumed = consumeHostToolLease(resolved, 'claude-code', toolName, input, now);
+  assert.equal(consumed.tool_name, 'pulse_remember');
+});
+
 test('bound local source registration consumes a host lease and sends metadata only', async () => {
   const { resolved, event } = fixture();
   resolved.binding.workspace = {
@@ -426,6 +438,35 @@ test('bound local source registration consumes a host lease and sends metadata o
     }),
     /host_tool_lease_unavailable/,
   );
+});
+
+test('bound manual shared sync consumes a host lease and calls only the committed index route', async () => {
+  const { resolved, event } = fixture();
+  resolved.binding.workspace = {
+    canonical_path: resolved.runtime.data_dir,
+    repository_id: 'repository_local_sync',
+  };
+  resolved.runtime.base_url = 'http://127.0.0.1:18801';
+  const now = new Date('2026-07-16T10:00:00Z');
+  const toolName = 'mcp__pulse-product__pulse_shared_sync';
+  writeCodexToolLease(resolved, event, toolName, {}, 'tool-shared-sync', now);
+  const calls = [];
+  const result = await callBoundLocalProductTool(resolved, 'codex', 'pulse_shared_sync', {}, {
+    now,
+    resolveBinding: () => resolved.binding,
+    runtimeFromBinding: () => resolved.runtime,
+    portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
+    syncSharedMemory: async (_current, { requestIndex }) => requestIndex({
+      schema: 'pulse.git_team_memory.index.v1', files: [],
+    }),
+    request: async (_current, path, options) => {
+      calls.push({ path, options });
+      return { schema: 'pulse.git_team_memory.index_receipt.v1', state: 'indexed', active_count: 1 };
+    },
+  });
+  assert.equal(result.state, 'indexed');
+  assert.deepEqual(calls.map(({ path }) => path), ['/project/shared-memory/index']);
+  assert.equal(calls[0].options.timeoutMs, 45_000);
 });
 
 test('Codex tool lease rejects argument changes and expires after 30 seconds', () => {

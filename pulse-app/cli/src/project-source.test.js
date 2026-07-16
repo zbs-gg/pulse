@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { readBoundProjectSourceWindow } from './project-source.js';
+import { ensureBoundPortableProjectID, readBoundProjectSourceWindow } from './project-source.js';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'pulse-project-source.'));
@@ -24,6 +24,17 @@ function fixture() {
     },
   };
 }
+
+test('second checkout adopts the committed portable project id and rejects later drift', () => {
+  const { resolved } = fixture();
+  const committed = `project_${'b'.repeat(32)}`;
+  assert.equal(ensureBoundPortableProjectID(resolved, { adoptPortableProjectID: committed }), committed);
+  assert.equal(ensureBoundPortableProjectID(resolved), committed);
+  assert.throws(
+    () => ensureBoundPortableProjectID(resolved, { adoptPortableProjectID: `project_${'c'.repeat(32)}` }),
+    /project_identity_mismatch/,
+  );
+});
 
 test('bound source window returns stable metadata and withholds unsafe lines', () => {
   const { root, resolved } = fixture();

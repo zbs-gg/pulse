@@ -14,6 +14,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/outbox"
 	"github.com/nkkmnk/pulse/internal/prompt"
 	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 type outboxRow struct {
@@ -163,15 +164,16 @@ type retrieveRequest struct {
 }
 
 type retrieveResponse struct {
-	EventIDs             []int64                           `json:"event_ids"`
-	ModeUsed             string                            `json:"mode_used"`
-	Confidence           float64                           `json:"confidence"`
-	Classifier           string                            `json:"classifier"`
-	Reasoning            string                            `json:"reasoning,omitempty"`
-	EmotionRole          string                            `json:"emotion_role,omitempty"`
-	EmotionRoleReasoning string                            `json:"emotion_role_reasoning,omitempty"`
-	SurfaceabilityAction string                            `json:"surfaceability_action,omitempty"`
-	ScoreBreakdowns      map[int64]retrieve.ScoreBreakdown `json:"score_breakdowns,omitempty"`
+	EventIDs             []int64                                 `json:"event_ids"`
+	ModeUsed             string                                  `json:"mode_used"`
+	Confidence           float64                                 `json:"confidence"`
+	Classifier           string                                  `json:"classifier"`
+	Reasoning            string                                  `json:"reasoning,omitempty"`
+	EmotionRole          string                                  `json:"emotion_role,omitempty"`
+	EmotionRoleReasoning string                                  `json:"emotion_role_reasoning,omitempty"`
+	SurfaceabilityAction string                                  `json:"surfaceability_action,omitempty"`
+	ScoreBreakdowns      map[int64]retrieve.ScoreBreakdown       `json:"score_breakdowns,omitempty"`
+	ProjectMemory        map[int64]store.GitTeamMemoryProvenance `json:"project_memory,omitempty"`
 }
 
 // handleRetrieve serves POST /retrieve. Body: retrieveRequest. Returns
@@ -222,6 +224,7 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		EmotionRoleReasoning: resp.EmotionRole.Reasoning,
 		SurfaceabilityAction: string(resp.SurfaceabilityAction),
 		ScoreBreakdowns:      resp.ScoreBreakdowns,
+		ProjectMemory:        resp.ProjectMemory,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

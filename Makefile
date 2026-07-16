@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test verify personal-real-mlx-release team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test git-team-memory-e2e verify personal-real-mlx-release team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -66,6 +66,9 @@ mcp-build: ## Build MCP server (mcp/)
 
 cli-test: ## Run published CLI contract tests (pulse-app/cli/)
 	cd $(CLI_DIR) && $(NPM) test
+
+git-team-memory-e2e: ## Prove committed Git memory reaches a second checkout through the existing ranker
+	cd $(CLI_DIR) && $(NPM) run test:git-team-memory
 
 team-remote-daemon-store-acceptance: mcp-build ## Exercise Go/SQLite plus a synthetic Owner HTTP/OIDC/DPoP/CLI chain; external TLS/live IdP stays separate
 	cd $(MCP_DIR) && $(NPM) run acceptance:team-remote-daemon-store

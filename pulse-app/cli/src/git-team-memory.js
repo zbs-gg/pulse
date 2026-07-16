@@ -13,13 +13,19 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { ensureBoundPortableProjectID } from './project-source.js';
+
 const DIGEST = /^[a-f0-9]{64}$/;
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 const GIT_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64}|unborn)$/;
 const ALLOWED_GIT_COMMANDS = new Set([
   'check-ignore', 'commit-tree', 'diff-tree', 'hash-object', 'read-tree', 'rev-parse',
-  'status', 'symbolic-ref', 'update-index', 'update-ref', 'write-tree',
+  'log', 'ls-tree', 'show', 'status', 'symbolic-ref', 'update-index', 'update-ref', 'write-tree',
 ]);
+const INDEX_PATH = /^pulse-memory\/(?:project\.json|memories\/shared_memory_[a-f0-9]{32}\.json|publications\/[A-Za-z0-9][A-Za-z0-9._:-]{0,254}\.json)$/;
+const PORTABLE_PROJECT_ID = /^project_[a-f0-9]{32}$/;
+const INDEX_MAX_FILES = 256;
+const INDEX_MAX_BYTES = 4 << 20;
 
 function inside(root, target) {
   const rel = relative(root, target);
@@ -36,7 +42,7 @@ function gitEnvironment(extra = {}) {
   };
 }
 
-function runGitCommand(root, args, { input, env = {}, allowFailure = false } = {}) {
+function runGitCommand(root, args, { input, env = {}, allowFailure = false, binary = false } = {}) {
   if (!Array.isArray(args) || !ALLOWED_GIT_COMMANDS.has(args[0])) {
     throw new Error('git_team_memory_git_command_forbidden');
   }
@@ -44,7 +50,7 @@ function runGitCommand(root, args, { input, env = {}, allowFailure = false } = {
     cwd: root,
     env: gitEnvironment(env),
     input,
-    encoding: 'utf8',
+    encoding: binary ? null : 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 15_000,
   });
@@ -52,7 +58,11 @@ function runGitCommand(root, args, { input, env = {}, allowFailure = false } = {
   if (result.status !== 0 && !allowFailure) {
     throw new Error(`git_team_memory_git_failed:${args[0]}:${String(result.stderr).trim().slice(0, 160)}`);
   }
-  return { status: result.status, stdout: String(result.stdout), stderr: String(result.stderr) };
+  return {
+    status: result.status,
+    stdout: binary ? result.stdout : String(result.stdout),
+    stderr: binary ? result.stderr : String(result.stderr),
+  };
 }
 
 function currentGitParent(root, runGit) {
@@ -244,4 +254,97 @@ export async function publishGitTeamMemory(resolved, input, {
     outcome: result.outcome,
     commit_hash: result.commit_hash,
   });
+}
+
+function committedPackRoot(resolved, runGit) {
+  if (!resolved?.binding?.workspace || !isAbsolute(resolved.binding.workspace.canonical_path ?? '')) {
+    throw new Error('git_team_memory_index_authority_unavailable');
+  }
+  const root = realpathSync(resolved.binding.workspace.canonical_path);
+  const probe = runGit(root, ['rev-parse', '--show-toplevel'], { allowFailure: true });
+  if (probe.status !== 0) return undefined;
+  const top = realpathSync(probe.stdout.trim());
+  if (top !== root) throw new Error('git_team_memory_repository_mismatch');
+  return root;
+}
+
+function parseCommittedProjectID(content) {
+  let value;
+  try { value = JSON.parse(content); } catch { throw new Error('git_team_memory_project_invalid'); }
+  if (!value || Array.isArray(value) || value.schema !== 'pulse.git_team_memory.project.v1' ||
+      !PORTABLE_PROJECT_ID.test(value.project_id ?? '') ||
+      Object.keys(value).sort().join('\x00') !== 'project_id\x00schema') {
+    throw new Error('git_team_memory_project_invalid');
+  }
+  return value.project_id;
+}
+
+export function readCommittedGitTeamMemoryPack(resolved, {
+  runGit = runGitCommand,
+  ensureProjectID = ensureBoundPortableProjectID,
+} = {}) {
+  const root = committedPackRoot(resolved, runGit);
+  if (root === undefined) return { state: 'absent' };
+  const head = currentGitParent(root, runGit);
+  if (head === 'unborn') return { state: 'absent' };
+  const listing = runGit(root, ['ls-tree', '-r', '-z', '--name-only', head, '--', 'pulse-memory'])
+    .stdout.split('\x00').filter(Boolean);
+  if (listing.length === 0) return { state: 'absent' };
+  if (listing.length > INDEX_MAX_FILES || listing.some((path) => !INDEX_PATH.test(path))) {
+    throw new Error('git_team_memory_committed_tree_invalid');
+  }
+  const paths = [...listing].sort();
+  if (paths.some((path, index) => index > 0 && path === paths[index - 1])) {
+    throw new Error('git_team_memory_committed_tree_invalid');
+  }
+  let totalBytes = 0;
+  const files = paths.map((path) => {
+    const blob = runGit(root, ['show', `${head}:${path}`], { binary: true }).stdout;
+    if (!Buffer.isBuffer(blob)) throw new Error('git_team_memory_committed_blob_invalid');
+    totalBytes += blob.length;
+    if (totalBytes > INDEX_MAX_BYTES || blob.includes(0)) {
+      throw new Error('git_team_memory_committed_blob_invalid');
+    }
+    let content;
+    try { content = new TextDecoder('utf-8', { fatal: true }).decode(blob); } catch {
+      throw new Error('git_team_memory_committed_blob_invalid');
+    }
+    const commitHash = runGit(root, ['log', '-1', '--format=%H', head, '--', path]).stdout.trim();
+    if (!/^[a-f0-9]{40,64}$/.test(commitHash)) throw new Error('git_team_memory_commit_provenance_invalid');
+    return {
+      path,
+      content,
+      sha256: createHash('sha256').update(blob).digest('hex'),
+      commit_hash: commitHash,
+    };
+  });
+  if (currentGitParent(root, runGit) !== head) throw new Error('git_team_memory_head_changed');
+  const projectFile = files.find(({ path }) => path === 'pulse-memory/project.json');
+  if (!projectFile) throw new Error('git_team_memory_project_invalid');
+  const portableProjectID = parseCommittedProjectID(projectFile.content);
+  ensureProjectID(resolved, { adoptPortableProjectID: portableProjectID });
+  return {
+    state: 'committed',
+    request: {
+      schema: 'pulse.git_team_memory.index.v1',
+      portable_project_id: portableProjectID,
+      repository_id: resolved.binding.workspace.repository_id,
+      binding_digest: resolved.binding.binding_digest,
+      head_commit: head,
+      files,
+    },
+  };
+}
+
+export async function syncCommittedGitTeamMemory(resolved, {
+  requestIndex,
+  runGit = runGitCommand,
+  ensureProjectID = ensureBoundPortableProjectID,
+} = {}) {
+  if (typeof requestIndex !== 'function') throw new Error('git_team_memory_index_request_unavailable');
+  const pack = readCommittedGitTeamMemoryPack(resolved, { runGit, ensureProjectID });
+  if (pack.state === 'absent') {
+    return { schema: 'pulse.git_team_memory.index_receipt.v1', state: 'absent', active_count: 0 };
+  }
+  return requestIndex(pack.request);
 }

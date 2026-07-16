@@ -393,6 +393,13 @@ export const GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS = [
       required: ['approval_lease_id', 'approver_label'], additionalProperties: false,
     },
   },
+  {
+    name: 'pulse_shared_sync',
+    description: 'Index only the committed pulse-memory/ pack from the current local Git HEAD into this checkout\'s existing state-aware Pulse engine. Uncommitted files and remotes are ignored.',
+    inputSchema: {
+      type: 'object', properties: {}, required: [], additionalProperties: false,
+    },
+  },
 ];
 
 const GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES = new Set(

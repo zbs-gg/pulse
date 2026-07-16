@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { publishGitTeamMemory } from './git-team-memory.js';
+import { publishGitTeamMemory, syncCommittedGitTeamMemory } from './git-team-memory.js';
 
 function git(root, ...args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -163,4 +163,78 @@ test('Git Team Memory publication advances a detached local HEAD without creatin
   assert.equal(result.state, 'committed');
   assert.equal(git(root, 'rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD');
   assert.equal(git(root, 'rev-parse', `${result.commit_hash}^`), parent);
+});
+
+function canonical(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+test('Git Team Memory sync adopts the committed portable project and ignores working-tree edits', async () => {
+  const { root } = fixture();
+  const projectID = `project_${'a'.repeat(32)}`;
+  const sourceDigest = 'b'.repeat(64);
+  const authority = 'c'.repeat(64);
+  const memoryID = `shared_memory_${'d'.repeat(32)}`;
+  const sourceReferences = [{ source_id: 'source_project_notes', version_digest: sourceDigest }];
+  const candidate = {
+    kind: 'decision', statement: 'Use the approved brief for every launch.', audience: 'project',
+    confidence: 0.9, source_references: sourceReferences, warnings: [],
+  };
+  const candidateDigest = createHash('sha256').update(JSON.stringify(candidate)).digest('hex');
+  const object = canonical({
+    schema: 'pulse.git_team_memory.object.v1', memory_id: memoryID, version: 1,
+    status: 'active', kind: 'decision', content: candidate.statement, confidence: 0.9,
+    candidate_digest: candidateDigest, approver_label: 'Nikita',
+    approved_at: '2026-07-16T12:00:00Z', approval_authority: authority,
+    source_references: sourceReferences, warnings: [],
+  });
+  const objectPath = `pulse-memory/memories/${memoryID}.json`;
+  const objectSHA = createHash('sha256').update(object).digest('hex');
+  const manifestPath = 'pulse-memory/publications/review_batch_sync.json';
+  mkdirSync(join(root, 'pulse-memory', 'memories'), { recursive: true });
+  mkdirSync(join(root, 'pulse-memory', 'publications'), { recursive: true });
+  writeFileSync(join(root, 'pulse-memory', 'project.json'), canonical({
+    schema: 'pulse.git_team_memory.project.v1', project_id: projectID,
+  }));
+  writeFileSync(join(root, ...objectPath.split('/')), object);
+  writeFileSync(join(root, ...manifestPath.split('/')), canonical({
+    schema: 'pulse.git_team_memory.publication.v1', publication_id: 'shared_publication_sync',
+    batch_id: 'review_batch_sync', project_id: projectID,
+    project_path: 'pulse-memory/project.json', approval_authority: authority,
+    approved_at: '2026-07-16T12:00:00Z',
+    objects: [{ memory_id: memoryID, path: objectPath, sha256: objectSHA }],
+  }));
+  git(root, 'add', 'pulse-memory');
+  git(root, 'commit', '-q', '-m', 'approved memory');
+  const committedHead = git(root, 'rev-parse', 'HEAD');
+  const cloneRoot = join(mkdtempSync(join(tmpdir(), 'pulse-git-team-memory-clone.')), 'checkout');
+  execFileSync('git', ['clone', '-q', root, cloneRoot], { encoding: 'utf8' });
+  const dataDir = join(cloneRoot, '.pulse-test');
+  mkdirSync(dataDir, { mode: 0o700 });
+  writeFileSync(join(cloneRoot, ...objectPath.split('/')), canonical({ content: 'uncommitted injection' }));
+  let adopted;
+  let request;
+  const resolved = {
+    binding: {
+      binding_digest: 'e'.repeat(64),
+      workspace: {
+        canonical_path: cloneRoot,
+        repository_id: 'repository_sync_fixture',
+      },
+    },
+    runtime: { data_dir: dataDir },
+  };
+  const receipt = await syncCommittedGitTeamMemory(resolved, {
+    ensureProjectID: (_resolved, options) => { adopted = options.adoptPortableProjectID; },
+    requestIndex: async (body) => {
+      request = body;
+      return { schema: 'pulse.git_team_memory.index_receipt.v1', state: 'indexed', active_count: 1 };
+    },
+  });
+  assert.equal(receipt.state, 'indexed');
+  assert.equal(adopted, projectID);
+  assert.equal(request.head_commit, committedHead);
+  assert.equal(request.portable_project_id, projectID);
+  assert.equal(request.files.find(({ path }) => path === objectPath).content, object);
+  assert.ok(request.files.every(({ commit_hash }) => commit_hash === committedHead));
 });

@@ -507,6 +507,7 @@ type RetrieveResponse struct {
 	EmotionRole          EmotionRoleDecision
 	SurfaceabilityAction SurfaceabilityAction
 	ScoreBreakdowns      map[int64]ScoreBreakdown
+	ProjectMemory        map[int64]store.GitTeamMemoryProvenance
 }
 
 type ScoreBreakdown struct {
@@ -677,6 +678,10 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	if e.accessFreqEnabled && e.store != nil && len(ids) > 0 {
 		_ = e.store.IncrementAccessCounts(ids, time.Now())
 	}
+	var projectMemory map[int64]store.GitTeamMemoryProvenance
+	if e.store != nil && (e.store.StoreKind() == store.StoreKindPersonal || e.store.StoreKind() == store.StoreKindDesk) {
+		projectMemory, _ = e.store.GitTeamMemoryProvenanceForEvents(ids)
+	}
 
 	return &RetrieveResponse{
 		EventIDs:             ids,
@@ -685,6 +690,7 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		EmotionRole:          emotionRole,
 		SurfaceabilityAction: surfaceability,
 		ScoreBreakdowns:      breakdowns,
+		ProjectMemory:        projectMemory,
 	}, nil
 }
 

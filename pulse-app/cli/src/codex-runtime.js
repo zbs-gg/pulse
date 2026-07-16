@@ -33,7 +33,7 @@ import { captureEnabledForHost } from './capture-state.js';
 import { callTeamRemoteTool, isReadOnlyTeamTool } from './team-remote-client.js';
 import { renderGitTeamMemoryCards } from './host-adapter.js';
 import { ensureBoundPortableProjectID, readBoundProjectSourceWindow } from './project-source.js';
-import { publishGitTeamMemory } from './git-team-memory.js';
+import { publishGitTeamMemory, syncCommittedGitTeamMemory } from './git-team-memory.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
@@ -330,13 +330,12 @@ const LOCAL_PRODUCT_TOOL_ACTIONS = new Set([
   'pulse_source_register', 'pulse_source_window', 'pulse_source_status',
   'pulse_shared_stage', 'pulse_shared_inspect', 'pulse_shared_edit',
   'pulse_shared_reject', 'pulse_shared_cards',
-  'pulse_shared_publish',
+  'pulse_shared_publish', 'pulse_shared_sync',
 ]);
 
 function productToolAction(toolName) {
   if (typeof toolName === 'string') {
-    const match = toolName.match(/(?:^|__)(pulse_[a-z_]+)$/i);
-    const action = match?.[1]?.toLowerCase();
+    const action = toolName.split('__').at(-1)?.toLowerCase();
     if (LOCAL_PRODUCT_TOOL_ACTIONS.has(action)) return action;
   }
   throw new Error('invalid_product_tool_action');
@@ -518,6 +517,7 @@ export async function callBoundLocalProductTool(resolved, host, name, input, {
   runtimeFromBinding = vaultRuntimeFromBinding,
   portableProjectID = ensureBoundPortableProjectID,
   readSourceWindow = readBoundProjectSourceWindow,
+  syncSharedMemory = syncCommittedGitTeamMemory,
   request = activatedBoundPulseRequest,
 } = {}) {
   const action = productToolAction(name);
@@ -622,6 +622,15 @@ export async function callBoundLocalProductTool(resolved, host, name, input, {
           outcome: publication.outcome,
           commit_hash: publication.commit_hash,
         },
+      }),
+    });
+  }
+  if (action === 'pulse_shared_sync') {
+    closedLocalToolInput(input, [], []);
+    return syncSharedMemory(current, {
+      ensureProjectID: portableProjectID,
+      requestIndex: (index) => request(current, '/project/shared-memory/index', {
+        body: index, timeoutMs: 45_000,
       }),
     });
   }

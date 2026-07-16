@@ -94,8 +94,14 @@ function sanitizeLine(line, lineNumber) {
   };
 }
 
-export function ensureBoundPortableProjectID(resolved, { random = randomBytes } = {}) {
+export function ensureBoundPortableProjectID(resolved, {
+  random = randomBytes,
+  adoptPortableProjectID,
+} = {}) {
   const { binding, repositoryID } = boundIdentity(resolved);
+  if (adoptPortableProjectID !== undefined && !PORTABLE_PROJECT_ID.test(adoptPortableProjectID)) {
+    throw new Error('project_identity_adoption_invalid');
+  }
   const dataDir = resolve(resolved.runtime.data_dir);
   const statePath = resolve(dataDir, 'git-team-memory-project.json');
   if (!pathInside(dataDir, statePath)) throw new Error('project_identity_path_unsafe');
@@ -111,13 +117,20 @@ export function ensureBoundPortableProjectID(resolved, { random = randomBytes } 
         Object.keys(value).sort().join('\0') !== 'binding_digest\0portable_project_id\0repository_id\0schema') {
       throw new Error('project_identity_mismatch');
     }
+    if (adoptPortableProjectID !== undefined && value.portable_project_id !== adoptPortableProjectID) {
+      throw new Error('project_identity_mismatch');
+    }
     return value.portable_project_id;
   }
-  const entropy = random(16);
-  if (!Buffer.isBuffer(entropy) || entropy.length !== 16) throw new Error('project_identity_random_invalid');
+  let portableProjectID = adoptPortableProjectID;
+  if (portableProjectID === undefined) {
+    const entropy = random(16);
+    if (!Buffer.isBuffer(entropy) || entropy.length !== 16) throw new Error('project_identity_random_invalid');
+    portableProjectID = `project_${entropy.toString('hex')}`;
+  }
   const value = {
     schema: 'pulse.git_team_memory_project_identity.v1',
-    portable_project_id: `project_${entropy.toString('hex')}`,
+    portable_project_id: portableProjectID,
     repository_id: repositoryID,
     binding_digest: binding.binding_digest,
   };
@@ -125,7 +138,9 @@ export function ensureBoundPortableProjectID(resolved, { random = randomBytes } 
   try {
     writeFileSync(statePath, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
   } catch (error) {
-    if (error?.code === 'EEXIST') return ensureBoundPortableProjectID(resolved, { random });
+    if (error?.code === 'EEXIST') {
+      return ensureBoundPortableProjectID(resolved, { random, adoptPortableProjectID });
+    }
     throw error;
   }
   return value.portable_project_id;

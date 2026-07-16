@@ -61,6 +61,7 @@
     "check": "node src/cli.js --help",
     "test": "node --test src/*.test.js",
     "test:codex-product": "node scripts/codex-product-e2e.mjs",
+    "test:git-team-memory": "node scripts/git-team-memory-e2e.mjs",
     "test:codex-product:real-mlx": "PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs",
     "test:codex-team-packaging-contract": "node scripts/codex-team-packaging-contract.mjs",
     "test:claude-product": "node scripts/claude-product-e2e.mjs",

@@ -40,6 +40,7 @@ import {
   writeCodexTurnContext,
 } from './codex-runtime.js';
 import { ensureBoundPortableProjectID } from './project-source.js';
+import { syncCommittedGitTeamMemory } from './git-team-memory.js';
 import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
@@ -284,10 +285,25 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
   try {
     resolved = resolveRuntime(rawInput);
     if (eventName === 'SessionStart') {
+      let syncMessage;
+      try {
+        const sync = await (dependencies.syncSharedMemory ?? syncCommittedGitTeamMemory)(resolved, {
+          ensureProjectID: dependencies.portableProjectID ?? ensureBoundPortableProjectID,
+          requestIndex: (body) => request(resolved, '/project/shared-memory/index', {
+            body, timeoutMs: 45_000,
+          }),
+        });
+        if (sync?.state === 'indexed') {
+          syncMessage = `Pulse Git Team Memory indexed: ${sync.active_count} active project memories (${sync.receipt_id}).`;
+        }
+      } catch {
+        syncMessage = 'Pulse Git Team Memory sync was blocked; no unverified shared project memory was admitted.';
+      }
       const context = await resumeContext(resolved, event, request, dependencies);
       return annotateContinuityDelivery(healthy({
         continue: true,
         hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context.additionalContext },
+        ...(syncMessage ? { systemMessage: syncMessage } : {}),
       }), resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {

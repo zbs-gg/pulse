@@ -406,12 +406,13 @@ export function isDestructivePulseShellInvocation(toolName, toolInput) {
     /\/(?:memory\/wipe|memory\/delete)(?:\s|[?'"\\]|$)/i.test(command) ||
     /\/project\/shared-memory\/review\/(?:present|exact-ok)(?:\s|[?'"\\]|$)/i.test(command) ||
     /\/project\/shared-memory\/publications\/(?:start|finalize)(?:\s|[?'"\\]|$)/i.test(command) ||
+    /\/project\/shared-memory\/index(?:\s|[?'"\\]|$)/i.test(command) ||
     /(?:^|[\s'"=])(?:~\/\.pulse|\$HOME\/\.pulse|\/[^\s'";|]+\/\.pulse)\/secret\.key(?:[\s'";|]|$)/i.test(command);
 }
 
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
-    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish))$/i.test(toolName);
+    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish|sync))$/i.test(toolName);
 }
 
 export function hookBundleDigest(bytes) {

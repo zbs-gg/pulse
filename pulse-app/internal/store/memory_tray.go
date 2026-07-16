@@ -2456,6 +2456,8 @@ func (s *Store) WipeProductMemory() error {
 		return err
 	}
 	if _, err := tx.Exec(`
+		DELETE FROM git_memory_shared_projection;
+		DELETE FROM git_memory_shared_versions;
 		DELETE FROM private_projection_outbox;
 		DELETE FROM memory_write_audit;
 		DELETE FROM memory_write_idempotency;

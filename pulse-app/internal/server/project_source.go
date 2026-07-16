@@ -45,7 +45,8 @@ func writeGitMemoryReviewError(w http.ResponseWriter, err error) {
 		errors.Is(err, store.ErrGitTeamMemoryVersionConflict), errors.Is(err, store.ErrGitTeamMemoryTerminal),
 		errors.Is(err, store.ErrGitTeamMemoryConflict), errors.Is(err, store.ErrGitTeamMemoryApprovalUnavailable),
 		errors.Is(err, store.ErrGitTeamMemoryApprovalAmbiguous),
-		errors.Is(err, store.ErrGitTeamMemoryPublicationConflict):
+		errors.Is(err, store.ErrGitTeamMemoryPublicationConflict),
+		errors.Is(err, store.ErrGitTeamMemoryIndexConflict):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, "git team memory review error: "+err.Error(), http.StatusBadRequest)

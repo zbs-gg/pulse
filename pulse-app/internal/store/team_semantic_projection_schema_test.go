@@ -13,7 +13,7 @@ func TestMigration037InstallsScopedSemanticContributionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 50 || migrations[36].Version != 37 ||
+	if len(migrations) != 51 || migrations[36].Version != 37 ||
 		migrations[36].Name != "037_team_semantic_materializations.sql" {
 		t.Fatalf("migration 037 = %+v (count %d), want frozen 037_team_semantic_materializations.sql", migrations[36], len(migrations))
 	}
