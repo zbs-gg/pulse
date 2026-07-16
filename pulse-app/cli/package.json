@@ -70,6 +70,7 @@
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
+    "build:personal-release": "node scripts/build-personal-release.mjs",
     "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"

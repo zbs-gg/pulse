@@ -207,7 +207,7 @@ if (productionPackaging) {
       'attach', '-readonly', '-nobrowse', '-mountpoint', mountPoint, nativeHelperCarrier,
     ], { stdio: 'inherit' });
     attached = true;
-    const carrierHelper = join(mountPoint, expectedHelperIdentifier);
+    const carrierHelper = join(mountPoint, 'bin', expectedHelperIdentifier);
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', carrierHelper], { stdio: 'inherit' });
     const innerDigest = createHash('sha256').update(readFileSync(carrierHelper)).digest('hex');
     const sourceDigest = createHash('sha256').update(readFileSync(nativeHelper)).digest('hex');

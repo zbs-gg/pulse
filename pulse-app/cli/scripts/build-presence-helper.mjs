@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,7 @@ import {
   EXPECTED_HELPER_CONTRACT_VERSION,
   EXPECTED_HELPER_SELF_TEST,
 } from '../src/trust-helper.js';
+import { buildPulseArtifactTree, canonicalRuntimeJSON } from '../src/managed-embedder-release.js';
 
 const EXPECTED_IDENTIFIER = 'gg.zbs.pulse.presence-helper';
 const EXPECTED_TEAM_ID = '44N4NZ86S5';
@@ -115,9 +116,17 @@ rmSync(carrier, { force: true });
 rmSync(carrierRoot, { recursive: true, force: true });
 try {
   mkdirSync(carrierRoot, { recursive: true, mode: 0o755 });
-  const carrierHelper = join(carrierRoot, EXPECTED_IDENTIFIER);
+  const carrierBin = join(carrierRoot, 'bin');
+  mkdirSync(carrierBin, { mode: 0o700 });
+  const carrierHelper = join(carrierBin, EXPECTED_IDENTIFIER);
   copyFileSync(output, carrierHelper);
-  chmodSync(carrierHelper, 0o755);
+  chmodSync(carrierHelper, 0o700);
+  const artifactTree = buildPulseArtifactTree(carrierRoot);
+  writeFileSync(
+    join(carrierRoot, 'pulse-artifact-tree.json'),
+    `${canonicalRuntimeJSON(artifactTree)}\n`,
+    { mode: 0o600 },
+  );
   execFileSync('/usr/bin/hdiutil', [
     'create', '-volname', 'Pulse Presence Helper', '-srcfolder', carrierRoot,
     '-format', 'UDZO', '-ov', carrier,
@@ -126,7 +135,7 @@ try {
   rmSync(carrierRoot, { recursive: true, force: true });
 }
 execFileSync('/usr/bin/codesign', [
-  '--force', '--timestamp', '--sign', identity, carrier,
+  '--force', '--timestamp', '--identifier', EXPECTED_IDENTIFIER, '--sign', identity, carrier,
 ], { stdio: 'inherit' });
 execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', carrier], { stdio: 'inherit' });
 
@@ -140,7 +149,7 @@ function verifyCarrierInner() {
       'attach', '-readonly', '-nobrowse', '-mountpoint', mountPoint, carrier,
     ], { stdio: 'inherit' });
     attached = true;
-    const innerHelper = join(mountPoint, EXPECTED_IDENTIFIER);
+    const innerHelper = join(mountPoint, 'bin', EXPECTED_IDENTIFIER);
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', innerHelper], { stdio: 'inherit' });
     for (const command of ['contract', 'self-test']) {
       const expected = command === 'contract'

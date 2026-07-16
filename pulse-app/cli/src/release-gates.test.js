@@ -102,3 +102,38 @@ test('npm publication runs the repository release gate before preparing package 
     /`npm publish` runs `make release-verify` from the repository root before package artifacts are prepared/,
   );
 });
+
+test('production presence carrier uses the same exact-tree contract as the installer', () => {
+	const builder = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'build-presence-helper.mjs'), 'utf8',
+	);
+	assert.match(builder, /buildPulseArtifactTree\(carrierRoot\)/);
+	assert.match(builder, /pulse-artifact-tree\.json/);
+	assert.match(builder, /join\(carrierRoot, 'bin'\)/);
+	assert.match(builder, /--identifier', EXPECTED_IDENTIFIER/);
+	assert.match(builder, /join\(mountPoint, 'bin', EXPECTED_IDENTIFIER\)/);
+
+	const packager = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
+	);
+	assert.match(packager, /join\(mountPoint, 'bin', expectedHelperIdentifier\)/);
+});
+
+test('one production release builder emits every installer artifact and stops before unapproved notarization', () => {
+	const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
+	assert.equal(packageJSON.scripts?.['build:personal-release'], 'node scripts/build-personal-release.mjs');
+	const builder = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'build-personal-release.mjs'), 'utf8',
+	);
+	for (const artifact of ['daemon', 'embedder-runtime', 'model', 'plugin-runtime', 'presence-helper']) {
+		assert.match(builder, new RegExp(`['\"]${artifact}['\"]`));
+	}
+	assert.match(builder, /PULSE_RELEASE_SUBMISSION_AUTHORIZATION/);
+	assert.match(builder, /apple-notarization-approved/);
+	assert.ok(builder.indexOf('notarization_submission_authorization_required') < builder.lastIndexOf('buildDaemon('));
+	assert.match(builder, /notarytool', 'submit'/);
+	assert.match(builder, /sign-release-manifest\.mjs/);
+	assert.match(builder, /materializeVerifiedDmg/);
+	assert.match(builder, /materializeVerifiedTarGz/);
+	assert.match(builder, /verified_unpublished/);
+});
