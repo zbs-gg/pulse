@@ -185,6 +185,7 @@ func TestGitTeamMemoryTrustedPresentationAndExactOKIssueSingleUseLease(t *testin
 		TaskID: stage.TaskID, SessionRef: "session:" + strings.Repeat("1", 64),
 		TurnRef: "turn:" + strings.Repeat("2", 64), SourceEventDigest: strings.Repeat("3", 64),
 		CardBlockDigest: strings.Repeat("4", 64), CandidateDigests: []string{candidate.ContentDigest},
+		ApproverLabelDigest: strings.Repeat("f", 64),
 	}, now)
 	if err != nil || presented.State != "presented" || presented.BatchID != staged.BatchID {
 		t.Fatalf("presentation = %#v, err=%v", presented, err)
@@ -238,7 +239,8 @@ func TestGitTeamMemoryEditInvalidatesTrustedPresentation(t *testing.T) {
 		BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex", TaskID: stage.TaskID,
 		SessionRef: "session:" + strings.Repeat("6", 64), TurnRef: "turn:" + strings.Repeat("7", 64),
 		SourceEventDigest: strings.Repeat("8", 64), CardBlockDigest: strings.Repeat("9", 64),
-		CandidateDigests: []string{candidate.ContentDigest},
+		CandidateDigests:    []string{candidate.ContentDigest},
+		ApproverLabelDigest: strings.Repeat("f", 64),
 	}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +290,8 @@ func TestGitTeamMemoryExactOKRejectsWrongTaskExpiredAndAmbiguousPresentations(t 
 			BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex", TaskID: taskID,
 			SessionRef: sessionRef, TurnRef: "turn:" + strings.Repeat("d", 64),
 			SourceEventDigest: eventDigest, CardBlockDigest: cardDigest,
-			CandidateDigests: []string{staged.Candidates[0].ContentDigest},
+			CandidateDigests:    []string{staged.Candidates[0].ContentDigest},
+			ApproverLabelDigest: strings.Repeat("f", 64),
 		}, at); err != nil {
 			t.Fatal(err)
 		}
@@ -309,7 +312,8 @@ func TestGitTeamMemoryExactOKRejectsWrongTaskExpiredAndAmbiguousPresentations(t 
 		BatchID: wrong.BatchID, BatchGeneration: wrong.Generation, Host: "codex", TaskID: "task_wrong",
 		SessionRef: "session:" + strings.Repeat("e", 64), TurnRef: "turn:" + strings.Repeat("f", 64),
 		SourceEventDigest: strings.Repeat("1", 64), CardBlockDigest: strings.Repeat("2", 64),
-		CandidateDigests: []string{wrong.Candidates[0].ContentDigest},
+		CandidateDigests:    []string{wrong.Candidates[0].ContentDigest},
+		ApproverLabelDigest: strings.Repeat("f", 64),
 	}, now); !errors.Is(err, ErrGitTeamMemoryVersionConflict) {
 		t.Fatalf("wrong task presentation error = %v", err)
 	}
@@ -329,7 +333,8 @@ func TestGitTeamMemoryExactOKRejectsWrongTaskExpiredAndAmbiguousPresentations(t 
 		BatchID: expiredBatch.BatchID, BatchGeneration: expiredBatch.Generation, Host: "codex", TaskID: "task_expired",
 		SessionRef: expiredSession, TurnRef: "turn:" + strings.Repeat("e", 64),
 		SourceEventDigest: strings.Repeat("f", 64), CardBlockDigest: strings.Repeat("5", 64),
-		CandidateDigests: []string{expiredBatch.Candidates[0].ContentDigest},
+		CandidateDigests:    []string{expiredBatch.Candidates[0].ContentDigest},
+		ApproverLabelDigest: strings.Repeat("f", 64),
 	}, now.Add(11*time.Minute))
 	if err != nil || represented.State != "presented" || represented.PresentationID == "" {
 		t.Fatalf("re-present expired cards = %#v, err=%v", represented, err)
@@ -344,5 +349,98 @@ func TestGitTeamMemoryExactOKRejectsWrongTaskExpiredAndAmbiguousPresentations(t 
 		Host: "codex", SessionRef: ambiguousSession, PromptEventDigest: strings.Repeat("d", 64),
 	}, now.Add(time.Second)); !errors.Is(err, ErrGitTeamMemoryApprovalAmbiguous) {
 		t.Fatalf("ambiguous presentation approval error = %v", err)
+	}
+}
+
+func TestGitTeamMemoryPublicationReturnsExactCanonicalFilesAndFinalizesCommit(t *testing.T) {
+	vault, _ := openGitMemoryDeskStore(t)
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	source, err := vault.RegisterProjectSource(
+		gitMemorySourceRegistration("notes/team.md", strings.Repeat("b", 64), 120), now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageSharedReviewRequest(source,
+		safeSharedReviewCandidate("Use the approved project brief before drafting a launch page."))
+	stage.TaskID = "task_git_publication"
+	stage.IdempotencyKey = "stage_git_publication"
+	staged, err := vault.StageGitTeamMemoryReview(stage, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approverLabel := "Nikita"
+	approverDigest := gitTeamMemoryApproverLabelDigest(approverLabel)
+	_, err = vault.PresentGitTeamMemoryCards(GitTeamMemoryPresentationRequest{
+		Schema: GitTeamMemoryPresentationSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		BatchID: staged.BatchID, BatchGeneration: staged.Generation, Host: "codex", TaskID: stage.TaskID,
+		SessionRef: "session:" + strings.Repeat("1", 64), TurnRef: "turn:" + strings.Repeat("2", 64),
+		SourceEventDigest: strings.Repeat("3", 64), CardBlockDigest: strings.Repeat("4", 64),
+		CandidateDigests: []string{staged.Candidates[0].ContentDigest}, ApproverLabelDigest: approverDigest,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := vault.ApproveExactGitTeamMemoryOK(GitTeamMemoryExactOKRequest{
+		Schema: GitTeamMemoryExactOKSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		Host: "codex", SessionRef: "session:" + strings.Repeat("1", 64),
+		PromptEventDigest: strings.Repeat("5", 64),
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.BeginGitTeamMemoryPublication(GitTeamMemoryPublicationStartRequest{
+		Schema: GitTeamMemoryPublicationStartSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		ApprovalLeaseID: lease.LeaseID, ApproverLabel: "Dima",
+		ExpectedParent: strings.Repeat("a", 40),
+	}, now.Add(1500*time.Millisecond)); !errors.Is(err, ErrGitTeamMemoryApprovalUnavailable) {
+		t.Fatalf("undisplayed approver label error = %v", err)
+	}
+	started, err := vault.BeginGitTeamMemoryPublication(GitTeamMemoryPublicationStartRequest{
+		Schema: GitTeamMemoryPublicationStartSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		ApprovalLeaseID: lease.LeaseID, ApproverLabel: approverLabel,
+		ExpectedParent: strings.Repeat("a", 40),
+	}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.State != "publishing" || len(started.Files) != 3 || started.FilesDigest == "" {
+		t.Fatalf("publication start = %#v", started)
+	}
+	var combined strings.Builder
+	for _, file := range started.Files {
+		if !strings.HasPrefix(file.Path, "pulse-memory/") || file.Content == "" || file.SHA256 == "" {
+			t.Fatalf("publication file = %#v", file)
+		}
+		combined.WriteString(file.Content)
+	}
+	if !strings.Contains(combined.String(), approverLabel) ||
+		!strings.Contains(combined.String(), "Use the approved project brief") {
+		t.Fatalf("canonical publication content = %s", combined.String())
+	}
+	replayed, err := vault.BeginGitTeamMemoryPublication(GitTeamMemoryPublicationStartRequest{
+		Schema: GitTeamMemoryPublicationStartSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		ApprovalLeaseID: lease.LeaseID, ApproverLabel: approverLabel,
+		ExpectedParent: strings.Repeat("a", 40),
+	}, now.Add(3*time.Second))
+	if err != nil || replayed.PublicationID != started.PublicationID || replayed.FilesDigest != started.FilesDigest {
+		t.Fatalf("publication replay = %#v, err=%v", replayed, err)
+	}
+	finalized, err := vault.FinalizeGitTeamMemoryPublication(GitTeamMemoryPublicationFinalizeRequest{
+		Schema: GitTeamMemoryPublicationFinalizeSchema, PortableProjectID: testGitMemoryProject,
+		RepositoryID: testGitMemoryRepository, BindingDigest: testGitMemoryBinding,
+		PublicationID: started.PublicationID, FilesDigest: started.FilesDigest,
+		Outcome: "committed", CommitHash: strings.Repeat("c", 40),
+	}, now.Add(4*time.Second))
+	if err != nil || finalized.State != "committed" || finalized.CommitHash != strings.Repeat("c", 40) {
+		t.Fatalf("publication finalize = %#v, err=%v", finalized, err)
+	}
+	if _, err := vault.ConsumeGitTeamMemoryApprovalLease(lease.LeaseID, now.Add(5*time.Second)); !errors.Is(err, ErrGitTeamMemoryApprovalUnavailable) {
+		t.Fatalf("publication lease replay error = %v", err)
 	}
 }

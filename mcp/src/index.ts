@@ -375,8 +375,22 @@ export const GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS = [
     name: 'pulse_shared_cards',
     description: 'Render the exact canonical human-readable card block for one staged batch. The next trusted Stop hook must observe this block before exact ok can approve it.',
     inputSchema: {
-      type: 'object', properties: { batch_id: { type: 'string' } },
-      required: ['batch_id'], additionalProperties: false,
+      type: 'object', properties: {
+        batch_id: { type: 'string' },
+        approver_label: { type: 'string', minLength: 1, maxLength: 80 },
+      },
+      required: ['batch_id', 'approver_label'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_publish',
+    description: 'Consume one trusted exact-ok approval lease, write the exact displayed objects under pulse-memory/, and create only a local path-limited Git commit. Never pushes or opens a PR.',
+    inputSchema: {
+      type: 'object', properties: {
+        approval_lease_id: { type: 'string' },
+        approver_label: { type: 'string', minLength: 1, maxLength: 80 },
+      },
+      required: ['approval_lease_id', 'approver_label'], additionalProperties: false,
     },
   },
 ];

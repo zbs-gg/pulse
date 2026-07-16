@@ -13,6 +13,7 @@
     "src/capture-state.js",
     "src/cli-idempotency.js",
     "src/host-adapter.js",
+    "src/git-team-memory.js",
     "src/codex-hooks.js",
     "src/claude-hooks.js",
     "src/codex-install.js",

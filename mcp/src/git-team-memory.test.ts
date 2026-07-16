@@ -49,6 +49,7 @@ test('Codex product MCP exposes only closed local Git Team Memory tools and rout
       'pulse_source_register', 'pulse_source_window', 'pulse_source_status',
       'pulse_shared_stage', 'pulse_shared_inspect', 'pulse_shared_edit',
       'pulse_shared_reject', 'pulse_shared_cards',
+      'pulse_shared_publish',
     ]);
     for (const name of expected) assert.ok(names.includes(name), `${name} missing`);
     assert.equal(names.some((name) => name.startsWith('pulse_team_')), false);

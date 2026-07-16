@@ -87,10 +87,11 @@ function sharedMemoryBatch() {
 }
 
 test('shared-memory cards are canonical, readable, and reject altered or duplicate blocks', () => {
-  const cards = renderGitTeamMemoryCards(sharedMemoryBatch());
+  const cards = renderGitTeamMemoryCards(sharedMemoryBatch(), { approverLabel: 'Nikita' });
   assert.match(cards.block, /^\[PULSE TEAM MEMORY CARDS v1 batch=shared_batch_cards_01 generation=1\]/);
   assert.match(cards.block, /Use the approved brief before drafting the launch page/);
   assert.match(cards.block, /Reply exactly `ok`/);
+  assert.match(cards.block, /Approver: "Nikita"/);
   assert.deepEqual(cards.candidate_digests, ['c'.repeat(64)]);
   assert.match(cards.card_block_digest, /^[a-f0-9]{64}$/);
   assert.equal(verifyGitTeamMemoryCardBlock(`Here are the cards:\n\n${cards.block}`, cards), true);
@@ -100,7 +101,7 @@ test('shared-memory cards are canonical, readable, and reject altered or duplica
 
 test('trusted Stop presents only the exact canonical shared-memory card block without persisting assistant text', async () => {
   const batch = sharedMemoryBatch();
-  const cards = renderGitTeamMemoryCards(batch);
+  const cards = renderGitTeamMemoryCards(batch, { approverLabel: 'Nikita' });
   const calls = [];
   const sharedResolved = {
     ...resolved,
@@ -136,6 +137,7 @@ test('trusted Stop presents only the exact canonical shared-memory card block wi
   ]);
   assert.equal(calls[1].options.body.card_block_digest, cards.card_block_digest);
   assert.deepEqual(calls[1].options.body.candidate_digests, cards.candidate_digests);
+  assert.equal(calls[1].options.body.approver_label_digest, cards.approver_label_digest);
   assert.doesNotMatch(JSON.stringify(calls), /Cards ready for review|Use the approved brief/);
 });
 
@@ -567,6 +569,7 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
     'curl -X POST http://127.0.0.1:18801/memory/wipe',
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/exact-ok',
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/review/present',
+    'curl -X POST http://127.0.0.1:18801/project/shared-memory/publications/start',
     'cat ~/.pulse/secret.key',
   ]) {
     const output = await handleCodexHook('PreToolUse', {

@@ -208,6 +208,7 @@ export function renderAdditionalContext(evidence, lease) {
 
 const GIT_MEMORY_DIGEST = /^[a-f0-9]{64}$/;
 const GIT_MEMORY_CARD_MARKER = /^\[PULSE TEAM MEMORY CARDS v1 batch=([A-Za-z0-9][A-Za-z0-9._:-]{0,254}) generation=([1-9][0-9]*)\]$/gm;
+const GIT_MEMORY_APPROVER_LABEL = /^Approver: (.+)$/gm;
 
 function gitMemoryDisplayString(value, code, maxLength = 1200) {
   if (typeof value !== 'string' || value.length < 1 || value.length > maxLength || CONTROL.test(value)) {
@@ -254,14 +255,29 @@ function gitMemoryCardCandidate(candidate, batchID, index) {
   ].join('\n');
 }
 
-export function renderGitTeamMemoryCards(batch) {
+function validGitTeamMemoryApproverLabel(value) {
+  return typeof value === 'string' && value === value.trim() && value.length > 0 &&
+    [...value].length <= 80 && value.normalize('NFC') === value && !CONTROL.test(value);
+}
+
+export function gitTeamMemoryApproverLabelDigest(value) {
+  if (!validGitTeamMemoryApproverLabel(value)) throw new Error('git_team_memory_approver_label_invalid');
+  return createHash('sha256')
+    .update('pulse-git-memory-approver-label-v1')
+    .update('\x00')
+    .update(value)
+    .digest('hex');
+}
+
+export function renderGitTeamMemoryCards(batch, { approverLabel } = {}) {
   if (!batch || typeof batch !== 'object' || Array.isArray(batch) ||
       batch.schema !== 'pulse.git_team_memory.inspect.v1' || !STABLE_ID.test(batch.batch_id ?? '') ||
       !Number.isSafeInteger(batch.generation) || batch.generation < 1 || batch.host !== 'codex' ||
       batch.state !== 'staged' || !STABLE_ID.test(batch.source_id ?? '') ||
       !GIT_MEMORY_DIGEST.test(batch.source_version_digest ?? '') ||
       typeof batch.source_locator !== 'string' || batch.source_locator.length < 1 || CONTROL.test(batch.source_locator) ||
-      !Array.isArray(batch.candidates) || batch.candidates.length < 1 || batch.candidates.length > 20) {
+      !Array.isArray(batch.candidates) || batch.candidates.length < 1 || batch.candidates.length > 20 ||
+      !validGitTeamMemoryApproverLabel(approverLabel)) {
     throw new Error('git_team_memory_card_batch_invalid');
   }
   const candidateDigests = [];
@@ -272,6 +288,7 @@ export function renderGitTeamMemoryCards(batch) {
   const block = [
     `[PULSE TEAM MEMORY CARDS v1 batch=${batch.batch_id} generation=${batch.generation}]`,
     `Source: ${gitMemoryDisplayString(batch.source_locator, 'git_team_memory_card_source_invalid', 512)} @ ${batch.source_version_digest}`,
+    `Approver: ${JSON.stringify(approverLabel)}`,
     '',
     cards.join('\n\n'),
     '',
@@ -284,8 +301,22 @@ export function renderGitTeamMemoryCards(batch) {
     batch_id: batch.batch_id,
     batch_generation: batch.generation,
     candidate_digests: Object.freeze(candidateDigests),
+    approver_label_digest: gitTeamMemoryApproverLabelDigest(approverLabel),
     card_block_digest: createHash('sha256').update(block).digest('hex'),
   });
+}
+
+export function gitTeamMemoryCardApproverLabels(message) {
+  if (typeof message !== 'string' || message.length > 1 << 20) return [];
+  const found = [];
+  GIT_MEMORY_APPROVER_LABEL.lastIndex = 0;
+  for (const match of message.matchAll(GIT_MEMORY_APPROVER_LABEL)) {
+    try {
+      const value = JSON.parse(match[1]);
+      if (validGitTeamMemoryApproverLabel(value)) found.push(value);
+    } catch { /* malformed labels are not presentation authority */ }
+  }
+  return found;
 }
 
 export function gitTeamMemoryCardMarkers(message) {
@@ -303,8 +334,10 @@ export function verifyGitTeamMemoryCardBlock(message, expected) {
       !GIT_MEMORY_DIGEST.test(expected.card_block_digest ?? '') ||
       createHash('sha256').update(expected.block).digest('hex') !== expected.card_block_digest) return false;
   const markers = gitTeamMemoryCardMarkers(message);
+  const approvers = gitTeamMemoryCardApproverLabels(message);
   if (markers.length !== 1 || markers[0].batch_id !== expected.batch_id ||
-      markers[0].batch_generation !== expected.batch_generation) return false;
+      markers[0].batch_generation !== expected.batch_generation || approvers.length !== 1 ||
+      gitTeamMemoryApproverLabelDigest(approvers[0]) !== expected.approver_label_digest) return false;
   return message.split(expected.block).length === 2;
 }
 
@@ -372,12 +405,13 @@ export function isDestructivePulseShellInvocation(toolName, toolInput) {
   return /(?:^|[\s'";&|()])(?:[^\s'";&|()]*\/)?(?:pulse|cli\.js)\s+(?:wipe|delete)(?=$|[\s'";&|()])/i.test(command) ||
     /\/(?:memory\/wipe|memory\/delete)(?:\s|[?'"\\]|$)/i.test(command) ||
     /\/project\/shared-memory\/review\/(?:present|exact-ok)(?:\s|[?'"\\]|$)/i.test(command) ||
+    /\/project\/shared-memory\/publications\/(?:start|finalize)(?:\s|[?'"\\]|$)/i.test(command) ||
     /(?:^|[\s'"=])(?:~\/\.pulse|\$HOME\/\.pulse|\/[^\s'";|]+\/\.pulse)\/secret\.key(?:[\s'";|]|$)/i.test(command);
 }
 
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
-    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards))$/i.test(toolName);
+    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish))$/i.test(toolName);
 }
 
 export function hookBundleDigest(bytes) {

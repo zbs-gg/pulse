@@ -101,3 +101,33 @@ func (s *Server) handleGitTeamMemoryExactOK(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, result)
 }
+
+func (s *Server) handleGitTeamMemoryPublicationStart(w http.ResponseWriter, r *http.Request) {
+	var req store.GitTeamMemoryPublicationStartRequest
+	if err := decodeMemoryTrayBody(r, &req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.cfg.Store.BeginGitTeamMemoryPublication(req, time.Now().UTC())
+	if err != nil {
+		writeGitMemoryReviewError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, result)
+}
+
+func (s *Server) handleGitTeamMemoryPublicationFinalize(w http.ResponseWriter, r *http.Request) {
+	var req store.GitTeamMemoryPublicationFinalizeRequest
+	if err := decodeMemoryTrayBody(r, &req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.cfg.Store.FinalizeGitTeamMemoryPublication(req, time.Now().UTC())
+	if err != nil {
+		writeGitMemoryReviewError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, result)
+}

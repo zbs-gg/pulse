@@ -24,32 +24,34 @@ var (
 )
 
 type GitTeamMemoryPresentationRequest struct {
-	Schema            string   `json:"schema"`
-	PortableProjectID string   `json:"portable_project_id"`
-	RepositoryID      string   `json:"repository_id"`
-	BindingDigest     string   `json:"binding_digest"`
-	BatchID           string   `json:"batch_id"`
-	BatchGeneration   int      `json:"batch_generation"`
-	Host              string   `json:"host"`
-	TaskID            string   `json:"task_id"`
-	SessionRef        string   `json:"session_ref"`
-	TurnRef           string   `json:"turn_ref"`
-	SourceEventDigest string   `json:"source_event_digest"`
-	CardBlockDigest   string   `json:"card_block_digest"`
-	CandidateDigests  []string `json:"candidate_digests"`
+	Schema              string   `json:"schema"`
+	PortableProjectID   string   `json:"portable_project_id"`
+	RepositoryID        string   `json:"repository_id"`
+	BindingDigest       string   `json:"binding_digest"`
+	BatchID             string   `json:"batch_id"`
+	BatchGeneration     int      `json:"batch_generation"`
+	Host                string   `json:"host"`
+	TaskID              string   `json:"task_id"`
+	SessionRef          string   `json:"session_ref"`
+	TurnRef             string   `json:"turn_ref"`
+	SourceEventDigest   string   `json:"source_event_digest"`
+	CardBlockDigest     string   `json:"card_block_digest"`
+	CandidateDigests    []string `json:"candidate_digests"`
+	ApproverLabelDigest string   `json:"approver_label_digest"`
 }
 
 type GitTeamMemoryPresentationReceipt struct {
-	Schema           string   `json:"schema"`
-	PresentationID   string   `json:"presentation_id"`
-	GenerationID     string   `json:"generation_id"`
-	BatchID          string   `json:"batch_id"`
-	BatchGeneration  int      `json:"batch_generation"`
-	CardBlockDigest  string   `json:"card_block_digest"`
-	CandidateDigests []string `json:"candidate_digests"`
-	State            string   `json:"state"`
-	PresentedAt      string   `json:"presented_at"`
-	ExpiresAt        string   `json:"expires_at"`
+	Schema              string   `json:"schema"`
+	PresentationID      string   `json:"presentation_id"`
+	GenerationID        string   `json:"generation_id"`
+	BatchID             string   `json:"batch_id"`
+	BatchGeneration     int      `json:"batch_generation"`
+	CardBlockDigest     string   `json:"card_block_digest"`
+	CandidateDigests    []string `json:"candidate_digests"`
+	ApproverLabelDigest string   `json:"approver_label_digest"`
+	State               string   `json:"state"`
+	PresentedAt         string   `json:"presented_at"`
+	ExpiresAt           string   `json:"expires_at"`
 }
 
 type GitTeamMemoryExactOKRequest struct {
@@ -63,23 +65,26 @@ type GitTeamMemoryExactOKRequest struct {
 }
 
 type GitTeamMemoryApprovalLease struct {
-	Schema           string   `json:"schema"`
-	LeaseID          string   `json:"lease_id"`
-	PresentationID   string   `json:"presentation_id"`
-	BatchID          string   `json:"batch_id"`
-	BatchGeneration  int      `json:"batch_generation"`
-	CandidateDigests []string `json:"candidate_digests"`
-	AuthorityDigest  string   `json:"authority_digest"`
-	State            string   `json:"state"`
-	IssuedAt         string   `json:"issued_at"`
-	ExpiresAt        string   `json:"expires_at"`
-	ConsumedAt       string   `json:"consumed_at,omitempty"`
+	Schema              string   `json:"schema"`
+	LeaseID             string   `json:"lease_id"`
+	PresentationID      string   `json:"presentation_id"`
+	BatchID             string   `json:"batch_id"`
+	BatchGeneration     int      `json:"batch_generation"`
+	CandidateDigests    []string `json:"candidate_digests"`
+	ApproverLabelDigest string   `json:"approver_label_digest"`
+	AuthorityDigest     string   `json:"authority_digest"`
+	State               string   `json:"state"`
+	IssuedAt            string   `json:"issued_at"`
+	ExpiresAt           string   `json:"expires_at"`
+	ConsumedAt          string   `json:"consumed_at,omitempty"`
 }
 
 var hookRefPattern = map[string]string{
 	"session": "session:",
 	"turn":    "turn:",
 }
+
+const missingApproverLabelDigest = "0000000000000000000000000000000000000000000000000000000000000000"
 
 func validHookRef(kind, value string) bool {
 	prefix, ok := hookRefPattern[kind]
@@ -138,11 +143,12 @@ func loadPresentationReceiptTx(tx *sql.Tx, presentationID string) (GitTeamMemory
 		SELECT presentation.presentation_id, presentation.generation_id,
 		       presentation.batch_id, presentation.batch_generation,
 		       presentation.card_block_digest, presentation.candidate_digests_json,
+		       presentation.approver_label_digest,
 		       presentation.state, presentation.presented_at, presentation.expires_at
 		  FROM git_memory_hook_presentations presentation
 		 WHERE presentation.presentation_id=?`, presentationID).Scan(
 		&result.PresentationID, &result.GenerationID, &result.BatchID,
-		&result.BatchGeneration, &result.CardBlockDigest, &candidateJSON,
+		&result.BatchGeneration, &result.CardBlockDigest, &candidateJSON, &result.ApproverLabelDigest,
 		&result.State, &result.PresentedAt, &result.ExpiresAt,
 	)
 	if err != nil {
@@ -162,7 +168,8 @@ func (s *Store) PresentGitTeamMemoryCards(req GitTeamMemoryPresentationRequest, 
 	if !validTrayIdentifier(req.BatchID) || req.BatchGeneration < 1 || req.Host != "codex" ||
 		!validTrayIdentifier(req.TaskID) || !validHookRef("session", req.SessionRef) ||
 		!validHookRef("turn", req.TurnRef) || !trayBindingDigestPattern.MatchString(req.SourceEventDigest) ||
-		!trayBindingDigestPattern.MatchString(req.CardBlockDigest) || !validDigestList(req.CandidateDigests) {
+		!trayBindingDigestPattern.MatchString(req.CardBlockDigest) || !validDigestList(req.CandidateDigests) ||
+		!trayBindingDigestPattern.MatchString(req.ApproverLabelDigest) {
 		return GitTeamMemoryPresentationReceipt{}, ErrGitTeamMemoryPresentationInvalid
 	}
 	presentedAt := now.UTC().Format(time.RFC3339Nano)
@@ -206,14 +213,16 @@ func (s *Store) PresentGitTeamMemoryCards(req GitTeamMemoryPresentationRequest, 
 		if loadErr != nil {
 			return GitTeamMemoryPresentationReceipt{}, loadErr
 		}
-		if result.CardBlockDigest != req.CardBlockDigest || !sameStrings(result.CandidateDigests, req.CandidateDigests) {
+		legacyWithoutApprover := result.ApproverLabelDigest == missingApproverLabelDigest
+		if !legacyWithoutApprover && (result.CardBlockDigest != req.CardBlockDigest || !sameStrings(result.CandidateDigests, req.CandidateDigests) ||
+			result.ApproverLabelDigest != req.ApproverLabelDigest) {
 			return GitTeamMemoryPresentationReceipt{}, ErrGitTeamMemoryVersionConflict
 		}
 		expires, parseErr := time.Parse(time.RFC3339Nano, result.ExpiresAt)
 		if parseErr != nil {
 			return GitTeamMemoryPresentationReceipt{}, errors.New("git team memory presentation expiry is corrupt")
 		}
-		if expires.After(now.UTC()) {
+		if !legacyWithoutApprover && expires.After(now.UTC()) {
 			return result, tx.Rollback()
 		}
 		if _, err := tx.Exec(`UPDATE git_memory_hook_presentations SET state='invalidated' WHERE presentation_id=? AND state='presented'`, existingID); err != nil {
@@ -248,10 +257,11 @@ func (s *Store) PresentGitTeamMemoryCards(req GitTeamMemoryPresentationRequest, 
 		INSERT INTO git_memory_hook_presentations(
 			presentation_id, generation_id, batch_id, batch_generation, host, task_id,
 			session_ref, turn_ref, source_event_digest, card_block_digest,
-			candidate_digests_json, state, presented_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'presented', ?, ?)`, presentationID,
+			candidate_digests_json, state, presented_at, expires_at, approver_label_digest
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'presented', ?, ?, ?)`, presentationID,
 		generationID, req.BatchID, req.BatchGeneration, req.Host, req.TaskID, req.SessionRef,
-		req.TurnRef, req.SourceEventDigest, req.CardBlockDigest, string(candidateJSON), presentedAt, expiresAt); err != nil {
+		req.TurnRef, req.SourceEventDigest, req.CardBlockDigest, string(candidateJSON), presentedAt, expiresAt,
+		req.ApproverLabelDigest); err != nil {
 		return GitTeamMemoryPresentationReceipt{}, err
 	}
 	if err := insertGitMemoryBatchReceiptAuditTx(tx, req.BatchID, "presented", "present", "accepted", "", presentedAt); err != nil {
@@ -264,7 +274,8 @@ func (s *Store) PresentGitTeamMemoryCards(req GitTeamMemoryPresentationRequest, 
 		Schema: GitTeamMemoryPresentationSchema, PresentationID: presentationID,
 		GenerationID: generationID, BatchID: req.BatchID, BatchGeneration: req.BatchGeneration,
 		CardBlockDigest: req.CardBlockDigest, CandidateDigests: append([]string(nil), req.CandidateDigests...),
-		State: "presented", PresentedAt: presentedAt, ExpiresAt: expiresAt,
+		ApproverLabelDigest: req.ApproverLabelDigest,
+		State:               "presented", PresentedAt: presentedAt, ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -292,9 +303,9 @@ func insertGitMemoryBatchReceiptAuditTx(tx *sql.Tx, batchID, status, action, out
 	return err
 }
 
-func gitTeamMemoryAuthorityDigest(sessionRef, promptEventDigest, presentationID, cardDigest string) string {
+func gitTeamMemoryAuthorityDigest(sessionRef, promptEventDigest, presentationID, cardDigest, approverLabelDigest string) string {
 	digest := sha256.Sum256([]byte(strings.Join([]string{
-		"pulse-git-memory-exact-ok-v1", sessionRef, promptEventDigest, presentationID, cardDigest,
+		"pulse-git-memory-exact-ok-v1", sessionRef, promptEventDigest, presentationID, cardDigest, approverLabelDigest,
 	}, "\x00")))
 	return hex.EncodeToString(digest[:])
 }
@@ -306,11 +317,11 @@ func loadApprovalLeaseTx(tx *sql.Tx, leaseID string) (GitTeamMemoryApprovalLease
 	err := tx.QueryRow(`
 		SELECT lease_id, presentation_id, batch_id, batch_generation,
 		       candidate_digests_json, authority_digest, state, issued_at,
-		       expires_at, COALESCE(consumed_at, '')
+		       expires_at, COALESCE(consumed_at, ''), approver_label_digest
 		  FROM git_memory_approval_leases WHERE lease_id=?`, leaseID).Scan(
 		&result.LeaseID, &result.PresentationID, &result.BatchID, &result.BatchGeneration,
 		&candidateJSON, &result.AuthorityDigest, &result.State, &result.IssuedAt,
-		&result.ExpiresAt, &result.ConsumedAt,
+		&result.ExpiresAt, &result.ConsumedAt, &result.ApproverLabelDigest,
 	)
 	if err != nil {
 		return GitTeamMemoryApprovalLease{}, err
@@ -350,24 +361,26 @@ func (s *Store) ApproveExactGitTeamMemoryOK(req GitTeamMemoryExactOKRequest, now
 		return GitTeamMemoryApprovalLease{}, err
 	}
 	type pendingPresentation struct {
-		presentationID, batchID, cardDigest, candidateJSON, expiresAt string
-		generation                                                    int
+		presentationID, batchID, cardDigest, candidateJSON, expiresAt, approverLabelDigest string
+		generation                                                                         int
 	}
 	rows, err := tx.Query(`
 		SELECT presentation.presentation_id, presentation.batch_id,
 		       presentation.batch_generation, presentation.card_block_digest,
-		       presentation.candidate_digests_json, presentation.expires_at
+		       presentation.candidate_digests_json, presentation.expires_at,
+		       presentation.approver_label_digest
 		  FROM git_memory_hook_presentations presentation
 		  JOIN git_memory_card_generations card ON card.generation_id=presentation.generation_id
 		  JOIN git_memory_review_batches batch ON batch.batch_id=presentation.batch_id
 		  JOIN git_memory_sources source ON source.source_id=batch.source_id
 		 WHERE presentation.host=? AND presentation.session_ref=?
 		   AND presentation.state='presented' AND card.state='presented'
+		   AND presentation.approver_label_digest<>?
 		   AND batch.state='staged'
 		   AND batch.portable_project_id=?
 		   AND batch.source_version_digest=source.current_version_digest
 		 ORDER BY presentation.presented_at, presentation.presentation_id`,
-		req.Host, req.SessionRef, req.PortableProjectID)
+		req.Host, req.SessionRef, missingApproverLabelDigest, req.PortableProjectID)
 	if err != nil {
 		return GitTeamMemoryApprovalLease{}, err
 	}
@@ -375,7 +388,7 @@ func (s *Store) ApproveExactGitTeamMemoryOK(req GitTeamMemoryExactOKRequest, now
 	for rows.Next() {
 		var item pendingPresentation
 		if err := rows.Scan(&item.presentationID, &item.batchID, &item.generation,
-			&item.cardDigest, &item.candidateJSON, &item.expiresAt); err != nil {
+			&item.cardDigest, &item.candidateJSON, &item.expiresAt, &item.approverLabelDigest); err != nil {
 			rows.Close()
 			return GitTeamMemoryApprovalLease{}, err
 		}
@@ -410,7 +423,7 @@ func (s *Store) ApproveExactGitTeamMemoryOK(req GitTeamMemoryExactOKRequest, now
 		return GitTeamMemoryApprovalLease{}, ErrGitTeamMemoryVersionConflict
 	}
 	authorityDigest := gitTeamMemoryAuthorityDigest(req.SessionRef, req.PromptEventDigest,
-		selected.presentationID, selected.cardDigest)
+		selected.presentationID, selected.cardDigest, selected.approverLabelDigest)
 	leaseID, err := newOpaqueID("approval_lease")
 	if err != nil {
 		return GitTeamMemoryApprovalLease{}, err
@@ -419,10 +432,10 @@ func (s *Store) ApproveExactGitTeamMemoryOK(req GitTeamMemoryExactOKRequest, now
 		INSERT INTO git_memory_approval_leases(
 			lease_id, presentation_id, batch_id, batch_generation, session_ref,
 			prompt_event_digest, authority_digest, candidate_digests_json,
-			state, issued_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)`, leaseID, selected.presentationID,
+			state, issued_at, expires_at, approver_label_digest
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?)`, leaseID, selected.presentationID,
 		selected.batchID, selected.generation, req.SessionRef, req.PromptEventDigest,
-		authorityDigest, selected.candidateJSON, issuedAt, expiresAt); err != nil {
+		authorityDigest, selected.candidateJSON, issuedAt, expiresAt, selected.approverLabelDigest); err != nil {
 		return GitTeamMemoryApprovalLease{}, err
 	}
 	candidateRows, err := tx.Query(`
@@ -485,7 +498,8 @@ func (s *Store) ApproveExactGitTeamMemoryOK(req GitTeamMemoryExactOKRequest, now
 		Schema: GitTeamMemoryApprovalLeaseSchema, LeaseID: leaseID,
 		PresentationID: selected.presentationID, BatchID: selected.batchID,
 		BatchGeneration: selected.generation, CandidateDigests: digests,
-		AuthorityDigest: authorityDigest, State: "issued", IssuedAt: issuedAt, ExpiresAt: expiresAt,
+		ApproverLabelDigest: selected.approverLabelDigest,
+		AuthorityDigest:     authorityDigest, State: "issued", IssuedAt: issuedAt, ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -533,7 +547,8 @@ func (lease GitTeamMemoryApprovalLease) Validate() error {
 	if lease.Schema != GitTeamMemoryApprovalLeaseSchema || !validTrayIdentifier(lease.LeaseID) ||
 		!validTrayIdentifier(lease.PresentationID) || !validTrayIdentifier(lease.BatchID) ||
 		lease.BatchGeneration < 1 || !validDigestList(lease.CandidateDigests) ||
-		!trayBindingDigestPattern.MatchString(lease.AuthorityDigest) {
+		!trayBindingDigestPattern.MatchString(lease.AuthorityDigest) ||
+		!trayBindingDigestPattern.MatchString(lease.ApproverLabelDigest) {
 		return fmt.Errorf("approval lease is invalid")
 	}
 	return nil

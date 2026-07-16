@@ -211,6 +211,8 @@ func (s *Server) localHandler() http.Handler {
 			r.Post("/project/shared-memory/review/candidates/{id}/reject", s.handleGitTeamMemoryReject)
 			r.Post("/project/shared-memory/review/present", s.handleGitTeamMemoryPresent)
 			r.Post("/project/shared-memory/review/exact-ok", s.handleGitTeamMemoryExactOK)
+			r.Post("/project/shared-memory/publications/start", s.handleGitTeamMemoryPublicationStart)
+			r.Post("/project/shared-memory/publications/finalize", s.handleGitTeamMemoryPublicationFinalize)
 		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -39,6 +41,8 @@ func TestGitTeamMemoryTrustedPresentationAndExactOKRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	digests := []string{batch.Candidates[0].ContentDigest}
+	approverLabel := "Nikita"
+	approverDigest := sha256.Sum256([]byte("pulse-git-memory-approver-label-v1\x00" + approverLabel))
 	present := pulseJSON(t, ts, http.MethodPost, "/project/shared-memory/review/present", map[string]any{
 		"schema": "pulse.git_team_memory.presentation.v1", "portable_project_id": testSharedProject,
 		"repository_id": testSharedRepository, "binding_digest": testSharedBinding,
@@ -46,7 +50,7 @@ func TestGitTeamMemoryTrustedPresentationAndExactOKRoutes(t *testing.T) {
 		"host": "codex", "task_id": "task_server_git_memory",
 		"session_ref": "session:" + strings.Repeat("c", 64), "turn_ref": "turn:" + strings.Repeat("d", 64),
 		"source_event_digest": strings.Repeat("e", 64), "card_block_digest": strings.Repeat("f", 64),
-		"candidate_digests": digests,
+		"candidate_digests": digests, "approver_label_digest": hex.EncodeToString(approverDigest[:]),
 	})
 	defer present.Body.Close()
 	if present.StatusCode != http.StatusOK {
@@ -75,6 +79,30 @@ func TestGitTeamMemoryTrustedPresentationAndExactOKRoutes(t *testing.T) {
 	}
 	if lease.State != "issued" || lease.BatchID != batch.BatchID || lease.Validate() != nil {
 		t.Fatalf("approval lease = %#v", lease)
+	}
+	start := pulseJSON(t, ts, http.MethodPost, "/project/shared-memory/publications/start", map[string]any{
+		"schema": "pulse.git_team_memory.publication_start.v1", "portable_project_id": testSharedProject,
+		"repository_id": testSharedRepository, "binding_digest": testSharedBinding,
+		"approval_lease_id": lease.LeaseID, "approver_label": approverLabel,
+		"expected_parent": strings.Repeat("a", 40),
+	})
+	defer start.Body.Close()
+	if start.StatusCode != http.StatusOK {
+		t.Fatalf("publication start status = %d", start.StatusCode)
+	}
+	var publication store.GitTeamMemoryPublicationReceipt
+	if err := json.NewDecoder(start.Body).Decode(&publication); err != nil {
+		t.Fatal(err)
+	}
+	finalize := pulseJSON(t, ts, http.MethodPost, "/project/shared-memory/publications/finalize", map[string]any{
+		"schema": "pulse.git_team_memory.publication_finalize.v1", "portable_project_id": testSharedProject,
+		"repository_id": testSharedRepository, "binding_digest": testSharedBinding,
+		"publication_id": publication.PublicationID, "files_digest": publication.FilesDigest,
+		"outcome": "committed", "commit_hash": strings.Repeat("c", 40),
+	})
+	defer finalize.Body.Close()
+	if finalize.StatusCode != http.StatusOK {
+		t.Fatalf("publication finalize status = %d", finalize.StatusCode)
 	}
 
 	unknown := map[string]any{

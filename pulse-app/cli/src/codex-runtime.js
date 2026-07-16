@@ -33,6 +33,7 @@ import { captureEnabledForHost } from './capture-state.js';
 import { callTeamRemoteTool, isReadOnlyTeamTool } from './team-remote-client.js';
 import { renderGitTeamMemoryCards } from './host-adapter.js';
 import { ensureBoundPortableProjectID, readBoundProjectSourceWindow } from './project-source.js';
+import { publishGitTeamMemory } from './git-team-memory.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
@@ -329,6 +330,7 @@ const LOCAL_PRODUCT_TOOL_ACTIONS = new Set([
   'pulse_source_register', 'pulse_source_window', 'pulse_source_status',
   'pulse_shared_stage', 'pulse_shared_inspect', 'pulse_shared_edit',
   'pulse_shared_reject', 'pulse_shared_cards',
+  'pulse_shared_publish',
 ]);
 
 function productToolAction(toolName) {
@@ -568,16 +570,19 @@ export async function callBoundLocalProductTool(resolved, host, name, input, {
     } });
   }
   if (action === 'pulse_shared_inspect' || action === 'pulse_shared_cards') {
-    const body = closedLocalToolInput(input, ['batch_id']);
+    const body = action === 'pulse_shared_cards'
+      ? closedLocalToolInput(input, ['batch_id', 'approver_label'])
+      : closedLocalToolInput(input, ['batch_id']);
     const batch = await request(current, '/project/shared-memory/review/inspect', { body: {
       schema: 'pulse.git_team_memory.inspect.v1', ...authority, batch_id: body.batch_id,
     } });
     if (action === 'pulse_shared_inspect') return batch;
-    const cards = renderGitTeamMemoryCards(batch);
+    const cards = renderGitTeamMemoryCards(batch, { approverLabel: body.approver_label });
     return {
       schema: 'pulse.git_team_memory.cards.v1', batch_id: cards.batch_id,
       batch_generation: cards.batch_generation, card_block: cards.block,
       card_block_digest: cards.card_block_digest, candidate_digests: cards.candidate_digests,
+      approver_label_digest: cards.approver_label_digest,
     };
   }
   if (action === 'pulse_shared_edit') {
@@ -596,6 +601,28 @@ export async function callBoundLocalProductTool(resolved, host, name, input, {
         schema: 'pulse.git_team_memory.reject.v1', ...authority,
         candidate_id: body.candidate_id, expected_version: body.expected_version, reason_code: body.reason_code,
       },
+    });
+  }
+  if (action === 'pulse_shared_publish') {
+    const body = closedLocalToolInput(input, ['approval_lease_id', 'approver_label']);
+    return publishGitTeamMemory(current, body, {
+      beginPublication: (publication) => request(current, '/project/shared-memory/publications/start', {
+        body: {
+          schema: 'pulse.git_team_memory.publication_start.v1', ...authority,
+          approval_lease_id: publication.approval_lease_id,
+          approver_label: publication.approver_label,
+          expected_parent: publication.expected_parent,
+        },
+      }),
+      finalizePublication: (publication) => request(current, '/project/shared-memory/publications/finalize', {
+        body: {
+          schema: 'pulse.git_team_memory.publication_finalize.v1', ...authority,
+          publication_id: publication.publication_id,
+          files_digest: publication.files_digest,
+          outcome: publication.outcome,
+          commit_hash: publication.commit_hash,
+        },
+      }),
     });
   }
   throw new Error('product_local_tool_forbidden');

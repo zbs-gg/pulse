@@ -19,6 +19,7 @@ import {
   contextLease,
   eventBoundContextLease,
   extractPulseReceiptRefs,
+  gitTeamMemoryCardApproverLabels,
   gitTeamMemoryCardMarkers,
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
@@ -124,15 +125,18 @@ function exactGitTeamMemoryOK(value) {
 
 async function presentGitTeamMemoryCards(resolved, event, rawInput, request, dependencies) {
   const markers = gitTeamMemoryCardMarkers(rawInput.last_assistant_message);
-  if (markers.length === 0) return undefined;
-  if (markers.length !== 1) throw new Error('git_team_memory_card_presentation_ambiguous');
+  const approverLabels = gitTeamMemoryCardApproverLabels(rawInput.last_assistant_message);
+  if (markers.length === 0 && approverLabels.length === 0) return undefined;
+  if (markers.length !== 1 || approverLabels.length !== 1) {
+    throw new Error('git_team_memory_card_presentation_ambiguous');
+  }
   const authority = sharedMemoryAuthority(resolved, dependencies);
   const batch = await request(resolved, '/project/shared-memory/review/inspect', {
     body: {
       schema: 'pulse.git_team_memory.inspect.v1', ...authority, batch_id: markers[0].batch_id,
     },
   });
-  const cards = renderGitTeamMemoryCards(batch);
+  const cards = renderGitTeamMemoryCards(batch, { approverLabel: approverLabels[0] });
   if (cards.batch_generation !== markers[0].batch_generation ||
       !verifyGitTeamMemoryCardBlock(rawInput.last_assistant_message, cards)) {
     throw new Error('git_team_memory_card_presentation_mismatch');
@@ -147,6 +151,7 @@ async function presentGitTeamMemoryCards(resolved, event, rawInput, request, dep
       source_event_digest: event.source_event_key.slice('event_'.length),
       card_block_digest: cards.card_block_digest,
       candidate_digests: cards.candidate_digests,
+      approver_label_digest: cards.approver_label_digest,
     },
   });
 }
