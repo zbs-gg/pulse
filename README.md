@@ -16,16 +16,17 @@ about. Local-first, state-aware memory for any AI agent.
 ## Quickstart
 
 ```bash
-npx @zbs-gg/pulse@preview install   # Personal Pulse for Codex
-pulse doctor codex                  # exact readiness verdict
-pulse home                          # memories, continuity, token evidence
+npx -y @zbs-gg/pulse@preview install # detects Claude Code, Cursor, and Codex
+pulse doctor <installed-host>        # claude-code, cursor, or codex
+pulse home                           # memories, continuity, token evidence
 ```
 
-The release-gated Personal path is Apple Silicon + Node 20+ + Codex. Pulse owns
-its daemon, managed local embedding runtime, and model; it needs no Go, Python,
-Make, Docker, model API key, or manual configuration editing. On unsupported
-hosts, [Safe Mode](#safe-mode--fallback-not-the-product) remains a separately
-labeled compatibility fallback, **not** the engine.
+The release-gated Personal path is Apple Silicon + Node 20+ + a Git project +
+any one of Claude Code, Cursor, or Codex. Pulse detects every compatible host
+already installed and connects them to one shared local Core and vault. It
+needs no Go, Python, Make, Docker, model API key, or manual configuration
+editing. On unsupported hosts, [Safe Mode](#safe-mode--fallback-not-the-product)
+remains a separately labeled compatibility fallback, **not** the engine.
 
 ![What the next agent session receives — the Pulse continuity pack](docs/assets/continuity-pack.png)
 
@@ -50,15 +51,16 @@ Please install it carefully:
 2. Check the npm package:
    npm view @zbs-gg/pulse dist-tags
    The Personal path requires preview 0.7.0 or newer.
-3. Check whether this is an Apple Silicon Mac with Node 20+, Codex, and a Git
-   project. Otherwise explain Safe Mode separately.
+3. Check whether this is an Apple Silicon Mac with Node 20+, a Git project,
+   and at least one of Claude Code, Cursor, or Codex. Otherwise explain Safe
+   Mode separately.
 4. Explain in plain English what Pulse will write, where memory is stored,
    what does NOT happen by default, and how I can erase it.
 5. Ask me for confirmation before installing anything.
 6. After I confirm, install the best supported path.
-   For Personal Pulse on Codex:
-     npx @zbs-gg/pulse@preview install
-     pulse doctor codex
+   For Personal Pulse:
+     npx -y @zbs-gg/pulse@preview install
+     pulse doctor <installed-host>
      pulse home
    For MCP/Safe Mode:
      configure the host to run:
@@ -88,7 +90,8 @@ retrieves the right remembered episode for *this* moment — not just the
 closest text match — shows **why** that memory surfaced, shows what it will
 tell your next agent, and wipes on one command.
 
-Status: developer preview. Local-first, Codex-first. Not production,
+Status: developer preview. Local-first, host-neutral across Claude Code,
+Cursor, and Codex. Not production,
 not a consumer app yet.
 
 If you are an agent asked to evaluate or install Pulse: read
@@ -122,29 +125,30 @@ legacy and should not be the default install path.
 
 | Harness | Current support | Recommended path |
 |---|---|---|
-| Codex / OpenAI local agents | First release-gated Personal product: one-command managed runtime, hooks, Memory Home, and continuity. | `npx @zbs-gg/pulse@preview install` |
-| Claude Code | Existing Local Preview path; not the Stage 1 clean-room release gate. | `npx @zbs-gg/pulse@preview init claude-code` |
+| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity through the shared Core. | `npx -y @zbs-gg/pulse@preview install` |
+| Claude Code | Native Personal plugin and lifecycle through the same shared Core and vault. | `npx -y @zbs-gg/pulse@preview install` |
 | Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. Full connector/store path is not shipped. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | Native local plugin and lifecycle through the same shared Core and vault; no Cursor CLI required. | `npx -y @zbs-gg/pulse@preview install` |
 | Windsurf | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
 | Gemini CLI | MCP-compatible if the CLI/harness supports local MCP command servers. Not first-class installer yet. | Use the same MCP command after agent audit |
 | LangChain / CrewAI / custom agents | Integration surface, not a consumer installer. | Run Pulse MCP locally and call its tools from your framework |
 | ChatGPT app / Claude Directory / Pulse Cloud | Future distribution surfaces. | Not shipped in this preview |
 
 _"MCP-compatible" means protocol-level only. The packed one-command product
-gate is Codex-first; other hosts do not inherit that claim._
+gate covers Claude Code, Cursor, and Codex; other hosts do not inherit that claim._
 
-## Install — Personal Pulse for Codex
+## Install — Personal Pulse
 
 ```bash
-npx @zbs-gg/pulse@preview install
-pulse doctor codex
+npx -y @zbs-gg/pulse@preview install
+pulse doctor <installed-host>
 pulse home
 ```
 
 The wizard shows the exact plan before consent, downloads only signed release
-artifacts, survives interruption, and opens Memory Home. A normal memory must
-then be shown, saved, and offered to a fresh Codex task. See the complete
+artifacts, provisions Core once, attaches every detected compatible harness,
+survives interruption, and opens Memory Home. A normal memory must then be
+shown, saved, and offered to a fresh task in a verified harness. See the complete
 [Personal onboarding](docs/PERSONAL_PULSE_ONBOARDING.md).
 
 ### What the demo proves
@@ -176,7 +180,7 @@ Then: `pulse demo --clean` removes the whole demo store.
 
 | Mode | What you get | Needs |
 |---|---|---|
-| Personal Pulse for Codex | managed local state-aware retrieval, visible writes, Memory Home, fresh-task continuity | Apple Silicon, Node 20+, Codex, Git project |
+| Personal Pulse | managed local state-aware retrieval, visible writes, Memory Home, fresh-task continuity | Apple Silicon, Node 20+, Git project, and Claude Code, Cursor, or Codex |
 | Claude Code Local Preview | older source-built preview path | Node 20+, Go toolchain, Claude Code CLI, configured embedder |
 | Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 20+, nothing else |
 
@@ -212,7 +216,8 @@ paper/bench, not reproduced in this repository.
   Cohere *embedding* option, doctor reports `external embedding API: on`.
 - Raw transcript capture is off by default — structured capsules only.
 - Memory is local and inspectable; wipe needs an exact confirmation phrase.
-- `pulse doctor` is the source of truth: if full retrieval is off it says
+- `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`
+  is the product source of truth: if full retrieval is off it says
   "Pulse MCP fallback is ready. Full retrieval is not enabled." — never
   "Pulse ready".
 

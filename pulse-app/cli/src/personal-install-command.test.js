@@ -45,6 +45,17 @@ function plan(overrides = {}) {
   };
 }
 
+function readyActivation() {
+  return {
+    product_ready: true,
+    parity: 'complete',
+    hosts: [{
+      host: 'codex', activated: true, verified: true,
+      lifecycle_ready: true, reason_code: 'codex_verified',
+    }],
+  };
+}
+
 test('lock contention returns one stable machine-readable action without invoking installer dependencies', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-command-lock.'));
   const release = acquireInstallLock(join(dataDir, 'runtime', 'personal-install.lock'));
@@ -115,7 +126,8 @@ test('one-command orchestration carries the immutable plan into a healthy instal
         inspectPresence: async () => ({ ready: true }), installPresence: async () => {},
         inspectPrincipal: async () => principal, createPrincipal: async () => principal,
         inspectBinding: async () => ({ ready: true, binding }), createBinding: async () => binding,
-        inspectActivation: async () => ({ ready: true }), activateCodex: async () => {},
+        inspectCore: async () => ({ ready: true, full_retrieval: true, context: {} }), activateCore: async () => {},
+        inspectActivation: async () => readyActivation(), activateHosts: async () => readyActivation(),
         inspectHealth: async () => ({ ready: true, full_retrieval: true }),
         writeReceipt: async () => 'receipt_command_ready',
       };
@@ -153,7 +165,8 @@ test('interactive one-command install opens Memory Home after releasing the inst
       inspectPresence: async () => ({ ready: true }), installPresence: async () => {},
       inspectPrincipal: async () => principal, createPrincipal: async () => principal,
       inspectBinding: async () => ({ ready: true, binding }), createBinding: async () => binding,
-      inspectActivation: async () => ({ ready: true }), activateCodex: async () => {},
+      inspectCore: async () => ({ ready: true, full_retrieval: true, context: {} }), activateCore: async () => {},
+      inspectActivation: async () => readyActivation(), activateHosts: async () => readyActivation(),
       inspectHealth: async () => ({ ready: true, full_retrieval: true }),
       writeReceipt: async () => 'receipt_command_ready',
     }),

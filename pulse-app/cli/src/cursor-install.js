@@ -121,3 +121,13 @@ export function installCursorPlugin(sourceRoot, {
     if (!movedPrevious || existsSync(destination)) rmSync(previous, { recursive: true, force: true });
   }
 }
+
+export function removeCursorPlugin({ cursorHome = cursorHomePath() } = {}) {
+  const path = cursorPluginPath(cursorHome);
+  if (!existsSync(path)) return { removed: false };
+  const current = inspectCursorPlugin({ cursorHome });
+  if (current.reason === 'cursor_plugin_unsafe') throw new Error('cursor_plugin_unsafe');
+  rmSync(path, { recursive: true, force: false });
+  if (existsSync(path)) throw new Error('cursor_plugin_remove_failed');
+  return { removed: true };
+}

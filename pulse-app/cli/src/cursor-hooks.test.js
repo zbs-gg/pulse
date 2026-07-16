@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { normalizeCursorHook } from './host-adapter.js';
-import { handleCursorHook } from './cursor-hooks.js';
+import {
+  flushCursorHookOutput,
+  handleCursorHook,
+  inspectCursorLifecycleReadiness,
+  recordCursorLifecycleReadiness,
+} from './cursor-hooks.js';
 
 const base = {
   conversation_id: 'cursor-session-01',
@@ -39,20 +47,31 @@ function stopEvent(input = base) {
 
 test('Cursor sessionStart injects the same bound continuity contract without a second store', async () => {
   const calls = [];
+  let delivery;
   const output = await handleCursorHook('sessionStart', {
     session_id: base.conversation_id, workspace_roots: ['/workspace/pulse'], composer_mode: 'agent',
   }, {
     resolveRuntime: () => resolved,
     request: async (_runtime, path, options) => {
       calls.push({ path, options });
-      return { resume_markdown: 'Decision created in Codex is available in Cursor.' };
+      return {
+        resume_markdown: 'Decision created in Codex is available in Cursor.',
+        included_object_ids: ['memory_shared_01'],
+        included_evidence_ids: ['pulse:memory_shared_01'],
+      };
     },
     now: () => new Date('2026-07-16T10:00:00Z'),
+  });
+  await flushCursorHookOutput({}, output, {
+    recordDelivery: async (offer) => { delivery = offer; },
+    writeOutput: async () => {},
   });
   assert.equal(calls[0].path, '/continuity/resume');
   assert.equal(calls[0].options.body.host, 'cursor');
   assert.match(output.additional_context, /Decision created in Codex is available in Cursor/);
   assert.match(output.additional_context, /pulse.context_lease.v2/);
+  assert.deepEqual(delivery.object_ids, ['memory_shared_01']);
+  assert.equal(delivery.host, 'cursor');
 });
 
 test('Cursor beforeSubmitPrompt binds the turn without persisting prompt content', async () => {
@@ -128,4 +147,23 @@ test('Cursor stop requests one bounded finalization pass then seals no-change', 
   assert.deepEqual(second, {});
   assert.equal(requests[0].path, '/turn/no-change');
   assert.equal(requests[0].options.body.host, 'cursor');
+});
+
+test('Cursor lifecycle readiness is content-free, cumulative, and requires the capability floor', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-cursor-lifecycle.'));
+  const local = { ...resolved, runtime: { ...resolved.runtime, data_dir: dataDir } };
+  try {
+    assert.equal(inspectCursorLifecycleReadiness(local).ready, false);
+    for (const event of ['session_context', 'turn_capture', 'write_receipt', 'finalize']) {
+      recordCursorLifecycleReadiness(local, event, new Date('2026-07-17T10:00:00Z'));
+    }
+    const readiness = inspectCursorLifecycleReadiness(local);
+    assert.equal(readiness.ready, true);
+    assert.deepEqual(readiness.observed, {
+      session_context: true, turn_capture: true, write_receipt: true, finalize: true,
+    });
+    assert.doesNotMatch(JSON.stringify(readiness), /cursor-session|prompt|transcript|\/workspace/);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });

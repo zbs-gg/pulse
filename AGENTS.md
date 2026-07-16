@@ -3,10 +3,10 @@
 Pulse is local-first, state-aware memory for AI agents. When a user asks you
 to install it, your job is to audit first, explain the exact local changes,
 obtain consent, run the one Personal command, and report the real readiness
-state. Codex is the first release-gated harness.
+state. Claude Code, Cursor, and Codex are equal release-gated bootstrap hosts.
 
 The product promise is concrete: a normal memory is shown before it is saved,
-survives into a fresh Codex task, carries provenance and retrieval reasons,
+survives into a fresh task in a verified host, carries provenance and retrieval reasons,
 and appears in Memory Home with honest token-economy evidence.
 
 ## 1. Audit before installing
@@ -14,10 +14,11 @@ and appears in Memory Home with honest token-economy evidence.
 1. Inspect this repository or the exact npm package.
 2. Run `npm view @zbs-gg/pulse dist-tags --json`. The Personal path described
    here requires the `preview` release that contains version `0.7.0` or newer.
-3. Check for an Apple Silicon Mac, Node 20+, Codex, and a Git project.
+3. Check for an Apple Silicon Mac, Node 20+, a Git project, and at least one of
+   Claude Code, Cursor, or Codex.
 4. Explain the install in plain language:
-   - verified Pulse-owned daemon, local embedding runtime, model, Codex plugin,
-     and macOS presence helper are installed;
+   - a verified Pulse-owned daemon, local embedding runtime, model, native
+     plugins for every detected compatible host, and macOS presence helper are installed;
    - the daemon listens only on numeric loopback and memory stays in a private,
      project-bound local vault;
    - raw transcript capture and backend model calls are off by default;
@@ -27,10 +28,10 @@ and appears in Memory Home with honest token-economy evidence.
 5. Ask for explicit confirmation. Do not translate `--yes` into security or
    data approval.
 
-## 2. Install Personal Pulse for Codex
+## 2. Install Personal Pulse
 
 ```bash
-npx @zbs-gg/pulse@preview install
+npx -y @zbs-gg/pulse@preview install
 ```
 
 This path does not require Go, Python, Make, Docker, a model API key, or manual
@@ -38,25 +39,27 @@ configuration editing. The wizard verifies the signed release before it
 mutates product state. A missing, expired, downgraded, or invalid manifest is
 a hard stop, not a reason to fall back silently.
 
-The user may need to approve the macOS presence prompt and trust the exact
-Pulse hook set in Codex. These actions are resumable: after either action,
-rerun the same command or `pulse repair`.
+The user may need to approve the macOS presence prompt, trust the exact Pulse
+hook set in Codex, approve the Claude Code plugin, or reload Cursor. These
+actions are resumable: rerun the same command or `pulse repair`. One verified
+host makes Pulse usable; every unfinished detected host stays visible as
+degraded parity until repaired.
 
 ## 3. Read the real verdict
 
 ```bash
-pulse doctor codex
+pulse doctor <installed-host>
 pulse home
 ```
 
-Only **`Pulse Codex automatic lifecycle ready.`** means the Personal product
-is ready. Confirm that doctor reports:
+Only **`Pulse <host> automatic lifecycle ready.`** means that host's automatic
+continuity is ready. Confirm that doctor reports:
 
 - production authority;
 - full retrieval through the managed local embedder;
 - raw transcript capture off;
 - backend model calls off;
-- native hook trust and one observed Codex lifecycle.
+- exact native plugin activation and one observed lifecycle in that host.
 
 Memory Home is the user surface. It shows readiness, pending cards, recent
 saved memories, what a fresh task received, acknowledgement state, and token
@@ -65,9 +68,9 @@ savings multiplier or convert `collecting` into a claim.
 
 ## 4. Prove one real memory
 
-Continue normal work in Codex. Let the active harness propose one compact,
+Continue normal work in a verified host. Let the active harness propose one compact,
 structured memory. The user must see the card in Memory Home before the review
-delay begins. After save, start a fresh Codex task in the same project and
+delay begins. After save, start a fresh task in the same project and
 confirm that Pulse offers the memory with provenance and retrieval reasons.
 Then open Memory Home again and point to the saved-memory and continuity
 receipts. Do not use the simulated demo as a substitute for this proof.
@@ -76,10 +79,10 @@ receipts. Do not use the simulated demo as a substitute for this proof.
 
 ```bash
 pulse repair
-pulse disconnect codex
+pulse disconnect <host>
 ```
 
-Disconnecting removes the Codex integration and preserves the local vault.
+Disconnecting removes that host integration and preserves the local vault.
 Whole-vault wipe remains separately presence-bound. Never delete `~/.pulse`
 or another project vault as part of routine uninstall unless the user names
 that destructive action and completes its exact confirmation flow.

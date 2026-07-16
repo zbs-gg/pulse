@@ -1,18 +1,19 @@
-# Personal Pulse onboarding for Codex
+# Personal Pulse onboarding
 
 This is the Stage 1 product path: one person, one project-bound local vault,
-Codex, a visible first memory, and continuity into a fresh task.
+at least one supported harness, a visible first memory, and continuity into a fresh task.
 
 ## Before the command
 
-The supported release target is an Apple Silicon Mac with Node 20+, Codex, and
-a Git project. Personal Pulse does not require Go, Python, Make, Docker, or a
-model API key. It does not ask the user to edit Codex configuration.
+The supported release target is an Apple Silicon Mac with Node 20+, a Git
+project, and at least one of Claude Code, Cursor, or Codex. Personal Pulse
+does not require Go, Python, Make, Docker, or a model API key. It also requires no
+manual host config editing.
 
 The published `preview` package must contain a canonical signed release
 manifest plus the exact notarized daemon, managed local embedding runtime,
-data-only model, Codex plugin runtime, and presence helper. If any one is
-missing or invalid, installation stops before identity, binding, or Codex
+data-only model, native plugin runtime, and presence helper. If any one is
+missing or invalid, installation stops before identity, binding, or host
 activation changes.
 
 ## One command
@@ -20,7 +21,7 @@ activation changes.
 Run this inside the project:
 
 ```bash
-npx @zbs-gg/pulse@preview install
+npx -y @zbs-gg/pulse@preview install
 ```
 
 The first screen says what will be downloaded, how much disk it needs, every
@@ -35,9 +36,10 @@ The install order is fixed:
 2. install and verify the macOS presence boundary;
 3. create or reuse the device-local Personal principal;
 4. create or reuse the exact project binding;
-5. activate the pinned Codex plugin and runtime;
-6. start the project vault and prove managed full retrieval;
-7. write a content-free install receipt and open Memory Home.
+5. start and verify one host-neutral Core and project vault;
+6. attach every detected compatible harness through its native plugin;
+7. prove managed full retrieval, write a content-free host matrix receipt,
+   and open Memory Home.
 
 An interrupted download resumes from verified bytes. A crash or canceled
 security prompt does not make partial artifacts current. Run the same command
@@ -53,11 +55,11 @@ the Personal vault and does not repeat already verified runtime work.
 ## The first screen after install: Memory Home
 
 ```bash
-pulse doctor codex
+pulse doctor <installed-host>
 pulse home
 ```
 
-The ready verdict is `Pulse Codex automatic lifecycle ready.` Memory Home shows:
+The ready verdict is `Pulse <host> automatic lifecycle ready.` Memory Home shows:
 
 - Personal readiness and the exact next action when incomplete;
 - pending memory cards before their save delay starts;
@@ -68,11 +70,11 @@ The ready verdict is `Pulse Codex automatic lifecycle ready.` Memory Home shows:
 
 ## First-memory proof
 
-1. Do normal work in Codex.
-2. Let Codex propose one compact structured memory through Pulse.
+1. Do normal work in a verified Claude Code, Cursor, or Codex task.
+2. Let that harness propose one compact structured memory through Pulse.
 3. Read the exact card in Memory Home. Edit, cancel, or save after the visible
    review delay.
-4. Start a fresh Codex task in the same project.
+4. Start a fresh task in the same project, optionally in another verified harness.
 5. Confirm that the memory appears automatically with provenance and retrieval
    reasons.
 6. Open Memory Home and inspect the saved-memory, context-offer, and host
@@ -91,10 +93,10 @@ and cannot replace it.
 - Git-backed Team Memory receives only separately reviewed and exactly approved
   shared candidates.
 
-Remove Codex integration while preserving memory:
+Remove one host integration while preserving memory:
 
 ```bash
-pulse disconnect codex
+pulse disconnect <host>
 ```
 
 Whole-vault wipe is separately protected by fresh macOS presence. Disconnect,
@@ -102,13 +104,13 @@ repair, and ordinary uninstall never imply permission to delete memory.
 
 ## What blocks publication
 
-The deterministic gates run from `npm pack`, with a runtime PATH that exposes
-Node, Codex, and Git but no Go or Python. They prove clean install choreography,
-interrupted-download resume, repair, packed Git Team modules, and no external
-publication. They are intentionally labeled synthetic.
+The deterministic gates run from `npm pack` and prove Claude-only, Cursor-only,
+Codex-only, multihost shared-Core, interrupted-download resume, repair, packed
+Git Team modules, and no external publication. They expose no Go or Python and
+are intentionally labeled synthetic.
 
 Before publishing the preview, a clean physical Apple Silicon Mac must also
 pass the content-free release attestation against production authority, real
-signed/notarized artifacts, native Codex hook trust, one saved memory, a fresh
+signed/notarized artifacts, native host lifecycle trust, one saved memory, a fresh
 continuity task, Memory Home, and honest token evidence. Without that receipt,
 `make release-verify` and `npm publish` fail closed.

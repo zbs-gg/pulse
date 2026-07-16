@@ -23,8 +23,8 @@ export function parseClaudePluginList(value) {
   }
 }
 
-function claudePluginCommand(args) {
-  return spawnSync('claude', ['plugin', ...args], {
+function claudePluginCommand(args, executable = 'claude') {
+  return spawnSync(executable, ['plugin', ...args], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, killSignal: 'SIGTERM',
   });
 }
@@ -36,7 +36,8 @@ function requireSuccess(result, action) {
 }
 
 export function activateClaudePlugin(edge, {
-  run = claudePluginCommand,
+  executable = 'claude',
+  run = (args) => claudePluginCommand(args, executable),
   inspect = inspectCodexPluginCompatibility,
 } = {}) {
   if (!edge || typeof edge.marketplace_root !== 'string' || !isAbsolute(edge.marketplace_root) ||

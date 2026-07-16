@@ -69,9 +69,8 @@ try {
   const tools = join(root, 'tools');
   mkdirSync(tools, { mode: 0o700 });
   symlinkSync(process.execPath, join(tools, 'node'));
-  const codex = run('/usr/bin/which', ['codex']).stdout.trim();
-  symlinkSync(codex, join(tools, 'codex'));
   symlinkSync('/usr/bin/git', join(tools, 'git'));
+  assert.equal(existsSync(join(tools, 'codex')), false);
   assert.equal(existsSync(join(tools, 'go')), false);
   assert.equal(existsSync(join(tools, 'python')), false);
 
@@ -118,10 +117,10 @@ try {
     const statePath = process.env.PULSE_STATE_PATH;
     const receiptPath = process.env.PULSE_RECEIPT_PATH;
     const interrupted = process.env.PULSE_INTERRUPT === '1';
-    const empty = { runtime:false, presence:false, principal:null, binding:null, activation:false, health:false, runtime_mutations:0 };
+    const empty = { runtime:false, presence:false, principal:null, binding:null, core:false, activation:false, health:false, runtime_mutations:0, core_mutations:0 };
     const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : empty;
     const save = () => fs.writeFileSync(statePath, JSON.stringify(state), { mode:0o600 });
-    const plan = { schema:'pulse.personal_install_plan.v1', contract_version:1, outcome:'ready_to_install', reason_codes:[], detected:{ workspace:{ workspace_id:'workspace_packed', repository_id:'repository_packed', canonical_path:'/private/project' } } };
+    const plan = { schema:'pulse.personal_install_plan.v1', contract_version:1, outcome:'ready_to_install', reason_codes:[], detected:{ workspace:{ workspace_id:'workspace_packed', repository_id:'repository_packed', canonical_path:'/private/project' }, hosts:[{host:'cursor',detected:true,compatible:true,activation_target:true}] } };
     const dependencies = {
       inspectRuntime: async () => ({ ready:state.runtime }),
       provisionRuntime: async () => { state.runtime=true; state.runtime_mutations+=1; save(); },
@@ -131,8 +130,10 @@ try {
       createPrincipal: async () => { state.principal={ principal_id:'principal_0123456789abcdef0123456789abcdef' }; save(); return state.principal; },
       inspectBinding: async () => state.binding ? { ready:true, binding:state.binding } : { ready:false, status:'missing' },
       createBinding: async ({principal}) => { state.binding={ binding_id:'binding_packed', principal_ref:principal.principal_id }; save(); return state.binding; },
-      inspectActivation: async () => ({ ready:state.activation }),
-      activateCodex: async () => { state.activation=true; state.health=true; save(); },
+      inspectCore: async () => ({ ready:state.core, full_retrieval:state.core, context:{store_id:'store_personal_packed'} }),
+      activateCore: async () => { state.core=true; state.core_mutations+=1; save(); },
+      inspectActivation: async () => ({ product_ready:state.activation, parity:state.activation?'complete':'blocked', hosts:[{host:'cursor',activated:state.activation,verified:state.activation,lifecycle_ready:state.activation,reason_code:state.activation?'cursor_verified':'cursor_activation_required'}] }),
+      activateHosts: async () => { state.activation=true; state.health=true; save(); },
       inspectHealth: async () => ({ ready:state.health, full_retrieval:state.health }),
       writeReceipt: async (receipt) => { fs.writeFileSync(receiptPath, JSON.stringify(receipt), {mode:0o600}); if (interrupted && receipt.reason_code === 'checkpoint_artifacts_staged') process.exit(73); return 'receipt_packed_interruption'; },
     };
@@ -159,6 +160,7 @@ try {
   assert.equal(repairedResult.outcome, 'ready');
   assert.equal(repairedResult.reason_code, 'resumed');
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).runtime_mutations, 1);
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).core_mutations, 1);
   assert.equal(readFileSync(vaultMarker, 'utf8'), 'preserve-private-memory\n');
 
   process.stdout.write(`${JSON.stringify({
@@ -166,10 +168,11 @@ try {
     authority: 'synthetic-test',
     content_free: true,
     package_source: 'npm-pack',
-    runtime_path: { node: true, codex: true, git: true, go: false, python: false },
+    runtime_path: { node: true, codex: false, git: true, go: false, python: false },
     artifact_resume_offset: resumed.resumed_from,
     partial_activation: false,
     install_resumed: true,
+    host_neutral_checkpoint: true,
     private_vault_preserved: true,
     production_install_proof: false,
   })}\n`);

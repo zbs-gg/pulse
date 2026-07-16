@@ -119,6 +119,7 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	       && $(NPM) test --silent \
 	       && $(NPM) run --silent test:personal-clean-room \
 	       && $(NPM) run --silent test:personal-interruption \
+	       && $(NPM) run --silent test:personal-multiharness \
 	       && $(NPM) run --silent test:claude-product \
 	       && $(NPM) run --silent test:codex-team-packaging-contract; \
 	     else \

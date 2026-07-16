@@ -14,19 +14,20 @@ Please:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check: npm view @zbs-gg/pulse dist-tags --json
    Personal requires preview 0.7.0 or newer.
-3. Check for Apple Silicon, Node 20+, Codex, and a Git project.
+3. Check for Apple Silicon, Node 20+, a Git project, and Claude Code, Cursor,
+   or Codex.
 4. Explain what Pulse writes and how I can erase it.
 5. Ask me for confirmation before installing anything.
 6. After I confirm, install:
-   - Personal Pulse for Codex:
-     npx @zbs-gg/pulse@preview install
-     pulse doctor codex
+   - Personal Pulse:
+     npx -y @zbs-gg/pulse@preview install
+     pulse doctor <installed-host>
      pulse home
    - Other MCP-compatible hosts:
      configure the host to run:
      npx -y @zbs-gg/pulse@preview mcp
      and tell me this is Safe Mode/fallback, not the full state-aware engine.
-7. Save one visible memory, start a fresh Codex task, and show me its Memory
+7. Save one visible memory, start a fresh task, and show me its Memory
    Home receipts and honest collecting/estimated/measured token state.
 
 Important: no old-chat import without separate confirmation; no raw
@@ -45,16 +46,17 @@ tell your next agent, and wipes on one command.
 This is the one package: installer/CLI (`install`, `repair`, `doctor`, `home`)
 plus the MCP server (`pulse mcp`, bundled prebuilt).
 
-Status: developer preview. Local-first, Codex-first. Not production.
+Status: developer preview. Local-first across Claude Code, Cursor, and Codex.
+Not production.
 
 ## Compatible harnesses
 
 | Harness | Current support | Recommended path |
 |---|---|---|
-| Codex / OpenAI local agents | First release-gated Personal product with managed local retrieval, hooks, Memory Home, and continuity. | `npx @zbs-gg/pulse@preview install` |
-| Claude Code | Existing Local Preview path, outside the Stage 1 clean-room gate. | `npx @zbs-gg/pulse@preview init claude-code` |
+| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity. | `npx -y @zbs-gg/pulse@preview install` |
+| Claude Code | Native Personal plugin and lifecycle through the shared Core and vault. | `npx -y @zbs-gg/pulse@preview install` |
 | Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | Native local plugin and lifecycle through the shared Core; no Cursor CLI required. | `npx -y @zbs-gg/pulse@preview install` |
 | Windsurf | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
 | Gemini CLI | MCP-compatible when local MCP command servers are supported. | Agent-audited `npx -y @zbs-gg/pulse@preview mcp` |
 | LangChain / CrewAI / custom agents | Framework integration surface. | Run `pulse mcp` and call its tools |
@@ -65,23 +67,23 @@ Status: developer preview. Local-first, Codex-first. Not production.
 </p>
 
 
-## Install — Personal Pulse for Codex
+## Install — Personal Pulse
 
 ```bash
-npx @zbs-gg/pulse@preview install
-pulse doctor codex
+npx -y @zbs-gg/pulse@preview install
+pulse doctor <installed-host>
 pulse home
 ```
 
 The Personal path does not require Go, Python, Make, Docker, a model API key,
 or manual configuration editing. The wizard verifies the complete signed
-release, resumes interrupted downloads, activates the exact Codex plugin, and
-opens Memory Home. It stops rather than silently falling back when production
+release, resumes interrupted downloads, provisions Core once, activates every
+detected compatible native plugin, and opens Memory Home. It stops rather than silently falling back when production
 authority or full retrieval is unavailable.
 
-Only `Pulse Codex automatic lifecycle ready.` means the product is ready. The
+Only `Pulse <host> automatic lifecycle ready.` means that host is ready. The
 real proof is one normal memory shown before save and then offered to a fresh
-Codex task with provenance, retrieval reasons, and receipts in Memory Home.
+task with provenance, retrieval reasons, and receipts in Memory Home.
 
 ### What `pulse demo` proves
 
@@ -117,7 +119,7 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
 - No old-chat import by default — ingest is explicit and consent-first.
 - Personal memory is local and project-bound; it never enters Git without a
   separate exact shared-memory approval.
-- Disconnect preserves memory: `pulse disconnect codex`. Whole-vault wipe is
+- Disconnect preserves memory: `pulse disconnect <host>`. Whole-vault wipe is
   separately protected by fresh macOS presence.
 
 Docs, agent install script, and source: https://github.com/zbs-gg/pulse

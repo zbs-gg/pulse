@@ -11,7 +11,8 @@ const STEP = Object.freeze({
   presence: 'presence_ready',
   principal: 'principal_ready',
   binding: 'binding_ready',
-  codex: 'codex_activated',
+  core: 'core_ready',
+  harnesses: 'harnesses_activated',
   retrieval: 'full_retrieval_ready',
 });
 
@@ -30,6 +31,15 @@ const ACTION_REQUIRED_CODES = new Set([
   'codex_login_required',
   'codex_probe_failed',
   'codex_version_invalid',
+  'claude_activation_incomplete',
+  'claude_identity_changed',
+  'claude_identity_invalid',
+  'claude_probe_failed',
+  'claude_version_invalid',
+  'cursor_activation_incomplete',
+  'supported_harness_activation_failed',
+  'supported_harness_incompatible',
+  'supported_harness_missing',
   'presence_denied',
   'presence_required',
   'principal_repair_required',
@@ -58,7 +68,8 @@ function exactDependencies(dependencies) {
     'inspectPresence', 'installPresence',
     'inspectPrincipal', 'createPrincipal',
     'inspectBinding', 'createBinding',
-    'inspectActivation', 'activateCodex',
+    'inspectCore', 'activateCore',
+    'inspectActivation', 'activateHosts',
     'inspectHealth', 'writeReceipt',
   ];
   if (!dependencies || required.some((name) => typeof dependencies[name] !== 'function')) {
@@ -101,22 +112,32 @@ function nextAction(reasonCode) {
     codex_login_required: 'Sign in to Codex, then run pulse install again.',
     codex_probe_failed: 'Verify the detected Codex CLI runs, then run pulse install-plan --json again.',
     codex_version_invalid: 'Update the detected Codex CLI, then run pulse install-plan --json again.',
+    claude_identity_changed: 'Run pulse install-plan --json again and review the changed Claude Code executable before retrying.',
+    claude_identity_invalid: 'Install Claude Code in a supported location, then run pulse install-plan --json.',
+    claude_probe_failed: 'Verify the detected Claude Code CLI runs, then run pulse install-plan --json again.',
+    claude_version_invalid: 'Update Claude Code to a compatible version, then run pulse install again.',
+    cursor_activation_incomplete: 'Reload Cursor, then run pulse repair.',
     disclosure_consent_required: 'Review the install plan and approve it in the interactive wizard.',
-    platform_unsupported: 'Use an Apple Silicon Mac with macOS, Node 20+, Codex, and a Git project.',
+    platform_unsupported: 'Use an Apple Silicon Mac with macOS, Node 20+, a supported harness, and a Git project.',
     presence_denied: 'Approve the macOS security prompt, then run pulse install again.',
     presence_required: 'Complete the macOS security prompt, then run pulse install again.',
     principal_repair_required: 'Run pulse install-plan --json and review current_state.principal before changing the Personal identity.',
     runtime_repair_required: 'Run pulse install-plan --json and review current_state.runtime before changing the active runtime.',
+    supported_harness_activation_failed: 'Fix the reported harness activation, then run pulse repair.',
+    supported_harness_incompatible: 'Update Claude Code, Cursor, or Codex to a compatible version, then run pulse install again.',
+    supported_harness_missing: 'Install Claude Code, Cursor, or Codex, then run pulse install again.',
   };
   return actions[reasonCode] ?? 'Fix the reported requirement, then run pulse install again.';
 }
 
 function terminalResult(plan, {
   completedSteps = [],
+  hostStatus,
   outcome,
   reasonCode,
 }) {
   const workspace = planWorkspace(plan);
+  const normalizedHostStatus = normalizePersonalInstallHostStatus(hostStatus);
   return {
     schema: 'pulse.personal_install_result.v1',
     outcome,
@@ -128,21 +149,50 @@ function terminalResult(plan, {
       canonical_path: workspace.canonical_path,
     },
     preserved_data: true,
+    host_status: normalizedHostStatus,
     next_action: outcome === 'ready'
-      ? 'Memory Home is opening now. Review the installed memory, then open a new Codex task in this project and create the first visible memory.'
+      ? normalizedHostStatus.parity === 'degraded'
+        ? 'Memory Home is opening now. Pulse is usable through a verified harness; run pulse repair to attach the remaining detected harnesses.'
+        : 'Memory Home is opening now. Review the installed memory, then open a new task in a verified harness and create the first visible memory.'
       : nextAction(reasonCode),
   };
 }
 
+export function normalizePersonalInstallHostStatus(value) {
+  if (value === undefined) return { product_ready: false, parity: 'blocked', hosts: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.product_ready !== 'boolean' ||
+      !['blocked', 'complete', 'degraded'].includes(value.parity) || !Array.isArray(value.hosts) || value.hosts.length > 3) {
+    fail('host_status_invalid');
+  }
+  const seen = new Set();
+  const hosts = value.hosts.map((host) => {
+    if (!host || typeof host !== 'object' || !['claude-code', 'codex', 'cursor'].includes(host.host) || seen.has(host.host) ||
+        typeof host.activated !== 'boolean' || typeof host.verified !== 'boolean' ||
+        typeof host.lifecycle_ready !== 'boolean' || !SAFE_REASON_CODE.test(host.reason_code ?? '')) {
+      fail('host_status_invalid');
+    }
+    seen.add(host.host);
+    return {
+      host: host.host,
+      activated: host.activated,
+      verified: host.verified,
+      lifecycle_ready: host.lifecycle_ready,
+      reason_code: host.reason_code,
+    };
+  });
+  return { product_ready: value.product_ready, parity: value.parity, hosts };
+}
+
 function receiptFor(result) {
   return {
-    schema: 'pulse.personal_install_receipt.v1',
+    schema: 'pulse.personal_install_receipt.v2',
     outcome: result.outcome,
     reason_code: result.reason_code,
     completed_steps: [...result.completed_steps],
     workspace_id: result.current_project.workspace_id,
     repository_id: result.current_project.repository_id,
     preserved_data: true,
+    host_status: normalizePersonalInstallHostStatus(result.host_status),
   };
 }
 
@@ -168,7 +218,7 @@ export function writePersonalInstallReceipt(receipt, {
   now = new Date(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
-      !receipt || receipt.schema !== 'pulse.personal_install_receipt.v1' ||
+      !receipt || receipt.schema !== 'pulse.personal_install_receipt.v2' ||
       !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome) ||
       !/^[a-z0-9][a-z0-9_]{0,127}$/.test(receipt.reason_code ?? '') ||
       !/^workspace_[a-z0-9][a-z0-9_]{0,127}$/.test(receipt.workspace_id ?? '') ||
@@ -178,6 +228,7 @@ export function writePersonalInstallReceipt(receipt, {
       Number.isNaN(now.valueOf())) {
     fail('install_receipt_invalid');
   }
+  const hostStatus = normalizePersonalInstallHostStatus(receipt.host_status);
   const root = resolve(dataDir);
   const directory = join(root, 'receipts', 'install');
   requirePrivateDirectory(root);
@@ -188,6 +239,7 @@ export function writePersonalInstallReceipt(receipt, {
     created_at: now.toISOString(),
     outcome: receipt.outcome,
     preserved_data: true,
+    host_status: hostStatus,
     reason_code: receipt.reason_code,
     repository_id: receipt.repository_id,
     schema: receipt.schema,
@@ -363,20 +415,45 @@ export async function runPersonalInstall({
     completedSteps.push(STEP.binding);
     await emitCheckpoint(deps, exact, completedSteps);
 
-    const activation = await verifiedStep({
-      inspect: () => deps.inspectActivation({ binding: bindingStatus.binding, plan: exact }),
-      mutate: () => deps.activateCodex({ binding: bindingStatus.binding, plan: exact }),
+    const core = await verifiedStep({
+      inspect: () => deps.inspectCore({ binding: bindingStatus.binding, plan: exact }),
+      mutate: () => deps.activateCore({ binding: bindingStatus.binding, plan: exact }),
       completedSteps,
-      step: STEP.codex,
-      verificationCode: 'codex_activation_verification_failed',
+      step: STEP.core,
+      verificationCode: 'core_activation_verification_failed',
     });
-    mutated ||= activation.mutated;
+    mutated ||= core.mutated;
+    await emitCheckpoint(deps, exact, completedSteps);
+
+    let activation = await deps.inspectActivation({
+      binding: bindingStatus.binding, core: core.value, plan: exact,
+    });
+    const beforeReady = activation?.product_ready === true || activation?.ready === true;
+    const hostParityIncomplete = activation?.product_ready === true && activation?.parity !== 'complete';
+    if (!beforeReady || hostParityIncomplete) {
+      const activated = await deps.activateHosts({
+        binding: bindingStatus.binding, core: core.value, plan: exact, activation,
+      });
+      activation = activated?.product_ready === true || activated?.product_ready === false
+        ? activated
+        : await deps.inspectActivation({
+            binding: bindingStatus.binding, core: core.value, plan: exact,
+          });
+      mutated = true;
+    }
+    const activationReady = activation?.product_ready === true || activation?.ready === true;
+    if (!activationReady) fail('supported_harness_activation_failed');
+    const hostStatus = activation?.product_ready === true
+      ? normalizePersonalInstallHostStatus(activation)
+      : { product_ready: true, parity: 'complete', hosts: [] };
+    completedSteps.push(STEP.harnesses);
     await emitCheckpoint(deps, exact, completedSteps);
 
     const health = await deps.inspectHealth({
       binding: bindingStatus.binding,
+      core: core.value,
       plan: exact,
-      report: activation.value?.report,
+      activation,
     });
     if (health?.ready !== true || health?.full_retrieval !== true) {
       const reasonCode = health?.reason_code ?? (health?.warming ? 'model_warming' : 'full_retrieval_unavailable');
@@ -385,13 +462,14 @@ export async function runPersonalInstall({
         'codex_plugin_unavailable', 'codex_hook_lifecycle_required', 'codex_hook_trust_required',
         'codex_native_lifecycle_attestation_unavailable', 'daemon_unavailable',
         'full_retrieval_unavailable', 'local_embedder_warming', 'model_warming',
-      ].includes(reasonCode)) {
+      ].includes(reasonCode) && !/^(?:claude|codex|cursor|supported_harness)_[a-z0-9_]{1,96}$/.test(reasonCode)) {
         fail('health_status_invalid');
       }
       const outcome = health?.outcome ?? (health?.warming ? 'warming' : 'action_required');
       if (!['warming', 'action_required'].includes(outcome)) fail('health_status_invalid');
       return await emitTerminal(deps, terminalResult(exact, {
         completedSteps,
+        hostStatus,
         outcome,
         reasonCode,
       }));
@@ -403,6 +481,7 @@ export async function runPersonalInstall({
     else if (resumeEvidence) reasonCode = 'resumed';
     return await emitTerminal(deps, terminalResult(exact, {
       completedSteps,
+      hostStatus,
       outcome: 'ready',
       reasonCode,
     }));

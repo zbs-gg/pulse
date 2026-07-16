@@ -30,6 +30,9 @@ function repository(root, name = 'project') {
 }
 
 const codexReady = () => ({ available: true, version: '1.2.3', reason_code: null });
+const hostMissing = (host) => () => ({ available: false, version: null, reason_code: `${host}_missing` });
+const claudeReady = () => ({ available: true, version: '2.1.196', reason_code: null });
+const cursorReady = () => ({ available: true, reason_code: null });
 
 function verifiedRelease() {
   return {
@@ -64,29 +67,39 @@ const cleanState = {
   principal: 'missing', runtime: 'missing', vault: 'missing',
 };
 
-test('supported Codex-first Stage 1 plan is stable, explicit, and has no Go or Python requirement', () => {
+test('supported singleton-host Stage 1 plans are stable, explicit, and have no Go or Python requirement', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-install-plan.'));
   try {
     const home = join(root, 'home');
     const cwd = repository(root);
     mkdirSync(home);
     const before = readdirSync(home);
-    const plan = buildPersonalInstallPlan({
+    const plans = [
+      ['claude-code', { detectClaude: claudeReady, detectCodex: hostMissing('codex'), detectCursor: hostMissing('cursor') }],
+      ['codex', { detectClaude: hostMissing('claude'), detectCodex: codexReady, detectCursor: hostMissing('cursor') }],
+      ['cursor', { detectClaude: hostMissing('claude'), detectCodex: hostMissing('codex'), detectCursor: cursorReady }],
+    ].map(([host, detectors]) => [host, buildPersonalInstallPlan({
       cwd, home, codexHome: join(home, '.codex'), platform: 'darwin', architecture: 'arm64',
-      nodeVersion: '20.18.0', detectCodex: codexReady,
+      nodeVersion: '20.18.0', ...detectors,
       release: verifiedRelease(), detectResources: () => ampleResources, currentState: cleanState,
-    });
+    })]);
+    const plan = plans[1][1];
 
     assert.equal(plan.schema, 'pulse.personal_install_plan.v1');
     assert.equal(plan.contract_version, 1);
     assert.equal(plan.stage, 'personal_stage_1');
-    assert.equal(plan.target_host, 'codex');
+    assert.equal('target_host' in plan, false);
     assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
     assert.equal(plan.activation_policy, 'all_detected_supported_hosts');
     assert.equal(plan.outcome, 'ready_to_install');
     assert.deepEqual(plan.reason_codes, []);
     assert.equal(plan.detected.workspace.checkout_kind, 'primary');
     assert.equal(plan.detected.codex.version, '1.2.3');
+    for (const [host, singleton] of plans) {
+      assert.equal(singleton.outcome, 'ready_to_install', host);
+      assert.deepEqual(singleton.detected.hosts.filter((entry) => entry.activation_target).map((entry) => entry.host), [host]);
+      assert.deepEqual(singleton.reason_codes, []);
+    }
     assert.equal(plan.release.total_download_bytes, 150);
     assert.equal(plan.release.artifacts.length, 5);
     assert.deepEqual(plan.release.origins, ['https://models.zbs.gg', 'https://releases.zbs.gg']);
@@ -118,18 +131,32 @@ test('supported Codex-first Stage 1 plan is stable, explicit, and has no Go or P
   }
 });
 
-test('unsupported machine and missing Codex use stable reason codes without throwing', () => {
+test('unsupported machine and no supported harness use stable reason codes without throwing', () => {
   const plan = buildPersonalInstallPlan({
     cwd: '/missing', home: '/tmp/pulse-plan-home', codexHome: '/tmp/pulse-plan-codex',
     platform: 'linux', architecture: 'x64', nodeVersion: '18.0.0',
     release: verifiedRelease(), detectResources: () => ampleResources,
     detectWorkspace: () => { const error = new Error('not git'); error.code = 'workspace_not_git'; throw error; },
-    detectCodex: () => ({ available: false, version: null, reason_code: 'codex_missing' }),
+    detectClaude: hostMissing('claude'), detectCodex: hostMissing('codex'), detectCursor: hostMissing('cursor'),
   });
   assert.equal(plan.outcome, 'unsupported');
   assert.deepEqual(plan.reason_codes, [
-    'platform_unsupported', 'architecture_unsupported', 'node_unsupported', 'workspace_not_git', 'codex_missing',
+    'platform_unsupported', 'architecture_unsupported', 'node_unsupported', 'workspace_not_git', 'supported_harness_missing',
   ]);
+});
+
+test('detected but incompatible supported harnesses have a distinct no-mutation reason', () => {
+  const plan = buildPersonalInstallPlan({
+    cwd: '/project', home: '/tmp/pulse-plan-home', codexHome: '/tmp/pulse-plan-codex',
+    platform: 'darwin', architecture: 'arm64', nodeVersion: '20.0.0', currentState: cleanState,
+    detectWorkspace: () => ({ canonical_path: '/project', checkout_kind: 'primary', repository_id: 'repository_a', workspace_id: 'workspace_a' }),
+    detectClaude: () => ({ available: false, executable_path: '/usr/local/bin/claude', reason_code: 'claude_version_invalid' }),
+    detectCodex: hostMissing('codex'), detectCursor: hostMissing('cursor'),
+    release: verifiedRelease(), detectResources: () => ampleResources,
+  });
+  assert.equal(plan.outcome, 'action_required');
+  assert.deepEqual(plan.reason_codes, ['supported_harness_incompatible']);
+  assert.equal(plan.next_action.code, 'supported_harness_incompatible');
 });
 
 test('workspace detection collapses symlinks and distinguishes Git worktrees', () => {

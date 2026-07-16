@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
+import { statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { assertSupportedNodeVersion, RELEASE_ARTIFACT_KINDS } from './release-manifest.js';
+import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { personalPrincipalPath } from './personal-principal.js';
 import { DEFAULT_TRUST_PATHS } from './trust-helper.js';
 import { canonicalizeWorkspace, defaultBindingPaths } from './workspace-binding.js';
@@ -15,11 +15,6 @@ const INSTALL_HEADROOM_BYTES = 2 * 1024 ** 3;
 const CURRENT_STATE_KEYS = Object.freeze([
   'binding', 'daemon', 'embedder', 'hook_trust', 'install_receipt',
   'plugin', 'presence', 'principal', 'runtime', 'vault',
-]);
-const DEFAULT_CODEX_CANDIDATES = Object.freeze([
-  '/opt/homebrew/bin/codex',
-  '/usr/local/bin/codex',
-  '/usr/bin/codex',
 ]);
 const RELEASE_REASON_CODES = new Set([
   'allowed_origins_invalid',
@@ -90,53 +85,7 @@ function nodeStatus(version) {
   };
 }
 
-function canonicalCodexExecutable(path) {
-  try {
-    const target = realpathSync(path);
-    const stat = statSync(target);
-    if (!stat.isFile() || (stat.mode & 0o111) === 0) return null;
-    return {
-      path: target,
-      sha256: createHash('sha256').update(readFileSync(target)).digest('hex'),
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function detectCodexCLI({
-  candidates = DEFAULT_CODEX_CANDIDATES,
-  codexPath,
-  versionProbe,
-} = {}) {
-  if (!Array.isArray(candidates) || candidates.length > 32 ||
-      candidates.some((candidate) => typeof candidate !== 'string' || !isAbsolute(candidate) || resolve(candidate) !== candidate) ||
-      (codexPath !== undefined && (typeof codexPath !== 'string' || !isAbsolute(codexPath) || resolve(codexPath) !== codexPath)) ||
-      (versionProbe !== undefined && (typeof versionProbe !== 'function' || codexPath === undefined))) {
-    throw new TypeError('codex_path_invalid');
-  }
-  const selected = codexPath
-    ? canonicalCodexExecutable(codexPath)
-    : candidates.map(canonicalCodexExecutable).find(Boolean);
-  if (!selected) {
-    return {
-      available: false, executable_path: null, executable_sha256: null,
-      version: null, reason_code: 'codex_missing',
-    };
-  }
-  const identity = { executable_path: selected.path, executable_sha256: selected.sha256 };
-  if (!versionProbe) return { available: true, ...identity, version: null, reason_code: null };
-
-  let result;
-  try { result = versionProbe(selected.path); } catch {
-    return { available: false, ...identity, version: null, reason_code: 'codex_probe_failed' };
-  }
-  if (result?.status !== 0) return { available: false, ...identity, version: null, reason_code: 'codex_probe_failed' };
-  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(0, 4096);
-  const match = output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/);
-  if (!match) return { available: false, ...identity, version: null, reason_code: 'codex_version_invalid' };
-  return { available: true, ...identity, version: match[1], reason_code: null };
-}
+export { detectCodexCLI };
 
 export function detectInstallResources({ home = homedir(), spawn = spawnSync } = {}) {
   let diskFreeBytes = null;
@@ -280,6 +229,7 @@ export function formatPersonalInstallPlan(plan) {
     throw new TypeError('install_plan_invalid');
   }
   const workspace = plan.detected?.workspace;
+  const detectedHosts = plan.detected?.hosts ?? [];
   const release = plan.release;
   const writes = plan.local_writes.map((entry) =>
     `  - ${entry.path} — ${entry.purpose}${entry.preserved_on_uninstall ? ' (preserved on uninstall)' : ''}`);
@@ -299,6 +249,8 @@ Workspace: ${workspace?.workspace_id ?? 'unavailable'}
 Repository: ${workspace?.repository_id ?? 'unavailable'}
 Supported harnesses: Claude Code, Codex, Cursor
 Activation: every compatible harness detected on this Mac
+Detected harnesses:
+${detectedHosts.map((host) => `  - ${host.host}: ${host.compatible ? 'compatible' : host.detected ? `incompatible (${host.reason_code ?? 'unknown'})` : 'not installed'}`).join('\n')}
 Preflight: ${plan.outcome}
 
 Current state:
@@ -331,9 +283,9 @@ ${approvals.join('\n')}
 
 Removal boundary:
   - runtime uninstall: unavailable in this U3 build
-  - disconnect removes only the Codex integration; the signed binding and Personal vault are preserved
+  - disconnect removes only the selected harness integration; the signed binding and Personal vault are preserved
   - wipe is separate, destructive, and requires fresh OS-backed presence
-  - disconnect command: ${plan.rollback.remove_codex_connection}
+  - disconnect commands: ${(plan.rollback.disconnect_commands ?? []).join(', ') || 'none until a harness is detected'}
 ${reasons}
 Nothing above is written until you approve this disclosure in the interactive wizard.`;
 }
@@ -358,7 +310,9 @@ export function buildPersonalInstallPlan({
   architecture = process.arch,
   nodeVersion = process.versions.node,
   detectWorkspace = canonicalizeWorkspace,
+  detectClaude,
   detectCodex = detectCodexCLI,
+  detectCursor,
   detectResources = detectInstallResources,
   release,
   releaseReasonCode,
@@ -370,7 +324,13 @@ export function buildPersonalInstallPlan({
     throw new TypeError('install_plan_path_invalid');
   }
   const workspace = workspaceStatus(cwd, detectWorkspace);
-  const codex = detectCodex();
+  const hosts = detectSupportedHosts({
+    home,
+    ...(detectClaude ? { detectClaude } : {}),
+    detectCodex,
+    ...(detectCursor ? { detectCursor } : {}),
+  });
+  const codex = hosts.find((host) => host.host === 'codex');
   const node = nodeStatus(nodeVersion);
   const verifiedRelease = releaseStatus(release);
   const detectedCurrentState = installCurrentState(currentState);
@@ -386,7 +346,12 @@ export function buildPersonalInstallPlan({
   if (architecture !== 'arm64') reasons.push('architecture_unsupported');
   if (!node.ok) reasons.push('node_unsupported');
   if (workspace.reason_code) reasons.push(workspace.reason_code);
-  if (!codex.available) reasons.push(codex.reason_code ?? 'codex_probe_failed');
+  const compatibleHosts = hosts.filter((host) => host.compatible);
+  if (compatibleHosts.length === 0) {
+    reasons.push(hosts.some((host) => host.detected)
+      ? 'supported_harness_incompatible'
+      : 'supported_harness_missing');
+  }
   if (!verifiedRelease) reasons.push(verifiedReleaseReason(releaseReasonCode));
   reasons.push(...unsafeCurrentStateReasons(detectedCurrentState));
   if (resources.disk_free_bytes !== null && resources.disk_free_bytes < requiredDiskBytes) reasons.push('disk_insufficient');
@@ -404,8 +369,7 @@ export function buildPersonalInstallPlan({
     contract_version: 1,
     product: 'Pulse Personal',
     stage: 'personal_stage_1',
-    target_host: 'codex',
-    supported_hosts: ['claude-code', 'codex', 'cursor'],
+    supported_hosts: [...SUPPORTED_HOST_IDS],
     activation_policy: 'all_detected_supported_hosts',
     outcome,
     reason_codes: reasons,
@@ -415,6 +379,7 @@ export function buildPersonalInstallPlan({
       architecture: { actual: architecture, required: 'arm64', ok: architecture === 'arm64' },
       node,
       codex,
+      hosts,
       workspace: workspace.identity,
     },
     release: verifiedRelease,
@@ -434,10 +399,17 @@ export function buildPersonalInstallPlan({
       { path: join(pulseRoot, 'receipts', 'install', '<workspace_id>.json'), purpose: 'install_receipt', preserved_on_uninstall: false },
       { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
       { path: dirname(DEFAULT_TRUST_PATHS.publicKeyPath), purpose: 'root_owned_binding_trust', preserved_on_uninstall: true },
-      { path: join(codexRoot, 'pulse', 'product-locators.json'), purpose: 'codex_workspace_locator', preserved_on_uninstall: false },
       { path: join(resolve(home), '.pulse', 'product-locators.json'), purpose: 'shared_harness_workspace_locator', preserved_on_uninstall: false },
-      { path: join(codexRoot, 'plugins'), purpose: 'codex_managed_pulse_plugin', preserved_on_uninstall: false },
-      { path: join(resolve(home), '.cursor', 'plugins', 'local', 'pulse'), purpose: 'cursor_local_pulse_plugin_if_detected', preserved_on_uninstall: false },
+      ...(codex?.activation_target ? [
+        { path: join(codexRoot, 'pulse', 'product-locators.json'), purpose: 'codex_workspace_locator', preserved_on_uninstall: false },
+        { path: join(codexRoot, 'plugins'), purpose: 'codex_managed_pulse_plugin', preserved_on_uninstall: false },
+      ] : []),
+      ...(hosts.find((host) => host.host === 'claude-code')?.activation_target ? [
+        { path: join(resolve(home), '.claude', 'plugins'), purpose: 'claude_managed_pulse_plugin', preserved_on_uninstall: false },
+      ] : []),
+      ...(hosts.find((host) => host.host === 'cursor')?.activation_target ? [
+        { path: join(resolve(home), '.cursor', 'plugins', 'local', 'pulse'), purpose: 'cursor_local_pulse_plugin', preserved_on_uninstall: false },
+      ] : []),
       { path: join(workspacePath, '.gitignore'), purpose: 'exclude_local_pulse_state', preserved_on_uninstall: false },
     ],
     network_effects: [
@@ -448,8 +420,7 @@ export function buildPersonalInstallPlan({
         artifacts: verifiedRelease?.artifacts ?? [],
         total_bytes: verifiedRelease?.total_download_bytes ?? null,
       },
-      { code: 'codex_plugin_activation', destination: 'Codex native plugin manager' },
-      { code: 'detected_harness_activation', destination: 'Claude Code, Codex, and Cursor local plugin surfaces' },
+      { code: 'detected_harness_activation', destinations: compatibleHosts.map((host) => host.host) },
       { code: 'local_runtime', destination: '127.0.0.1 only' },
     ],
     privacy: {
@@ -461,12 +432,14 @@ export function buildPersonalInstallPlan({
     required_human_approvals: [
       { code: 'install_disclosure_consent', automatable_by_yes: false },
       { code: 'macos_presence_and_binding', automatable_by_yes: false },
-      { code: 'codex_hook_trust', automatable_by_yes: false },
+      ...(codex?.activation_target ? [{ code: 'codex_hook_trust', automatable_by_yes: false }] : []),
       { code: 'binding_replacement_if_needed', automatable_by_yes: false },
     ],
     rollback: {
       remove_runtime: null,
       remove_codex_connection: 'pulse disconnect codex',
+      disconnect_commands: compatibleHosts
+        .map((host) => `pulse disconnect ${host.host}`),
       runtime_uninstall: 'unavailable_in_u3',
       preserve_vault: true,
       destructive_wipe_separate: true,

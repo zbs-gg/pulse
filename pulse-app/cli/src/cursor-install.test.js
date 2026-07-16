@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { inspectCursorPlugin, installCursorPlugin } from './cursor-install.js';
+import { inspectCursorPlugin, installCursorPlugin, removeCursorPlugin } from './cursor-install.js';
 
 function fixturePlugin(root, version = '0.7.0') {
   const plugin = join(root, `source-${version}`);
@@ -49,6 +49,19 @@ test('Cursor plugin installation rejects links and restores the last known good 
     assert.equal(current.ready, true);
     assert.equal(current.digest, good.digest);
     assert.equal(JSON.parse(readFileSync(join(current.path, '.cursor-plugin', 'plugin.json'))).version, '0.7.0');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cursor plugin removal is idempotent and leaves the containing Cursor home intact', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-cursor-plugin-remove-'));
+  try {
+    const cursorHome = join(root, '.cursor');
+    installCursorPlugin(fixturePlugin(root), { cursorHome });
+    assert.deepEqual(removeCursorPlugin({ cursorHome }), { removed: true });
+    assert.equal(inspectCursorPlugin({ cursorHome }).reason, 'cursor_plugin_missing');
+    assert.deepEqual(removeCursorPlugin({ cursorHome }), { removed: false });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -17,6 +17,10 @@ function printResult(result, { json, stdout }) {
   writeLine(stdout, `\nPulse install result: ${result.outcome} (${result.reason_code})`);
   writeLine(stdout, `Project: ${result.current_project.workspace_id}`);
   writeLine(stdout, `Completed: ${result.completed_steps.length > 0 ? result.completed_steps.join(' -> ') : 'none'}`);
+  writeLine(stdout, `Host parity: ${result.host_status?.parity ?? 'blocked'}`);
+  for (const host of result.host_status?.hosts ?? []) {
+    writeLine(stdout, `  - ${host.host}: ${host.verified ? 'verified' : host.reason_code}`);
+  }
   writeLine(stdout, 'Personal vault and signed binding: preserved');
   if (result.receipt_ref) writeLine(stdout, `Receipt: ${result.receipt_ref}`);
   writeLine(stdout, `Next: ${result.next_action}`);

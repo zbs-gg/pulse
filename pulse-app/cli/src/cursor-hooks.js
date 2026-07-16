@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import {
+  chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   annotateContinuityDelivery,
@@ -23,6 +27,85 @@ import { composeBoundResumeEvidence, persistContinuityDelivery } from './product
 
 const HOST = 'cursor';
 const MAX_HOOK_INPUT = 1 << 20;
+const LIFECYCLE_EVENTS = Object.freeze(['session_context', 'turn_capture', 'write_receipt', 'finalize']);
+
+function lifecyclePath(resolved) {
+  const dataDir = resolved?.runtime?.data_dir;
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
+      !/^[a-f0-9]{64}$/.test(resolved?.binding?.binding_digest ?? '')) {
+    throw new Error('cursor_lifecycle_context_invalid');
+  }
+  return join(dataDir, 'runtime', 'cursor-lifecycle.json');
+}
+
+function privateDirectory(path) {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const info = lstatSync(path);
+  const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o077) !== 0) {
+    throw new Error('cursor_lifecycle_directory_unsafe');
+  }
+}
+
+function emptyObserved() {
+  return Object.fromEntries(LIFECYCLE_EVENTS.map((event) => [event, false]));
+}
+
+function cursorLifecycleResult(record) {
+  const ready = LIFECYCLE_EVENTS.every((event) => record.observed[event] === true);
+  return {
+    ready,
+    observed: { ...record.observed },
+    reason_code: ready ? 'cursor_lifecycle_verified' : 'cursor_lifecycle_required',
+    updated_at: record.updated_at,
+  };
+}
+
+export function inspectCursorLifecycleReadiness(resolved) {
+  const path = lifecyclePath(resolved);
+  try {
+    const info = lstatSync(path);
+    const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid ||
+        (info.mode & 0o077) !== 0 || info.size > 4096) throw new Error('unsafe');
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    if (record?.schema !== 'pulse.cursor_lifecycle_readiness.v1' ||
+        record.binding_digest !== resolved.binding.binding_digest ||
+        Object.keys(record.observed ?? {}).sort().join('\0') !== [...LIFECYCLE_EVENTS].sort().join('\0') ||
+        Object.values(record.observed).some((value) => typeof value !== 'boolean') ||
+        Number.isNaN(Date.parse(record.updated_at))) throw new Error('invalid');
+    return cursorLifecycleResult(record);
+  } catch {
+    return { ready: false, observed: emptyObserved(), reason_code: 'cursor_lifecycle_required' };
+  }
+}
+
+export function recordCursorLifecycleReadiness(resolved, event, now = new Date()) {
+  if (!LIFECYCLE_EVENTS.includes(event) || !(now instanceof Date) || Number.isNaN(now.valueOf())) {
+    throw new Error('cursor_lifecycle_event_invalid');
+  }
+  const path = lifecyclePath(resolved);
+  privateDirectory(resolve(resolved.runtime.data_dir));
+  privateDirectory(dirname(path));
+  const current = inspectCursorLifecycleReadiness(resolved);
+  const record = {
+    schema: 'pulse.cursor_lifecycle_readiness.v1',
+    binding_digest: resolved.binding.binding_digest,
+    observed: { ...current.observed, [event]: true },
+    updated_at: now.toISOString(),
+  };
+  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { flag: 'wx', mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    const descriptor = openSync(temporary, 'r');
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return cursorLifecycleResult(record);
+}
 
 function opaqueTurnCorrelation(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
@@ -88,6 +171,11 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
   const resolveRuntime = dependencies.resolveRuntime ??
     ((input) => resolveBoundCodexRuntime(input, { host: HOST }));
   const request = dependencies.request ?? activatedBoundPulseRequest;
+  const recordLifecycle = (event) => {
+    try {
+      (dependencies.recordLifecycle ?? recordCursorLifecycleReadiness)(resolved, event, now);
+    } catch { /* readiness evidence is fail-closed and must not break the host lifecycle */ }
+  };
 
   if (eventName === 'preToolUse' &&
       (isDestructivePulseTool(rawInput.tool_name) ||
@@ -105,12 +193,14 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
 
     if (eventName === 'sessionStart') {
       const context = await resumeContext(resolved, event, request, dependencies);
+      recordLifecycle('session_context');
       return annotateContinuityDelivery({
         additional_context: context.additionalContext,
       }, resolved, event, context.manifest);
     }
     if (eventName === 'beforeSubmitPrompt') {
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
+      recordLifecycle('turn_capture');
       return { continue: true };
     }
     if (eventName === 'preToolUse') {
@@ -136,6 +226,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
         });
         if (receiptMatchesEvent(receipt, ref, marker, event)) corroborated.push(ref);
       }
+      if (corroborated.length > 0) recordLifecycle('write_receipt');
       return corroborated.length === 0 ? {} : {
         additional_context: `Pulse Memory Tray receipt: ${corroborated.map((ref) => `${ref.receipt_id}:${ref.status}`).join(', ')}`,
       };
@@ -145,6 +236,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       if (rawInput.status !== undefined && rawInput.status !== 'completed') return {};
       try {
         (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
+        recordLifecycle('finalize');
         return {};
       } catch {
         // A missing marker triggers one bounded host-owned finalization pass.
@@ -162,6 +254,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       } catch (error) {
         if (!(error?.status === 409 && /turn already finalized with a different result/.test(error.message))) throw error;
       }
+      recordLifecycle('finalize');
       return {};
     }
     throw new Error('unsupported_cursor_hook');

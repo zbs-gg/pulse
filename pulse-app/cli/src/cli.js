@@ -57,12 +57,17 @@ import {
   detectCodexCLI,
   formatPersonalInstallPlan,
 } from './install-plan.js';
+import { detectClaudeCodeCLI } from './supported-hosts.js';
 import {
+  activateDetectedPersonalHosts,
+  inspectDetectedPersonalHosts,
+} from './personal-host-adapters.js';
+import {
+  normalizePersonalInstallHostStatus,
   PersonalInstallError,
   writePersonalInstallReceipt,
 } from './personal-install.js';
 import {
-  personalInstallHealthFromReadiness,
   projectPersonalLiveReadiness,
 } from './personal-live-readiness.js';
 import {
@@ -79,10 +84,9 @@ import {
 } from './codex-hooks.js';
 import { claudeHookContractDigest, claudeWorkspaceDigest, runClaudeHookCLI } from './claude-hooks.js';
 import { activateClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
-import { runCursorHookCLI } from './cursor-hooks.js';
-import { cursorHomePath, inspectCursorPlugin, installCursorPlugin } from './cursor-install.js';
+import { inspectCursorLifecycleReadiness, runCursorHookCLI } from './cursor-hooks.js';
+import { cursorHomePath, inspectCursorPlugin, installCursorPlugin, removeCursorPlugin } from './cursor-install.js';
 import {
-	codexProductActivationReady,
 	codexMarketplaceDoctorCheck,
   codexHomePath,
 	inspectCodexMarketplaceSnapshot,
@@ -176,6 +180,7 @@ Usage:
   pulse doctor
   pulse doctor codex
   pulse doctor claude-code
+  pulse doctor cursor
   pulse doctor --json
   pulse trust status [--json]
   pulse trust install --confirm "install pulse presence helper"
@@ -199,6 +204,7 @@ Usage:
   pulse connect-smoke --base <https-origin> [--thread <id>] [--json]
   pulse disconnect claude-code
   pulse disconnect codex
+  pulse disconnect cursor
   pulse stop
   pulse remove claude-code
   pulse daemon --go-bin <path> [-- <extra pulse server args>]
@@ -366,6 +372,20 @@ function writeProductLocators(options) {
 	return writeCodexProductLocator(options);
 }
 
+function writeSharedProductLocator(options) {
+	return writeProductLocator({ ...options, productHome: join(homedir(), '.pulse') });
+}
+
+function validInstallReceiptHostStatus(status) {
+  if (status === undefined) return false;
+  try {
+    normalizePersonalInstallHostStatus(status);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function personalInstallReceiptStatus(workspace) {
   const journalPath = join(DATA_DIR, 'runtime', 'install-journal.json');
   const journalStatus = privateStateFileStatus(journalPath);
@@ -390,9 +410,10 @@ function personalInstallReceiptStatus(workspace) {
   if (fileStatus !== 'present_unverified') return fileStatus;
   try {
     const receipt = JSON.parse(readFileSync(path, 'utf8'));
-    if (receipt?.schema !== 'pulse.personal_install_receipt.v1' ||
+    if (!['pulse.personal_install_receipt.v1', 'pulse.personal_install_receipt.v2'].includes(receipt?.schema) ||
         receipt.workspace_id !== workspace.workspace_id || receipt.repository_id !== workspace.repository_id ||
-        !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome)) {
+        !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome) ||
+        (receipt.schema === 'pulse.personal_install_receipt.v2' && !validInstallReceiptHostStatus(receipt.host_status))) {
       return 'invalid';
     }
     if (receipt.outcome === 'ready') return 'ready';
@@ -520,19 +541,248 @@ async function createPersonalBindingForInstall(principal, plan) {
   }
 }
 
+function exactPersonalCore(binding) {
+  const resolved = resolveCodexMcpRuntime(process.cwd());
+  if (resolved.binding.binding_id !== binding?.binding_id ||
+      resolved.runtime.store_id !== vaultRuntimeFromBinding(binding).store_id) {
+    throw new PersonalInstallError('binding_repair_required');
+  }
+  return resolved;
+}
+
+function personalCoreContext(resolved, edge, liveStatus) {
+  return Object.freeze({
+    binding: resolved.binding,
+    edge,
+    live_status: liveStatus,
+    resolved,
+    store_id: resolved.runtime.store_id,
+  });
+}
+
+async function inspectPersonalInstallCore(binding) {
+  try {
+    const resolved = exactPersonalCore(binding);
+    const runtime = inspectVaultRuntime(resolved.runtime);
+    if (runtime.status !== 'running') return { ready: false, reason_code: 'core_activation_required' };
+    const edge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
+    const liveStatus = await boundPulseRequest(resolved, '/memory/status', { method: 'GET', timeoutMs: 1500 });
+    return {
+      ready: true,
+      full_retrieval: liveStatus.full_retrieval === true,
+      reason_code: 'core_verified',
+      context: personalCoreContext(resolved, edge, liveStatus),
+    };
+  } catch {
+    return { ready: false, reason_code: 'core_activation_required' };
+  }
+}
+
+async function activatePersonalInstallCore(binding) {
+  const releaseActivation = await acquireProductActivationLock();
+  try {
+    await recoverBindingAuthority();
+    const resolved = exactPersonalCore(binding);
+    const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
+    try {
+      const previousDaemon = inspectVaultRuntime(resolved.runtime);
+      if (previousDaemon.status === 'running') await assertVaultRuntimeHealthy(resolved.runtime);
+      const snapshots = snapshotLocalFiles(activationFilePaths(resolved.binding));
+      let installedRuntime;
+      let runtimeInstalled = false;
+      try {
+        const managedRuntime = await ensureManagedProductRuntime(resolved.runtime, { publishConfig: false });
+        if (previousDaemon.status === 'running' &&
+            previousDaemon.managed_embedder?.config_digest !== managedRuntime.managed_embedder.config_digest) {
+          await stopVaultRuntimeAndWait(resolved.runtime);
+        }
+        managedRuntime.managed_embedder = activateManagedEmbedderConfig(
+          resolved.runtime, managedRuntime.managed_embedder,
+        );
+        installedRuntime = installCodexRuntime(managedRuntime.product_edge.runtime_root, DATA_DIR, {
+          keepPrevious: true,
+          signedEdge: managedRuntime.product_edge,
+        });
+        runtimeInstalled = true;
+        if (!installedRuntime.ok) throw new Error('personal_core_runtime_install_failed');
+        const runtimeStatus = inspectVaultRuntime(resolved.runtime);
+        if (['stopped', 'crashed', 'running'].includes(runtimeStatus.status)) {
+          await startVaultRuntime(resolved.runtime, {
+            daemonPath: managedRuntime.daemon.path,
+            managedEmbedder: managedRuntime.managed_embedder,
+            host: 'pulse-product',
+            allowRollback: false,
+          });
+        } else {
+          throw new Error('personal_core_runtime_state_invalid');
+        }
+        await assertVaultRuntimeHealthy(resolved.runtime);
+        writeProductDaemonActivation(managedRuntime, installedRuntime);
+        const defaults = defaultBindingPaths();
+        writeSharedProductLocator({
+          codexHome: codexHomePath(),
+          binding: resolved.binding,
+          dataDir: DATA_DIR,
+          registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+          publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+          anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+          trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+        });
+        finalizeCodexRuntimeInstall(DATA_DIR);
+        commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
+      } catch (error) {
+        const failures = [];
+        if (runtimeInstalled) {
+          try {
+            const rollback = rollbackCodexRuntimeInstall(DATA_DIR);
+            if (!rollback.ok) failures.push(new Error(rollback.detail));
+          } catch (failure) { failures.push(failure); }
+        }
+        try { await stopUpgradedVaultBeforeFileRestore(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
+        try { restoreLocalFiles(snapshots); } catch (failure) { failures.push(failure); }
+        try { await restoreVaultAfterFailedConnect(resolved.runtime, previousDaemon); } catch (failure) { failures.push(failure); }
+        if (failures.length > 0) throw new Error('personal_core_activation_rollback_failed');
+        throw error;
+      }
+    } finally {
+      await releaseVaultActivation();
+    }
+  } finally {
+    await releaseActivation();
+  }
+}
+
+function personalInstallHostRegistry(targets) {
+  const codexExecutable = targets.get('codex')?.executable_path;
+  const claudeExecutable = targets.get('claude-code')?.executable_path;
+  const captureFor = (context, host) => {
+    const capture = safeReadJSON(join(context.resolved.runtime.data_dir, 'capture-state.json'));
+    return captureEnabledForHost(capture, host);
+  };
+  return {
+    'claude-code': {
+      inspect: async (context) => {
+        const result = inspectClaudeNativeProductPlugin(context.edge, claudeExecutable);
+        return {
+          ready: result.ok === true && captureFor(context, 'claude-code'),
+          lifecycle_ready: false,
+          reason_code: result.ok ? 'claude_plugin_verified' : (result.reason ?? 'claude_activation_required'),
+        };
+      },
+      activate: async (context) => {
+        activateClaudePlugin(context.edge, { executable: claudeExecutable });
+        removeLegacyClaudeProductRegistration(claudeExecutable);
+        writeCaptureStateFiles({
+          globalDataDir: DATA_DIR, binding: context.binding, host: 'claude-code', enabled: true,
+          reason: 'claude_code_native_plugin_connected',
+        });
+      },
+    },
+    codex: {
+      inspect: async (context) => {
+        const plugin = codexPluginStatus(codexExecutable);
+        const exact = inspectCodexPluginCompatibility(plugin, context.edge);
+        return {
+          ready: exact.ok === true && captureFor(context, 'codex'),
+          lifecycle_ready: false,
+          reason_code: exact.ok ? 'codex_plugin_verified' : (exact.reason ?? 'codex_activation_required'),
+        };
+      },
+      activate: async (context) => {
+        const transaction = snapshotCodexHostActivation(codexExecutable);
+        try {
+          activateExactCodexProductEdge(context.edge, transaction, codexExecutable);
+          const defaults = defaultBindingPaths();
+          writeCodexProductLocator({
+            codexHome: codexHomePath(), binding: context.binding, dataDir: DATA_DIR,
+            registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+            publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+            anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+            trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+          });
+          writeCaptureStateFiles({
+            globalDataDir: DATA_DIR, binding: context.binding, host: 'codex', enabled: true,
+            reason: 'codex_plugin_connected',
+          });
+        } catch (error) {
+          rollbackCodexHostActivation(transaction, codexExecutable);
+          throw error;
+        }
+        discardPluginTreeSnapshot(transaction.pluginTree);
+      },
+    },
+    cursor: {
+      inspect: async (context) => {
+        const result = inspectCursorPlugin({
+          cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
+        });
+        const lifecycle = inspectCursorLifecycleReadiness(context.resolved);
+        return {
+          ready: result.ready === true && captureFor(context, 'cursor'),
+          lifecycle_ready: lifecycle.ready,
+          reason_code: result.ready ? 'cursor_plugin_verified' : result.reason,
+        };
+      },
+      activate: async (context) => {
+        installCursorPlugin(context.edge.plugin_root, {
+          cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
+        });
+        writeCaptureStateFiles({
+          globalDataDir: DATA_DIR, binding: context.binding, host: 'cursor', enabled: true,
+          reason: 'cursor_plugin_connected',
+        });
+      },
+    },
+  };
+}
+
+function personalInstallCoreHealth(core, activation) {
+  if (core?.ready !== true) {
+    return { ready: false, full_retrieval: false, outcome: 'action_required', reason_code: 'daemon_unavailable' };
+  }
+  if (core.full_retrieval !== true) {
+    return { ready: false, full_retrieval: false, outcome: 'action_required', reason_code: 'full_retrieval_unavailable' };
+  }
+  if (activation?.product_ready !== true) {
+    return {
+      ready: false, full_retrieval: true, outcome: 'action_required',
+      reason_code: activation?.hosts?.[0]?.reason_code ?? 'supported_harness_activation_failed',
+      host_status: activation,
+    };
+  }
+  return {
+    ready: true,
+    full_retrieval: true,
+    outcome: 'ready',
+    reason_code: activation.parity === 'complete' ? 'personal_live_ready' : 'personal_live_ready_host_parity_degraded',
+    host_status: activation,
+  };
+}
+
 function personalInstallDependencies(plan) {
   if (personalInstallUsesSyntheticOverrides()) {
     throw new PersonalInstallError('synthetic_authority_forbidden');
   }
-  const codexExecutable = plan?.detected?.codex?.executable_path;
-  const expectedCodexDigest = plan?.detected?.codex?.executable_sha256;
-  if (typeof codexExecutable !== 'string' || !isAbsolute(codexExecutable) ||
-      typeof expectedCodexDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedCodexDigest)) {
-    throw new PersonalInstallError('codex_identity_invalid');
+  const hosts = plan?.detected?.hosts;
+  if (!Array.isArray(hosts) || hosts.filter((host) => host?.activation_target === true).length < 1) {
+    throw new PersonalInstallError('supported_harness_missing');
   }
-  let codexVerified = false;
-  function verifyExactCodex() {
-    if (codexVerified) return;
+  const targets = new Map(hosts
+    .filter((host) => host?.activation_target === true)
+    .map((host) => [host.host, host]));
+  const target = (host) => targets.get(host);
+  const registry = personalInstallHostRegistry(targets);
+  let identitiesVerified = false;
+  function verifyExactCLIHosts() {
+    if (identitiesVerified) return;
+    const codex = target('codex');
+    if (codex) {
+      const codexExecutable = codex.executable_path;
+      const expectedCodexDigest = codex.executable_sha256;
+      if (typeof codexExecutable !== 'string' || !isAbsolute(codexExecutable) ||
+          typeof expectedCodexDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedCodexDigest)) {
+        throw new PersonalInstallError('codex_identity_invalid');
+      }
     const probe = detectCodexCLI({
       codexPath: codexExecutable,
       versionProbe: (path) => {
@@ -547,11 +797,40 @@ function personalInstallDependencies(plan) {
     if (probe.executable_path !== codexExecutable || probe.executable_sha256 !== expectedCodexDigest) {
       throw new PersonalInstallError('codex_identity_changed');
     }
-    codexVerified = true;
+    }
+    const claude = target('claude-code');
+    if (claude) {
+      const claudeExecutable = claude.executable_path;
+      const expectedClaudeDigest = claude.executable_sha256;
+      if (typeof claudeExecutable !== 'string' || !isAbsolute(claudeExecutable) ||
+          typeof expectedClaudeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedClaudeDigest)) {
+        throw new PersonalInstallError('claude_identity_invalid');
+      }
+      const probe = detectClaudeCodeCLI({
+        claudePath: claudeExecutable,
+        versionProbe: (path) => {
+          const command = path.endsWith('.js') ? process.execPath : path;
+          const commandArgs = command === process.execPath ? [path, '--version'] : ['--version'];
+          return spawnSync(command, commandArgs, {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, killSignal: 'SIGTERM',
+          });
+        },
+      });
+      if (!probe.available) throw new PersonalInstallError(probe.reason_code ?? 'claude_probe_failed');
+      const parts = probe.version.split('.').map(Number);
+      if (parts[0] < 2 || (parts[0] === 2 && parts[1] < 1) ||
+          (parts[0] === 2 && parts[1] === 1 && parts[2] < 196)) {
+        throw new PersonalInstallError('claude_version_invalid');
+      }
+      if (probe.executable_path !== claudeExecutable || probe.executable_sha256 !== expectedClaudeDigest) {
+        throw new PersonalInstallError('claude_identity_changed');
+      }
+    }
+    identitiesVerified = true;
   }
   return {
     inspectRuntime: async () => {
-      verifyExactCodex();
+      verifyExactCLIHosts();
       const activationSetStatus = privateStateFileStatus(join(DATA_DIR, 'artifacts', 'active-release.json'));
       try {
         const inspection = inspectPersonalRuntime(packagedPersonalRuntimeOptions(DATA_DIR));
@@ -588,35 +867,15 @@ function personalInstallDependencies(plan) {
     createPrincipal: async () => ensurePersonalPrincipal({ consentGranted: true }),
     inspectBinding: async ({ principal, plan }) => existingPersonalBinding(principal, plan),
     createBinding: async ({ principal, plan }) => createPersonalBindingForInstall(principal, plan),
-    inspectActivation: async ({ binding }) => {
-      try {
-        const report = await codexDoctorReport({ codexExecutable });
-        if (!codexProductActivationReady(report)) return { ready: false, report };
-        const capture = safeReadJSON(join(vaultRuntimeFromBinding(binding).data_dir, 'capture-state.json'));
-        const edge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
-        if (claudeProductVersionCheck().ok) {
-          const claude = inspectClaudeNativeProductPlugin(edge);
-          if (!captureEnabledForHost(capture, 'claude-code') || !claude.ok) return { ready: false, report };
-        }
-        if (cursorInstallationDetected()) {
-          const cursor = inspectCursorPlugin({
-            cursorHome: cursorHomePath(), expectedDigest: edge.plugin_tree_digest,
-          });
-          if (!captureEnabledForHost(capture, 'cursor') || !cursor.ready) return { ready: false, report };
-        }
-        return { ready: true, report };
-      } catch {
-        return { ready: false };
-      }
-    },
-    activateCodex: async () => {
-      await connectCodex({ codexExecutable });
-      if (cursorInstallationDetected()) await connectCursor();
-    },
-    inspectHealth: async ({ report: inspectedReport }) => {
-      const report = inspectedReport ?? await codexDoctorReport({ codexExecutable });
-      return personalInstallHealthFromReadiness(report.personal_live_readiness);
-    },
+    inspectCore: async ({ binding }) => inspectPersonalInstallCore(binding),
+    activateCore: async ({ binding }) => activatePersonalInstallCore(binding),
+    inspectActivation: async ({ core }) => inspectDetectedPersonalHosts({
+      context: core.context, hosts, registry,
+    }),
+    activateHosts: async ({ core, activation }) => activateDetectedPersonalHosts({
+      context: core.context, hosts, registry, prior: activation,
+    }),
+    inspectHealth: async ({ core, activation }) => personalInstallCoreHealth(core, activation),
     writeReceipt: async (receipt) => writePersonalInstallReceipt(receipt, { dataDir: resolve(DATA_DIR) }),
   };
 }
@@ -1885,6 +2144,118 @@ async function runClaudeProductDoctor(rest = []) {
   if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
 }
 
+async function cursorProductDoctorReport() {
+  const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
+  const presenceTrust = syntheticAuthority
+    ? { ready: true, status: 'synthetic_test_authority', issues: [] }
+    : inspectPresenceTrust({ probePublicKey: true });
+  let resolved;
+  let bindingError;
+  try {
+    await recoverBindingAuthority();
+    resolved = resolveCodexMcpRuntime(process.cwd());
+  } catch (error) {
+    bindingError = error.message;
+  }
+  const runtimeStatus = resolved
+    ? inspectVaultRuntime(resolved.runtime)
+    : { status: 'unbound' };
+  const capture = resolved
+    ? safeReadJSON(join(resolved.runtime.data_dir, 'capture-state.json'))
+    : undefined;
+  let productEdge;
+  let productEdgeError;
+  try {
+    productEdge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
+  } catch (error) {
+    productEdgeError = error.message;
+  }
+  const plugin = productEdge
+    ? inspectCursorPlugin({
+        cursorHome: cursorHomePath(),
+        expectedDigest: productEdge.plugin_tree_digest,
+      })
+    : { ready: false, reason: 'cursor_product_edge_unavailable' };
+  const lifecycle = resolved
+    ? inspectCursorLifecycleReadiness(resolved)
+    : { ready: false, reason_code: 'cursor_lifecycle_required' };
+  let liveStatus;
+  let liveError;
+  if (resolved && runtimeStatus.status === 'running') {
+    try {
+      liveStatus = await boundPulseRequest(resolved, '/memory/status', {
+        method: 'GET', timeoutMs: 1500,
+      });
+    } catch (error) {
+      liveError = error.message;
+    }
+  }
+  const liveVault = liveStatus &&
+    liveStatus.storage_path === join(resolved.runtime.data_dir, 'pulse.db') &&
+    ['pulse-product', 'codex', 'claude-code', 'cursor'].includes(liveStatus.host) &&
+    liveStatus.backend_llm_enabled === false && liveStatus.capture_enabled === true &&
+    liveStatus.raw_capture_enabled === false;
+  const checks = {
+    presence_trust: presenceTrust.ready
+      ? { ok: true, detail: presenceTrust.status }
+      : { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+    binding: resolved
+      ? { ok: true, detail: `${resolved.binding.mode}:${resolved.binding.workspace.workspace_id}` }
+      : { ok: false, detail: bindingError ?? 'workspace is not bound' },
+    runtime: runtimeStatus.status === 'running'
+      ? { ok: true, detail: 'shared Pulse Core is running' }
+      : { ok: false, detail: `shared Pulse Core is ${runtimeStatus.status}` },
+    plugin: plugin.ready
+      ? { ok: true, detail: 'exact signed Cursor plugin installed' }
+      : { ok: false, detail: productEdgeError ?? plugin.reason ?? 'Cursor plugin unavailable' },
+    hooks: lifecycle.ready
+      ? { ok: true, detail: 'session context, turn capture, write receipt, and finalize observed' }
+      : { ok: false, detail: 'plugin installed; complete one normal Cursor turn' },
+    vault: liveVault
+      ? { ok: true, detail: `${resolved.runtime.kind}:${resolved.runtime.store_id}; live authenticated status` }
+      : { ok: false, detail: liveError ?? `bound vault is ${runtimeStatus.status}; live status unavailable or mismatched` },
+    capture: resolved && captureEnabledForHost(capture, 'cursor')
+      ? { ok: true, detail: 'host-extracted structured capture enabled' }
+      : { ok: false, detail: 'automatic capture disabled' },
+    retrieval: liveStatus?.full_retrieval === true
+      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
+      : { ok: false, detail: 'fallback only; full retrieval is not enabled' },
+  };
+  const ready = Object.values(checks).every((check) => check.ok);
+  return {
+    product: `Pulse Cursor ${resolved?.runtime?.kind === 'desk' ? 'Desk' : resolved?.runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
+    target_host: 'cursor',
+    verdict: ready
+      ? syntheticAuthority
+        ? 'Pulse Cursor synthetic test lifecycle ready; production authority is not active.'
+        : 'Pulse Cursor automatic lifecycle ready.'
+      : 'Pulse Cursor automatic lifecycle is not ready.',
+    checks,
+    trust: {
+      authority_mode: syntheticAuthority ? 'synthetic-test' : 'production',
+      raw_transcript_capture: liveStatus?.raw_capture_enabled ?? null,
+      backend_llm_enabled: liveStatus?.backend_llm_enabled ?? null,
+      full_retrieval: liveStatus?.full_retrieval ?? false,
+      embedder: liveStatus?.embedder ?? '',
+      external_embedding_api: /cohere|^embed-(?:english|multilingual)/i.test(liveStatus?.embedder ?? ''),
+    },
+  };
+}
+
+async function runCursorProductDoctor(rest = []) {
+  const report = await cursorProductDoctorReport();
+  if (rest.includes('--json')) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log('[pulse] doctor cursor');
+    for (const [label, check] of Object.entries(report.checks)) printDoctorLine(label, check);
+    console.log(`\nRetrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
+    console.log(`Verdict: ${report.verdict}`);
+    if (!report.checks.hooks.ok && report.checks.plugin.ok) console.log('Next: complete one normal Cursor turn, then run doctor again');
+  }
+  if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
+}
+
 function commandOnPath(name) {
   const pathValue = process.env.PATH ?? '';
   for (const dir of pathValue.split(':')) {
@@ -1900,8 +2271,8 @@ function cursorInstallationDetected() {
     existsSync('/Applications/Cursor.app') || existsSync(join(homedir(), 'Applications', 'Cursor.app'));
 }
 
-function inspectClaudeNativeProductPlugin(edge) {
-	const result = spawnSync('claude', ['plugin', 'list', '--json'], {
+function inspectClaudeNativeProductPlugin(edge, executable = 'claude') {
+	const result = spawnSync(executable, ['plugin', 'list', '--json'], {
 		encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, killSignal: 'SIGTERM',
 	});
 	if (result.status !== 0) return { ok: false, reason: 'claude_plugin_list_failed' };
@@ -2175,8 +2546,8 @@ function claudeProductMcpConfig(runtimePath) {
   };
 }
 
-function claudeMcpMutation(args) {
-	return spawnSync('claude', args, {
+function claudeMcpMutation(args, executable = 'claude') {
+	return spawnSync(executable, args, {
 		stdio: 'pipe', encoding: 'utf8', timeout: 10_000, killSignal: 'SIGTERM',
 	});
 }
@@ -2186,13 +2557,13 @@ function claudeMutationFailure(result, action) {
 	return new Error(`claude mcp ${action} failed${detail ? `: ${detail}` : ''}`);
 }
 
-function removeClaudeCodeExternalRegistration() {
-	const removed = claudeMcpMutation(['mcp', 'remove', 'pulse', '--scope', 'local']);
+function removeClaudeCodeExternalRegistration(executable = 'claude') {
+	const removed = claudeMcpMutation(['mcp', 'remove', 'pulse', '--scope', 'local'], executable);
 	const removeDetail = `${removed.stderr || removed.stdout || removed.error?.message || ''}`;
 	if (removed.error || (removed.status !== 0 && !/not found|not registered|does not exist/i.test(removeDetail))) {
 		throw claudeMutationFailure(removed, 'remove');
 	}
-	const verified = claudeMcpMutation(['mcp', 'get', 'pulse']);
+	const verified = claudeMcpMutation(['mcp', 'get', 'pulse'], executable);
 	if (verified.error) throw claudeMutationFailure(verified, 'get after remove');
 	if (verified.status === 0) throw new Error('claude mcp remove verification failed: Pulse is still registered');
 }
@@ -2326,8 +2697,8 @@ function installClaudeCodeHooks(runtimePath, runtimeDigest, { dryRun = false } =
   console.log('[pulse] .claude/settings.local.json was added to .gitignore');
 }
 
-function removeLegacyClaudeProductRegistration() {
-	removeClaudeCodeExternalRegistration();
+function removeLegacyClaudeProductRegistration(executable = 'claude') {
+	removeClaudeCodeExternalRegistration(executable);
 	const mcpPath = resolve(process.cwd(), '.mcp.json');
 	if (existsSync(mcpPath)) {
 		const current = JSON.parse(readFileSync(mcpPath, 'utf8'));
@@ -2650,6 +3021,10 @@ async function runDoctor(rest = []) {
   }
   if (rest[0] === 'claude-code') {
     await runClaudeProductDoctor(rest.slice(1));
+    return;
+  }
+  if (rest[0] === 'cursor') {
+    await runCursorProductDoctor(rest.slice(1));
     return;
   }
   const report = await doctorReport();
@@ -2987,6 +3362,26 @@ async function connectCursor() {
 		});
 		console.log(`[pulse] Cursor plugin ${installed.reused ? 'already connected' : 'connected'} to the shared ${resolved.runtime.kind} vault.`);
 		console.log('[pulse] Reload Cursor once so it discovers the local Pulse plugin.');
+	} finally {
+		await release();
+	}
+}
+
+async function disconnectCursor() {
+	const release = await acquireProductActivationLock();
+	try {
+		let binding;
+		try {
+			await recoverBindingAuthority();
+			binding = resolveCodexMcpRuntime(process.cwd()).binding;
+		} catch { /* plugin removal remains possible after a lost binding */ }
+		if (binding) {
+			writeCaptureStateFiles({
+				globalDataDir: DATA_DIR, binding, host: 'cursor', enabled: false, reason: 'host_disconnected',
+			});
+		}
+		const result = removeCursorPlugin({ cursorHome: cursorHomePath() });
+		console.log(`[pulse] Cursor ${result.removed ? 'disconnected' : 'was not connected'}. Local memory was preserved.`);
 	} finally {
 		await release();
 	}
@@ -9138,7 +9533,7 @@ async function main() {
       return;
     }
     if (target !== undefined && target !== '--json' && target !== 'codex') {
-      throw new Error('pulse install-plan supports Personal Codex or the legacy claude-code preview plan');
+      throw new Error('pulse install-plan supports host-neutral Personal or the legacy claude-code preview plan');
     }
     printPersonalInstallPlan(currentPersonalInstallPlan(), { json: args.includes('--json') });
     return;
@@ -9290,8 +9685,12 @@ async function main() {
 			await disconnectCodex();
       return;
     }
+		if (target === 'cursor') {
+			await disconnectCursor();
+			return;
+		}
     if (target !== 'claude-code') {
-      throw new Error('v1 supports: pulse disconnect codex | claude-code');
+      throw new Error('v1 supports: pulse disconnect codex | claude-code | cursor');
     }
 		await disconnectClaudeCode();
     return;

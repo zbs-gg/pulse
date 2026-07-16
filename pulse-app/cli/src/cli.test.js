@@ -425,13 +425,15 @@ test('install-plan claude-code prints human-readable trust plan', () => {
   assert.doesNotMatch(result.stdout, /PULSE_API_KEY|secret\.key|sk-|ghp_|xoxb-/);
 });
 
-test('install-plan --json exposes the Codex-first Personal product contract without mutation', () => {
+test('install-plan --json exposes the host-neutral Personal product contract without mutation', () => {
   const { home, result } = run(['install-plan', '--json']);
 
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.schema, 'pulse.personal_install_plan.v1');
-  assert.equal(plan.target_host, 'codex');
+  assert.equal('target_host' in plan, false);
+  assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+  assert.deepEqual(plan.detected.hosts.map((host) => host.host), ['claude-code', 'codex', 'cursor']);
   assert.equal(plan.stage, 'personal_stage_1');
   assert.equal(plan.privacy.raw_transcript_capture, 'off');
   assert.equal(plan.privacy.backend_model_calls, 'off');
@@ -536,6 +538,21 @@ test('doctor --json reports machine-readable missing setup without a stack trace
     assert.equal(typeof report.checks[key].detail, 'string');
   }
   assert.match(report.next_steps.join('\n'), /pulse init claude-code/);
+  assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
+});
+
+test('doctor cursor --json reports the native Cursor product contract', () => {
+  const { result } = run(['doctor', 'cursor', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.target_host, 'cursor');
+  assert.equal(report.verdict, 'Pulse Cursor automatic lifecycle is not ready.');
+  for (const key of ['presence_trust', 'binding', 'runtime', 'plugin', 'hooks', 'vault', 'capture', 'retrieval']) {
+    assert.ok(report.checks[key], `missing check ${key}`);
+    assert.equal(typeof report.checks[key].ok, 'boolean');
+    assert.equal(typeof report.checks[key].detail, 'string');
+  }
   assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
 });
 
