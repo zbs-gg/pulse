@@ -1656,7 +1656,7 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.match(html, /glass-card/);
   assert.match(html, /Pulse Import Preview/);
   assert.match(html, /Thread preview/);
-  assert.match(html, /Token economy/);
+	assert.match(html, /Archive sizing/);
   assert.match(html, /Needs your decision/);
   assert.doesNotMatch(html, /Charter|Georgia|--paper:#f7f2e8|background-size:36px 36px|#151a1c/);
   assert.match(html, /What Pulse will turn into continuity/);
@@ -1668,7 +1668,8 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.match(html, /People found/);
   assert.match(html, /Filter preview/);
   assert.match(html, /id="preview-filter"/);
-  assert.match(html, /estimated saved<\/span>/);
+	assert.match(html, /structured candidates<\/span>/);
+	assert.doesNotMatch(html, /estimated saved|estimated raw/i);
   assert.match(html, /source snippets<\/span>/);
   assert.match(html, /person-card/);
   assert.match(html, /Evidence/);
@@ -1745,7 +1746,7 @@ test('migrate preview json exposes staged import flow', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /Remember Vitaly should inspect|Decision: keep import/);
   const preview = JSON.parse(result.stdout);
-  assert.equal(preview.flow, 'pulse.import_preview.v1');
+  assert.equal(preview.flow, 'pulse.import_preview.v2');
   assert.equal(preview.source_scan.status, 'scanned');
   assert.equal(preview.source_scan.source, 'chatgpt');
   assert.equal(preview.source_scan.files_scanned, 1);
@@ -1759,8 +1760,9 @@ test('migrate preview json exposes staged import flow', () => {
   assert.equal(preview.candidate_threads.length, 2);
   assert.deepEqual(preview.candidate_threads.map((thread) => thread.title), ['Pulse MCP distribution', 'Garden demo UX']);
   assert.equal(preview.candidate_threads.every((thread) => thread.privacy_tier === 'private'), true);
-  assert.equal(preview.candidate_threads.every((thread) => thread.token_economy.estimated_raw_tokens >= 220), true);
-  assert.equal(preview.candidate_threads.every((thread) => thread.token_economy.resume_tokens <= 2000), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.source_snippets >= 0), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.structured_candidates >= 1), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.token_economy === undefined), true);
   assert.equal(preview.candidate_threads.some((thread) => thread.people_found.includes('Vitaly')), true);
   assert.ok(Array.isArray(preview.pulse_insights));
   assert.equal(preview.pulse_insights.length >= 1, true);
@@ -1832,7 +1834,8 @@ test('migrate preview HTML follows source-to-gate flow with local review actions
     assert.ok(index > previous, `${label} appears out of order`);
     previous = index;
   }
-  assert.match(html, /data-import-flow="pulse.import_preview.v1"/);
+  assert.match(html, /data-import-flow="pulse.import_preview.v2"/);
+  assert.match(html, /flow: "pulse.import_preview.v2"/);
   assert.match(html, /Download reviewed JSON before import/);
   assert.match(html, /reviewed 0 of/);
   assert.match(html, /data-review-action="confirm"/);
@@ -2464,10 +2467,33 @@ test('migrate commit requires explicit graph import confirmation', () => {
   assert.match(result.stderr, /--confirm "import pulse graph"/);
 });
 
+test('migrate commit rejects unsupported import preview flows before graph delivery', () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-unsupported-preview.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v999',
+    ok: true,
+    source: 'chatgpt',
+    conversations: 1,
+    messages: 1,
+    thread_candidates: ['Garden launch'],
+    memory_candidates: ['Garden launch: 1 bounded source snippet'],
+    raw_text_written: false,
+  }));
+
+  const { result } = run([
+    'migrate', 'commit', previewPath, '--confirm', 'import pulse graph',
+  ]);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unsupported Pulse import preview flow: pulse\.import_preview\.v999/);
+});
+
 test('migrate commit sends safe semantic delta to Pulse graph endpoint', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-preview.'));
   const previewPath = join(exportDir, 'preview.json');
   writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v1',
     ok: true,
     source: 'chatgpt',
     conversations: 1,
@@ -2551,6 +2577,7 @@ test('migrate commit fails closed on a rejected terminal receipt', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-rejected-preview.'));
   const previewPath = join(exportDir, 'preview.json');
   writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v2',
     ok: true,
     source: 'chatgpt',
     conversations: 1,

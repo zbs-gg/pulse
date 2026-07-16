@@ -196,7 +196,17 @@ test('standalone graph delta saves checkpoints that resume can replay', () => {
       resume_markdown: string;
       sections: { open_loops: string[]; suggested_next_step: string[] };
     };
-    assert.equal(resume.schema, 'pulse.continuity.v1');
+    assert.equal(resume.schema, 'pulse.continuity.v2');
+    assert.deepEqual(resume.token_economy, {
+      state: 'collecting_baseline',
+      method_id: 'utf8_bytes_div4_ceil',
+      method_version: '1',
+      rendered_bytes: Buffer.byteLength(resume.resume_markdown, 'utf8'),
+      pulse_tokens: resume.token_estimate,
+      reason_code: 'comparable_receipt_required',
+    });
+    assert.equal('estimated_raw_tokens' in resume.token_economy, false);
+    assert.equal('estimated_saved_tokens' in resume.token_economy, false);
     assert.equal(resume.thread_id, 'pulse-distribution');
     assert.match(resume.resume_markdown, /standalone lite engine/);
     assert.match(resume.resume_markdown, /## Open loops/);
@@ -204,6 +214,52 @@ test('standalone graph delta saves checkpoints that resume can replay', () => {
       resume.sections.suggested_next_step[0],
       'Continue with: Publish 0.4.0 to npm under the preview dist-tag.',
     );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('standalone resume budgets non-ASCII text by UTF-8 bytes without splitting emoji', () => {
+  const dataDir = tempDataDir();
+  try {
+    const store = new StandaloneStore(dataDir);
+    store.graphDelta({
+      schema: 'pulse.semantic_delta.v1',
+      source: {
+        host: 'claude-code',
+        conversation_scope: 'current_turn',
+        timestamp: '2026-06-10T10:00:00Z',
+        thread_id: 'utf8-budget',
+      },
+      continuity: {
+        summary: 'Память '.repeat(100) + '🌱'.repeat(250),
+        open_loops: ['🌱'.repeat(600)],
+      },
+      raw_input_included: false,
+    });
+
+    const resume = store.resume({ thread_id: 'utf8-budget', token_budget: 400 }) as {
+      token_budget: number;
+      token_estimate: number;
+      token_economy: {
+        method_id: string;
+        rendered_bytes: number;
+        pulse_tokens: number;
+      };
+      resume_markdown: string;
+    };
+    const renderedBytes = Buffer.byteLength(resume.resume_markdown, 'utf8');
+    const hasUnpairedSurrogate = [...resume.resume_markdown].some((character) => {
+      const codePoint = character.charCodeAt(0);
+      return character.length === 1 && codePoint >= 0xd800 && codePoint <= 0xdfff;
+    });
+
+    assert.equal(resume.token_economy.method_id, 'utf8_bytes_div4_ceil');
+    assert.ok(renderedBytes <= resume.token_budget * 4);
+    assert.equal(resume.token_estimate, Math.ceil(renderedBytes / 4));
+    assert.equal(resume.token_economy.rendered_bytes, renderedBytes);
+    assert.equal(resume.token_economy.pulse_tokens, resume.token_estimate);
+    assert.equal(hasUnpairedSurrogate, false);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

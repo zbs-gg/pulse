@@ -1,10 +1,26 @@
 package store
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+func TestTrimMarkdownToBudgetPreservesUTF8Boundaries(t *testing.T) {
+	markdown := strings.Repeat("я🌱", 30)
+	got := trimMarkdownToBudget(markdown, 20)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated resume is not valid UTF-8: %q", got)
+	}
+	if len([]byte(got)) > 80 {
+		t.Fatalf("truncated resume bytes=%d, want <=80", len([]byte(got)))
+	}
+	if !strings.Contains(got, "[truncated to Pulse resume budget]") {
+		t.Fatalf("truncated resume lost marker: %q", got)
+	}
+}
 
 func TestCheckpointResumeBuildsStructuredBlockUnderBudget(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
@@ -40,7 +56,7 @@ func TestCheckpointResumeBuildsStructuredBlockUnderBudget(t *testing.T) {
 		t.Fatalf("resume: %v", err)
 	}
 
-	if resume.Schema != ContinuitySchema {
+	if ContinuitySchema != "pulse.continuity.v2" || resume.Schema != ContinuitySchema {
 		t.Fatalf("bad schema: %q", resume.Schema)
 	}
 	if resume.ThreadID != "pulse-distribution" {
@@ -64,6 +80,79 @@ func TestCheckpointResumeBuildsStructuredBlockUnderBudget(t *testing.T) {
 	}
 	if resume.TokenEstimate > 900 {
 		t.Fatalf("resume exceeded budget: %d", resume.TokenEstimate)
+	}
+}
+
+func TestResumeTokenEconomyReportsOnlyExactLocalOfferFacts(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.SaveCheckpoint(ContinuityCheckpoint{
+		ThreadID:  "pulse-honest-ledger",
+		SessionID: "codex:pulse-honest-ledger:test",
+		Host:      "codex",
+		ProjectID: "garden",
+		Summary:   "Pulse must explain every token-economy number from immutable receipts.",
+	}); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	resume, err := s.BuildResume(ResumeQuery{
+		ThreadID:    "pulse-honest-ledger",
+		ProjectID:   "garden",
+		Host:        "codex",
+		TokenBudget: 900,
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	if resume.TokenEconomy.State != TokenEconomyCollectingBaseline {
+		t.Fatalf("state = %q, want collecting_baseline", resume.TokenEconomy.State)
+	}
+	if resume.TokenEconomy.RenderedBytes != len([]byte(resume.ResumeMarkdown)) {
+		t.Fatalf("rendered bytes = %d, want %d", resume.TokenEconomy.RenderedBytes, len([]byte(resume.ResumeMarkdown)))
+	}
+	if resume.TokenEconomy.PulseTokens != resume.TokenEstimate {
+		t.Fatalf("pulse tokens = %d, want exact local estimate %d", resume.TokenEconomy.PulseTokens, resume.TokenEstimate)
+	}
+	if resume.TokenEconomy.MethodID != TokenEconomyMethodUTF8BytesDiv4Ceil || resume.TokenEconomy.MethodVersion != "1" {
+		t.Fatalf("unexpected local count method: %#v", resume.TokenEconomy)
+	}
+	if resume.BaselineKind != "canonical_structured_resume_v1" || resume.SourceEquivalentTokens == nil ||
+		*resume.SourceEquivalentTokens < resume.TokenEstimate || resume.CoverageCounted < 1 ||
+		resume.CoverageCounted > resume.CoverageTotal {
+		t.Fatalf("resume baseline is not exact and covered: %#v", resume)
+	}
+
+	encoded, err := json.Marshal(resume)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, forbidden := range []string{"estimated_raw_tokens", "estimated_saved_tokens", "resume_tokens"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("resume API still exposes fabricated economy field %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestResumeOmitsBaselineWhenNoCanonicalSourceManifestIsPresent(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	resume, err := s.BuildResume(ResumeQuery{ThreadID: "empty", ProjectID: "garden", Host: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume.BaselineKind != "" || resume.SourceEquivalentTokens != nil ||
+		resume.CoverageCounted != 0 || resume.CoverageTotal != 0 {
+		t.Fatalf("empty resume invented a comparison baseline: %#v", resume)
 	}
 }
 
@@ -185,6 +274,41 @@ func TestResumeIncludesHostExtractedDecisionCapsuleWithoutCheckpoint(t *testing.
 	}
 	if len(resume.EvidenceRefs) != 1 || resume.EvidenceRefs[0] != "pulse:"+ids[0] {
 		t.Fatalf("memory capsule evidence refs missing: %#v", resume.EvidenceRefs)
+	}
+	if len(resume.IncludedObjectIDs) != 1 || resume.IncludedObjectIDs[0] != ids[0] {
+		t.Fatalf("exact rendered manifest lost canonical object: %#v", resume.IncludedObjectIDs)
+	}
+	if len(resume.IncludedEvidenceIDs) != 1 || resume.IncludedEvidenceIDs[0] != "pulse:"+ids[0] {
+		t.Fatalf("exact rendered manifest lost evidence ref: %#v", resume.IncludedEvidenceIDs)
+	}
+}
+
+func TestIncludedResumeManifestExcludesReferencesTrimmedOutOfExactMarkdown(t *testing.T) {
+	includedObjects, includedEvidence := includedResumeManifest(
+		"# Pulse Resume\n\n## Active decisions\n- Rendered decision.\n## Evidence refs\n- pulse:memory_rendered\n",
+		[]RecalledMemoryItem{
+			{ID: "memory_rendered", Summary: "Rendered decision."},
+			{ID: "memory_trimmed", Summary: "This decision was trimmed out."},
+		},
+		[]string{"pulse:memory_rendered", "pulse:memory_trimmed"},
+	)
+	if len(includedObjects) != 1 || includedObjects[0] != "memory_rendered" ||
+		len(includedEvidence) != 1 || includedEvidence[0] != "pulse:memory_rendered" {
+		t.Fatalf("manifest claimed trimmed provenance: objects=%#v evidence=%#v", includedObjects, includedEvidence)
+	}
+}
+
+func TestIncludedResumeManifestDoesNotInferOverlappingSummariesOrReferencePrefixes(t *testing.T) {
+	objects, evidence := includedResumeManifest(
+		"# Pulse Resume\n\n## Active decisions\n- Keep Pulse local and private.\n## Evidence refs\n- pulse:memory_010\n",
+		[]RecalledMemoryItem{
+			{ID: "memory_01", Summary: "Keep Pulse local"},
+			{ID: "memory_010", Summary: "Keep Pulse local and private."},
+		},
+		[]string{"pulse:memory_01", "pulse:memory_010"},
+	)
+	if len(objects) != 1 || objects[0] != "memory_010" || len(evidence) != 1 || evidence[0] != "pulse:memory_010" {
+		t.Fatalf("overlapping text forged provenance: objects=%#v evidence=%#v", objects, evidence)
 	}
 }
 

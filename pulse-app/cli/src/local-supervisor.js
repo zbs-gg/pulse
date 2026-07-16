@@ -17,6 +17,8 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
+import { isCanonicalRepositoryID } from './host-adapter.js';
+
 const SHA256 = /^[a-f0-9]{64}$/;
 const MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v1';
 const MANAGED_CONFIG_KEYS = [
@@ -55,6 +57,10 @@ export function vaultRuntimeFromBinding(binding) {
   }
   const dataDir = requireAbsolutePath(vault.data_dir, 'vault data_dir');
   const cacheDir = requireAbsolutePath(vault.cache_dir, 'vault cache_dir');
+	const repositoryID = binding.workspace?.repository_id;
+	if (!isCanonicalRepositoryID(repositoryID)) {
+		throw new SupervisorError('vault_runtime_invalid', 'binding has no canonical repository authority');
+	}
   if (dataDir === cacheDir || dataDir.startsWith(`${cacheDir}/`) || cacheDir.startsWith(`${dataDir}/`)) {
     throw new SupervisorError('vault_runtime_invalid', 'vault data and cache roots must be distinct');
   }
@@ -62,6 +68,7 @@ export function vaultRuntimeFromBinding(binding) {
     schema: 'pulse.local-vault-runtime.v1',
     binding_id: binding.binding_id,
     binding_digest: binding.binding_digest,
+		repository_id: repositoryID,
     resolver_epoch: binding.resolver_epoch,
     kind,
     runtime_mode: `${kind}-local`,
@@ -297,7 +304,9 @@ function processCommand(pid) {
 
 function receiptMetadataMatches(runtime, receipt) {
   if (!receipt || receipt.schema !== 'pulse.local-vault-process.v1' ||
-      receipt.binding_digest !== runtime.binding_digest || receipt.kind !== runtime.kind ||
+		receipt.binding_digest !== runtime.binding_digest ||
+		(receipt.repository_id !== undefined && receipt.repository_id !== runtime.repository_id) ||
+		receipt.kind !== runtime.kind ||
       receipt.store_id !== runtime.store_id || receipt.data_dir !== runtime.data_dir ||
       !Number.isSafeInteger(receipt.pid) || receipt.pid <= 1 || typeof receipt.executable !== 'string' ||
 			!/^[a-f0-9]{64}$/.test(receipt.executable_digest ?? '') ||
@@ -353,6 +362,7 @@ export function inspectVaultRuntime(runtime) {
     return {
       status: 'crashed', runtime, pid: receipt.pid, executable: receipt.executable,
       executable_digest: receipt.executable_digest, managed_embedder: managedEmbedder, fallback: false,
+		legacy_authority: receipt.repository_id === undefined,
     };
   }
 	if (!receiptProcessMatches(runtime, receipt, command)) {
@@ -362,6 +372,7 @@ export function inspectVaultRuntime(runtime) {
     status: 'running', runtime, pid: receipt.pid, executable: receipt.executable,
     executable_digest: receipt.executable_digest,
     managed_embedder: managedEmbedderFromReceipt(receipt) || undefined,
+		legacy_authority: receipt.repository_id === undefined,
     fallback: false,
   };
 }
@@ -478,7 +489,8 @@ export async function startVaultRuntime(runtime, {
 	if (status.status === 'running') {
 		const sameManaged = status.managed_embedder?.config_digest === desiredManaged?.config_digest &&
 			status.managed_embedder?.config_path === desiredManaged?.config_path;
-		if (status.executable === executable && status.executable_digest === desiredDigest && sameManaged) return status;
+		if (status.executable === executable && status.executable_digest === desiredDigest && sameManaged &&
+			status.legacy_authority !== true) return status;
 		rollbackPath = status.executable;
 		rollbackManaged = status.managed_embedder;
 		await stopVaultRuntimeAndWait(runtime);
@@ -503,6 +515,7 @@ export async function startVaultRuntime(runtime, {
       PULSE_RUNTIME_MODE: runtime.runtime_mode,
       PULSE_VAULT_STORE_ID: runtime.store_id,
       PULSE_BINDING_DIGEST: runtime.binding_digest,
+		PULSE_REPOSITORY_ID: runtime.repository_id,
       PULSE_POLICY_EPOCH: '0',
       PULSE_RESOLVER_EPOCH: String(runtime.resolver_epoch),
       PULSE_DATA_DIR: runtime.data_dir,
@@ -517,7 +530,8 @@ export async function startVaultRuntime(runtime, {
   closeSync(logFD);
   const receipt = {
     schema: 'pulse.local-vault-process.v1', pid: child.pid,
-    executable, executable_digest: desiredDigest, binding_digest: runtime.binding_digest,
+		executable, executable_digest: desiredDigest, binding_digest: runtime.binding_digest,
+		repository_id: runtime.repository_id,
     kind: runtime.kind, store_id: runtime.store_id, data_dir: runtime.data_dir,
     started_at: new Date().toISOString(),
     ...(desiredManaged ? {

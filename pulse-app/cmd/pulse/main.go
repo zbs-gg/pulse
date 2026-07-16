@@ -135,6 +135,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	defer s.Close()
 	if kind != "" {
 		bindingDigest := os.Getenv("PULSE_BINDING_DIGEST")
+		repositoryID := os.Getenv("PULSE_REPOSITORY_ID")
 		policyEpoch, policyErr := strconv.ParseInt(os.Getenv("PULSE_POLICY_EPOCH"), 10, 64)
 		resolverEpoch, resolverErr := strconv.ParseInt(os.Getenv("PULSE_RESOLVER_EPOCH"), 10, 64)
 		if policyErr != nil || resolverErr != nil || resolverEpoch < 1 {
@@ -142,6 +143,9 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		}
 		if err := s.ConfigureProductRuntimeAuthority(bindingDigest, policyEpoch, resolverEpoch); err != nil {
 			return fmt.Errorf("configure product runtime authority: %w", err)
+		}
+		if err := s.ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID); err != nil {
+			return fmt.Errorf("configure continuity delivery authority: %w", err)
 		}
 	}
 

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { composeBoundResumeEvidence, renderCommonsResume } from './product-compositor.js';
+import {
+  composeBoundResumeEvidence,
+  createContinuityDeliveryOffer,
+  renderCommonsResume,
+} from './product-compositor.js';
 import { TeamRemoteClientError } from './team-remote-client.js';
 
 const WORKSPACE = {
@@ -12,6 +16,7 @@ function resolved(mode = 'team') {
   return {
     binding: {
       mode, fallback: false, principal_ref: 'principal_nik', workspace: WORKSPACE,
+      binding_digest: 'a'.repeat(64),
       ...(mode === 'team'
         ? { desk: { store_id: 'desk_nik' }, commons: {
           project_id: 'project_zbs', resource: 'https://pulse.example/mcp',
@@ -96,6 +101,118 @@ test('Personal binding never creates a Commons client', async () => {
   assert.equal(remoteCalls, 0);
   assert.equal(result.commons.status, 'not_applicable');
   assert.match(result.evidence[0], /^Personal Vault continuity/);
+});
+
+test('Personal carries only a complete controlled canonical baseline into the receipt manifest', async () => {
+  const result = await composeBoundResumeEvidence(resolved('personal'), {
+    session_id: 'session_1', idempotency_key: 'event_1',
+  }, {
+    host: 'codex',
+    request: async () => ({
+      resume_markdown: 'Personal continuity.',
+      included_object_ids: ['memory_1'],
+      included_evidence_ids: ['pulse:memory_1'],
+      baseline_kind: 'canonical_structured_resume_v1',
+      source_equivalent_tokens: 500,
+      coverage_counted: 1,
+      coverage_total: 1,
+    }),
+  });
+  assert.deepEqual(result.manifest, {
+    object_ids: ['memory_1'], evidence_ids: ['pulse:memory_1'],
+    baseline_kind: 'canonical_structured_resume_v1',
+    source_equivalent_tokens: 500, coverage_counted: 1, coverage_total: 1,
+  });
+
+  await assert.rejects(composeBoundResumeEvidence(resolved('personal'), {
+    session_id: 'session_1', idempotency_key: 'event_1',
+  }, {
+    host: 'codex',
+    request: async () => ({
+      resume_markdown: 'Partial baseline must fail closed.',
+      baseline_kind: 'canonical_structured_resume_v1',
+      source_equivalent_tokens: 500,
+    }),
+  }), /local_resume_baseline_invalid/);
+});
+
+test('Team composition omits local baseline because mixed Desk and Commons are incomparable', async () => {
+  const result = await composeBoundResumeEvidence(resolved('team'), {
+    session_id: 'session_1', idempotency_key: 'event_1',
+  }, {
+    host: 'codex',
+    request: async () => ({
+      resume_markdown: 'Desk continuity.',
+      included_object_ids: ['memory_private'],
+      baseline_kind: 'canonical_structured_resume_v1',
+      source_equivalent_tokens: 500,
+      coverage_counted: 1,
+      coverage_total: 1,
+    }),
+    teamRequest: async () => remoteResume(),
+  });
+  assert.equal('baseline_kind' in result.manifest, false);
+  assert.equal('source_equivalent_tokens' in result.manifest, false);
+  assert.equal('coverage_counted' in result.manifest, false);
+});
+
+test('native lifecycle identity stays stable while divergent payload replay changes only the measured context', () => {
+  const event = {
+    host: 'codex', event: 'session_start', session_id: 'session_1',
+    source_event_key: `event_${'b'.repeat(64)}`,
+  };
+  const first = createContinuityDeliveryOffer(resolved('personal'), event, 'first payload', {
+    object_ids: ['memory_1'], evidence_ids: [],
+  });
+  const divergent = createContinuityDeliveryOffer(resolved('personal'), event, 'changed payload', {
+    object_ids: ['memory_2'], evidence_ids: [],
+  });
+  assert.equal(divergent.idempotencyKey, first.idempotencyKey);
+  assert.notEqual(divergent.offer.context_id, first.offer.context_id);
+  assert.notEqual(divergent.offer.payload_digest, first.offer.payload_digest);
+});
+
+test('composition returns only the structured IDs declared as included in rendered continuity', async () => {
+  const result = await composeBoundResumeEvidence(resolved('personal'), {
+    session_id: 'session_1', idempotency_key: 'event_1',
+  }, {
+    host: 'codex',
+    request: async () => ({
+      resume_markdown: 'Rendered personal memory.',
+      included_object_ids: ['memory_2', 'memory_1', 'memory_2'],
+      included_evidence_ids: ['pulse:memory_2', 'pulse:memory_1', 'pulse:memory_2'],
+      // Legacy aggregate refs can include entries removed by bounded rendering
+      // and must never be promoted into the exact-delivery manifest.
+      evidence_refs: ['pulse:not-rendered'],
+      material_refs: ['memory_not-rendered'],
+    }),
+  });
+
+  assert.deepEqual(result.manifest, {
+    object_ids: ['memory_1', 'memory_2'],
+    evidence_ids: ['pulse:memory_1', 'pulse:memory_2'],
+  });
+  assert.equal(Object.isFrozen(result.manifest), true);
+  assert.equal(Object.isFrozen(result.manifest.object_ids), true);
+});
+
+test('Commons object IDs remain structural instead of being parsed back out of rendered text', async () => {
+  const result = await composeBoundResumeEvidence(resolved(), {
+    session_id: 'session_1', idempotency_key: 'event_1',
+  }, {
+    host: 'codex',
+    request: async () => ({
+      resume_markdown: 'Private continuity.',
+      included_object_ids: ['memory_private'],
+      included_evidence_ids: ['pulse:memory_private'],
+    }),
+    teamRequest: async () => remoteResume('Text mentions [fake_object] but it is not provenance.'),
+  });
+
+  assert.deepEqual(result.manifest, {
+    object_ids: ['commons_1', 'memory_private'],
+    evidence_ids: ['pulse:memory_private'],
+  });
 });
 
 test('Commons response parser rejects count drift and malformed object provenance', () => {

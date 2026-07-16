@@ -124,6 +124,7 @@ test('managed product runtime resolves three verified activations and atomically
 function binding(mode, root) {
   const common = {
     binding_id: 'binding_demo', binding_digest: 'a'.repeat(64), resolver_epoch: 3, fallback: false,
+		workspace: { repository_id: 'repository_pulse' },
   };
   if (mode === 'personal') {
     return {
@@ -155,6 +156,7 @@ test('supervisor derives physically separate Personal and Desk process descripto
   assert.notEqual(personal.addr, desk.addr);
   assert.equal(personal.fallback, false);
   assert.equal(desk.fallback, false);
+	assert.equal(personal.repository_id, 'repository_pulse');
   assert.equal(inspectVaultRuntime(personal).status, 'stopped');
 });
 
@@ -329,6 +331,7 @@ mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
 writeFileSync(dataDir + '/authority.json', JSON.stringify({
   binding_digest: process.env.PULSE_BINDING_DIGEST,
+	repository_id: process.env.PULSE_REPOSITORY_ID,
   policy_epoch: process.env.PULSE_POLICY_EPOCH,
   resolver_epoch: process.env.PULSE_RESOLVER_EPOCH,
 }), { mode: 0o600 });
@@ -353,7 +356,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.equal(started.status, 'running');
   assert.equal(started.fallback, false);
   assert.deepEqual(JSON.parse(readFileSync(join(runtime.data_dir, 'authority.json'), 'utf8')), {
-    binding_digest: 'a'.repeat(64), policy_epoch: '0', resolver_epoch: '3',
+		binding_digest: 'a'.repeat(64), repository_id: 'repository_pulse', policy_epoch: '0', resolver_epoch: '3',
   });
 	assert.equal(inspectVaultRuntime(runtime).status, 'running');
 	assert.equal(stopVaultRuntime(runtime).status, 'stopping');
@@ -392,6 +395,43 @@ test('supervisor recovers an exact crashed receipt and atomically restarts on da
   assert.notEqual(upgraded.pid, recovered.pid);
   assert.notEqual(upgradedReceipt.executable_digest, firstReceipt.executable_digest);
   assert.equal(inspectVaultRuntime(runtime).executable.endsWith('/pulse-daemon-b.mjs'), true);
+});
+
+test('supervisor safely restarts a verified legacy receipt into repository authority and rejects wrong present authority', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-supervisor-legacy-authority.'));
+  const port = await freePort();
+  const selected = binding('personal', root);
+  selected.personal.base_url = `http://127.0.0.1:${port}`;
+  const runtime = vaultRuntimeFromBinding(selected);
+  const daemon = join(root, 'pulse-daemon.mjs');
+  writeFakeDaemon(daemon, 'legacy-authority');
+  t.after(async () => {
+    try { await stopVaultRuntimeAndWait(runtime); } catch { /* already stopped */ }
+  });
+
+  const original = await startVaultRuntime(runtime, { daemonPath: daemon, timeoutMs: 5000 });
+  const legacyReceipt = JSON.parse(readFileSync(runtime.pid_file, 'utf8'));
+  delete legacyReceipt.repository_id;
+  writeFileSync(runtime.pid_file, JSON.stringify(legacyReceipt), { mode: 0o600 });
+  const legacy = inspectVaultRuntime(runtime);
+  assert.equal(legacy.status, 'running');
+  assert.equal(legacy.legacy_authority, true);
+
+  const adopted = await startVaultRuntime(runtime, { daemonPath: daemon, timeoutMs: 5000 });
+  assert.notEqual(adopted.pid, original.pid);
+  const adoptedReceipt = JSON.parse(readFileSync(runtime.pid_file, 'utf8'));
+  assert.equal(adoptedReceipt.repository_id, runtime.repository_id);
+  assert.equal(inspectVaultRuntime(runtime).legacy_authority, false);
+
+  writeFileSync(runtime.pid_file, JSON.stringify({
+    ...adoptedReceipt, repository_id: 'repository_wrong',
+  }), { mode: 0o600 });
+  assert.equal(inspectVaultRuntime(runtime).status, 'stale_or_mismatched');
+  await assert.rejects(
+    startVaultRuntime(runtime, { daemonPath: daemon, timeoutMs: 5000 }),
+    (error) => error instanceof SupervisorError && error.code === 'vault_runtime_receipt_mismatch',
+  );
+  writeFileSync(runtime.pid_file, JSON.stringify(adoptedReceipt), { mode: 0o600 });
 });
 
 test('failed daemon upgrade waits for the new process to exit and restores the healthy previous daemon', async (t) => {

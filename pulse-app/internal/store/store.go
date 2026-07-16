@@ -43,6 +43,8 @@ type Store struct {
 	expectedBindingDigest string
 	expectedPolicyEpoch   int64
 	expectedResolverEpoch int64
+	continuityAuthorityMu sync.RWMutex
+	continuityRepository  string
 	publicationTargetMu   sync.RWMutex
 	publicationTarget     *TeamPublicationTarget
 
@@ -320,7 +322,7 @@ type persistedStoreIdentity struct {
 }
 
 func validateStoreIdentity(db *sql.DB, profile storeOpenProfile) (persistedStoreIdentity, error) {
-	return validateStoreIdentityForVersion(db, profile, 45)
+	return validateStoreIdentityForVersion(db, profile, 46)
 }
 
 func validateStoreIdentityForVersion(db *sql.DB, profile storeOpenProfile, schemaVersion int) (persistedStoreIdentity, error) {

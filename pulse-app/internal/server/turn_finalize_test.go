@@ -353,14 +353,14 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 		ContentDigest: strings.Repeat("c", 64),
 		MemoryKind:    "decision", ConversationScope: "current_turn",
 		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository-pulse",
-		Host: "codex", SessionID: "session-a", CreatedAt: "2026-07-16T01:00:00Z",
+		Host: "codex", SessionRef: "session:" + strings.Repeat("d", 64), CreatedAt: "2026-07-16T01:00:00Z",
 		Active: true,
 	}
 	offered := ContextDeliveryReadinessFact{
-		ContextID: "context_01", Acknowledgement: "offered_to_host",
+		ContextID: "context_01", Acknowledgement: "offered_to_host", Purpose: "session_start",
 		ObjectIDs: []string{terminal.ObjectID}, EvidenceIDs: []string{terminal.EvidenceIDs[0]},
 		PayloadDigest: strings.Repeat("b", 64), BindingDigest: terminal.BindingDigest,
-		RepositoryID: terminal.RepositoryID, Host: "codex", SessionID: "session-b",
+		RepositoryID: terminal.RepositoryID, Host: "codex", SessionRef: "session:" + strings.Repeat("e", 64),
 		CreatedAt: "2026-07-16T01:01:00Z",
 	}
 	observed := offered
@@ -411,7 +411,7 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 			ObjectID: "pulse:install", Status: string(store.MemoryWriteCreated), ContentDigest: strings.Repeat("d", 64),
 			MemoryKind: "system_event", ConversationScope: "install_event",
 			BindingDigest: terminal.BindingDigest, RepositoryID: terminal.RepositoryID,
-			Host: "pulse-cli", SessionID: "install", CreatedAt: "2026-07-16T00:00:00Z", Active: true,
+			Host: "pulse-cli", SessionRef: "session:" + strings.Repeat("f", 64), CreatedAt: "2026-07-16T00:00:00Z", Active: true,
 		}}, wantState: "first_memory_pending"},
 		{name: "terminal memory only", memories: []TerminalMemoryReadinessFact{terminal}, wantState: "context_offer_pending"},
 		{name: "wrong project offer", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
@@ -421,8 +421,13 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 		}()}, wantState: "context_offer_pending"},
 		{name: "same task offer is not continuity", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
 			same := offered
-			same.SessionID = terminal.SessionID
+			same.SessionRef = terminal.SessionRef
 			return same
+		}()}, wantState: "context_offer_pending"},
+		{name: "subagent offer is not fresh task continuity", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
+			subagent := offered
+			subagent.Purpose = "subagent_start"
+			return subagent
 		}()}, wantState: "context_offer_pending"},
 		{name: "wrong evidence is not continuity", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{func() ContextDeliveryReadinessFact {
 			wrong := offered

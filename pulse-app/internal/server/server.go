@@ -139,6 +139,9 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/continuity/resume", s.handleContinuityResume)
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
+		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
+		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)
 	}

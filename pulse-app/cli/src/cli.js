@@ -129,6 +129,8 @@ const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
 const PREVIEW_VERSION = '0.7.0';
+const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
+const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
 const MAX_MIGRATION_FILE_BYTES = positiveEnvInt('PULSE_MIGRATION_MAX_FILE_BYTES', 300 * 1024 * 1024);
 const MAX_MIGRATION_FILES = positiveEnvInt('PULSE_MIGRATION_MAX_FILES', 3000);
@@ -4528,21 +4530,17 @@ function previewThreadTitle(value, fallback = 'Archive thread') {
   return title || fallback;
 }
 
-function estimatePreviewTokenEconomy(preview) {
+function previewArchiveSizing(preview) {
   const conversations = Number.isFinite(preview.conversations) ? preview.conversations : 0;
   const messages = Number.isFinite(preview.messages) ? preview.messages : 0;
-  const estimatedRaw = Math.max(messages * 220, conversations * 900, 0);
-  const resumeTokens = Math.min(2000, Math.max(
-    240,
-    preview.memory_candidates.length * 70 +
-      preview.emotion_candidates.length * 40 +
-      preview.relationship_candidates.length * 28 +
-      preview.people_candidates.length * 16,
-  ));
   return {
-    estimatedRaw,
-    resumeTokens,
-    estimatedSaved: Math.max(0, estimatedRaw - resumeTokens),
+		conversations,
+		messages,
+		structured_candidates:
+			preview.memory_candidates.length +
+			preview.emotion_candidates.length +
+			preview.relationship_candidates.length +
+			preview.people_candidates.length,
   };
 }
 
@@ -4629,20 +4627,15 @@ function relationshipsForThread(relationships, title) {
     .slice(0, 6);
 }
 
-function tokenEconomyForThread(messageCount, thread) {
-  const estimatedRawTokens = Math.max(messageCount * 220, 220);
-  const resumeTokens = Math.min(2000, Math.max(
-    240,
-    safeArrayLength(thread.decisions) * 70 +
-      safeArrayLength(thread.open_loops) * 36 +
-      safeArrayLength(thread.do_not_repeat) * 34 +
-      safeArrayLength(thread.emotional_anchors) * 40 +
-      safeArrayLength(thread.people_found) * 18,
-  ));
+function previewSizingForThread(messageCount, thread) {
   return {
-    estimated_raw_tokens: estimatedRawTokens,
-    resume_tokens: resumeTokens,
-    estimated_saved_tokens: Math.max(0, estimatedRawTokens - resumeTokens),
+		source_snippets: Math.max(0, messageCount),
+		structured_candidates:
+			safeArrayLength(thread.decisions) +
+			safeArrayLength(thread.open_loops) +
+			safeArrayLength(thread.do_not_repeat) +
+			safeArrayLength(thread.emotional_anchors) +
+			safeArrayLength(thread.people_found),
   };
 }
 
@@ -4658,17 +4651,13 @@ function buildPulseInsights(preview) {
       const firstOpenLoop = safeText((thread.open_loops ?? [])[0], 150);
       const firstPerson = safeText((thread.people_found ?? [])[0], 90);
       const threadTitle = safeText(thread.title, 160);
-      const saved = Number.isFinite(thread.token_economy?.estimated_saved_tokens)
-        ? thread.token_economy.estimated_saved_tokens
-        : 0;
       const reasons = [
         firstDecision ? `Decision candidate: ${firstDecision}` : '',
         firstPerson ? `${firstPerson} appears as a related person in ${threadTitle}.` : '',
         people > 0 ? `${people} related ${people === 1 ? 'person' : 'people'} found may make this thread easier to resume.` : '',
         firstOpenLoop ? `Open loop candidate: ${firstOpenLoop}` : '',
         decisions > 0 ? `${decisions} candidate decision${decisions === 1 ? '' : 's'} can become resume context.` : '',
-        openLoops > 0 ? `${openLoops} open loop${openLoops === 1 ? '' : 's'} may need follow-up.` : '',
-        saved > 0 ? `Approx. ${saved} tokens can be avoided by importing the structured resume instead of raw context.` : '',
+				openLoops > 0 ? `${openLoops} open loop${openLoops === 1 ? '' : 's'} may need follow-up.` : '',
       ].filter(Boolean);
       if (reasons.length === 0) {
         return null;
@@ -4721,7 +4710,7 @@ function buildCandidateThreads(preview, scannedSessions) {
       review_items: reviewItems,
       privacy_tier: 'private',
     };
-    thread.token_economy = tokenEconomyForThread(messageCount, thread);
+		thread.preview_sizing = previewSizingForThread(messageCount, thread);
     return thread;
   });
 }
@@ -4759,7 +4748,7 @@ function attachImportPreviewFlow(preview, state = {}) {
   });
   const staged = {
     ...withState,
-    flow: 'pulse.import_preview.v1',
+    flow: IMPORT_PREVIEW_FLOW,
     source_scan: previewSourceScan(withState),
     scanned_sessions: scannedSessions,
   };
@@ -4959,7 +4948,7 @@ function renderCandidateThreadsFlow(preview) {
           <span>${htmlEscape(safeArrayLength(thread.decisions))} decisions</span>
           <span>${htmlEscape(safeArrayLength(thread.open_loops))} open loops</span>
           <span>${htmlEscape(safeArrayLength(thread.do_not_repeat))} do-not-repeat</span>
-          <span>${htmlEscape(thread.token_economy?.resume_tokens ?? 0)} resume tokens</span>
+						<span>${htmlEscape(thread.preview_sizing?.source_snippets ?? 0)} source snippets</span>
         </div>
         <div class="mini-block"><h4>Decisions</h4>${previewList((thread.decisions ?? []).slice(0, 3), 'No decisions detected yet.')}</div>
         <div class="mini-block"><h4>Open loops</h4>${previewList((thread.open_loops ?? []).slice(0, 3), 'No open loops detected yet.')}</div>
@@ -5139,6 +5128,7 @@ function viewerCommandForPreview(preview) {
 
 function reviewedPreviewPayload(preview) {
   return {
+    flow: IMPORT_PREVIEW_FLOW,
     ok: preview.ok,
     source: preview.source,
     source_kind: preview.source_kind,
@@ -5276,7 +5266,7 @@ function renderMigrationPreviewHTML(preview) {
   ], 96);
   const visibleRelationships = preview.relationship_candidates.filter((item) => !relationshipTouchesReviewEntity(item));
   const visibleFunFacts = preview.fun_fact_candidates.filter((item) => !funFactTouchesReviewEntity(item));
-  const tokenEconomy = estimatePreviewTokenEconomy(preview);
+	const archiveSizing = previewArchiveSizing(preview);
   const emptyPreview = isEmptyMigrationPreview(preview);
   const profilePreview = {
     ...preview,
@@ -5388,7 +5378,7 @@ function renderMigrationPreviewHTML(preview) {
     @media (max-width:900px) { .workbench { grid-template-columns:1fr; } .rail { position:relative; height:auto; } header, .grid, .filter-row, .command { grid-template-columns:1fr; } .wide { grid-column:auto; } h1 { font-size:34px; line-height:1.08; } }
   </style>
 </head>
-<body data-design="pulse-glass-v3" data-import-flow="pulse.import_preview.v1">
+<body data-design="pulse-glass-v3" data-import-flow="${IMPORT_PREVIEW_FLOW}">
   <main class="workbench">
     <aside class="rail" aria-label="Pulse preview navigation">
       <div class="brand">
@@ -5433,7 +5423,7 @@ function renderMigrationPreviewHTML(preview) {
       <div class="metric"><b>${htmlEscape(reviewCandidates.length)}</b><span>needs decision</span></div>
       <div class="metric"><b>${htmlEscape(preview.emotion_candidates.length)}</b><span>emotional anchors</span></div>
       <div class="metric"><b>${htmlEscape(previewPeople.confident.length)}</b><span>people found</span></div>
-      <div class="metric"><b>${htmlEscape(tokenEconomy.estimatedSaved)}</b><span>estimated saved</span></div>
+			<div class="metric"><b>${htmlEscape(archiveSizing.structured_candidates)}</b><span>structured candidates</span></div>
       <div class="metric"><b>${htmlEscape(preview.redacted_fragments)}</b><span>redacted fragments</span></div>
     </div>
 
@@ -5445,14 +5435,14 @@ function renderMigrationPreviewHTML(preview) {
       ${renderPreviewThreadCards(preview)}
     </section>
 
-    <section id="token-economy">
-      <h2>Token economy</h2>
-      <div class="metrics" aria-label="Estimated token economy">
-        <div class="metric"><b>${htmlEscape(tokenEconomy.estimatedRaw)}</b><span>estimated raw</span></div>
-        <div class="metric"><b>${htmlEscape(tokenEconomy.resumeTokens)}</b><span>resume budget</span></div>
-        <div class="metric"><b>${htmlEscape(tokenEconomy.estimatedSaved)}</b><span>estimated saved</span></div>
-      </div>
-      <p class="empty">These are estimates for preview. Pulse stores the smaller continuity shape, not the raw archive text.</p>
+		<section id="archive-sizing">
+			<h2>Archive sizing</h2>
+			<div class="metrics" aria-label="Archive sizing">
+				<div class="metric"><b>${htmlEscape(archiveSizing.conversations)}</b><span>conversations</span></div>
+				<div class="metric"><b>${htmlEscape(archiveSizing.messages)}</b><span>source snippets</span></div>
+				<div class="metric"><b>${htmlEscape(archiveSizing.structured_candidates)}</b><span>structured candidates</span></div>
+			</div>
+			<p class="empty">This preview reports source and candidate counts only. Token economy starts from immutable delivery receipts after context is actually offered.</p>
     </section>
 
     <section class="filter-panel">
@@ -5567,7 +5557,7 @@ function renderMigrationPreviewHTML(preview) {
         review_decisions: reviewDecisions,
         active_threads: Object.values(activeThreads),
         reviewed_at: new Date().toISOString(),
-        flow: "pulse.import_preview.v1"
+        flow: "${IMPORT_PREVIEW_FLOW}"
       };
       const blob = new Blob([JSON.stringify(reviewed, null, 2) + "\\n"], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -8065,6 +8055,11 @@ async function commitMigrationPreview(previewPath, rest) {
     throw new Error('pulse migrate commit requires <preview-json-file>');
   }
   const preview = JSON.parse(readFileSync(resolve(previewPath), 'utf8'));
+  const previewFlow = preview?.flow;
+  if (previewFlow !== undefined && previewFlow !== LEGACY_IMPORT_PREVIEW_FLOW &&
+      previewFlow !== IMPORT_PREVIEW_FLOW) {
+    throw new Error(`unsupported Pulse import preview flow: ${String(previewFlow)}`);
+  }
   const delta = buildSemanticDeltaFromPreview(preview, {
     privacy: restArg(rest, '--privacy'),
   });

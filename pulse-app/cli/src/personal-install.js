@@ -4,6 +4,8 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
+import { isCanonicalRepositoryID } from './host-adapter.js';
+
 const STEP = Object.freeze({
   artifacts: 'artifacts_staged',
   presence: 'presence_ready',
@@ -170,7 +172,7 @@ export function writePersonalInstallReceipt(receipt, {
       !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome) ||
       !/^[a-z0-9][a-z0-9_]{0,127}$/.test(receipt.reason_code ?? '') ||
       !/^workspace_[a-z0-9][a-z0-9_]{0,127}$/.test(receipt.workspace_id ?? '') ||
-      !/^repository_[a-z0-9][a-z0-9_]{0,127}$/.test(receipt.repository_id ?? '') ||
+      !isCanonicalRepositoryID(receipt.repository_id) ||
       receipt.preserved_data !== true || !Array.isArray(receipt.completed_steps) ||
       receipt.completed_steps.some((step, index) => step !== PERSONAL_INSTALL_STEPS[index]) ||
       Number.isNaN(now.valueOf())) {

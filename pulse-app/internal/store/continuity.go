@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-const ContinuitySchema = "pulse.continuity.v1"
+const ContinuitySchema = "pulse.continuity.v2"
 
 var threadIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
 var safeRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,159}$`)
@@ -90,25 +92,38 @@ type ResumeSections struct {
 }
 
 type ResumeBlock struct {
-	Schema         string         `json:"schema"`
-	ThreadID       string         `json:"thread_id"`
-	ProjectID      string         `json:"project_id,omitempty"`
-	SessionID      string         `json:"session_id,omitempty"`
-	TokenBudget    int            `json:"token_budget"`
-	TokenEstimate  int            `json:"token_estimate"`
-	TokenEconomy   TokenEconomy   `json:"token_economy"`
-	ResumeMarkdown string         `json:"resume_markdown"`
-	Sections       ResumeSections `json:"sections"`
-	EvidenceRefs   []string       `json:"evidence_refs"`
-	MaterialRefs   []string       `json:"material_refs,omitempty"`
+	Schema                 string         `json:"schema"`
+	ThreadID               string         `json:"thread_id"`
+	ProjectID              string         `json:"project_id,omitempty"`
+	SessionID              string         `json:"session_id,omitempty"`
+	TokenBudget            int            `json:"token_budget"`
+	TokenEstimate          int            `json:"token_estimate"`
+	TokenEconomy           TokenEconomy   `json:"token_economy"`
+	ResumeMarkdown         string         `json:"resume_markdown"`
+	Sections               ResumeSections `json:"sections"`
+	EvidenceRefs           []string       `json:"evidence_refs"`
+	MaterialRefs           []string       `json:"material_refs,omitempty"`
+	IncludedObjectIDs      []string       `json:"included_object_ids"`
+	IncludedEvidenceIDs    []string       `json:"included_evidence_ids"`
+	BaselineKind           string         `json:"baseline_kind,omitempty"`
+	SourceEquivalentTokens *int           `json:"source_equivalent_tokens,omitempty"`
+	CoverageCounted        int            `json:"coverage_counted,omitempty"`
+	CoverageTotal          int            `json:"coverage_total,omitempty"`
 }
 
 type TokenEconomy struct {
-	ResumeTokens         int  `json:"resume_tokens"`
-	EstimatedRawTokens   int  `json:"estimated_raw_tokens"`
-	EstimatedSavedTokens int  `json:"estimated_saved_tokens"`
-	Estimated            bool `json:"estimated"`
+	State         string `json:"state"`
+	MethodID      string `json:"method_id"`
+	MethodVersion string `json:"method_version"`
+	RenderedBytes int    `json:"rendered_bytes"`
+	PulseTokens   int    `json:"pulse_tokens"`
+	ReasonCode    string `json:"reason_code"`
 }
+
+const (
+	TokenEconomyCollectingBaseline      = "collecting_baseline"
+	TokenEconomyMethodUTF8BytesDiv4Ceil = "utf8_bytes_div4_ceil"
+)
 
 type ViewerData struct {
 	NextResume       ResumeBlock               `json:"next_resume"`
@@ -378,9 +393,13 @@ func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
 			sections.EvidenceRefs = appendUniqueContinuityItem(sections.EvidenceRefs, obs.SourceRef)
 		}
 	}
+	promotedMemories := make([]RecalledMemoryItem, 0, len(memories))
 	for _, memory := range memories {
-		promoteMemoryCapsuleToResume(&sections, memory)
-		if memory.EvidenceRef != "" {
+		promoted := promoteMemoryCapsuleToResume(&sections, memory)
+		if promoted {
+			promotedMemories = append(promotedMemories, memory)
+		}
+		if memory.EvidenceRef != "" && promoted {
 			sections.EvidenceRefs = appendUniqueContinuityItem(sections.EvidenceRefs, memory.EvidenceRef)
 		}
 	}
@@ -401,27 +420,46 @@ func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
 		}
 	}
 
-	markdown := renderResumeMarkdown(sections)
-	markdown = trimMarkdownToBudget(markdown, budget)
+	fullMarkdown := renderResumeMarkdown(sections)
+	markdown := trimMarkdownToBudget(fullMarkdown, budget)
+	includedObjectIDs, includedEvidenceIDs := includedResumeManifest(markdown, promotedMemories, sections.EvidenceRefs)
+	fullObjectIDs, fullEvidenceIDs := includedResumeManifest(fullMarkdown, promotedMemories, sections.EvidenceRefs)
+	coverageCounted := len(includedObjectIDs) + len(includedEvidenceIDs)
+	coverageTotal := len(fullObjectIDs) + len(fullEvidenceIDs)
+	baselineKind := ""
+	var sourceEquivalentTokens *int
+	if coverageCounted > 0 && coverageTotal >= coverageCounted {
+		baselineKind = "canonical_structured_resume_v1"
+		value := estimateTokens(fullMarkdown)
+		sourceEquivalentTokens = &value
+	}
 	tokenEstimate := estimateTokens(markdown)
-	tokenEconomy := TokenEconomy{ResumeTokens: tokenEstimate}
-	if hasCheckpoint || len(observations) > 0 || len(memories) > 0 {
-		tokenEconomy.Estimated = true
-		tokenEconomy.EstimatedRawTokens = tokenEstimate * 8
-		tokenEconomy.EstimatedSavedTokens = tokenEconomy.EstimatedRawTokens - tokenEstimate
+	tokenEconomy := TokenEconomy{
+		State:         TokenEconomyCollectingBaseline,
+		MethodID:      TokenEconomyMethodUTF8BytesDiv4Ceil,
+		MethodVersion: "1",
+		RenderedBytes: len([]byte(markdown)),
+		PulseTokens:   tokenEstimate,
+		ReasonCode:    "comparable_receipt_required",
 	}
 	return ResumeBlock{
-		Schema:         ContinuitySchema,
-		ThreadID:       threadID,
-		ProjectID:      strings.TrimSpace(q.ProjectID),
-		SessionID:      strings.TrimSpace(q.SessionID),
-		TokenBudget:    budget,
-		TokenEstimate:  tokenEstimate,
-		TokenEconomy:   tokenEconomy,
-		ResumeMarkdown: markdown,
-		Sections:       sections,
-		EvidenceRefs:   sections.EvidenceRefs,
-		MaterialRefs:   sections.MaterialRefs,
+		Schema:                 ContinuitySchema,
+		ThreadID:               threadID,
+		ProjectID:              strings.TrimSpace(q.ProjectID),
+		SessionID:              strings.TrimSpace(q.SessionID),
+		TokenBudget:            budget,
+		TokenEstimate:          tokenEstimate,
+		TokenEconomy:           tokenEconomy,
+		ResumeMarkdown:         markdown,
+		Sections:               sections,
+		EvidenceRefs:           sections.EvidenceRefs,
+		MaterialRefs:           sections.MaterialRefs,
+		IncludedObjectIDs:      includedObjectIDs,
+		IncludedEvidenceIDs:    includedEvidenceIDs,
+		BaselineKind:           baselineKind,
+		SourceEquivalentTokens: sourceEquivalentTokens,
+		CoverageCounted:        coverageCounted,
+		CoverageTotal:          coverageTotal,
 	}, nil
 }
 
@@ -1297,23 +1335,54 @@ func (s *Store) recentResumeMemories(limit int) ([]RecalledMemoryItem, error) {
 	return out, rows.Err()
 }
 
-func promoteMemoryCapsuleToResume(sections *ResumeSections, memory RecalledMemoryItem) {
+func promoteMemoryCapsuleToResume(sections *ResumeSections, memory RecalledMemoryItem) bool {
 	summary := strings.TrimSpace(memory.Summary)
 	if summary == "" {
-		return
+		return false
 	}
+	var target *[]string
 	switch strings.TrimSpace(memory.Kind) {
 	case "decision", "preference", "correction":
-		sections.ActiveDecisions = appendUniqueContinuityItem(sections.ActiveDecisions, summary)
+		target = &sections.ActiveDecisions
 	case "open_loop":
-		sections.OpenLoops = appendUniqueContinuityItem(sections.OpenLoops, summary)
+		target = &sections.OpenLoops
 	case "do_not_repeat":
-		sections.DoNotRepeat = appendUniqueContinuityItem(sections.DoNotRepeat, summary)
+		target = &sections.DoNotRepeat
 	case "relationship_note", "state_signal":
-		sections.RelevantEmotionalState = appendUniqueContinuityItem(sections.RelevantEmotionalState, summary)
+		target = &sections.RelevantEmotionalState
 	case "fact", "project_state":
-		sections.WhereWeLeftOff = appendUniqueContinuityItem(sections.WhereWeLeftOff, summary)
+		target = &sections.WhereWeLeftOff
+	default:
+		return false
 	}
+	before := len(*target)
+	*target = appendUniqueContinuityItem(*target, summary)
+	return len(*target) > before
+}
+
+func includedResumeManifest(markdown string, memories []RecalledMemoryItem, evidenceRefs []string) ([]string, []string) {
+	renderedItems := make(map[string]struct{})
+	for _, line := range strings.Split(markdown, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			renderedItems[strings.TrimPrefix(line, "- ")] = struct{}{}
+		}
+	}
+	objectIDs := make([]string, 0, len(memories))
+	for _, memory := range memories {
+		summary := strings.TrimSpace(memory.Summary)
+		if _, rendered := renderedItems[summary]; memory.ID != "" && summary != "" && rendered {
+			objectIDs = appendUniqueContinuityItem(objectIDs, memory.ID)
+		}
+	}
+	evidenceIDs := make([]string, 0, len(evidenceRefs))
+	for _, evidenceRef := range evidenceRefs {
+		if _, rendered := renderedItems[evidenceRef]; evidenceRef != "" && rendered {
+			evidenceIDs = appendUniqueContinuityItem(evidenceIDs, evidenceRef)
+		}
+	}
+	sort.Strings(objectIDs)
+	sort.Strings(evidenceIDs)
+	return objectIDs, evidenceIDs
 }
 
 func promoteContinuityObservation(sections *ResumeSections, summary string) bool {
@@ -1534,14 +1603,22 @@ func writeResumeSection(b *strings.Builder, title string, items []string) {
 }
 
 func trimMarkdownToBudget(markdown string, budget int) string {
-	maxChars := budget * 4
-	if len(markdown) <= maxChars {
+	maxBytes := budget * 4
+	if len(markdown) <= maxBytes {
 		return markdown
 	}
-	if maxChars < 80 {
-		maxChars = 80
+	if maxBytes < 80 {
+		maxBytes = 80
 	}
-	return strings.TrimSpace(markdown[:maxChars-40]) + "\n- [truncated to Pulse resume budget]\n"
+	const marker = "\n- [truncated to Pulse resume budget]\n"
+	end := maxBytes - len(marker)
+	if end > len(markdown) {
+		end = len(markdown)
+	}
+	for end > 0 && end < len(markdown) && !utf8.RuneStart(markdown[end]) {
+		end--
+	}
+	return strings.TrimSpace(markdown[:end]) + marker
 }
 
 func estimateTokens(text string) int {

@@ -226,7 +226,7 @@ func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testi
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 45 || writer != 45 {
+	if reader != 46 || writer != 46 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }
@@ -1726,7 +1726,7 @@ func TestTerminalMemoryReadinessFactsComeFromPresentedActiveTerminalReceipts(t *
 		fact.ContentDigest != pending.ContentDigest || fact.MemoryKind != "decision" ||
 		fact.ConversationScope != "current_turn" || fact.BindingDigest != testTrayBindingDigest ||
 		fact.RepositoryID != "repository_pulse" || fact.Host != req.Host ||
-		fact.SessionID != opaqueTurnCorrelation("session", req.SessionID) || !fact.Active || len(fact.EvidenceIDs) != 0 {
+		fact.SessionRef != opaqueTurnCorrelation("session", req.SessionID) || !fact.Active || len(fact.EvidenceIDs) != 0 {
 		t.Fatalf("terminal readiness fact lost immutable chain: %#v", fact)
 	}
 	otherBinding := strings.Repeat("b", 64)

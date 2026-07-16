@@ -9,6 +9,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import * as codexHooks from './codex-hooks.js';
+
 import {
   extractPulseReceiptRefs,
   hookBundleDigest,
@@ -145,7 +147,7 @@ test('PostToolUse extracts only canonical Pulse receipt references', () => {
   assert.doesNotMatch(JSON.stringify(refs), /must not be returned/);
 });
 
-test('SessionStart injects bound resume as inert evidence with a short lease', async () => {
+test('SessionStart injects bound resume as inert evidence with an event-bound lease', async () => {
   const calls = [];
   const output = await handleCodexHook('SessionStart', {
     ...base,
@@ -164,11 +166,167 @@ test('SessionStart injects bound resume as inert evidence with a short lease', a
   assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
   const injected = output.hookSpecificOutput.additionalContext;
   assert.match(injected, /pulse.context.v1/);
-  assert.match(injected, /pulse.context_lease.v1/);
+  assert.match(injected, /pulse.context_lease.v2/);
+  assert.match(injected, /"scope":"session_start"/);
   assert.match(injected, /Prior decision/);
 	assert.match(injected, /"practices":\[\]/);
 	assert.match(injected, /Pulse host rules \(host-owned\)/);
   assert.doesNotMatch(injected, /transcript_path/);
+});
+
+test('CLI durably records the exact frozen SessionStart context before returning it', async () => {
+  const order = [];
+  let serialized;
+  let delivery;
+  let deliveryKey;
+  const input = { ...base, hook_event_name: 'SessionStart', source: 'startup', turn_id: undefined };
+  const output = await handleCodexHook('SessionStart', input, {
+    resolveRuntime: () => resolved,
+    request: async () => ({
+      resume_markdown: 'Remember the exact launch decision. 🌱',
+      included_object_ids: ['memory_02', 'memory_01'],
+      included_evidence_ids: ['pulse:memory_01'],
+      baseline_kind: 'canonical_structured_resume_v1',
+      source_equivalent_tokens: 640,
+      coverage_counted: 2,
+      coverage_total: 2,
+    }),
+    now: () => new Date('2026-07-14T10:00:00Z'),
+  });
+  // The flush boundary, not an earlier compositor return, owns the digest.
+  output.hookSpecificOutput.additionalContext += '\nFinal host serialization marker.';
+  assert.equal(typeof codexHooks.flushCodexHookOutput, 'function');
+  await codexHooks.flushCodexHookOutput('SessionStart', input, output, {
+    writeOutput: async (value) => {
+      order.push('stdout');
+      serialized = value;
+    },
+    recordDelivery: async (value, _resolved, idempotencyKey) => {
+      order.push('receipt');
+      delivery = value;
+      deliveryKey = idempotencyKey;
+    },
+  });
+
+  assert.deepEqual(order, ['receipt', 'stdout']);
+  const publicOutput = JSON.parse(serialized);
+  const payload = publicOutput.hookSpecificOutput.additionalContext;
+  const payloadBytes = Buffer.from(payload, 'utf8');
+  assert.equal(delivery.schema, 'pulse.continuity_delivery.v1');
+  assert.equal(delivery.purpose, 'session_start');
+  assert.equal(delivery.payload_digest, createHash('sha256').update(payloadBytes).digest('hex'));
+  assert.equal(delivery.rendered_bytes, payloadBytes.length);
+  assert.equal(delivery.method_id, 'utf8_bytes_div4_ceil');
+  assert.equal(delivery.method_version, '1');
+  assert.equal(delivery.pulse_tokens, Math.ceil(payloadBytes.length / 4));
+  assert.deepEqual(delivery.object_ids, ['memory_01', 'memory_02']);
+  assert.deepEqual(delivery.evidence_ids, ['pulse:memory_01']);
+  assert.equal(delivery.binding_digest, resolved.binding.binding_digest);
+  assert.equal(delivery.repository_id, resolved.binding.workspace.repository_id);
+  assert.match(delivery.session_ref, /^session:[a-f0-9]{64}$/);
+  assert.match(delivery.source_event_digest, /^[a-f0-9]{64}$/);
+  assert.equal(delivery.baseline_kind, 'canonical_structured_resume_v1');
+  assert.equal(delivery.source_equivalent_tokens, 640);
+  assert.equal(delivery.coverage_counted, 2);
+  assert.equal(delivery.coverage_total, 2);
+  assert.equal('acknowledgement' in delivery, false);
+  assert.equal('project_id' in delivery, false);
+  assert.equal('baseline_coverage' in delivery, false);
+  const keyMaterial = [
+    delivery.schema, delivery.purpose, delivery.binding_digest, delivery.repository_id,
+    delivery.host, delivery.session_ref, delivery.source_event_digest,
+  ].join('\x1f');
+  assert.equal(deliveryKey,
+    `continuity-offer:${createHash('sha256').update(keyMaterial).digest('hex')}`);
+  assert.equal('idempotency_key' in delivery, false);
+  assert.doesNotMatch(serialized, /payload_digest|context_id|session_ref/);
+});
+
+test('CLI records only an offer attempt and never readiness when stdout rejects SessionStart', async () => {
+  let receiptCalls = 0;
+  let readinessCalls = 0;
+  const error = Object.assign(new Error('pipe closed'), { code: 'EPIPE' });
+  const input = { ...base, hook_event_name: 'SessionStart', source: 'startup', turn_id: undefined };
+  const output = await handleCodexHook('SessionStart', input, {
+    resolveRuntime: () => resolved,
+    request: async () => ({ resume_markdown: 'Bound continuity.' }),
+  });
+  assert.equal(typeof codexHooks.flushCodexHookOutput, 'function');
+  await assert.rejects(codexHooks.flushCodexHookOutput('SessionStart', input, output, {
+    writeOutput: async () => { throw error; },
+    recordDelivery: async () => { receiptCalls++; },
+    recordReadiness: () => { readinessCalls++; },
+  }), /pipe closed/);
+  assert.equal(receiptCalls, 1);
+  assert.equal(readinessCalls, 0);
+});
+
+test('delivery failure is fail-closed before SessionStart reaches stdout', async () => {
+  let writes = 0;
+  let readiness = 0;
+  const input = { ...base, hook_event_name: 'SessionStart', source: 'startup', turn_id: undefined };
+  const output = await handleCodexHook('SessionStart', input, {
+    resolveRuntime: () => resolved,
+    request: async () => ({ resume_markdown: 'Bound continuity.' }),
+  });
+  assert.equal(typeof codexHooks.flushCodexHookOutput, 'function');
+  await assert.rejects(codexHooks.flushCodexHookOutput('SessionStart', input, output, {
+    writeOutput: async () => { writes++; },
+    recordDelivery: async () => { throw new Error('daemon unavailable'); },
+    recordReadiness: () => { readiness++; },
+  }), /daemon unavailable/);
+  assert.equal(writes, 0);
+  assert.equal(readiness, 0);
+});
+
+test('Codex lifecycle retries are byte-stable across clocks and subagent offers never imply readiness', async () => {
+  for (const [eventName, input, purpose] of [
+    ['SessionStart', { ...base, hook_event_name: 'SessionStart', source: 'startup', turn_id: undefined }, 'session_start'],
+    ['SubagentStart', { ...base, hook_event_name: 'SubagentStart', agent_type: 'Explore', agent_id: 'agent-1' }, 'subagent_start'],
+  ]) {
+    const dependencies = {
+      resolveRuntime: () => resolved,
+      request: async () => ({ resume_markdown: 'Stable continuity. 🌱' }),
+    };
+    const first = await handleCodexHook(eventName, input, {
+      ...dependencies, now: () => new Date('2026-07-14T10:00:00Z'),
+    });
+    const retry = await handleCodexHook(eventName, input, {
+      ...dependencies, now: () => new Date('2026-07-15T22:33:44Z'),
+    });
+    assert.equal(retry.hookSpecificOutput.additionalContext, first.hookSpecificOutput.additionalContext);
+    const offers = [];
+    let readiness = 0;
+    for (const output of [first, retry]) {
+      await codexHooks.flushCodexHookOutput(eventName, input, output, {
+        recordDelivery: async (offer, _runtime, idempotencyKey) => offers.push({ offer, idempotencyKey }),
+        writeOutput: async () => {},
+        recordReadiness: () => { readiness++; },
+      });
+    }
+    assert.equal(offers[0].offer.purpose, purpose);
+    assert.deepEqual(offers[1], offers[0]);
+    assert.equal(readiness, purpose === 'subagent_start' ? 0 : 2);
+  }
+});
+
+test('CLI default delivery adapter posts the offer with its exact idempotency key', async () => {
+  const calls = [];
+  const input = { ...base, hook_event_name: 'SessionStart', source: 'startup', turn_id: undefined };
+  const output = await handleCodexHook('SessionStart', input, {
+    resolveRuntime: () => resolved,
+    request: async () => ({ resume_markdown: 'Bound continuity.' }),
+  });
+  await codexHooks.flushCodexHookOutput('SessionStart', input, output, {
+    writeOutput: async () => {},
+    deliveryRequest: async (runtime, path, options) => calls.push({ runtime, path, options }),
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].runtime, resolved);
+  assert.equal(calls[0].path, '/continuity/delivery/offers');
+  assert.match(calls[0].options.idempotencyKey, /^continuity-offer:[a-f0-9]{64}$/);
+  assert.equal('idempotency_key' in calls[0].options.body, false);
+  assert.equal(calls[0].options.timeoutMs, 1200);
 });
 
 test('PreToolUse denies a supported side effect when binding recheck fails', async () => {
@@ -278,6 +436,24 @@ test('UserPromptSubmit creates only a content-free Stop-bound turn context', asy
   assert.equal(written[0].event, 'turn_finalize');
   assert.equal(written[0].source, 'stop');
   assert.doesNotMatch(JSON.stringify(written), /raw prompt|transcript/);
+});
+
+test('Codex UserPromptSubmit never mints host_observed from hook execution alone', async () => {
+  let deliveries = 0;
+  const input = {
+    ...base, hook_event_name: 'UserPromptSubmit', prompt: 'raw prompt must remain private',
+  };
+  const output = await handleCodexHook('UserPromptSubmit', input, {
+    resolveRuntime: () => resolved,
+    writeTurnContext: () => {},
+  });
+  await codexHooks.flushCodexHookOutput('UserPromptSubmit', input, output, {
+    writeOutput: async () => {},
+    recordDelivery: async () => { deliveries++; },
+    resolveRuntime: () => resolved,
+    recordReadiness: () => {},
+  });
+  assert.equal(deliveries, 0);
 });
 
 test('PostToolUse trusts only the plugin-owned product receipt namespace', async () => {
@@ -617,14 +793,15 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 		evidence_ids: ['pulse:pulse:memory_01'], status: 'created', memory_kind: 'decision',
 		content_digest: 'c'.repeat(64),
 		conversation_scope: 'current_turn', binding_digest: 'a'.repeat(64),
-		repository_id: 'repository-pulse', host: 'codex', session_id: 'session-a',
+		repository_id: 'repository-pulse', host: 'codex', session_ref: opaque('session', 'session-a'),
 		created_at: '2026-07-16T01:00:00Z', active: true,
 	};
+	const terminalSessionRef = terminal.session_ref;
 	const offered = {
-		context_id: 'context_01', acknowledgement: 'offered_to_host',
+		context_id: 'context_01', purpose: 'session_start', acknowledgement: 'offered_to_host',
 		object_ids: [terminal.object_id], evidence_ids: [terminal.evidence_ids[0]],
 		payload_digest: 'b'.repeat(64), binding_digest: terminal.binding_digest,
-		repository_id: terminal.repository_id, host: 'codex', session_id: 'session-b',
+		repository_id: terminal.repository_id, host: 'codex', session_ref: opaque('session', 'session-b'),
 		created_at: '2026-07-16T01:01:00Z',
 	};
 	const observed = { ...offered, acknowledgement: 'host_observed', created_at: '2026-07-16T01:02:00Z' };
@@ -657,7 +834,13 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 		...offered, repository_id: 'repository-other',
 	}]).state, 'context_offer_pending');
 	assert.equal(projectReadinessLifecycleInputs([terminal], [{
-		...offered, session_id: terminal.session_id,
+		...offered, session_ref: terminalSessionRef,
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, session_ref: undefined, session_id: 'session-b',
+	}]).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [{
+		...offered, purpose: 'subagent_start',
 	}]).state, 'context_offer_pending');
 	assert.equal(projectReadinessLifecycleInputs([terminal], [{
 		...offered, evidence_ids: ['pulse:other'],
@@ -668,6 +851,9 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 	}]).state, 'context_offer_pending');
 	assert.equal(projectReadinessLifecycleInputs([terminal], [offered, {
 		...observed, context_id: 'context_other',
+	}]).state, 'host_observation_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [offered, {
+		...observed, session_ref: opaque('session', 'session-other'),
 	}]).state, 'host_observation_pending');
 	const ready = projectReadinessLifecycleInputs([terminal], [offered, observed]);
 	assert.equal(ready.schema, 'pulse.readiness_lifecycle_inputs.v1');

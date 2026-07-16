@@ -29,13 +29,14 @@ type TerminalMemoryReadinessFact = store.TerminalMemoryReadinessFact
 type ContextDeliveryReadinessFact struct {
 	ContextID       string   `json:"context_id"`
 	Acknowledgement string   `json:"acknowledgement"`
+	Purpose         string   `json:"purpose"`
 	ObjectIDs       []string `json:"object_ids,omitempty"`
 	EvidenceIDs     []string `json:"evidence_ids,omitempty"`
 	PayloadDigest   string   `json:"payload_digest"`
 	BindingDigest   string   `json:"binding_digest"`
 	RepositoryID    string   `json:"repository_id"`
 	Host            string   `json:"host"`
-	SessionID       string   `json:"session_id"`
+	SessionRef      string   `json:"session_ref"`
 	CreatedAt       string   `json:"created_at"`
 }
 
@@ -97,7 +98,7 @@ func firstTerminalMemoryReadinessFact(facts []TerminalMemoryReadinessFact) (Term
 			fact.MemoryKind == "system_event" || !validReadinessScalar(fact.ConversationScope) ||
 			fact.ConversationScope == "install_event" || !readinessDigest(fact.BindingDigest) ||
 			!validReadinessScalar(fact.RepositoryID) || !validReadinessScalar(fact.Host) ||
-			fact.Host == "pulse-cli" || !validReadinessScalar(fact.SessionID) ||
+			fact.Host == "pulse-cli" || !validReadinessSessionRef(fact.SessionRef) ||
 			!validReadinessIDs(fact.EvidenceIDs) {
 			continue
 		}
@@ -134,13 +135,14 @@ func firstMatchingContextFact(
 		if !validTime || !at.After(after) || fact.Acknowledgement != acknowledgement ||
 			!validReadinessScalar(fact.ContextID) || !readinessDigest(fact.PayloadDigest) ||
 			fact.BindingDigest != terminal.BindingDigest || fact.RepositoryID != terminal.RepositoryID ||
-			fact.Host != terminal.Host || !validReadinessScalar(fact.SessionID) || fact.SessionID == terminal.SessionID ||
+			fact.Host != terminal.Host || fact.Purpose != "session_start" || !validReadinessSessionRef(fact.SessionRef) ||
+			fact.SessionRef == terminal.SessionRef ||
 			!validReadinessIDs(fact.ObjectIDs) || !validReadinessIDs(fact.EvidenceIDs) ||
 			!contextFactReferencesTerminal(fact, terminal) {
 			continue
 		}
 		if offered != nil && (fact.ContextID != offered.ContextID || fact.PayloadDigest != offered.PayloadDigest ||
-			fact.SessionID != offered.SessionID || !sameReadinessIDs(fact.ObjectIDs, offered.ObjectIDs) ||
+			fact.Purpose != offered.Purpose || fact.SessionRef != offered.SessionRef || !sameReadinessIDs(fact.ObjectIDs, offered.ObjectIDs) ||
 			!sameReadinessIDs(fact.EvidenceIDs, offered.EvidenceIDs)) {
 			continue
 		}
@@ -228,6 +230,10 @@ func readinessDigest(value string) bool {
 		}
 	}
 	return true
+}
+
+func validReadinessSessionRef(value string) bool {
+	return len(value) == 72 && strings.HasPrefix(value, "session:") && readinessDigest(strings.TrimPrefix(value, "session:"))
 }
 
 func (s *Server) handleTurnFinalize(w http.ResponseWriter, r *http.Request) {
@@ -356,12 +362,18 @@ func (s *Server) handleMemoryCorrect(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeMemoryTrayBody(r *http.Request, target any) error {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	return decodeStrictJSONBody(
+		r, target, 1<<20, errors.New("Memory Tray body is empty or too large"),
+	)
+}
+
+func decodeStrictJSONBody(r *http.Request, target any, maxBytes int64, invalidBody error) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
 	if err != nil {
 		return err
 	}
-	if len(raw) == 0 || len(raw) > 1<<20 {
-		return errors.New("Memory Tray body is empty or too large")
+	if len(raw) == 0 || int64(len(raw)) > maxBytes {
+		return invalidBody
 	}
 	return decodeStrictJSON(raw, target)
 }

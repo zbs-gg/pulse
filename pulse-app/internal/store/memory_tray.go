@@ -183,7 +183,7 @@ type TerminalMemoryReadinessFact struct {
 	BindingDigest         string   `json:"binding_digest"`
 	RepositoryID          string   `json:"repository_id"`
 	Host                  string   `json:"host"`
-	SessionID             string   `json:"session_id"`
+	SessionRef            string   `json:"session_ref"`
 	CreatedAt             string   `json:"created_at"`
 	Active                bool     `json:"active"`
 }
@@ -1077,7 +1077,7 @@ func (s *Store) TerminalMemoryReadinessFacts(
 		if err := rows.Scan(
 			&fact.ReceiptID, &fact.PresentationReceiptID, &fact.ObjectID,
 			&fact.Status, &fact.ContentDigest, &payload, &fact.BindingDigest,
-			&fact.Host, &fact.SessionID, &fact.CreatedAt,
+			&fact.Host, &fact.SessionRef, &fact.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

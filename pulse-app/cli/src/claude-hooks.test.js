@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import * as claudeHooks from './claude-hooks.js';
 import { normalizeClaudeHook } from './host-adapter.js';
 import { handleClaudeHook, recordClaudeHookReadiness } from './claude-hooks.js';
 
@@ -90,9 +91,111 @@ test('Claude SessionStart injects the same bound continuity contract', async () 
   assert.equal(calls[0].path, '/continuity/resume');
   assert.equal(calls[0].options.body.host, 'claude-code');
   assert.match(output.hookSpecificOutput.additionalContext, /Codex decision available/);
-  assert.match(output.hookSpecificOutput.additionalContext, /pulse.context_lease.v1/);
+  assert.match(output.hookSpecificOutput.additionalContext, /pulse.context_lease.v2/);
+  assert.match(output.hookSpecificOutput.additionalContext, /"scope":"session_start"/);
 	assert.match(output.hookSpecificOutput.additionalContext, /"practices":\[\]/);
 	assert.match(output.hookSpecificOutput.additionalContext, /Pulse host rules \(host-owned\)/);
+});
+
+test('Claude durably records the same exact delivery contract before returning stdout', async () => {
+  const order = [];
+  let serialized;
+  let delivery;
+  const input = {
+    session_id: base.session_id,
+    transcript_path: base.transcript_path,
+    cwd: '/workspace/pulse',
+    hook_event_name: 'SessionStart',
+    source: 'resume',
+  };
+  const output = await handleClaudeHook('SessionStart', input, {
+    resolveRuntime: () => resolved,
+    request: async () => ({
+      resume_markdown: 'Cross-harness continuity. 🌱',
+      included_object_ids: ['memory_02', 'memory_01'],
+      included_evidence_ids: ['pulse:memory_01'],
+      baseline_kind: 'canonical_structured_resume_v1',
+      source_equivalent_tokens: 700,
+      coverage_counted: 2,
+      coverage_total: 3,
+    }),
+    now: () => new Date('2026-07-14T10:00:00Z'),
+  });
+
+  assert.equal(typeof claudeHooks.flushClaudeHookOutput, 'function');
+  await claudeHooks.flushClaudeHookOutput('SessionStart', input, output, {
+    writeOutput: async (value) => { order.push('stdout'); serialized = value; },
+    recordDelivery: async (value) => { order.push('receipt'); delivery = value; },
+  });
+
+  assert.deepEqual(order, ['receipt', 'stdout']);
+  const payload = JSON.parse(serialized).hookSpecificOutput.additionalContext;
+  const bytes = Buffer.from(payload, 'utf8');
+  assert.equal(delivery.host, 'claude-code');
+  assert.equal(delivery.payload_digest, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(delivery.rendered_bytes, bytes.length);
+  assert.equal(delivery.pulse_tokens, Math.ceil(bytes.length / 4));
+  assert.equal(delivery.purpose, 'session_start');
+  assert.equal(delivery.method_id, 'utf8_bytes_div4_ceil');
+  assert.equal(delivery.method_version, '1');
+  assert.match(delivery.source_event_digest, /^[a-f0-9]{64}$/);
+  assert.equal(delivery.baseline_kind, 'canonical_structured_resume_v1');
+  assert.equal(delivery.source_equivalent_tokens, 700);
+  assert.equal(delivery.coverage_counted, 2);
+  assert.equal(delivery.coverage_total, 3);
+  assert.equal('acknowledgement' in delivery, false);
+  assert.deepEqual(delivery.object_ids, ['memory_01', 'memory_02']);
+  assert.deepEqual(delivery.evidence_ids, ['pulse:memory_01']);
+});
+
+test('Claude lifecycle retries are byte-stable across clocks and subagent offers never imply readiness', async () => {
+  for (const [eventName, input, purpose] of [
+    ['SessionStart', {
+      session_id: base.session_id, transcript_path: base.transcript_path, cwd: '/workspace/pulse',
+      hook_event_name: 'SessionStart', source: 'resume',
+    }, 'session_start'],
+    ['SubagentStart', {
+      ...base, hook_event_name: 'SubagentStart', agent_type: 'Explore', agent_id: 'agent-1',
+    }, 'subagent_start'],
+  ]) {
+    const dependencies = {
+      resolveRuntime: () => resolved,
+      request: async () => ({ resume_markdown: 'Stable cross-harness continuity. 🌱' }),
+    };
+    const first = await handleClaudeHook(eventName, input, {
+      ...dependencies, now: () => new Date('2026-07-14T10:00:00Z'),
+    });
+    const retry = await handleClaudeHook(eventName, input, {
+      ...dependencies, now: () => new Date('2026-07-16T03:04:05Z'),
+    });
+    assert.equal(retry.hookSpecificOutput.additionalContext, first.hookSpecificOutput.additionalContext);
+    const offers = [];
+    let readiness = 0;
+    for (const output of [first, retry]) {
+      await claudeHooks.flushClaudeHookOutput(eventName, input, output, {
+        recordDelivery: async (offer, _runtime, idempotencyKey) => offers.push({ offer, idempotencyKey }),
+        writeOutput: async () => {},
+        recordReadiness: () => { readiness++; },
+      });
+    }
+    assert.equal(offers[0].offer.purpose, purpose);
+    assert.deepEqual(offers[1], offers[0]);
+    assert.equal(readiness, purpose === 'subagent_start' ? 0 : 2);
+  }
+});
+
+test('Claude UserPromptSubmit never mints host_observed from hook execution alone', async () => {
+  let deliveries = 0;
+  const output = await handleClaudeHook('UserPromptSubmit', base, {
+    resolveRuntime: () => resolved,
+    writeTurnContext: () => {},
+  });
+  assert.equal(typeof claudeHooks.flushClaudeHookOutput, 'function');
+  await claudeHooks.flushClaudeHookOutput('UserPromptSubmit', base, output, {
+    writeOutput: async () => {},
+    recordDelivery: async () => { deliveries++; },
+  });
+  assert.equal(deliveries, 0);
 });
 
 test('all Claude turn hooks bind to one canonical Stop identity at the trusted repo root', async () => {

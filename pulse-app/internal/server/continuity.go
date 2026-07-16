@@ -708,14 +708,12 @@ function updateTokenHeart(data) {
   const el = document.getElementById("context-heart-copy");
   if (!el) return;
   const economy = data?.next_resume?.token_economy || {};
-  const saved = Number(economy.estimated_saved_tokens || 0);
-  const resume = Number(economy.resume_tokens || data?.next_resume?.token_estimate || 0);
-  const raw = Number(economy.estimated_raw_tokens || 0);
-  if (economy.estimated && saved > 0 && raw > 0) {
-    el.textContent = "♥ estimated " + formatApproxTokens(saved) + " tokens avoided. Pulse resume: approx. " + formatApproxTokens(resume) + " tokens.";
+	const offered = Number(economy.pulse_tokens || data?.next_resume?.token_estimate || 0);
+	if (offered > 0) {
+		el.textContent = "♥ Local Pulse context: " + formatApproxTokens(offered) + " tokens by " + String(economy.method_id || "local count") + ". Savings need comparable delivery receipts.";
     return;
   }
-  el.textContent = "Token savings appear after your first resume.";
+	el.textContent = "Token economy is collecting a comparable baseline.";
 }
 function updateFirstMemory(data) {
   const title = document.querySelector("[data-first-memory-title]");
@@ -1034,8 +1032,8 @@ async function loadViewerData() {
     document.getElementById("resume-summary").textContent = resumeSummary(data);
     renderHarnessDigest(data);
     document.getElementById("resume-budget").textContent = String(estimate) + " tokens";
-    const economy = data.next_resume?.token_economy || {};
-    document.getElementById("resume-token-economy").textContent = String(economy.resume_tokens || estimate) + " tokens";
+		const economy = data.next_resume?.token_economy || {};
+		document.getElementById("resume-token-economy").textContent = String(economy.pulse_tokens || estimate) + " local tokens";
     updateTokenHeart(data);
     updateFirstMemory(data);
     list("open-loops", data.open_loops);
