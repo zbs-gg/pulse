@@ -1133,9 +1133,7 @@ export function createPulseMcpServer(
     const localTools = PRODUCT_HOST_ADAPTER
       ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
       : tools;
-    const productTools = PRODUCT_HOST_ADAPTER
-      ? [...localTools, ...GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS]
-      : localTools;
+    const productTools = localTools;
     if (!PRODUCT_TEAM_BINDING) return { tools: productTools };
     const { TEAM_INSTALLED_READ_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
     return { tools: [...productTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
@@ -1214,7 +1212,7 @@ export function createPulseMcpServer(
         }
       }
       if (PRODUCT_HOST_ADAPTER && GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES.has(name)) {
-        return jsonText(await callProductLocalTool(name, args));
+        throw new Error('Git Team Memory requires the governed Git export path');
       }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);

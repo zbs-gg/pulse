@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -221,6 +222,100 @@ func TestMigration046AppliesOnlyToPersonalAndDeskWithContentFreeClosedSchema(t *
 	}
 }
 
+func TestMigration052PreservesContinuityRowsChildRefsAndGuards(t *testing.T) {
+	migrations, err := loadMigrationSet(migrationsFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "continuity-v51.db")+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE store_identity(
+			singleton INTEGER PRIMARY KEY, store_id TEXT UNIQUE,
+			min_reader_version INTEGER, min_writer_version INTEGER
+		);
+		INSERT INTO store_identity(singleton, store_id, min_reader_version, min_writer_version)
+		VALUES (1, 'store_desk_delivery', 45, 45);
+		CREATE TABLE turn_ledgers(binding_digest TEXT, ledger_id TEXT);
+		CREATE TABLE memory_write_receipts(
+			candidate_id TEXT, ledger_id TEXT, created_at TEXT, receipt_id TEXT, status TEXT
+		);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[45].SQL); err != nil {
+		t.Fatalf("apply frozen v46 fixture: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO continuity_delivery_receipts(
+			receipt_id, context_id, receipt_state, purpose, store_id, repository_id,
+			binding_digest, host, session_ref, payload_digest,
+			object_ref_count, evidence_ref_count, refs_manifest_digest,
+			method_id, method_version, rendered_bytes, pulse_tokens,
+			coverage_counted, coverage_total, source_event_digest,
+			idempotency_key_hash, operation_digest, created_at
+		) VALUES (
+			'delivery_old', 'context_old', 'offered_to_host', 'session_start',
+			'store_desk_delivery', 'repository_pulse', ?, 'codex', ?, ?,
+			1, 1, ?, 'utf8_bytes_div4_ceil', '1', 4, 1, 0, 0, ?, ?, ?, ?
+		);
+		INSERT INTO continuity_delivery_object_refs(receipt_id, ordinal, ref_id)
+		VALUES ('delivery_old', 0, 'pulse:memory_old');
+		INSERT INTO continuity_delivery_evidence_refs(receipt_id, ordinal, ref_id)
+		VALUES ('delivery_old', 0, 'pulse:evidence_old');
+		INSERT INTO continuity_delivery_ref_seals(receipt_id, refs_manifest_digest)
+		VALUES ('delivery_old', ?);`,
+		strings.Repeat("b", 64), testContinuitySessionRef("old cursor migration"), strings.Repeat("c", 64),
+		strings.Repeat("d", 64), strings.Repeat("e", 64), strings.Repeat("f", 64),
+		strings.Repeat("a", 64), "2026-07-17T09:00:00Z", strings.Repeat("d", 64)); err != nil {
+		t.Fatalf("seed v51 continuity proof: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(migrations[51].SQL); err != nil {
+		tx.Rollback()
+		t.Fatalf("apply v52 cursor upgrade: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit v52 cursor upgrade: %v", err)
+	}
+
+	for table, want := range map[string]int{
+		"continuity_delivery_receipts":      1,
+		"continuity_delivery_object_refs":   1,
+		"continuity_delivery_evidence_refs": 1,
+		"continuity_delivery_ref_seals":     1,
+	} {
+		var count int
+		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil || count != want {
+			t.Fatalf("%s rows=%d err=%v", table, count, err)
+		}
+	}
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.Next() {
+		rows.Close()
+		t.Fatal("v52 left a broken child reference")
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE continuity_delivery_receipts SET host='cursor' WHERE receipt_id='delivery_old'`); err == nil {
+		t.Fatal("v52 lost immutable receipt guard")
+	}
+	if _, err := db.Exec(`
+		INSERT INTO continuity_delivery_object_refs(receipt_id, ordinal, ref_id)
+		VALUES ('delivery_old', 1, 'pulse:memory_late')`); err == nil {
+		t.Fatal("v52 lost sealed child-ref guard")
+	}
+}
+
 func TestRecordContinuityOfferPersistsExactContentFreeFactAndOpaqueSession(t *testing.T) {
 	s := openContinuityDeliveryStore(t)
 	now := time.Date(2026, 7, 16, 10, 0, 0, 123, time.UTC)
@@ -296,6 +391,66 @@ func TestContinuityObservationCopiesExactOfferAndTransitionsOnce(t *testing.T) {
 	replay, err := s.RecordContinuityHostObserved(context.Background(), observedRequest, time.Now().Add(2*time.Second))
 	if err != nil || replay.ReceiptID != observed.ReceiptID || replay.CreatedAt != observed.CreatedAt {
 		t.Fatalf("exact observation replay=%#v err=%v", replay, err)
+	}
+}
+
+func TestCursorContinuityOffersAndAcknowledgementsNeverBecomeProviderMeasurements(t *testing.T) {
+	s := openContinuityDeliveryStore(t)
+	offerRequest := testContinuityOfferRequest()
+	offerRequest.Host = "cursor"
+	offerRequest.ContextID = continuityDeliveryContextID(offerRequest)
+	offerRequest.IdempotencyKey = continuityDeliveryOfferIdempotencyKey(offerRequest)
+
+	offer, err := s.RecordContinuityOffer(context.Background(), offerRequest, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedRequest := testContinuityObservationRequest(offerRequest)
+	observed, err := s.RecordContinuityHostObserved(
+		context.Background(), observedRequest, time.Now().Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offer.Host != "cursor" || observed.Host != "cursor" ||
+		offer.State != ContinuityDeliveryOfferedToHost || observed.State != ContinuityDeliveryHostObserved {
+		t.Fatalf("cursor delivery receipts=%#v %#v", offer, observed)
+	}
+
+	provider := continuityProviderMeasurementRequest{
+		ContextID: offerRequest.ContextID, IdempotencyKey: "cursor_provider_measurement_forbidden",
+		BindingDigest: offerRequest.BindingDigest, RepositoryID: offerRequest.RepositoryID,
+		Host: offerRequest.Host, SessionRef: offerRequest.SessionRef,
+		ProviderActualInputTokens: 500, ProviderActualSource: "cursor_provider_usage_v1",
+		ProviderEvidenceDigest: testContinuityDeliveryDigest("invented cursor provider receipt"),
+	}
+	if _, err := s.recordContinuityProviderMeasurement(context.Background(), provider, time.Now()); !errors.Is(err, ErrContinuityDeliveryInvalid) {
+		t.Fatalf("cursor provider measurement err=%v, want %v", err, ErrContinuityDeliveryInvalid)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO continuity_delivery_receipts(
+			receipt_id, context_id, parent_receipt_id, receipt_state, purpose,
+			store_id, repository_id, binding_digest, host, session_ref, payload_digest,
+			object_ref_count, evidence_ref_count, refs_manifest_digest, method_id, method_version,
+			rendered_bytes, pulse_tokens, baseline_kind, source_equivalent_tokens,
+			coverage_counted, coverage_total, source_event_digest,
+			provider_actual_input_tokens, provider_actual_source, provider_evidence_digest,
+			idempotency_key_hash, operation_digest, created_at
+		)
+		SELECT
+			'delivery_cursor_forged', context_id, receipt_id, 'provider_measurement', purpose,
+			store_id, repository_id, binding_digest, host, session_ref, payload_digest,
+			object_ref_count, evidence_ref_count, refs_manifest_digest, method_id, method_version,
+			rendered_bytes, pulse_tokens, baseline_kind, source_equivalent_tokens,
+			coverage_counted, coverage_total, NULL,
+			500, 'codex_provider_usage_v1', ?, ?, ?, ?
+		  FROM continuity_delivery_receipts WHERE receipt_id=?`,
+		testContinuityDeliveryDigest("forged cursor provider evidence"),
+		testContinuityDeliveryDigest("forged cursor idempotency"),
+		testContinuityDeliveryDigest("forged cursor operation"),
+		"2026-07-17T10:00:00Z", observed.ReceiptID,
+	); err == nil {
+		t.Fatal("SQLite admitted a Cursor provider measurement mislabeled as Codex evidence")
 	}
 }
 

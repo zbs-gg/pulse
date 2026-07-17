@@ -22,8 +22,8 @@ func TestMigrations034Through039InstallTeamObjectSemanticDeletionAndOwnerSchema(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := migrations[len(migrations)-1]; latest.Version != 51 || latest.Name != "051_git_team_memory_index.sql" {
-		t.Fatalf("latest migration = %+v, want 051_git_team_memory_index.sql", latest)
+	if latest := migrations[len(migrations)-1]; latest.Version != 52 || latest.Name != "052_cursor_continuity_delivery.sql" {
+		t.Fatalf("latest migration = %+v, want 052_cursor_continuity_delivery.sql", latest)
 	}
 
 	s, bootstrap := bootstrapTeamStore(t)

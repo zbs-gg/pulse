@@ -163,7 +163,7 @@ func validContinuityDeliveryPurpose(value string) bool {
 }
 
 func validContinuityDeliveryHost(value string) bool {
-	return value == "codex" || value == "claude-code"
+	return value == "codex" || value == "claude-code" || value == "cursor"
 }
 
 func validContinuityDeliveryIDs(values []string) bool {
