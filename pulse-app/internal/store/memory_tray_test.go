@@ -2193,3 +2193,15 @@ func TestPresentMemoryTrayCandidateRejectsStaleDigestBindingAndUntrustedSurface(
 		t.Fatalf("rejected presentation persisted %d receipts", count)
 	}
 }
+
+func TestUnassignedAssignmentTurnCorrelationGoldenVector(t *testing.T) {
+	invocationID, err := normalizeManualInvocation("unassigned", strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := opaqueTurnCorrelation("turn", "unassigned_turn_"+invocationID)
+	const want = "turn:07f170a4518a07651e47c22799e808411ce177ba80a8db548f7d8b3ceec678a3"
+	if got != want {
+		t.Fatalf("protected Unassigned turn = %q, want %q", got, want)
+	}
+}

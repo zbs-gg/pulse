@@ -1,4 +1,6 @@
 const SCHEMA = 'pulse.personal_live_readiness.v1';
+const SUPPORTED_HOST_SCHEMA = 'pulse.supported_host_live_readiness.v1';
+const SUPPORTED_HOSTS = new Set(['claude-code', 'codex', 'cursor']);
 
 const CONTRACTS = Object.freeze({
   personal_live_ready: Object.freeze({
@@ -34,6 +36,26 @@ const CONTRACTS = Object.freeze({
   local_embedder_warming: Object.freeze({
     outcome: 'warming', action: Object.freeze({ code: 'wait_for_embedder', label: 'Keep Pulse open while the local model warms' }),
   }),
+});
+
+const SUPPORTED_HOST_CONTRACTS = Object.freeze({
+  supported_host_live_ready: Object.freeze({
+    outcome: 'ready', action: Object.freeze({ code: 'continue_working', label: 'Continue working' }),
+  }),
+  presence_required: CONTRACTS.presence_required,
+  binding_repair_required: CONTRACTS.binding_repair_required,
+  host_adapter_unavailable: Object.freeze({
+    outcome: 'action_required', action: Object.freeze({ code: 'repair_host_adapter', label: 'Run pulse repair' }),
+  }),
+  host_activation_incomplete: Object.freeze({
+    outcome: 'action_required', action: Object.freeze({ code: 'repair_host_activation', label: 'Run pulse repair' }),
+  }),
+  host_lifecycle_required: Object.freeze({
+    outcome: 'action_required', action: Object.freeze({ code: 'complete_host_lifecycle', label: 'Complete one normal agent turn' }),
+  }),
+  daemon_unavailable: CONTRACTS.daemon_unavailable,
+  full_retrieval_unavailable: CONTRACTS.full_retrieval_unavailable,
+  local_embedder_warming: CONTRACTS.local_embedder_warming,
 });
 
 function canonicalCheckedAt(value) {
@@ -78,6 +100,38 @@ export function projectPersonalLiveReadiness(checks, checkedAt = new Date()) {
   };
 }
 
+function supportedHostReasonFromChecks(checks) {
+  if (failed(checks, 'presence_trust')) return 'presence_required';
+  if (failed(checks, 'authority') || failed(checks, 'binding')) return 'binding_repair_required';
+  const core = new Set([
+    'presence_trust', 'authority', 'binding', 'runtime', 'activation', 'capture', 'hooks', 'vault', 'retrieval',
+  ]);
+  const adapterChecks = Object.entries(checks ?? {}).filter(([name]) => !core.has(name));
+  if (adapterChecks.length < 1 || adapterChecks.some(([, check]) => check?.ok !== true)) {
+    return 'host_adapter_unavailable';
+  }
+  if (failed(checks, 'runtime') || (checks?.activation !== undefined && failed(checks, 'activation')) ||
+      failed(checks, 'capture')) return 'host_activation_incomplete';
+  if (failed(checks, 'hooks')) return 'host_lifecycle_required';
+  if (failed(checks, 'vault')) return 'daemon_unavailable';
+  if (failed(checks, 'retrieval')) return 'full_retrieval_unavailable';
+  return 'supported_host_live_ready';
+}
+
+export function projectSupportedHostLiveReadiness(targetHost, checks, checkedAt = new Date()) {
+  if (!SUPPORTED_HOSTS.has(targetHost)) throw new TypeError('supported host readiness target is invalid');
+  const reasonCode = supportedHostReasonFromChecks(checks);
+  const contract = SUPPORTED_HOST_CONTRACTS[reasonCode];
+  return {
+    schema: SUPPORTED_HOST_SCHEMA,
+    target_host: targetHost,
+    outcome: contract.outcome,
+    reason_code: reasonCode,
+    next_action: { ...contract.action },
+    checked_at: canonicalCheckedAt(checkedAt),
+  };
+}
+
 export function personalInstallHealthFromReadiness(snapshot) {
   const contract = CONTRACTS[snapshot?.reason_code];
   if (!contract || snapshot?.schema !== SCHEMA || snapshot?.outcome !== contract.outcome ||
@@ -96,3 +150,4 @@ export function personalInstallHealthFromReadiness(snapshot) {
 }
 
 export const PERSONAL_LIVE_READINESS_SCHEMA = SCHEMA;
+export const SUPPORTED_HOST_LIVE_READINESS_SCHEMA = SUPPORTED_HOST_SCHEMA;

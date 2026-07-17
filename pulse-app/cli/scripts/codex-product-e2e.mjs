@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -133,6 +133,17 @@ function initializeRepository(path) {
 }
 
 function packedTarball(root) {
+	const supplied = process.env.PULSE_PERSONAL_PACKED_TARBALL;
+	if (supplied !== undefined) {
+		if (!isAbsolute(supplied) || resolve(supplied) !== supplied) {
+			throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be an absolute canonical path');
+		}
+		const info = lstatSync(supplied);
+		if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+			throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be one regular, non-linked file');
+		}
+		return supplied;
+	}
 	const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
 	const [command, args] = process.platform === 'darwin'
 		? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
@@ -305,13 +316,26 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	};
 	assert.equal(existsSync(artifactRoot), false, 'packed provisioning must start with an empty artifact root');
 
-  const tarball = packedTarball(root);
+	const tarball = packedTarball(root);
+	const tarballDigest = digestFile(tarball);
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball], {
     cwd: root,
     timeout: 120_000,
   });
   const packedCLI = join(installRoot, 'node_modules', '@zbs-gg', 'pulse', 'src', 'cli.js');
 	const packedPackageRoot = resolve(packedCLI, '..', '..');
+	const packedPackageJSON = JSON.parse(readFileSync(join(packedPackageRoot, 'package.json'), 'utf8'));
+	assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
+	assert.equal(packedPackageJSON.version, '0.7.0');
+	Object.assign(productEvidence, {
+		package_version: packedPackageJSON.version,
+		packed_tarball_sha256: tarballDigest.sha256,
+		packed_tarball_bytes: tarballDigest.bytes,
+		exact_tarball_bound: true,
+		real_daemon_started_from_signed_release_fixture: true,
+		tray_save_proof: false,
+		unassigned_assignment_proof: false,
+	});
 	for (const relative of [
 		'src/git-team-memory.js',
 		'src/project-source.js',

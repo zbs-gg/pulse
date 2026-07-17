@@ -56,3 +56,25 @@ test('plugin and lifecycle removal have stable doctor reasons reused by installe
   assert.equal(lifecycle.next_action.code, 'complete_codex_lifecycle');
   assert.equal(readinessModule.personalInstallHealthFromReadiness(lifecycle).reason_code, lifecycle.reason_code);
 });
+
+test('Claude Code and Cursor use one host-neutral readiness contract without Codex-only copy', () => {
+  for (const host of ['claude-code', 'cursor']) {
+    const checks = {
+      presence_trust: { ok: true }, authority: { ok: true }, binding: { ok: true },
+      runtime: { ok: true }, capture: { ok: true }, hooks: { ok: true }, vault: { ok: true },
+      retrieval: { ok: true }, plugin: { ok: true }, host_access: { ok: true },
+    };
+    const ready = readinessModule.projectSupportedHostLiveReadiness(host, checks, checkedAt);
+    assert.deepEqual(ready, {
+      schema: 'pulse.supported_host_live_readiness.v1', target_host: host, outcome: 'ready',
+      reason_code: 'supported_host_live_ready',
+      next_action: { code: 'continue_working', label: 'Continue working' }, checked_at: checkedAt,
+    });
+    checks.hooks = { ok: false };
+    const lifecycle = readinessModule.projectSupportedHostLiveReadiness(host, checks, checkedAt);
+    assert.equal(lifecycle.reason_code, 'host_lifecycle_required');
+    assert.deepEqual(lifecycle.next_action, {
+      code: 'complete_host_lifecycle', label: 'Complete one normal agent turn',
+    });
+  }
+});

@@ -10,10 +10,14 @@ import (
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
-const personalLiveReadinessSchema = "pulse.personal_live_readiness.v1"
+const (
+	personalLiveReadinessSchema      = "pulse.personal_live_readiness.v1"
+	supportedHostLiveReadinessSchema = "pulse.supported_host_live_readiness.v1"
+)
 
 type personalLiveReadinessSnapshot struct {
 	Schema     string                     `json:"schema"`
+	TargetHost string                     `json:"target_host,omitempty"`
 	Outcome    string                     `json:"outcome"`
 	ReasonCode string                     `json:"reason_code"`
 	NextAction store.MemoryHomeNextAction `json:"next_action"`
@@ -72,9 +76,46 @@ var personalLiveReadinessContracts = map[string]personalLiveReadinessContract{
 	},
 }
 
+var supportedHostLiveReadinessContracts = map[string]personalLiveReadinessContract{
+	"supported_host_live_ready": {
+		Outcome: store.MemoryHomeReadinessReady,
+		Action:  store.MemoryHomeNextAction{Code: "continue_working", Label: "Continue working"},
+	},
+	"presence_required":       personalLiveReadinessContracts["presence_required"],
+	"binding_repair_required": personalLiveReadinessContracts["binding_repair_required"],
+	"host_adapter_unavailable": {
+		Outcome: store.MemoryHomeReadinessActionRequired,
+		Action:  store.MemoryHomeNextAction{Code: "repair_host_adapter", Label: "Run pulse repair"},
+	},
+	"host_activation_incomplete": {
+		Outcome: store.MemoryHomeReadinessActionRequired,
+		Action:  store.MemoryHomeNextAction{Code: "repair_host_activation", Label: "Run pulse repair"},
+	},
+	"host_lifecycle_required": {
+		Outcome: store.MemoryHomeReadinessActionRequired,
+		Action:  store.MemoryHomeNextAction{Code: "complete_host_lifecycle", Label: "Complete one normal agent turn"},
+	},
+	"daemon_unavailable":         personalLiveReadinessContracts["daemon_unavailable"],
+	"full_retrieval_unavailable": personalLiveReadinessContracts["full_retrieval_unavailable"],
+	"local_embedder_warming":     personalLiveReadinessContracts["local_embedder_warming"],
+}
+
+func supportedHostID(value string) bool {
+	return value == "claude-code" || value == "codex" || value == "cursor"
+}
+
 func validatePersonalLiveReadiness(snapshot personalLiveReadinessSnapshot) error {
-	contract, ok := personalLiveReadinessContracts[snapshot.ReasonCode]
-	if !ok || snapshot.Schema != personalLiveReadinessSchema || snapshot.Outcome != contract.Outcome ||
+	contracts := personalLiveReadinessContracts
+	if snapshot.Schema == supportedHostLiveReadinessSchema {
+		if !supportedHostID(snapshot.TargetHost) {
+			return errors.New("invalid Personal live readiness target_host")
+		}
+		contracts = supportedHostLiveReadinessContracts
+	} else if snapshot.Schema != personalLiveReadinessSchema || snapshot.TargetHost != "" {
+		return errors.New("invalid Personal live readiness schema")
+	}
+	contract, ok := contracts[snapshot.ReasonCode]
+	if !ok || snapshot.Outcome != contract.Outcome ||
 		snapshot.NextAction != contract.Action || snapshot.CheckedAt == "" {
 		return errors.New("invalid Personal live readiness snapshot")
 	}
@@ -90,10 +131,18 @@ func personalLiveReadinessDigest(snapshot personalLiveReadinessSnapshot) (string
 	if err := validatePersonalLiveReadiness(snapshot); err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{
+	fields := []string{
 		"pulse-personal-live-readiness-v1", snapshot.Schema, snapshot.Outcome, snapshot.ReasonCode,
 		snapshot.NextAction.Code, snapshot.NextAction.Label, snapshot.CheckedAt,
-	}, "\x00")))
+	}
+	if snapshot.Schema == supportedHostLiveReadinessSchema {
+		fields = []string{
+			"pulse-supported-host-live-readiness-v1", snapshot.Schema, snapshot.TargetHost,
+			snapshot.Outcome, snapshot.ReasonCode, snapshot.NextAction.Code, snapshot.NextAction.Label,
+			snapshot.CheckedAt,
+		}
+	}
+	digest := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
 	return hex.EncodeToString(digest[:]), nil
 }
 

@@ -57,7 +57,8 @@ import {
   detectCodexCLI,
   formatPersonalInstallPlan,
 } from './install-plan.js';
-import { detectClaudeCodeCLI } from './supported-hosts.js';
+import { detectClaudeCodeCLI, SUPPORTED_HOST_IDS } from './supported-hosts.js';
+import { selectHomeDoctorReport } from './home-doctor.js';
 import {
   activateDetectedPersonalHosts,
   inspectDetectedPersonalHosts,
@@ -69,6 +70,7 @@ import {
 } from './personal-install.js';
 import {
   projectPersonalLiveReadiness,
+  projectSupportedHostLiveReadiness,
 } from './personal-live-readiness.js';
 import {
   PersonalPrincipalError,
@@ -225,7 +227,7 @@ Usage:
   pulse migrate preview <export-folder-or-json-or-zip> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate preview-people-graph <graph-dir-or-people-index> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate commit <preview-json-file> --confirm "import pulse graph" [--privacy private|sensitive|normal] [--open]
-  pulse home [--base <url>] [--data-dir <path>]
+  pulse home [--host claude-code|codex|cursor] [--base <url>] [--data-dir <path>]
   pulse viewer [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]   legacy inspection surface
   pulse status
   pulse export
@@ -2110,10 +2112,12 @@ async function claudeLegacyProductDoctorReport() {
       ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
       : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
   };
-  const ready = Object.values(checks).every((check) => check.ok);
+  const personalLiveReadiness = projectSupportedHostLiveReadiness('claude-code', checks, new Date());
+  const ready = personalLiveReadiness.outcome === 'ready';
   return {
 	product: `Pulse Claude Code ${runtime?.kind === 'desk' ? 'Desk' : runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'claude-code',
+    personal_live_readiness: personalLiveReadiness,
     verdict: ready
 		? mcp.authority_mode === 'synthetic-test'
 			? 'Pulse Claude Code synthetic test lifecycle ready; production authority is not active.'
@@ -2128,6 +2132,9 @@ async function claudeLegacyProductDoctorReport() {
 			authority_mode: mcp.authority_mode,
       external_embedding_api: /cohere|^embed-(?:english|multilingual)/i.test(liveStatus?.embedder ?? ''),
 			hook_contract_digest: registeredRuntime.ok ? claudeHookContractDigest(registeredRuntime.digest) : '',
+      release_manifest_digest: productActivation?.release_manifest_digest ?? '',
+      release_version: productActivation?.release_version ?? '',
+      release_epoch: productActivation?.release_epoch ?? null,
     },
   };
 }
@@ -2227,10 +2234,12 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
       ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
       : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
   };
-  const ready = Object.values(checks).every((check) => check.ok);
+  const personalLiveReadiness = projectSupportedHostLiveReadiness('claude-code', checks, new Date());
+  const ready = personalLiveReadiness.outcome === 'ready';
   return {
     product: `Pulse Claude Code ${resolved?.runtime?.kind === 'desk' ? 'Desk' : resolved?.runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'claude-code',
+    personal_live_readiness: personalLiveReadiness,
     verdict: ready
       ? syntheticAuthority
         ? 'Pulse Claude Code synthetic test lifecycle ready; production authority is not active.'
@@ -2246,6 +2255,9 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
       external_embedding_api: /cohere|^embed-(?:english|multilingual)/i.test(liveStatus?.embedder ?? ''),
       hook_contract_digest: installedRuntime.ok ? claudeHookContractDigest(installedRuntime.digest) : '',
       plugin_tree_digest: pluginInspection?.digest ?? '',
+      release_manifest_digest: activation?.release_manifest_digest ?? '',
+      release_version: activation?.release_version ?? '',
+      release_epoch: activation?.release_epoch ?? null,
     },
   };
 }
@@ -2343,6 +2355,10 @@ async function cursorProductDoctorReport() {
     presence_trust: presenceTrust.ready
       ? { ok: true, detail: presenceTrust.status }
       : { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+    authority: {
+      ok: true,
+      detail: syntheticAuthority ? 'synthetic test authority; never production-trusted' : 'production shared locator authority',
+    },
     binding: resolved
       ? { ok: true, detail: `${resolved.binding.mode}:${resolved.binding.workspace.workspace_id}` }
       : { ok: false, detail: bindingError ?? 'workspace is not bound' },
@@ -2368,10 +2384,12 @@ async function cursorProductDoctorReport() {
       ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
       : { ok: false, detail: 'fallback only; full retrieval is not enabled' },
   };
-  const ready = Object.values(checks).every((check) => check.ok);
+  const personalLiveReadiness = projectSupportedHostLiveReadiness('cursor', checks, new Date());
+  const ready = personalLiveReadiness.outcome === 'ready';
   return {
     product: `Pulse Cursor ${resolved?.runtime?.kind === 'desk' ? 'Desk' : resolved?.runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'cursor',
+    personal_live_readiness: personalLiveReadiness,
     verdict: ready
       ? syntheticAuthority
         ? 'Pulse Cursor synthetic test lifecycle ready; production authority is not active.'
@@ -2385,6 +2403,9 @@ async function cursorProductDoctorReport() {
       full_retrieval: liveStatus?.full_retrieval ?? false,
       embedder: liveStatus?.embedder ?? '',
       external_embedding_api: /cohere|^embed-(?:english|multilingual)/i.test(liveStatus?.embedder ?? ''),
+      release_manifest_digest: productEdge?.release_manifest_digest ?? '',
+      release_version: productEdge?.release_version ?? '',
+      release_epoch: productEdge?.release_epoch ?? null,
     },
   };
 }
@@ -7226,12 +7247,31 @@ async function openHomeBrowserURL(url, session) {
 	}
 }
 
+async function personalDoctorForHost(host) {
+	if (host === 'claude-code') return claudeProductDoctorReport();
+	if (host === 'codex') return codexDoctorReport();
+	if (host === 'cursor') return cursorProductDoctorReport();
+	throw new Error('pulse home --host must be claude-code, codex, or cursor.');
+}
+
+async function homeDoctorReport(product, requestedHost) {
+	const capture = product ? safeReadJSON(join(product.runtime.data_dir, 'capture-state.json')) : undefined;
+	const enabledHosts = product
+		? SUPPORTED_HOST_IDS.filter((host) => captureEnabledForHost(capture, host))
+		: ['codex'];
+	return selectHomeDoctorReport({ requestedHost, enabledHosts, doctorForHost: personalDoctorForHost });
+}
+
 async function runHome(rest) {
 	if (rest.includes('--print-url')) {
 		throw new Error('pulse home does not support --print-url because its browser handoff is one-shot.');
 	}
 	const explicitDataDir = getRestArg(rest, '--data-dir');
 	const explicitBaseURL = getRestArg(rest, '--base');
+	const explicitHost = getRestArg(rest, '--host');
+	if (rest.includes('--host') && explicitHost === undefined) {
+		throw new Error('pulse home --host must be claude-code, codex, or cursor.');
+	}
 	let product;
 	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
 		try {
@@ -7247,7 +7287,7 @@ async function runHome(rest) {
 	const dataDir = resolve(explicitDataDir ?? product?.runtime.data_dir ?? DATA_DIR);
 	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
-	const doctor = await codexDoctorReport();
+	const doctor = await homeDoctorReport(product, explicitHost);
 	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness);
 	const relay = await startHomeBrowserRelay(session);
 	const interrupt = () => relay.close();

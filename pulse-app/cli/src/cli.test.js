@@ -1008,6 +1008,15 @@ test('home rejects print-url instead of exposing a bootstrap capability', () => 
   assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
 });
 
+test('home accepts only the three supported Personal harness selectors', () => {
+  for (const args of [['home', '--host'], ['home', '--host', 'gemini']]) {
+    const { result } = run(args);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /pulse home --host must be claude-code, codex, or cursor/);
+    assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
+  }
+});
+
 test('home rejects a daemon target with a query without echoing session credentials', async () => {
   const home = mkdtempSync(join(tmpdir(), 'pulse-home-target-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-target-cwd.'));

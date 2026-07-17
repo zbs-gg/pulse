@@ -33,6 +33,7 @@ test('release verification includes packed Personal clean-room, interruption, ph
     packageJSON.scripts?.['attest:personal-preview'],
     'node scripts/personal-preview-release-attestation.mjs',
   );
+  assert.ok(packageJSON.files?.includes('src/release-attestation.js'));
   assert.equal(
     packageJSON.scripts?.['test:codex-product:real-mlx'],
     'PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs',
@@ -44,6 +45,9 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(productE2E, /materializeVerifiedDmg/);
 	assert.match(productE2E, /quality_claimed !== true/);
 	assert.doesNotMatch(productE2E, /materializeAdHocDmgForE2E|testOnlyMaterializer:\s*true/);
+	assert.match(productE2E, /PULSE_PERSONAL_PACKED_TARBALL/);
+	assert.match(productE2E, /packed_tarball_sha256/);
+	assert.match(productE2E, /package_version/);
 	for (const script of [
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',
@@ -59,11 +63,33 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(attestation, /production_install_proof/);
 	assert.match(attestation, /content_free/);
 	assert.match(attestation, /synthetic_authority_forbidden/);
+	assert.match(attestation, /PULSE_PERSONAL_ATTEST_TARBALL/);
+	assert.match(attestation, /PULSE_PERSONAL_ATTEST_HOST/);
+	assert.match(attestation, /PULSE_PERSONAL_ATTEST_BETA_WORKSPACE/);
+	assert.match(attestation, /packed_tarball_sha256/);
+	assert.match(attestation, /exact_tarball_install_executed/);
+	assert.match(attestation, /runPackedPulse\(tarball, \['doctor', host, '--json'\]/);
+	assert.match(attestation, /runPackedPulse\(tarball, \['home', '--host', host\]/);
+	assert.match(attestation, /pulse\.personal_preview_release_attestation\.v2/);
+	assert.doesNotMatch(attestation, /native_hook_trusted:\s*host\s*===\s*'codex'\s*\?\s*true\s*:\s*null/);
+	const attestationHelper = readFileSync(
+		join(root, 'pulse-app', 'cli', 'src', 'release-attestation.js'), 'utf8',
+	);
+	assert.match(attestationHelper, /`--package=\$\{tarballPath\}`/);
+	assert.match(attestation, /public_preview_version/);
+	assert.match(attestation, /public_preview_matches_artifact/);
+	assert.match(attestation, /unassigned_assignment_receipt/);
+	assert.match(attestation, /assigned_object_recalled_in_alpha/);
+	assert.match(attestation, /assigned_object_absent_from_beta/);
+	assert.match(attestation, /beta_context_trace_empty/);
+	assert.match(attestation, /\/context\/query/);
 	assert.doesNotMatch(attestation, /PULSE_RELEASE_TEST_MODE\s*=\s*['\"]1/);
 	const multiharness = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'personal-preview-multiharness-e2e.mjs'), 'utf8',
 	);
 	assert.match(multiharness, /personal_preview_multiharness_orchestration\.v1/);
+	assert.match(multiharness, /PULSE_PERSONAL_PACKED_TARBALL/);
+	assert.match(multiharness, /packed_tarball_sha256/);
 	assert.match(multiharness, /production_install_proof:\s*false/);
 	assert.match(multiharness, /daemon_backed_cross_host_recall:\s*false/);
 	assert.doesNotMatch(multiharness, /behavioral_cross_host_object_id|state\.memories/);

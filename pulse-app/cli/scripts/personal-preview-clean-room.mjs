@@ -34,18 +34,30 @@ assert.equal(product.system_python_exposed, false);
 assert.equal(product.git_team_modules_packaged, true);
 assert.equal(product.external_publication_performed, false);
 assert.equal(product.full_retrieval, true);
+assert.equal(product.package_version, '0.7.0');
+assert.match(product.packed_tarball_sha256, /^[a-f0-9]{64}$/);
+assert.equal(Number.isInteger(product.packed_tarball_bytes) && product.packed_tarball_bytes > 0, true);
+assert.equal(product.exact_tarball_bound, true);
+assert.equal(product.tray_save_proof, false);
+assert.equal(product.unassigned_assignment_proof, false);
 
 const evidence = {
   schema: 'pulse.personal_preview_clean_room.v1',
   authority: 'synthetic-test',
   content_free: true,
   package_source: 'npm-pack',
+  package_version: product.package_version,
+  packed_tarball_sha256: product.packed_tarball_sha256,
+  packed_tarball_bytes: product.packed_tarball_bytes,
+  exact_tarball_bound: true,
   packed_runtime: true,
   runtime_path: { node: true, codex: true, git: true, go: false, python: false },
   full_retrieval: true,
   git_team_modules_packaged: true,
   remote_side_effects: false,
   production_install_proof: false,
+  tray_save_proof: false,
+  unassigned_assignment_proof: false,
   physical_attestation_required: true,
 };
 process.stdout.write(`${JSON.stringify(evidence)}\n`);

@@ -2,9 +2,10 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
@@ -26,21 +27,38 @@ function run(command, args, options = {}) {
 }
 
 function packedPackage(root) {
-  const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
-  const [command, args] = process.platform === 'darwin'
-    ? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
-    : ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]];
-  run(command, args, {
-    cwd: cliRoot,
-    env: { ...process.env, PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW: '1' },
-  });
-  const tarballs = readdirSync(root).filter((name) => name.endsWith('.tgz'));
-  assert.equal(tarballs.length, 1);
+  let tarball = process.env.PULSE_PERSONAL_PACKED_TARBALL;
+  if (tarball !== undefined) {
+    if (!isAbsolute(tarball) || resolve(tarball) !== tarball) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be an absolute canonical path');
+    }
+    const info = lstatSync(tarball);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be one regular, non-linked file');
+    }
+  } else {
+    const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
+    const [command, args] = process.platform === 'darwin'
+      ? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
+      : ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]];
+    run(command, args, {
+      cwd: cliRoot,
+      env: { ...process.env, PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW: '1' },
+    });
+    const tarballs = readdirSync(root).filter((name) => name.endsWith('.tgz'));
+    assert.equal(tarballs.length, 1);
+    tarball = join(root, tarballs[0]);
+  }
+  const bytes = readFileSync(tarball);
   const installRoot = join(root, 'packed');
   run('npm', [
-    'install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, join(root, tarballs[0]),
+    'install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball,
   ], { cwd: root });
-  return join(installRoot, 'node_modules', '@zbs-gg', 'pulse');
+  return {
+    packageRoot: join(installRoot, 'node_modules', '@zbs-gg', 'pulse'),
+    tarballBytes: bytes.byteLength,
+    tarballSHA256: createHash('sha256').update(bytes).digest('hex'),
+  };
 }
 
 function gitRepository(root) {
@@ -135,9 +153,20 @@ function productFixture({ failHosts = [] } = {}) {
 
 const root = mkdtempSync(join(tmpdir(), 'pulse-personal-multiharness.'));
 try {
-  const packedRoot = packedPackage(root);
+  const packed = packedPackage(root);
+  const packedRoot = packed.packageRoot;
+  const packedPackageJSON = JSON.parse(readFileSync(join(packedRoot, 'package.json'), 'utf8'));
+  assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
+  assert.equal(packedPackageJSON.version, '0.7.0');
   const { buildPersonalInstallPlan } = await import(pathToFileURL(join(packedRoot, 'src', 'install-plan.js')));
   const { runPersonalInstall } = await import(pathToFileURL(join(packedRoot, 'src', 'personal-install.js')));
+  const { unassignedAssignmentTurnRef } = await import(
+    pathToFileURL(join(packedRoot, 'src', 'release-attestation.js'))
+  );
+  assert.equal(
+    unassignedAssignmentTurnRef('a'.repeat(64)),
+    'turn:07f170a4518a07651e47c22799e808411ce177ba80a8db548f7d8b3ceec678a3',
+  );
   const {
     activateDetectedPersonalHosts,
     inspectDetectedPersonalHosts,
@@ -266,6 +295,10 @@ try {
     authority: 'synthetic-test',
     content_free: true,
     package_source: 'npm-pack',
+    package_version: packedPackageJSON.version,
+    packed_tarball_sha256: packed.tarballSHA256,
+    packed_tarball_bytes: packed.tarballBytes,
+    exact_tarball_bound: true,
     public_command_under_test: false,
     singleton_hosts: HOSTS,
     absent_harness_invocation: false,
