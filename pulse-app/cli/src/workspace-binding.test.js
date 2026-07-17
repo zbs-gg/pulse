@@ -4,6 +4,8 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -19,6 +21,7 @@ import {
   bindingRegistryAnchor,
   canonicalJSONStringify,
   canonicalizeWorkspace,
+  inspectWorkspaceBinding,
   resolveWorkspaceBinding,
   verifyBindingRegistry,
 } from './workspace-binding.js';
@@ -154,6 +157,33 @@ test('signed registry resolves exactly one immutable Team topology', () => {
   assert.equal(resolved.commons.store_id, 'store_commons_demo');
   assert.equal(resolved.fallback, false);
   assert.match(resolved.binding_digest, /^[a-f0-9]{64}$/);
+});
+
+test('unassigned inspection allows only no Git project or no registered binding', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-binding-unassigned.'));
+  const repository = makeRepository(home, 'work');
+  const paths = signedRegistry(home, {
+    schema: 'pulse.workspace-binding-registry.v1', epoch: 1, bindings: [],
+  });
+  const missing = inspectWorkspaceBinding({ cwd: repository, ...paths });
+  assert.equal(missing.status, 'unassigned');
+  assert.equal(missing.reason, 'binding_missing');
+  assert.equal(missing.workspace.canonical_path, realpathSync(repository));
+
+  const ordinaryDirectory = join(home, 'ordinary');
+  mkdirSync(ordinaryDirectory);
+  const notGit = inspectWorkspaceBinding({ cwd: ordinaryDirectory, ...paths });
+  assert.equal(notGit.status, 'unassigned');
+  assert.equal(notGit.reason, 'workspace_not_git');
+  assert.equal(notGit.workspace.canonical_path, realpathSync(ordinaryDirectory));
+
+  const registry = JSON.parse(readFileSync(paths.registryPath, 'utf8'));
+  registry.signature = Buffer.alloc(64).toString('base64');
+  writeFileSync(paths.registryPath, `${JSON.stringify(registry)}\n`, { mode: 0o600 });
+  assert.throws(
+    () => inspectWorkspaceBinding({ cwd: repository, ...paths }),
+    (error) => error instanceof BindingError && error.code === 'binding_signature_invalid',
+  );
 });
 
 test('tampering, ambiguity, and repo-local registries fail before any Vault can be queried', () => {

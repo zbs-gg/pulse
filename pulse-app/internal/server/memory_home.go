@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/unassigned"
 )
 
 func (s *Server) buildMemoryHome(
@@ -121,43 +122,68 @@ type memoryHomePendingCard struct {
 	CandidateJSON string
 }
 
+type memoryHomeUnassignedCard struct {
+	ItemID        string
+	ContentDigest string
+	CreatedAt     string
+	Host          string
+	Kind          string
+	Summary       string
+}
+
+type memoryHomeUnassignedActivity struct {
+	ReceiptID     string
+	ActionLabel   string
+	Status        string
+	CreatedAt     string
+	ContentDigest string
+}
+
 type memoryHomePage struct {
-	Data      store.MemoryHomeData
-	Pending   []memoryHomePendingCard
-	CSRFToken string
+	Data                  store.MemoryHomeData
+	Pending               []memoryHomePendingCard
+	UnassignedEnabled     bool
+	UnassignedUnavailable bool
+	Unassigned            []memoryHomeUnassignedCard
+	UnassignedActivity    []memoryHomeUnassignedActivity
+	CSRFToken             string
 }
 
 type memoryHomeTemplateData struct {
 	memoryHomePage
-	StoreLabel       string
-	StatusTitle      string
-	StatusDetail     string
-	StatusTone       string
-	MemoryCount      string
-	ContextState     string
-	EconomyValue     string
-	EconomyDetail    string
-	HasLatestMemory  bool
-	HasNextPreview   bool
-	HasPending       bool
-	HasAttempts      bool
-	HasContext       bool
-	EstimatedPercent string
-	Attempts         []store.MemoryHomeAttempt
+	StoreLabel            string
+	StatusTitle           string
+	StatusDetail          string
+	StatusTone            string
+	MemoryCount           string
+	ContextState          string
+	EconomyValue          string
+	EconomyDetail         string
+	HasLatestMemory       bool
+	HasNextPreview        bool
+	HasPending            bool
+	HasUnassigned         bool
+	HasUnassignedActivity bool
+	HasAttempts           bool
+	HasContext            bool
+	EstimatedPercent      string
+	Attempts              []store.MemoryHomeAttempt
 }
 
 func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 	attempts := memoryHomeBoundedAttempts(page.Data.Receipts.Attempts)
 	view := memoryHomeTemplateData{
-		memoryHomePage:  page,
-		StoreLabel:      memoryHomeStoreLabel(page.Data.Boundary.StoreKind),
-		MemoryCount:     fmt.Sprintf("%d", page.Data.Memories.ActiveCount),
-		HasLatestMemory: len(page.Data.Memories.LatestActive) > 0,
-		HasNextPreview:  page.Data.NextTaskPreview != nil,
-		HasPending:      len(page.Pending) > 0,
-		HasAttempts:     len(attempts) > 0,
-		HasContext:      page.Data.Context.LatestDelivery != nil,
-		Attempts:        attempts,
+		memoryHomePage:        page,
+		StoreLabel:            memoryHomeStoreLabel(page.Data.Boundary.StoreKind),
+		MemoryCount:           fmt.Sprintf("%d", page.Data.Memories.ActiveCount),
+		HasLatestMemory:       len(page.Data.Memories.LatestActive) > 0,
+		HasNextPreview:        page.Data.NextTaskPreview != nil,
+		HasPending:            len(page.Pending) > 0,
+		HasUnassigned:         len(page.Unassigned) > 0,
+		HasUnassignedActivity: len(page.UnassignedActivity) > 0,
+		HasAttempts:           len(attempts) > 0,
+		HasContext:            page.Data.Context.LatestDelivery != nil,
+		Attempts:              attempts,
 	}
 	view.StatusTitle, view.StatusDetail, view.StatusTone = memoryHomeReadinessCopy(page.Data.Readiness)
 	view.ContextState = memoryHomeContextCopy(page.Data.Context)
@@ -298,6 +324,38 @@ func memoryHomePendingCards(candidates []store.MemoryTrayPendingCandidate) ([]me
 	return cards, nil
 }
 
+func memoryHomeUnassignedCards(cards []unassigned.Card) []memoryHomeUnassignedCard {
+	result := make([]memoryHomeUnassignedCard, 0, len(cards))
+	for _, card := range cards {
+		result = append(result, memoryHomeUnassignedCard{
+			ItemID: card.ItemID, ContentDigest: card.ContentDigest, CreatedAt: card.CreatedAt,
+			Host: card.Host, Kind: card.Kind, Summary: card.Summary,
+		})
+	}
+	return result
+}
+
+func memoryHomeUnassignedActivities(
+	activity []unassigned.Activity,
+	currentBindingDigest string,
+) []memoryHomeUnassignedActivity {
+	result := make([]memoryHomeUnassignedActivity, 0, len(activity))
+	for _, value := range activity {
+		label := "Deleted from Inbox"
+		if value.Action == "assign" {
+			label = "Moved to this project’s Tray"
+			if value.BindingDigest != "" && value.BindingDigest != currentBindingDigest {
+				label = "Moved to another project’s Tray"
+			}
+		}
+		result = append(result, memoryHomeUnassignedActivity{
+			ReceiptID: value.ReceiptID, ActionLabel: label, Status: value.Status,
+			CreatedAt: value.CreatedAt, ContentDigest: value.ContentDigest,
+		})
+	}
+	return result
+}
+
 func memoryHomeCandidateDisplay(candidate store.PrivateMemoryCandidate) (kind, summary string) {
 	if candidate.Capsule != nil && len(candidate.Capsule.Items) == 1 {
 		return candidate.Capsule.Items[0].Kind, candidate.Capsule.Items[0].RedactedSummary
@@ -394,6 +452,28 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{else}}Waiting for a fresh task{{end}}</small></div>
     <div class="metric"><span>Token economy</span><span class="value">{{.EconomyValue}}</span><small>{{.EconomyDetail}}{{if .EstimatedPercent}} · {{.EstimatedPercent}}{{end}}</small></div>
   </div>
+
+  {{if .UnassignedEnabled}}
+  <section id="unassigned-inbox">
+    <div class="section-head"><div><div class="eyebrow">Not in any project yet</div><h2>Unassigned Inbox</h2></div><p>These structured records are local and non-retrievable. Choose this exact project to move one into its ordinary Memory Tray, or delete it.</p></div>
+    {{if .UnassignedUnavailable}}<div class="empty">Inbox is unavailable. No queued content was read or moved. Repair its private local file, then refresh Home.</div>{{else if .HasUnassigned}}
+    <div class="tray">
+      {{range .Unassigned}}
+      <article class="tray-card">
+        <header><span class="kind">{{.Kind}}</span><span class="pill">Unassigned · {{.Host}}</span></header>
+        <p class="summary">{{.Summary}}</p>
+        <div class="controls">
+          <form method="post" action="unassigned/{{.ItemID}}/assign" data-home-mutation data-home-pending-label="Moving the exact digest to this project’s Tray…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="content_digest" value="{{.ContentDigest}}"><input type="hidden" name="expected_binding_digest" value="{{$.Data.Boundary.BindingDigest}}"><button class="primary">Move to this project’s Tray</button></form>
+          <form method="post" action="unassigned/{{.ItemID}}/delete" data-home-mutation data-home-confirm="Delete this unassigned memory?" data-home-pending-label="Deleting the exact Inbox card…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="content_digest" value="{{.ContentDigest}}"><input type="hidden" name="expected_binding_digest" value="{{$.Data.Boundary.BindingDigest}}"><button>Delete</button></form>
+        </div>
+        <p class="receipt">Not counted as memory · captured {{.CreatedAt}} · digest {{.ContentDigest}}</p>
+      </article>
+      {{end}}
+    </div>
+    {{else}}<div class="empty">No unassigned memories. Work inside a bound project, or explicitly assign any future Inbox card here.</div>{{end}}
+    {{if .HasUnassignedActivity}}<div class="memory-list" style="margin-top:14px">{{range .UnassignedActivity}}<article class="memory attempt"><div class="meta"><span>{{.ActionLabel}}</span><span>{{.CreatedAt}}</span></div><p class="summary">{{.Status}}</p><div class="receipt">Inbox receipt {{.ReceiptID}} · digest {{.ContentDigest}}</div></article>{{end}}</div>{{end}}
+  </section>
+  {{end}}
 
   {{if .HasPending}}
   <section id="memory-tray">

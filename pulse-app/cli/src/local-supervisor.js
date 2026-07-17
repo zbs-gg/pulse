@@ -16,10 +16,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
 
 const SHA256 = /^[a-f0-9]{64}$/;
+const PRODUCT_BINDING_VERIFIER = fileURLToPath(new URL('./product-binding-verifier.js', import.meta.url));
 const MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v1';
 const MANAGED_CONFIG_KEYS = [
   'dimensions', 'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest', 'helper_path',
@@ -61,14 +63,16 @@ export function vaultRuntimeFromBinding(binding) {
 	if (!isCanonicalRepositoryID(repositoryID)) {
 		throw new SupervisorError('vault_runtime_invalid', 'binding has no canonical repository authority');
 	}
+  const workspacePath = requireAbsolutePath(binding.workspace?.canonical_path, 'binding workspace');
   if (dataDir === cacheDir || dataDir.startsWith(`${cacheDir}/`) || cacheDir.startsWith(`${dataDir}/`)) {
     throw new SupervisorError('vault_runtime_invalid', 'vault data and cache roots must be distinct');
   }
   return {
     schema: 'pulse.local-vault-runtime.v1',
     binding_id: binding.binding_id,
-    binding_digest: binding.binding_digest,
+		binding_digest: binding.binding_digest,
 		repository_id: repositoryID,
+		workspace_path: workspacePath,
     resolver_epoch: binding.resolver_epoch,
     kind,
     runtime_mode: `${kind}-local`,
@@ -515,7 +519,10 @@ export async function startVaultRuntime(runtime, {
       PULSE_RUNTIME_MODE: runtime.runtime_mode,
       PULSE_VAULT_STORE_ID: runtime.store_id,
       PULSE_BINDING_DIGEST: runtime.binding_digest,
-		PULSE_REPOSITORY_ID: runtime.repository_id,
+      PULSE_REPOSITORY_ID: runtime.repository_id,
+		PULSE_PRODUCT_WORKSPACE: runtime.workspace_path,
+		PULSE_PRODUCT_AUTHORITY_NODE: process.execPath,
+		PULSE_PRODUCT_AUTHORITY_HELPER: PRODUCT_BINDING_VERIFIER,
       PULSE_POLICY_EPOCH: '0',
       PULSE_RESOLVER_EPOCH: String(runtime.resolver_epoch),
       PULSE_DATA_DIR: runtime.data_dir,

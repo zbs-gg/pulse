@@ -13,7 +13,7 @@ test('capture state writes both preview and exact bound Personal vault markers',
   const binding = {
     binding_id: 'binding_personal', binding_digest: 'a'.repeat(64), resolver_epoch: 4,
     fallback: false, mode: 'personal',
-		workspace: { repository_id: 'repository_pulse' },
+		workspace: { repository_id: 'repository_pulse', canonical_path: root },
     personal: {
       store_id: 'store_personal_nik', data_dir: vaultDataDir,
       cache_dir: join(root, '.pulse', 'caches', 'personal'), base_url: 'http://127.0.0.1:18800',

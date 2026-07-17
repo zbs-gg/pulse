@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,13 @@ type Config struct {
 	// HomePresence authorizes each Memory Home session with a fresh native
 	// user-presence challenge. It is mandatory whenever HomeOrigin is enabled.
 	HomePresence HomePresence
+	// UnassignedInboxPath is the owner-only, non-retrievable queue shared by
+	// installed harnesses before a user chooses an exact project. Empty hides
+	// the queue without changing canonical memory behavior.
+	UnassignedInboxPath string
+	// HomeBindingVerifier re-reads the signed workspace authority before every
+	// Home render or mutation so a stale daemon/session cannot survive revoke.
+	HomeBindingVerifier HomeBindingVerifier
 }
 
 type BillingStatus struct {
@@ -118,8 +126,14 @@ func New(cfg Config) (*Server, error) {
 		if cfg.Store == nil || (cfg.Store.StoreKind() != store.StoreKindPersonal && cfg.Store.StoreKind() != store.StoreKindDesk) {
 			return nil, errors.New("server: Memory Home requires a Personal or Desk store")
 		}
+		if cfg.HomeBindingVerifier == nil {
+			return nil, errors.New("server: Memory Home requires live product binding verification")
+		}
 		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); !ok {
 			return nil, errors.New("server: Memory Home requires an exact product runtime boundary")
+		}
+		if cfg.UnassignedInboxPath != "" && !filepath.IsAbs(cfg.UnassignedInboxPath) {
+			return nil, errors.New("server: unassigned inbox path must be absolute")
 		}
 		homeSessions, err := newViewerSessionManager(viewerSessionConfig{
 			ExpectedOrigin: cfg.HomeOrigin, AbsoluteTTL: time.Hour, IdleTTL: 15 * time.Minute,

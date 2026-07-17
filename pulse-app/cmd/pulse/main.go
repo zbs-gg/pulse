@@ -134,6 +134,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		return err
 	}
 	defer s.Close()
+	var homeBindingVerifier server.HomeBindingVerifier
 	if kind != "" {
 		bindingDigest := os.Getenv("PULSE_BINDING_DIGEST")
 		repositoryID := os.Getenv("PULSE_REPOSITORY_ID")
@@ -147,6 +148,13 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		}
 		if err := s.ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID); err != nil {
 			return fmt.Errorf("configure continuity delivery authority: %w", err)
+		}
+		homeBindingVerifier, err = server.NewCommandHomeBindingVerifier(
+			os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE"), os.Getenv("PULSE_PRODUCT_AUTHORITY_HELPER"),
+			os.Getenv("PULSE_PRODUCT_WORKSPACE"), resolverEpoch,
+		)
+		if err != nil {
+			return fmt.Errorf("configure live product binding verifier: %w", err)
 		}
 	}
 
@@ -261,9 +269,15 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		billingHost = "pulse-product"
 	}
 	homeOrigin := ""
+	unassignedInboxPath := ""
 	var homePresence server.HomePresence
 	if kind != "" {
 		homeOrigin = "http://" + addr
+		userHome, homeErr := os.UserHomeDir()
+		if homeErr != nil || !filepath.IsAbs(userHome) {
+			return fmt.Errorf("configure unassigned inbox: user home unavailable")
+		}
+		unassignedInboxPath = filepath.Join(userHome, ".pulse", "supervisor", "unassigned-inbox.json")
 		presenceGate, err := userpresence.NewGate(userpresence.NewPlatformProver(), time.Now)
 		if err != nil {
 			return fmt.Errorf("configure Memory Home OS presence: %w", err)
@@ -284,11 +298,13 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 			RawCaptureEnabled: rawCaptureEnabled,
 			StoragePath:       cfg.DBPath,
 		},
-		Retrieval:    retrievalEngine,
-		ContextQuery: contextQuery,
-		Health:       healthProvider,
-		HomeOrigin:   homeOrigin,
-		HomePresence: homePresence,
+		Retrieval:           retrievalEngine,
+		ContextQuery:        contextQuery,
+		Health:              healthProvider,
+		HomeOrigin:          homeOrigin,
+		HomePresence:        homePresence,
+		UnassignedInboxPath: unassignedInboxPath,
+		HomeBindingVerifier: homeBindingVerifier,
 	})
 	if err != nil {
 		return err

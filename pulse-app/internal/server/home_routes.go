@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/unassigned"
 	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
@@ -22,6 +24,11 @@ const (
 	homeOpenPresencePolicyEpoch = uint64(1)
 	homeOpenPresenceDisplay     = "Open Pulse Memory Home for this bound workspace"
 	homeSessionRequestMaxBytes  = int64(4 << 10)
+)
+
+var (
+	errHomeUnassignedRejected = errors.New("unassigned card was rejected before Tray creation")
+	errHomeBindingStale       = errors.New("Home product binding is no longer current")
 )
 
 type homeSessionRequest struct {
@@ -48,6 +55,8 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/tray/{id}/edit", s.handleHomeTrayEdit)
 		r.Post("/tray/{id}/cancel", s.handleHomeTrayCancel)
 		r.Post("/tray/{id}/commit", s.handleHomeTrayCommit)
+		r.Post("/unassigned/{id}/assign", s.handleHomeUnassignedAssign)
+		r.Post("/unassigned/{id}/delete", s.handleHomeUnassignedDelete)
 	})
 	return r
 }
@@ -76,6 +85,10 @@ func (s *Server) handleHomeSessionIssue(w http.ResponseWriter, r *http.Request) 
 	request, err := parseHomeSessionRequest(w, r)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.verifyHomeBinding(r.Context()); err != nil {
+		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
 	}
 	now := s.homeNow()
@@ -183,6 +196,11 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Memory Home is locked. Run pulse home again.", http.StatusUnauthorized)
 		return
 	}
+	if err := s.verifyHomeBinding(r.Context()); err != nil {
+		http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
+		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
+		return
+	}
 	data, err := s.buildMemoryHome(s.homeNow(), session.LiveReadiness)
 	if err != nil {
 		http.Error(w, "Memory Home data is unavailable", http.StatusServiceUnavailable)
@@ -198,7 +216,23 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Memory Tray data is invalid", http.StatusInternalServerError)
 		return
 	}
-	page, err := renderMemoryHomeHTML(memoryHomePage{Data: data, Pending: cards, CSRFToken: session.CSRFToken})
+	unassignedSnapshot := unassigned.Snapshot{}
+	unassignedUnavailable := false
+	if s.cfg.UnassignedInboxPath != "" {
+		unassignedSnapshot, err = unassigned.ReadSnapshot(s.cfg.UnassignedInboxPath)
+		if err != nil {
+			unassignedUnavailable = true
+		}
+	}
+	page, err := renderMemoryHomeHTML(memoryHomePage{
+		Data: data, Pending: cards,
+		UnassignedEnabled: s.cfg.UnassignedInboxPath != "", UnassignedUnavailable: unassignedUnavailable,
+		Unassigned: memoryHomeUnassignedCards(unassignedSnapshot.Cards),
+		UnassignedActivity: memoryHomeUnassignedActivities(
+			unassignedSnapshot.Activity, data.Boundary.BindingDigest,
+		),
+		CSRFToken: session.CSRFToken,
+	})
 	if err != nil {
 		http.Error(w, "Memory Home render failed", http.StatusInternalServerError)
 		return
@@ -335,6 +369,88 @@ func (s *Server) handleHomeTrayCommit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleHomeUnassignedAssign(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	contentDigest, ok := exactHomeUnassignedDigest(r)
+	expectedBinding, bindingOK := exactHomeUnassignedBinding(r)
+	currentBinding, currentRepository, currentOK := s.cfg.Store.ProductRuntimeBoundary()
+	if !ok || !bindingOK || !currentOK || expectedBinding != currentBinding || s.cfg.UnassignedInboxPath == "" {
+		if ok && bindingOK && currentOK && expectedBinding != currentBinding {
+			http.Error(w, "The project binding changed. Refresh Home.", http.StatusConflict)
+			return
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	now := s.homeNow()
+	err := unassigned.Assign(
+		s.cfg.UnassignedInboxPath, chi.URLParam(r, "id"), contentDigest,
+		unassigned.Destination{
+			BindingDigest: currentBinding, RepositoryID: currentRepository, StoreID: s.cfg.Store.StoreID(),
+		},
+		now,
+		func(candidate store.PrivateMemoryCandidate) error {
+			if candidate.Capsule == nil {
+				return errors.New("unassigned capsule is missing")
+			}
+			result, err := s.cfg.Store.PrepareUnassignedMemoryCapsuleWithInvocation(
+				*candidate.Capsule, contentDigest, now, s.cfg.TrayGracePeriod,
+			)
+			if err != nil {
+				return err
+			}
+			if result.Status != store.TurnFinalizedCandidates || len(result.Receipts) < 1 {
+				return errHomeUnassignedRejected
+			}
+			for _, receipt := range result.Receipts {
+				if receipt.Status != store.MemoryWritePending {
+					return errHomeUnassignedRejected
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		if errors.Is(err, errHomeUnassignedRejected) {
+			http.Error(w, "Pulse rejected this card before Tray creation. It remains in Inbox.", http.StatusUnprocessableEntity)
+			return
+		}
+		if errors.Is(err, unassigned.ErrDestinationConflict) {
+			http.Error(w, "This Inbox card is already assigned to another project. Refresh Home.", http.StatusConflict)
+			return
+		}
+		http.Error(w, "The Inbox card changed. Refresh Home.", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeUnassignedDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	contentDigest, ok := exactHomeUnassignedDigest(r)
+	expectedBinding, bindingOK := exactHomeUnassignedBinding(r)
+	currentBinding, _, currentOK := s.cfg.Store.ProductRuntimeBoundary()
+	if !ok || !bindingOK || !currentOK || expectedBinding != currentBinding || s.cfg.UnassignedInboxPath == "" {
+		if ok && bindingOK && currentOK && expectedBinding != currentBinding {
+			http.Error(w, "The project binding changed. Refresh Home.", http.StatusConflict)
+			return
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := unassigned.Delete(
+		s.cfg.UnassignedInboxPath, chi.URLParam(r, "id"), contentDigest, s.homeNow(),
+	); err != nil {
+		http.Error(w, "The Inbox card changed. Refresh Home.", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) homeNow() time.Time {
 	if s != nil && s.homeSessions != nil && s.homeSessions.clock != nil {
 		return s.homeSessions.clock().UTC()
@@ -345,10 +461,26 @@ func (s *Server) homeNow() time.Time {
 func (s *Server) requireHomeMutation(w http.ResponseWriter, r *http.Request) (viewerSessionView, bool) {
 	session, err := s.homeSessions.ValidateMutation(w, r)
 	if err == nil {
+		if verifyErr := s.verifyHomeBinding(r.Context()); verifyErr != nil {
+			http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
+			http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
+			return viewerSessionView{}, false
+		}
 		return session, true
 	}
 	writeHomeMutationError(w, err)
 	return viewerSessionView{}, false
+}
+
+func (s *Server) verifyHomeBinding(ctx context.Context) error {
+	if s == nil || s.cfg.Store == nil || s.cfg.HomeBindingVerifier == nil {
+		return errHomeBindingStale
+	}
+	bindingDigest, repositoryID, ok := s.cfg.Store.ProductRuntimeBoundary()
+	if !ok || s.cfg.HomeBindingVerifier.Verify(ctx, bindingDigest, repositoryID) != nil {
+		return errHomeBindingStale
+	}
+	return nil
 }
 
 func exactHomeCandidateForm(r *http.Request) (string, int, bool) {
@@ -367,6 +499,32 @@ func exactHomeVersion(r *http.Request) (int, bool) {
 	}
 	version, err := strconv.Atoi(values[0])
 	return version, err == nil && version > 0
+}
+
+func exactHomeUnassignedDigest(r *http.Request) (string, bool) {
+	values := r.PostForm["content_digest"]
+	if len(values) != 1 || len(values[0]) != 64 {
+		return "", false
+	}
+	for _, char := range values[0] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return "", false
+		}
+	}
+	return values[0], true
+}
+
+func exactHomeUnassignedBinding(r *http.Request) (string, bool) {
+	values := r.PostForm["expected_binding_digest"]
+	if len(values) != 1 || len(values[0]) != 64 {
+		return "", false
+	}
+	for _, char := range values[0] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return "", false
+		}
+	}
+	return values[0], true
 }
 
 func (s *Server) currentHomeCandidate(candidateID string, version int) (store.MemoryTrayPendingCandidate, bool) {
@@ -516,13 +674,28 @@ const memoryHomeBrowserScript = `(() => {
     const form = event.target.closest("form[data-home-mutation], form.logout");
     if (!form) return;
     event.preventDefault();
+    if (form.dataset.homeConfirm && !window.confirm(form.dataset.homeConfirm)) return;
+    const mutationScope = form.closest(".tray-card") || form;
+    if (mutationScope.dataset.homeMutationBusy === "true") return;
+    const body = new URLSearchParams(new FormData(form)).toString();
+    const buttons = mutationScope.querySelectorAll("button");
+    mutationScope.dataset.homeMutationBusy = "true";
+    mutationScope.setAttribute("aria-busy", "true");
+    buttons.forEach((button) => { button.disabled = true; });
+    const releaseMutation = () => {
+      delete mutationScope.dataset.homeMutationBusy;
+      mutationScope.removeAttribute("aria-busy");
+      buttons.forEach((button) => { button.disabled = false; });
+    };
+    if (form.dataset.homePendingLabel) showMutationFailure(form, form.dataset.homePendingLabel);
     try {
       const response = await fetch(form.action, {
         method: "POST", credentials: "same-origin",
         headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: new URLSearchParams(new FormData(form)).toString(),
+        body,
       });
       if (!response.ok) {
+        releaseMutation();
         const detail = (await response.text()).trim();
         const message = detail.includes("Refresh Home")
           ? detail
@@ -532,6 +705,7 @@ const memoryHomeBrowserScript = `(() => {
       }
       window.location.reload();
     } catch (_) {
+      releaseMutation();
       showMutationFailure(form, "Action failed. Refresh Home and try again.");
     }
   });

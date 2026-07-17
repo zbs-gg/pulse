@@ -17,7 +17,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { readCommittedArtifactSet } from './artifact-installer.js';
 import { inspectCodexRuntimeAt } from './codex-install.js';
 import { RELEASE_ARTIFACT_KINDS } from './release-manifest.js';
-import { resolveWorkspaceBinding } from './workspace-binding.js';
+import { inspectWorkspaceBinding, resolveWorkspaceBinding } from './workspace-binding.js';
+import { stageUnassignedCapsule } from './unassigned-inbox.js';
 import {
 	SupervisorError,
 	activateManagedEmbedderConfig,
@@ -375,6 +376,41 @@ export function resolveProductWorkspaceBinding({ cwd = process.cwd() } = {}) {
   return resolveWorkspaceBinding({
     cwd,
     ...(process.env.PULSE_TRUST_MODE === 'test' ? { registryPath, publicKeyPath, anchorPath } : {}),
+  });
+}
+
+export function inspectProductWorkspaceBinding({ cwd = process.cwd() } = {}) {
+  const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
+  const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
+  const anchorPath = process.env.PULSE_BINDING_ANCHOR_PATH;
+  const custom = registryPath !== undefined || publicKeyPath !== undefined || anchorPath !== undefined;
+  if (custom && process.env.PULSE_TRUST_MODE !== 'test') {
+    throw new Error('caller-controlled Pulse binding authority is forbidden in product mode');
+  }
+  if (process.env.PULSE_TRUST_MODE === 'test' && (!registryPath || !publicKeyPath || !anchorPath)) {
+    throw new Error('synthetic test authority requires registry, public key, and anti-rollback anchor paths');
+  }
+  return inspectWorkspaceBinding({
+    cwd,
+    ...(process.env.PULSE_TRUST_MODE === 'test' ? { registryPath, publicKeyPath, anchorPath } : {}),
+  });
+}
+
+export function stageUnassignedProductCandidate(host, input, idempotencyKey, {
+  inspectBinding = inspectProductWorkspaceBinding,
+  stage = stageUnassignedCapsule,
+  path,
+} = {}) {
+  if (!['codex', 'claude-code', 'cursor'].includes(host)) throw new Error('unassigned_host_invalid');
+  const inspected = inspectBinding({ cwd: process.cwd() });
+  if (inspected?.status !== 'unassigned' ||
+      !['binding_missing', 'workspace_not_git'].includes(inspected.reason)) {
+    throw new Error('unassigned_staging_forbidden');
+  }
+  return stage(input, {
+    ...(path === undefined ? {} : { path }),
+    host,
+    idempotencyKey,
   });
 }
 

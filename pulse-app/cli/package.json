@@ -35,6 +35,8 @@
     "src/binding-admin.js",
     "src/trust-helper.js",
     "src/workspace-binding.js",
+    "src/unassigned-inbox.js",
+    "src/product-binding-verifier.js",
     "src/local-supervisor.js",
     "src/artifact-installer.js",
     "src/install-journal.js",

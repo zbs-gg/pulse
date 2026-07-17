@@ -1891,6 +1891,46 @@ func (s *Store) PrepareManualMemoryCapsuleWithInvocation(capsule MemoryCapsule, 
 	}, now, grace)
 }
 
+// PrepareUnassignedMemoryCapsuleWithInvocation moves one host-extracted,
+// digest-bound Inbox capsule into the current bound Vault's ordinary Memory
+// Tray. It does not commit canonical memory; the visible Tray review and grace
+// period remain mandatory. The caller is the trusted local Home surface, while
+// the original supported harness remains the truthful provenance host.
+func (s *Store) PrepareUnassignedMemoryCapsuleWithInvocation(
+	capsule MemoryCapsule,
+	invocationKey string,
+	now time.Time,
+	grace time.Duration,
+) (TurnFinalizeResult, error) {
+	if !validHost(capsule.Source.Host) || capsule.Source.Host == "pulse-cli" {
+		return TurnFinalizeResult{}, errors.New("unassigned capsule host is invalid")
+	}
+	key, err := manualCandidateKey(capsule)
+	if err != nil {
+		return TurnFinalizeResult{}, err
+	}
+	invocationID, err := normalizeManualInvocation("unassigned", invocationKey)
+	if err != nil {
+		return TurnFinalizeResult{}, err
+	}
+	candidates := make([]PrivateMemoryCandidate, 0, len(capsule.Items))
+	for _, item := range capsule.Items {
+		itemCapsule := capsule
+		itemCapsule.Items = []MemoryCapsuleItem{item}
+		candidates = append(candidates, PrivateMemoryCandidate{
+			Kind: PrivateMemoryCandidateCapsule, Capsule: &itemCapsule,
+		})
+	}
+	bindingDigest, policyEpoch, resolverEpoch := s.productRuntimeAuthority()
+	return s.FinalizeTurn(TurnFinalizeRequest{
+		Schema: TurnFinalizeRequestSchema,
+		Host:   capsule.Source.Host, SessionID: "unassigned_session_" + key,
+		TurnID: "unassigned_turn_" + invocationID, SourceEventKey: "unassigned:memory:" + invocationID,
+		IdempotencyKey: "unassigned_memory_" + invocationID, BindingDigest: bindingDigest,
+		PolicyEpoch: policyEpoch, ResolverEpoch: resolverEpoch, Candidates: candidates,
+	}, now, grace)
+}
+
 func (s *Store) PrepareManualSemanticDelta(delta SemanticDelta, now time.Time, grace time.Duration) (TurnFinalizeResult, error) {
 	return s.PrepareManualSemanticDeltaWithInvocation(delta, "", now, grace)
 }

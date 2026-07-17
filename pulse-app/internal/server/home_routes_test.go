@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +25,16 @@ type homePresenceStub struct {
 	err        error
 	challenges []userpresence.Challenge
 	mutate     func(userpresence.Assertion) userpresence.Assertion
+}
+
+type homeBindingVerifierStub struct {
+	err   error
+	calls int
+}
+
+func (value *homeBindingVerifierStub) Verify(_ context.Context, _, _ string) error {
+	value.calls++
+	return value.err
 }
 
 type warmingProductTestEmbedder struct{ productTestEmbedder }
@@ -116,6 +128,171 @@ func TestHomeRouterIsolatedFromIPCAndCORSAndRendersRealReadModel(t *testing.T) {
 		t.Fatalf("IPC header crossed Home boundary: status=%d", blocked.Code)
 	}
 	assertHomeHeaders(t, blocked.Header())
+}
+
+func TestHomeUnassignedCardHasZeroInfluenceUntilExactProjectAssignment(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	inboxPath, itemID, contentDigest := writeHomeUnassignedInbox(t)
+	srv.cfg.UnassignedInboxPath = inboxPath
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, homePageRequest(srv, session))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Unassigned Inbox") ||
+		!strings.Contains(page.Body.String(), "Assign this only to an exact project.") ||
+		!strings.Contains(page.Body.String(), "Not counted as memory") {
+		t.Fatalf("unassigned card not rendered truthfully: status=%d body=%s", page.Code, page.Body.String())
+	}
+	var active, pending int
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM private_memory_objects WHERE lifecycle='active'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 || pending != 0 {
+		t.Fatalf("unassigned card influenced Vault before assignment: active=%d pending=%d", active, pending)
+	}
+
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"content_digest":           {contentDigest},
+		"expected_binding_digest":  {strings.Repeat("a", 64)},
+	}
+	if err := vault.ConfigureProductRuntimeAuthority(strings.Repeat("b", 64), 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	stale := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(stale, homeMutationRequest(srv, session, "unassigned/"+itemID+"/assign", form))
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "binding changed") {
+		t.Fatalf("stale binding status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	if err := vault.ConfigureProductRuntimeAuthority(strings.Repeat("a", 64), 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	assigned := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assigned, homeMutationRequest(srv, session, "unassigned/"+itemID+"/assign", form))
+	if assigned.Code != http.StatusNoContent {
+		t.Fatalf("assign status=%d body=%s", assigned.Code, assigned.Body.String())
+	}
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM private_memory_objects WHERE lifecycle='active'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 || pending != 1 {
+		t.Fatalf("assignment bypassed ordinary Tray: active=%d pending=%d", active, pending)
+	}
+	var provenanceHost string
+	if err := vault.DB().QueryRow(`SELECT provenance_host FROM memory_write_receipts ORDER BY created_at DESC, receipt_id DESC LIMIT 1`).Scan(&provenanceHost); err != nil {
+		t.Fatal(err)
+	}
+	if provenanceHost != "codex" {
+		t.Fatalf("assignment lost harness provenance: %q", provenanceHost)
+	}
+
+	retry := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retry, homeMutationRequest(srv, session, "unassigned/"+itemID+"/assign", form))
+	if retry.Code != http.StatusNoContent {
+		t.Fatalf("idempotent assign retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("assign retry duplicated Tray candidates: %d", pending)
+	}
+	completedPage := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(completedPage, homePageRequest(srv, session))
+	if completedPage.Code != http.StatusOK ||
+		!strings.Contains(completedPage.Body.String(), "Moved to this project’s Tray") ||
+		!strings.Contains(completedPage.Body.String(), "No unassigned memories") {
+		t.Fatalf("assignment receipt not visible: status=%d body=%s", completedPage.Code, completedPage.Body.String())
+	}
+}
+
+func TestHomeUnassignedDeleteKeepsAVisibleTerminalReceipt(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	inboxPath, itemID, contentDigest := writeHomeUnassignedInbox(t)
+	srv.cfg.UnassignedInboxPath = inboxPath
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"content_digest":           {contentDigest},
+		"expected_binding_digest":  {strings.Repeat("a", 64)},
+	}
+	deleted := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleted, homeMutationRequest(srv, session, "unassigned/"+itemID+"/delete", form))
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, homePageRequest(srv, session))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Deleted from Inbox") ||
+		!strings.Contains(page.Body.String(), "No unassigned memories") {
+		t.Fatalf("delete receipt not visible: status=%d body=%s", page.Code, page.Body.String())
+	}
+}
+
+func TestHomeRejectedUnassignedAssignmentLeavesTheCardInInbox(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	inboxPath, itemID, contentDigest := writeHomeUnassignedInboxWithSummary(t, strings.Repeat("я", 601))
+	srv.cfg.UnassignedInboxPath = inboxPath
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"content_digest":           {contentDigest},
+		"expected_binding_digest":  {strings.Repeat("a", 64)},
+	}
+	rejected := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rejected, homeMutationRequest(srv, session, "unassigned/"+itemID+"/assign", form))
+	if rejected.Code != http.StatusUnprocessableEntity || !strings.Contains(rejected.Body.String(), "remains in Inbox") {
+		t.Fatalf("rejected assignment status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	var pending int
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("rejected assignment created pending Tray rows: %d", pending)
+	}
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, homePageRequest(srv, session))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), strings.Repeat("я", 40)) {
+		t.Fatalf("rejected card disappeared: status=%d body=%s", page.Code, page.Body.String())
+	}
+}
+
+func TestHomeFailsClosedWhenTheSignedWorkspaceBindingIsRevoked(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	verifier := srv.cfg.HomeBindingVerifier.(*homeBindingVerifierStub)
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier.err = errors.New("binding revoked")
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, homePageRequest(srv, session))
+	if page.Code != http.StatusConflict || !strings.Contains(page.Body.String(), "binding changed") {
+		t.Fatalf("revoked page status=%d body=%s", page.Code, page.Body.String())
+	}
+	mutation := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(mutation, homeMutationRequest(srv, session, "tray/candidate_deadbeef/commit", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "expected_version": {"1"},
+	}))
+	if mutation.Code != http.StatusConflict || !strings.Contains(mutation.Body.String(), "binding changed") {
+		t.Fatalf("revoked mutation status=%d body=%s", mutation.Code, mutation.Body.String())
+	}
 }
 
 func TestHomeRejectsAmbientAndWrongSessionRoutesEvenWithStolenCookie(t *testing.T) {
@@ -520,6 +697,11 @@ func TestMemoryHomeBrowserScriptIsolatesPresentationAndMutationFailures(t *testi
 		"if (!response.ok) {",
 		"showMutationFailure(form, message);",
 		"Action failed. Refresh Home and try again.",
+		"window.confirm(form.dataset.homeConfirm)",
+		"form.dataset.homePendingLabel",
+		"mutationScope.dataset.homeMutationBusy",
+		"buttons.forEach((button) => { button.disabled = true; })",
+		"releaseMutation();",
 	} {
 		if !strings.Contains(memoryHomeBrowserScript, want) {
 			t.Errorf("Home browser script missing failure-isolation contract %q", want)
@@ -621,6 +803,40 @@ func newHomeRoutePending(t *testing.T, vault *store.Store, suffix, summary strin
 	return store.MemoryTrayCandidateView{}
 }
 
+func writeHomeUnassignedInbox(t *testing.T) (path, itemID, contentDigest string) {
+	return writeHomeUnassignedInboxWithSummary(t, "Assign this only to an exact project.")
+}
+
+func writeHomeUnassignedInboxWithSummary(t *testing.T, summary string) (path, itemID, contentDigest string) {
+	t.Helper()
+	canonicalCandidate := fmt.Sprintf(
+		`{"capsule":{"items":[{"confidence":1,"evidence_hint":"user_confirmed","kind":"decision","privacy_tier":"normal","redacted_summary":%q,"retention":"project","tags":["pulse"]}],"raw_input_included":false,"schema":"pulse.memory_capsule.v1","source":{"conversation_scope":"current_turn","host":"codex","timestamp":"2026-07-17T10:00:00Z"}},"kind":"memory_capsule"}`,
+		summary,
+	)
+	digest := sha256.Sum256(append([]byte("pulse-unassigned-candidate-v1\x00"), []byte(canonicalCandidate)...))
+	contentDigest = fmt.Sprintf("%x", digest[:])
+	itemID = "unassigned_" + contentDigest[:32]
+	directory := filepath.Join(t.TempDir(), ".pulse", "supervisor")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(directory, "unassigned-inbox.json")
+	body := fmt.Sprintf(
+		`{"schema":"pulse.unassigned_inbox.v1","items":[{"schema":"pulse.unassigned_candidate.v1","item_id":%q,"content_digest":%q,"created_at":"2026-07-17T10:00:00Z","host":"codex","idempotency_key":"request_home_01","candidate":%s}],"receipts":[{"receipt_id":"unassigned_receipt_%s","item_id":%q,"content_digest":%q,"action":"stage","status":"staged","created_at":"2026-07-17T10:00:00Z"}]}`,
+		itemID, contentDigest, canonicalCandidate, strings.Repeat("a", 32), itemID, contentDigest,
+	) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, itemID, contentDigest
+}
+
 func homeRouteCandidate(t *testing.T, vault *store.Store, candidateID string) store.MemoryTrayCandidateView {
 	t.Helper()
 	candidates, err := vault.ListMemoryTray(50)
@@ -656,8 +872,9 @@ func newHomeRouteFixtureWithPresence(t *testing.T, presence HomePresence) (*Serv
 	}
 	srv, err := New(Config{
 		IPCSecret: "home-test-daemon-secret", Store: vault, HomeOrigin: testViewerSessionOrigin,
-		HomePresence:    presence,
-		TrayGracePeriod: 30 * time.Second, Billing: BillingStatus{Host: "codex", Mode: "host-extracted"},
+		HomePresence:        presence,
+		HomeBindingVerifier: &homeBindingVerifierStub{},
+		TrayGracePeriod:     30 * time.Second, Billing: BillingStatus{Host: "codex", Mode: "host-extracted"},
 		Retrieval: retrieve.New(retrieve.Config{Store: vault, Embedder: productTestEmbedder{}}),
 	})
 	if err != nil {

@@ -63,6 +63,10 @@ const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
   ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code' | 'cursor'
   : undefined;
 const PRODUCT_TEAM_BINDING = PRODUCT_HOST_ADAPTER && process.env.PULSE_PRODUCT_BINDING_MODE === 'team';
+const PRODUCT_UNASSIGNED_REASON = PRODUCT_HOST_ADAPTER &&
+  (process.env.PULSE_PRODUCT_UNASSIGNED === 'binding_missing' || process.env.PULSE_PRODUCT_UNASSIGNED === 'workspace_not_git')
+  ? process.env.PULSE_PRODUCT_UNASSIGNED
+  : undefined;
 
 async function assertProductBindingCurrent(): Promise<void> {
   if (!PRODUCT_HOST_ADAPTER) return;
@@ -72,12 +76,26 @@ async function assertProductBindingCurrent(): Promise<void> {
     throw new Error('Pulse host binding authority is unavailable; restart this task');
   }
   const authority = await import(moduleURL) as {
+    inspectProductWorkspaceBinding(options: { cwd: string }): {
+      status: 'bound' | 'unassigned';
+      reason?: string;
+      workspace?: { canonical_path: string };
+    };
     resolveProductWorkspaceBinding(options: { cwd: string }): {
       binding_digest: string;
       resolver_epoch: number;
       workspace: { canonical_path: string };
     };
   };
+  if (PRODUCT_UNASSIGNED_REASON) {
+    const inspected = authority.inspectProductWorkspaceBinding({ cwd: process.cwd() });
+    if (inspected.status !== 'unassigned' || inspected.reason !== PRODUCT_UNASSIGNED_REASON ||
+        !inspected.workspace || realpathSync(inspected.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
+        realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
+      throw new Error('Pulse unassigned workspace state changed; restart this task');
+    }
+    return;
+  }
   const current = authority.resolveProductWorkspaceBinding({ cwd: process.cwd() });
   if (current.binding_digest !== process.env.PULSE_BINDING_DIGEST ||
       current.resolver_epoch !== Number(process.env.PULSE_RESOLVER_EPOCH) ||
@@ -466,6 +484,11 @@ function productRuntimeResolution() {
 }
 
 interface ProductRuntimeModule {
+  stageUnassignedProductCandidate(
+    host: 'codex' | 'claude-code' | 'cursor',
+    input: unknown,
+    idempotencyKey: string,
+  ): unknown;
   consumeHostToolLease(
     resolved: ReturnType<typeof productRuntimeResolution>,
     host: 'codex' | 'claude-code' | 'cursor',
@@ -1133,7 +1156,20 @@ export function createPulseMcpServer(
     const localTools = PRODUCT_HOST_ADAPTER
       ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
       : tools;
-    const productTools = localTools;
+    let productTools = PRODUCT_UNASSIGNED_REASON
+      ? localTools.filter((tool) => tool.name === 'pulse_remember')
+      : localTools;
+    if (PRODUCT_UNASSIGNED_REASON && PRODUCT_HOST) {
+      productTools = productTools.map((tool) => {
+        const descriptor = JSON.parse(JSON.stringify(tool)) as typeof tool;
+        const source = descriptor.inputSchema.properties?.source;
+        const host = source?.properties?.host;
+        if (host) {
+          source.properties.host = { type: 'string', const: PRODUCT_HOST } as unknown as typeof host;
+        }
+        return descriptor;
+      });
+    }
     if (!PRODUCT_TEAM_BINDING) return { tools: productTools };
     const { TEAM_INSTALLED_READ_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
     return { tools: [...productTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
@@ -1145,6 +1181,9 @@ export function createPulseMcpServer(
 
     try {
       await assertProductBindingCurrent();
+      if (PRODUCT_UNASSIGNED_REASON && name !== 'pulse_remember') {
+        throw new Error('Choose a project before using Pulse recall or project memory tools');
+      }
       if (runtimeMode === 'team-remote') {
         if (!teamContext) throw new Error('team request context is unavailable');
         const contracts = await loadTeamRemoteContracts();
@@ -1295,6 +1334,11 @@ function resolveStandaloneStore(): StandaloneStore {
 async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
     if (PRODUCT_HOST_ADAPTER) {
+      if (PRODUCT_UNASSIGNED_REASON) {
+        if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+        const runtime = await productRuntimeModule();
+        return jsonText(runtime.stageUnassignedProductCandidate(PRODUCT_HOST, args, invocationKey));
+      }
       const context = await consumeProductTurnContext(args);
       const body = productFinalizeBody(args as unknown as MemoryCapsule, context);
       const out = await pulseFetch<unknown>(

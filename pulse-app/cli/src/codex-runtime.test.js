@@ -11,12 +11,14 @@ import {
   callBoundTeamTool,
   consumeCodexToolLease,
 	consumeHostToolLease,
+	stageUnassignedProductCandidate,
 	readProductActivation,
   readCodexTurnContext,
   writeCodexToolLease,
   writeCodexTurnContext,
 	writeHostToolLease,
 } from './codex-runtime.js';
+import { readUnassignedInbox, unassignedInboxPath } from './unassigned-inbox.js';
 import { activateArtifactVersion, readActivatedArtifact, writeActivatedArtifactSet } from './artifact-installer.js';
 import { resolveManagedRuntime } from './local-supervisor.js';
 
@@ -98,6 +100,40 @@ async function managedActivationFixture(dataDir) {
 	});
 	return { activations, managed, release };
 }
+
+test('product runtime stages only an exactly unassigned structured candidate', () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-runtime-unassigned.'));
+	const path = unassignedInboxPath(home);
+	const input = {
+		schema: 'pulse.memory_capsule.v1',
+		source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-17T10:00:00Z' },
+		items: [{
+			kind: 'decision', redacted_summary: 'Assign this only after choosing the exact project.', confidence: 1,
+			evidence_hint: 'user_confirmed', privacy_tier: 'normal', retention: 'project', tags: ['pulse'],
+		}],
+		raw_input_included: false,
+	};
+	for (const reason of ['binding_missing', 'workspace_not_git']) {
+		const receipt = stageUnassignedProductCandidate('codex', input, `request_${reason}`, {
+			path,
+			inspectBinding: () => ({ status: 'unassigned', reason }),
+		});
+		assert.equal(receipt.destination, 'unassigned_inbox');
+	}
+	assert.equal(readUnassignedInbox(path).items.length, 1);
+	for (const inspection of [
+		{ status: 'bound', binding: {} },
+		{ status: 'unassigned', reason: 'binding_ambiguous' },
+		{ status: 'unassigned', reason: 'binding_workspace_mismatch' },
+	]) {
+		assert.throws(
+			() => stageUnassignedProductCandidate('codex', input, `request_${inspection.reason ?? 'bound'}`, {
+				path, inspectBinding: () => inspection,
+			}),
+			/unassigned_staging_forbidden/,
+		);
+	}
+});
 
 test('installed runtime proxies only read-only Team tools through the exact current binding', async () => {
 	const binding = {

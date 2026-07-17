@@ -124,7 +124,7 @@ test('managed product runtime resolves three verified activations and atomically
 function binding(mode, root) {
   const common = {
     binding_id: 'binding_demo', binding_digest: 'a'.repeat(64), resolver_epoch: 3, fallback: false,
-		workspace: { repository_id: 'repository_pulse' },
+		workspace: { repository_id: 'repository_pulse', canonical_path: root },
   };
   if (mode === 'personal') {
     return {
@@ -171,6 +171,9 @@ test('supervisor rejects fallback and non-numeric-loopback runtime descriptors',
   const localhost = binding('personal', root);
   localhost.personal.base_url = 'http://localhost:18800';
   assert.throws(() => vaultRuntimeFromBinding(localhost), SupervisorError);
+  const missingWorkspace = binding('personal', root);
+  delete missingWorkspace.workspace.canonical_path;
+  assert.throws(() => vaultRuntimeFromBinding(missingWorkspace), SupervisorError);
 });
 
 async function freePort() {

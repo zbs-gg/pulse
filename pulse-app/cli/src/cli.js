@@ -119,6 +119,7 @@ import {
 	acquireVaultActivationLock,
 	boundPulseRequest,
 	ensureActivatedVaultRuntime,
+	inspectProductWorkspaceBinding,
 	readProductActivation,
 	readProductActivationBundle,
 } from './codex-runtime.js';
@@ -1023,13 +1024,13 @@ function mcpServerEntrypoint() {
   if (process.env.PULSE_MCP_ENTRYPOINT) {
     return existsSync(process.env.PULSE_MCP_ENTRYPOINT) ? process.env.PULSE_MCP_ENTRYPOINT : undefined;
   }
-  // Published package ships a prebuilt server; a repo checkout uses mcp/dist.
-  const vendored = join(CLI_PACKAGE_ROOT, 'vendor', 'pulse-mcp-dist', 'index.js');
-  if (existsSync(vendored)) {
-    return vendored;
-  }
+  // A repo checkout must use its freshly built MCP server even when a stale
+  // prepack artifact is present. Published packages have no sibling mcp/
+  // checkout and therefore fall through to the vendored build.
   const checkout = resolve(CLI_PACKAGE_ROOT, '..', '..', 'mcp', 'dist', 'index.js');
-  return existsSync(checkout) ? checkout : undefined;
+  if (existsSync(checkout)) return checkout;
+  const vendored = join(CLI_PACKAGE_ROOT, 'vendor', 'pulse-mcp-dist', 'index.js');
+  return existsSync(vendored) ? vendored : undefined;
 }
 
 async function runMcpServer() {
@@ -1050,6 +1051,23 @@ async function runMcpServer() {
 async function runProductMcpServer(host) {
   if (!['codex', 'claude-code', 'cursor'].includes(host)) throw new Error('unsupported product MCP host');
   await recoverBindingAuthority();
+  const inspected = inspectProductWorkspaceBinding({ cwd: process.cwd() });
+  if (inspected.status === 'unassigned') {
+    process.chdir(inspected.workspace.canonical_path);
+    process.env.PULSE_RUNTIME_MODE = 'local-stdio';
+    process.env.PULSE_MCP_MODE = 'daemon';
+    process.env.PULSE_HOST_ADAPTER = host;
+    process.env.PULSE_HOST_WORKSPACE = inspected.workspace.canonical_path;
+    process.env.PULSE_PRODUCT_UNASSIGNED = inspected.reason;
+    process.env.PULSE_HOST_AUTHORITY_MODULE = pathToFileURL(
+      join(CLI_PACKAGE_ROOT, 'src', 'codex-runtime.js'),
+    ).href;
+    process.env.PULSE_HOST_RUNTIME_MODULE = pathToFileURL(
+      join(CLI_PACKAGE_ROOT, 'src', 'codex-runtime.js'),
+    ).href;
+    await runMcpServer();
+    return;
+  }
   const resolved = resolveCodexMcpRuntime(process.cwd());
   // Binding resolution intentionally accepts a nested launch directory. The
   // MCP process then pins itself to the signed canonical root so every tool
@@ -1070,6 +1088,7 @@ async function runProductMcpServer(host) {
   process.env.PULSE_RESOLVER_EPOCH = String(resolved.binding.resolver_epoch);
   process.env.PULSE_HOST_WORKSPACE = resolved.binding.workspace.canonical_path;
   process.env.PULSE_PRODUCT_BINDING_MODE = resolved.binding.mode;
+  delete process.env.PULSE_PRODUCT_UNASSIGNED;
   process.env.PULSE_HOST_AUTHORITY_MODULE = pathToFileURL(
     join(CLI_PACKAGE_ROOT, 'src', 'codex-runtime.js'),
   ).href;

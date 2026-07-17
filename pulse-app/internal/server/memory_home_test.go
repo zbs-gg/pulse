@@ -134,6 +134,33 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 	}
 }
 
+func TestRenderMemoryHomeShowsUnassignedEmptyAndUnavailableWithoutClaimingMemory(t *testing.T) {
+	t.Parallel()
+	base := memoryHomePage{
+		Data: store.MemoryHomeData{
+			Boundary:  store.MemoryHomeBoundary{BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository_pulse"},
+			Readiness: store.MemoryHomeReadinessSnapshot{NextAction: store.MemoryHomeNextAction{Label: "Continue working"}},
+		},
+		UnassignedEnabled: true,
+	}
+	empty, err := renderMemoryHomeHTML(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(empty, "No unassigned memories") || strings.Contains(empty, "Inbox is unavailable") {
+		t.Fatalf("empty Inbox state is not explicit: %s", empty)
+	}
+	base.UnassignedUnavailable = true
+	unavailable, err := renderMemoryHomeHTML(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unavailable, "Inbox is unavailable") ||
+		!strings.Contains(unavailable, "No queued content was read or moved") {
+		t.Fatalf("unavailable Inbox state is not fail-closed: %s", unavailable)
+	}
+}
+
 func TestRenderMemoryHomeBoundsAttemptsOutsideCanonicalMemory(t *testing.T) {
 	t.Parallel()
 	attempts := make([]store.MemoryHomeAttempt, 11)

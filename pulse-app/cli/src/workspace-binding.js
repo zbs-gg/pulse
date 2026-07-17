@@ -317,3 +317,23 @@ export function resolveWorkspaceBinding({
     fallback: false,
   };
 }
+
+export function inspectWorkspaceBinding(options = {}) {
+  const cwd = options.cwd ?? process.cwd();
+  try {
+    return { status: 'bound', binding: resolveWorkspaceBinding(options) };
+  } catch (error) {
+    if (!(error instanceof BindingError) ||
+        (error.code !== 'binding_missing' && error.code !== 'workspace_not_git')) {
+      throw error;
+    }
+    const workspace = error.code === 'binding_missing'
+      ? canonicalizeWorkspace(cwd)
+      : { canonical_path: realpathSync(resolve(cwd)) };
+    return {
+      status: 'unassigned',
+      reason: error.code,
+      workspace,
+    };
+  }
+}
