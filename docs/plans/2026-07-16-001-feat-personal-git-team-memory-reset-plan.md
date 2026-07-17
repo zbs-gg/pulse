@@ -1,5 +1,5 @@
 ---
-title: Pulse Personal and Git-Backed Team Memory Reset - Plan
+title: Pulse Personal and Team Memory Product Architecture - Plan
 type: feat
 date: 2026-07-16
 topic: personal-git-team-memory-reset
@@ -7,20 +7,18 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
-deepened: 2026-07-16
+deepened: 2026-07-17
 ---
 
-# Pulse Personal and Git-Backed Team Memory Reset - Plan
+# Pulse Personal and Team Memory Product Architecture - Plan
 
 ## Goal Capsule
 
-- **Objective:** Ship Pulse as a one-command, state-aware memory product for one person and as an approval-gated shared-memory product for a small team using the project's Git repository.
-- **Product authority:** This plan governs the immediate Pulse product path where it conflicts with the older Personal onboarding and Team Remote plans. Existing implementation remains evidence and a parts inventory, not an automatic requirement for the critical path.
-- **First proof:** In Codex, one person saves and later receives a real Personal memory; a reviewed project source produces shared-memory cards; approval creates a local Git commit; a second checkout retrieves the approved memory through Pulse.
-- **Open blockers:** None. Independent clones require a portable project namespace in the shared pack, and Codex approval requires a trusted content-free hook bridge; both are resolved in the Planning Contract.
-- **Delivery constraint:** Each implementation slice must produce a user-verifiable result in one working day. New infrastructure or more than two review rounds triggers a scope review instead of silently expanding the slice.
-- **Execution profile:** U1-U4 form the active vertical slice. Use one implementation worker and one independent reviewer, commit each unit separately, and stop after U4's real linked-worktree receipt before beginning release or Home expansion.
-- **Tail ownership:** The executor owns tests, simplification, review fixes, scoped commits, and the local dogfood proof. Npm publication, Git push/PR, Apple notarization submission, colleague installation, and real private-source import require separate approval.
+- **Objective:** Ship Pulse as a lightweight project memory for one person and as a governed central memory product for a team.
+- **Product authority:** This contract supersedes the Git-first Team Memory product direction in the previous revision of this file and the central-service-first scope of the older synthetic Team plan where either conflicts with the product split below.
+- **Personal proof:** A colleague installs Pulse with one command on a Mac that has Claude Code, Cursor, or Codex; a memory survives into a fresh task inside the same project; another project receives none of it; Home shows the continuity and token evidence.
+- **Team proof:** Two named members use one central Team Vault and Board for one project; one exact candidate is approved; both members receive it with provenance; a member without project access cannot retrieve or influence ranking with it.
+- **Open blockers:** None for local implementation. Public npm publication and U13's controlled two-person deployment require fresh external-mutation approval; the plan distinguishes code-complete, artifact-ready, publicly available, and controlled-Team proof.
 
 ---
 
@@ -28,460 +26,541 @@ deepened: 2026-07-16
 
 ### Summary
 
-Pulse will keep Personal memory local and publish only human-approved shared memories as inspectable files in the project Git repository. The active AI harness extracts candidates from project sources; Pulse owns source identity, validation, approval, storage, retrieval, provenance, and receipts.
+Pulse will have two product modes on one memory model. Personal is a lightweight local product whose memory follows one person across supported harnesses inside a bound project. Team is a separate central Team Vault and Board where members govern project memory together; Git is an optional approved export, not the Team database.
 
 ### Problem Frame
 
-Pulse has working retrieval, memory, continuity, review, and security primitives, but it is not yet an installable product for a colleague. Personal work reached Memory Home before the clean-machine release proof, while Team work became a large synthetic security foundation before two people could share one real memory.
+Pulse has accumulated a capable local retrieval engine, a secure Personal review surface, a Git publication path, and a large synthetic Team security foundation. Those parts do not yet add up to a product that a colleague can install quickly or a team can understand and operate together.
 
-The immediate product needs a fixed, understandable answer to two questions: where private memory lives and where team memory lives. It must also accept growing project sources without turning full transcripts and documents into injected context or requiring a new extraction model inside Pulse.
+The earlier product direction also blurred three different jobs. A single user needs continuity and lower context cost without administering infrastructure. A team needs one shared control surface, isolation, roles, review, correction, and deletion. A repository needs durable operating artifacts and portable exports, but it should not silently become the authorization system or live database for corporate memory.
+
+Memory scope is the trust boundary joining those jobs. Cross-session and cross-harness continuity inside one project is useful. Unrequested cross-project recall is usually noise and can leak client or personal context. Pulse therefore needs a deterministic project boundary before it needs broader ingestion or richer extraction.
 
 ### Key Decisions
 
-- **Active-harness extraction.** (session-settled: user-directed — chosen over a Pulse-embedded extraction model: Codex, Claude Code, Cursor, or the active compatible harness already has the model and source-reading capability.) Pulse supplies one extraction contract and does not require its own LLM provider, model key, or agent runtime.
-- **Git-backed approved Team Memory.** (session-settled: user-directed — chosen over making remote Commons the first team release: small teams need a visible canonical location and existing synchronization before enterprise infrastructure.) Git stores approved shared-memory objects; each member's local Pulse indexes them and remains the only retrieval engine.
-- **Source and memory remain distinct.** Project transcripts and files may live in the same private repository when the team placed them there intentionally. Shared memory contains compact conclusions and stable source references, not copied raw source content.
-- **Chat-first approval with a durable Home history.** (session-settled: user-directed — chosen over Git diff review: the primary users are non-technical.) The active harness presents plain-language cards; Memory Home preserves the same immutable cards, warnings, decisions, and publication receipts.
-- **Local commit without external delivery.** (session-settled: user-approved — chosen over automatic push or PR: approval of memory content is not approval to send externally.) Approval may create a local commit; push, PR, or any external publication requires a separate explicit confirmation.
-- **Remote Commons becomes optional hardening.** Existing Team identity, authorization, revocation, audit, and deletion work may be reused later when teams need real-time synchronization or finer access control. It cannot block Personal or Git-backed Team Memory.
+- **Two products on one memory model.** (session-settled: user-directed — chosen over one equally heavy product for individuals and teams: an individual needs simple continuity, while team governance is the paid infrastructure problem.) Personal and Team share memory semantics and retrieval quality without sharing deployment or administration requirements.
+- **Project-first memory.** (session-settled: user-directed — chosen over global memory by default: continuity across tasks and harnesses is valuable inside a project, while cross-project context is usually unnecessary and unsafe.) Every retrievable memory has both an ownership boundary and a project destination.
+- **Trusted routing, not agent discretion.** (session-settled: user-approved — chosen over letting the active model decide where a conversation belongs: models can misclassify context and cannot be the security boundary.) Pulse derives the current project from a trusted workspace binding; ambiguous work stays unassigned.
+- **Central Team Vault and Board.** (session-settled: user-directed — chosen over Git as the canonical Team database: teams need a common state, membership, revocation, approvals, audit, and deletion.) Team memory lives in an isolated shared store and is managed in one visible place.
+- **Exact human approval for sharing.** (session-settled: user-directed — chosen over automatic Personal-to-Team promotion: one mistaken promotion can expose private or client context.) The system may recommend a destination, but only an authorized human can approve the exact content and scope.
+- **Git as derived publication.** (session-settled: user-approved — chosen over discarding the implemented Git path or keeping it as Team authority: approved knowledge still benefits from portable, inspectable export.) Git may carry approved snapshots, rules, practices, or decisions after Team Vault approval; it does not grant memory access or replace the live Team record.
+- **Host-extracted capsules.** (session-settled: user-directed — chosen over a required Pulse extraction model: the active harness already has the model and source-reading capability.) Pulse owns validation, scope, storage, retrieval, and receipts; the active harness proposes compact structured memories.
 
 ### Actors
 
-- A1. **Member:** Uses an AI harness, reviews candidates, and controls whether anything becomes shared memory.
-- A2. **Active harness:** Reads permitted source content, extracts bounded candidates, explains uncertainty, and presents review cards.
-- A3. **Pulse:** Resolves the project, registers source versions, validates candidates, binds approval, writes memory, indexes it, retrieves it, and records receipts.
-- A4. **Git repository:** Canonically stores project sources chosen by the team and approved shared-memory files; it supplies history and synchronization.
-- A5. **Teammate:** Pulls the project and receives relevant approved memory through their own local Pulse.
+- A1. **Personal user:** Uses one or more supported harnesses and owns local private memory.
+- A2. **Team member:** Uses Pulse inside projects granted by the team and may propose or consume shared memories.
+- A3. **Reviewer or owner:** Approves exact Team content, promotes scope, corrects records, manages access, and performs destructive actions permitted by role.
+- A4. **Active harness:** Claude Code, Cursor, Codex, or another compatible host that reads permitted source material and proposes structured capsules.
+- A5. **Pulse Personal Core:** Resolves trusted project identity, stores local memory, retrieves only visible candidates, and records continuity and token receipts.
+- A6. **Pulse Team Vault:** Holds authoritative shared memories, project membership, provenance, lifecycle, audit, and deletion state.
+- A7. **Team Board:** Presents candidates, scopes, warnings, decisions, corrections, access, and history in a non-technical control surface.
+- A8. **Source system:** Holds the original call, transcript, chat, Drive document, or repository file from which a capsule may be extracted.
+- A9. **Git repository:** Optionally stores approved derived knowledge and source references after a separate publication decision.
 
 ### Requirements
 
 **Personal product**
 
-- R1. A supported user installs Personal Pulse with one public command and no system Go, Python, Make, Docker, model API key, or manual configuration editing.
-- R2. Codex is the first release-gated harness; another harness must reuse the same local memory and extraction contracts rather than create a second engine.
-- R3. Personal memory remains in a project-bound local vault and never enters Git through capture, extraction, review, or synchronization without human approval for the exact shared candidate.
-- R4. A normal Personal memory must surface automatically in a later fresh harness task with provenance, retrieval reasons, and a delivery receipt.
-- R5. Memory Home must show readiness, recent Personal memories, offered context, acknowledgement state, and honest token-economy evidence without fabricated savings.
+- R1. A supported user must install the complete Personal product with one public command and no system Go, Python, Make, Docker, model API key, or manual configuration editing.
+- R2. Claude Code, Cursor, and Codex must be equal bootstrap hosts; any one is sufficient, and several installed hosts share one Personal Core and vault.
+- R3. Personal memory must survive across sessions and supported harnesses only inside its authorized project boundary unless the user explicitly assigns a broader destination supported by this contract.
+- R4. Personal Memory Home must remain lightweight and show readiness, recent memories, the context offered to the next task, acknowledgement state, controls, and honest token-economy evidence.
+- R5. Personal must remain useful with no Team account, Team server, Git remote, or browser dashboard administration.
 
-**Sources and extraction**
+**Project identity and isolation**
 
-- R6. Pulse must accept a project source through a command, API, or MCP surface and bind it to a canonical project plus a stable version identity.
-- R7. The first source type is a repository-local text or Markdown file; later adapters must map Google Drive, Krisp, and other systems into the same source contract.
-- R8. Pulse must expose bounded source material to the active harness so extraction does not require injecting or rereading the whole source by default.
-- R9. The active harness must return typed candidate memories with a compact statement, proposed project audience, confidence, and source references to the registered version.
-- R10. Pulse must not make backend model calls for extraction; all model-based extraction and advisory risk comments come from the active harness.
-- R11. A repeated review must process only new or changed source versions and unresolved candidates unless the user explicitly requests a full review.
+- R6. Every memory must carry an ownership boundary and a stable project identity before it becomes eligible for retrieval.
+- R7. Pulse must derive the current project from a trusted, inspectable workspace or repository binding rather than model inference, prompt text, a folder-name guess, or a caller-supplied project label.
+- R8. When Pulse cannot prove a current project, proposed memories must enter a local Unassigned Inbox and remain ineligible for automatic retrieval until the user assigns them.
+- R9. Project visibility must filter candidates before lexical search, vector search, graph traversal, state-aware ranking, continuity assembly, counts, and explanations.
+- R10. A memory from one project must not appear in or influence another project's results, traces, counts, graph neighbors, token metrics, or continuity packs.
+- R11. A Team workspace may group related projects, but movement from project scope to workspace-wide scope requires an exact human-reviewed promotion; no automatic parent-scope inheritance may broaden visibility.
 
-**Risk review and approval**
+**Capture, extraction, and sources**
 
-- R12. Pulse must deterministically block secrets, credentials, unsafe local paths, unapproved Personal content, and attempts to publish raw source text as a shared-memory object.
-- R13. The active harness may flag confidentiality, weak evidence, over-broad claims, contradictions, or unclear scope, but those comments cannot override a deterministic Pulse block.
-- R14. The user must see the exact canonical content, source summary, project destination, and warnings for every candidate before approval.
-- R15. A short chat response such as `ok` is valid only for one exact pending batch in the current task and project whose immutable card digests were just presented.
-- R16. Editing a candidate invalidates its prior presentation and approval; the revised card must be shown again.
-- R17. Rejected, canceled, blocked, and unreviewed candidates must never enter shared retrieval.
+- R12. The active harness may propose short typed capsules from conversations, calls, documents, and repository files through one host-neutral contract.
+- R13. Pulse must not require a built-in extraction LLM or backend model call for Personal capture; model-based extraction happens in the active harness.
+- R14. A capsule must retain bounded provenance to its permitted source without copying a raw transcript, full document, secret, credential, or unsafe local path into memory.
+- R15. Original recordings, transcripts, chats, and documents remain in their source systems or an explicitly chosen project archive; Pulse stores only approved structured memory and safe references.
+- R16. Reprocessing the same source version must be idempotent, and changed-source review must avoid rereading or re-proposing already resolved material by default.
 
-**Git-backed Team Memory**
+**Team Vault and Board**
 
-- R18. Each approved shared memory must be stored as a human-readable, independently reviewable project file with stable identity, kind, approver, approval time, source references, and content.
-- R19. Approved shared-memory files live under one conventional project-owned directory, while raw sources, generated indexes, secrets, private memory, and the live Pulse database remain outside it.
-- R20. Approval writes the exact displayed objects and may create a local Git commit containing only those publication changes.
-- R21. Pulse must never push, create a PR, send a message, or otherwise publish externally without a new explicit confirmation naming that action.
-- R22. After Git synchronization, each member's local Pulse must incrementally index added, corrected, superseded, or removed shared-memory files without a second shared retrieval engine.
-- R23. Visibility filtering must occur before state-aware ranking; Personal memory is never a candidate for another member's retrieval.
-- R24. Shared retrieval must identify the memory as team/project context and expose its source references, approval history, commit provenance when available, and why it surfaced.
+- R17. Team memory must use one isolated central Team Vault as its live source of truth; Personal vaults and unrelated teams must remain outside its storage and authorization boundary.
+- R18. The Team Board must show the lifecycle of every shared candidate and memory, including proposed, warned, edited, rejected, approved, materializing, active, materialization-failed, corrected, superseded, removal-pending, removed, and blocked states. Before activation, candidate content is visible only to its proposer and currently authorized reviewers or owners; ordinary project members receive content only after approval and activation. Git export has separate exporting, exported, and export-failed states.
+- R19. Team membership, project grants, and roles must be server-authoritative and rechecked before every shared read or write; caller-supplied actor, role, team, or project fields may only narrow authority.
+- R20. A Team candidate must show its exact canonical content, destination, source summary, warnings, and visibility before approval.
+- R21. Approval must bind to the exact displayed candidate generation and scope; any edit, destination change, newer registered source digest, or changed warning invalidates the prior presentation and approval. Source freshness is explicitly `current_as_of_registered_version` or `unverified`; project policy must block approval when independent source-system reverification is required.
+- R22. The active harness may recommend whether a candidate belongs in Personal, Team Project, or Team Workspace memory, but it must never grant promotion or override a deterministic block.
+- R23. Every Team mutation must produce a durable content-bound receipt and metadata-only audit event identifying the actor, action, target, project, result, and policy generation without storing raw prompts, transcript fragments, tokens, secrets, or local paths.
+- R24. Corrections and supersession must preserve history while removing stale content from every future retrieval surface.
+- R25. Revoking membership or a project grant must block the next request without waiting for a new agent session or silently falling back to Personal memory.
+- R26. Deletion must hide the target immediately and report completion only after content-bearing review generations, retrieval indexes, graph projections, continuity, caches, and controlled backup retention can no longer disclose it. Metadata-only audit and tombstone history may remain.
+- R27. Board, API, MCP, and harness-native cards must project the same authoritative lifecycle and receipts rather than becoming independent approval engines.
 
-**History and operations**
+**Retrieval and delivery**
 
-- R25. Memory Home must retain the lifecycle of every shared candidate: proposed, warned, edited, rejected, approved, published, corrected, superseded, or removed.
-- R26. Every publication outcome must have a content-bound receipt connecting the displayed batch, approver, resulting memory IDs, file identities, and local commit when created.
-- R27. A manual review command must show pending new or changed candidates; an optional scheduled evening trigger may invoke the same review without gaining approval or publication authority.
-- R28. A correction must preserve history and stop superseded content from entering future context after local reindexing.
+- R28. Relevant Team Project memory may be combined with the member's local Personal Project memory only after both stores independently authorize the active person and project.
+- R29. Retrieved context must identify whether each item is Personal Project, Team Project, or Team Workspace memory and explain why it surfaced.
+- R30. Pulse must record the exact bounded context offered to a host and distinguish local token estimates from host-observed or provider-measured usage.
+- R31. A Team outage must be visible and fail closed for Team memory; it must not read or write a local substitute while claiming shared continuity.
+
+**Git publication and portability**
+
+- R32. Git export must operate only on exact Team content already approved for the named repository destination and must never export Personal memory automatically.
+- R33. Exported files must remain human-readable, versioned, source-referenced, and independently inspectable without becoming the authorization source for Team retrieval.
+- R34. Approval of Team memory must not imply permission to push, open a pull request, send a message, or perform another external action; each external effect requires separate confirmation.
+- R35. Existing Git review, exact-card, publication, receipt, and pack-index work may be reused for export and offline portability only where it preserves the central Team Vault authority.
 
 ### Key Flows
 
-- F1. Personal continuity
-  - **Trigger:** A1 completes normal work in Codex.
-  - **Actors:** A1, A2, A3
-  - **Steps:** A2 proposes durable Personal memory; A3 validates and presents it; A1 accepts or edits it; a later task receives a compact relevant context pack.
-  - **Outcome:** One real memory survives across tasks with visible provenance and token accounting.
-  - **Covered by:** R1-R5
+- F1. **Personal continuity inside one project**
+  - **Trigger:** A1 works in a bound project through A4.
+  - **Actors:** A1, A4, A5
+  - **Steps:** A4 proposes a compact memory; A5 validates project and content, shows it, stores it after Personal review, and offers relevant context to a later task in the same project.
+  - **Outcome:** The memory survives sessions and harnesses without becoming visible in another project.
+  - **Covered by:** R1-R10, R12-R16, R29-R30
 
-- F2. Source extraction
-  - **Trigger:** A1 asks Pulse to process a project text or Markdown source.
-  - **Actors:** A1, A2, A3
-  - **Steps:** A3 registers the source version and supplies bounded material; A2 extracts typed candidates and advisory warnings; A3 validates and stages safe candidates.
-  - **Outcome:** The source remains separate while reviewable structured memories are ready.
-  - **Covered by:** R6-R13
+- F2. **Unassigned work**
+  - **Trigger:** A4 cannot prove which project owns the current conversation or source.
+  - **Actors:** A1, A4, A5
+  - **Steps:** A5 stages the candidate in the Unassigned Inbox; it is excluded from automatic context; A1 assigns or deletes it through a visible action.
+  - **Outcome:** Ambiguity creates review work, not global memory or leakage.
+  - **Covered by:** R6-R10
 
-- F3. Chat approval and local publication
-  - **Trigger:** A2 presents one exact pending batch and asks whether to share it with the project.
-  - **Actors:** A1, A2, A3, A4
-  - **Steps:** A1 approves or edits; A3 binds the response to displayed digests; approved objects are written; A3 creates a local commit and returns a receipt.
-  - **Outcome:** Team memory exists in Git, but nothing has been pushed externally.
-  - **Covered by:** R14-R21, R25-R26
+- F3. **Project memory promoted to Team**
+  - **Trigger:** A2 or A4 proposes that a conclusion should help the project team.
+  - **Actors:** A2, A3, A4, A6, A7
+  - **Steps:** A7 shows exact cards, destination, provenance, and warnings; A3 approves, edits, or rejects; A6 stores only the exact approved generation and records receipts.
+  - **Outcome:** The Team Project receives an attributable memory without exposing unrelated Personal context.
+  - **Covered by:** R17-R24, R27
 
-- F4. Team consumption
-  - **Trigger:** A5 receives approved-memory changes through normal Git synchronization.
-  - **Actors:** A3, A4, A5
-  - **Steps:** A3 incrementally indexes the changed shared-memory objects, filters them by project visibility, and ranks relevant items for the current state and task.
-  - **Outcome:** A5's fresh harness task receives the approved memory with reasons and provenance.
-  - **Covered by:** R22-R24, R28
+- F4. **Team retrieval**
+  - **Trigger:** A2 starts a task inside an authorized Team Project.
+  - **Actors:** A2, A4, A5, A6
+  - **Steps:** Personal and Team stores independently authorize the member and project; hidden candidates are removed before ranking; A4 receives one labeled context pack with provenance and reasons.
+  - **Outcome:** Relevant private and shared context can cooperate without merging their authority or storage.
+  - **Covered by:** R19, R25, R28-R31
 
-- F5. Incremental review
-  - **Trigger:** A1 runs review manually or an evening trigger detects unresolved changes.
-  - **Actors:** A1, A2, A3
-  - **Steps:** A3 supplies only changed sources and pending candidates; A2 prepares cards and warnings; A1 decides in chat or later through Memory Home.
-  - **Outcome:** Review cost scales with new material, and scheduling never grants approval authority.
-  - **Covered by:** R11, R25, R27
+- F5. **Workspace-wide promotion**
+  - **Trigger:** A3 decides a memory should apply to several related projects.
+  - **Actors:** A3, A6, A7
+  - **Steps:** A7 shows the exact parent workspace and affected projects; A3 approves the new scope; A6 records a new scoped generation and preserves the project history.
+  - **Outcome:** Cross-project context exists only by explicit, reviewable promotion.
+  - **Covered by:** R11, R20-R24, R29
 
-### Product Flow
+- F6. **Approved Git export**
+  - **Trigger:** A3 asks to publish selected approved knowledge into a repository.
+  - **Actors:** A3, A6, A7, A9
+  - **Steps:** A7 presents the exact export set and destination; A3 approves the export; Pulse writes portable files and returns a receipt; push or pull-request creation remains a separate action.
+  - **Outcome:** Durable project artifacts can travel through Git without turning Git into the live Team database.
+  - **Covered by:** R32-R35
+
+### Product Boundaries
 
 ```mermaid
 flowchart TB
-  S["Project source"] --> R["Pulse source registration"]
-  R --> H["Active harness extraction"]
-  H --> V["Pulse validation"]
-  V --> C["Plain-language review cards"]
-  C -->|"edit or reject"| H
-  C -->|"approve exact batch"| G["Approved shared-memory files"]
-  G --> L["Local Git commit"]
-  L -->|"separate confirmation later"| X["Push or PR"]
-  G --> I["Local Pulse indexes"]
-  I --> Q["Filtered state-aware retrieval"]
+  Work["Current harness task"] --> Binding{"Trusted project binding?"}
+  Binding -->|"no"| Inbox["Unassigned Inbox\nnot retrievable"]
+  Binding -->|"yes"| Personal["Personal Project memory\nlocal and private"]
+  Personal -->|"exact human approval"| TeamProject["Team Project memory\ncentral Team Vault"]
+  TeamProject -->|"explicit scope promotion"| TeamWorkspace["Team Workspace memory\nselected related projects"]
+  TeamProject -->|"separate export approval"| Git["Git knowledge export\nderived and portable"]
+  Personal -. "never automatic" .-> TeamProject
 ```
+
+The arrows are authority changes, not data-copy defaults. A higher scope receives a new approved generation and provenance; hidden lower-scope content is never made visible merely because two scopes share a project name.
 
 ### Acceptance Examples
 
-- AE1. **Covers R1-R5.** Given a clean supported Mac with Codex and Node but no Go or Python, when A1 installs Pulse, saves one normal memory, and starts a fresh task, then that task receives the same memory and Home shows its receipt and honest token state.
-- AE2. **Covers R6-R11.** Given a repository text transcript, when A1 asks Codex to ingest it, then Pulse binds a stable source version and Codex returns bounded typed candidates without Pulse calling an extraction model.
-- AE3. **Covers R12-R17.** Given a candidate containing a credential and another containing a weakly supported conclusion, when review runs, then Pulse blocks the credential candidate and the harness comments on the evidence risk of the other.
-- AE4. **Covers R14-R21.** Given two displayed safe cards and one pending batch, when A1 replies `ok`, then only those two objects are written and committed locally, a receipt is returned, and no push or PR occurs.
-- AE5. **Covers R15-R17.** Given a displayed card that is edited after presentation, when A1 says `ok` without seeing the edited card, then publication is refused until the revised content is presented.
-- AE6. **Covers R22-R24.** Given a second checkout that receives the local publication commit, when a relevant fresh task starts there, then its local Pulse surfaces the shared memory with project visibility, source and commit provenance, and ranking reasons.
-- AE7. **Covers R11, R27.** Given no source changes since the previous review, when an evening trigger runs, then it reports no new candidates without reprocessing the whole project or asking for publication approval.
-- AE8. **Covers R25-R28.** Given an approved memory later corrected, when the correction is committed and reindexed, then Home preserves both versions while future retrieval excludes the superseded statement.
+- AE1. **Covers R1-R5.** Given a clean supported Mac with only one of Claude Code, Cursor, or Codex and no compilers, Docker, or model key, when A1 runs the public install command, then Personal reaches honest readiness and no absent host is required or invoked.
+- AE2. **Covers R3, R6-R10, R28-R30.** Given one memory in Project Alpha, when A1 starts a fresh task in Project Alpha and then Project Beta through another supported harness, then Alpha receives the memory with provenance and Beta receives no result, count, trace, or ranking influence from it.
+- AE3. **Covers R7-R8.** Given a conversation with no trusted workspace binding, when A4 proposes a memory, then it appears in Unassigned Inbox and cannot enter a later context pack until A1 assigns a project.
+- AE4. **Covers R17-R24, R27-R29.** Given Nik and Dima have access to one Team Project, when Nik approves one exact candidate in the Board, then both members can retrieve that generation with actor, source, scope, and reason while a third ungranted member cannot observe it.
+- AE5. **Covers R20-R22.** Given a displayed Team card is edited or moved from project to workspace scope, when A3 attempts to reuse the earlier approval, then Pulse refuses until the new exact card and destination are shown and approved.
+- AE6. **Covers R11, R29.** Given two projects share a workspace, when A3 promotes one project memory to the workspace, then only the selected related projects receive the new generation and unrelated projects remain unaffected.
+- AE7. **Covers R25, R31.** Given Dima has an active agent session, when his project grant is revoked or Team Vault becomes unavailable, then the next Team request is denied or visibly degraded with no Personal fallback presented as shared memory.
+- AE8. **Covers R24, R26.** Given a shared memory has retrieval, graph, and continuity projections, when A3 removes it, then it disappears immediately from reads and reaches complete only after all derived surfaces are clean.
+- AE9. **Covers R12-R16.** Given a selected call transcript, when A4 extracts candidates, then Pulse stores only approved capsules and safe source references; the raw transcript, credentials, and local paths are absent from memory and receipts.
+- AE10. **Covers R32-R35.** Given an approved Team memory, when A3 approves its Git export, then the exact portable file is created with a receipt while no push, pull request, or other external delivery happens automatically.
 
 ### Success Criteria
 
-- The Personal clean-machine Codex proof passes without user-installed compilers or model keys.
-- One repository source reaches approved shared memory through chat cards in the active harness.
-- A local commit is created after approval and zero external Git actions occur without a second confirmation.
-- A second checkout retrieves the approved memory through the existing Pulse ranking and continuity path.
-- Review cost is bounded to new or changed material and every surfaced shared item has inspectable provenance.
+- A non-technical colleague completes Personal installation and proves same-project continuity without developer tooling or manual configuration.
+- Personal Home shows a real memory, a real fresh-task offer, and honest measured, estimated, or collecting token state.
+- Automated isolation tests demonstrate zero cross-project and cross-member influence before ranking on every retrieval surface under test.
+- Nik and Dima complete one real Team Project flow from candidate through Board approval to retrieval on separate installations.
+- Every shared item visible to a member has inspectable source, scope, lifecycle, actor, and reason.
+- Team access revocation affects the next request, deletion is derivation-complete, and Team outage never masquerades as shared continuity.
 
 ### Scope Boundaries
 
 **Deferred for later**
 
-- First-class Cursor activation after the Codex product gate proves the shared harness contract.
-- Google Drive, Krisp, and other source adapters.
-- GitHub push, branch, PR, and scheduled delivery integrations.
-- Remote Commons for real-time synchronization, per-member server ACLs, revocation, and teams that cannot use one private repository.
-- Rich interactive Home cards beyond the durable history required by this contract.
+- Google Drive, Krisp webhook, Telegram, and bulk historical source adapters beyond the common selected-source contract.
+- Automatic scheduled review and notification delivery after the manual Board flow works for two people.
+- Personal cross-project or global memory; evidence must show a stable need before a broader private scope is introduced.
+- Enterprise billing, SSO, compliance claims, high availability, and multi-region deployment.
+- Automatic publication of approved memory into Git, skills, procedures, or external systems.
 
 **Outside this product's identity**
 
-- A built-in extraction LLM or a second general agent runtime.
-- Automatic promotion from Personal to Team memory.
-- Using Git as the Personal vault, live database, generated index, or secret store.
-- Replacing source systems or copying all source content into shared memories.
-- Skill factories, practice compilation, or team workflow governance owned by `takt`.
+- A global memory pool searched across unrelated projects by default.
+- An agent or LLM deciding authorization, membership, final project destination, or Team promotion.
+- Git as the Personal vault, live Team database, generated retrieval index, secret store, or substitute for revocation.
+- Raw transcript or unrestricted document storage inside Pulse memory.
+- Automatic Personal-to-Team promotion or automatic workspace-wide visibility.
+- A skill marketplace or general workflow/skill factory; those belong to adjacent products built on approved Pulse memories.
 
 ### Dependencies and Assumptions
 
-- The project repository is private when its sources or shared memories are not public, and repository membership matches the intended human audience.
-- The team intentionally controls which raw or redacted source files enter the repository; Pulse does not expand repository access or silently copy external sources into it.
-- The active harness can read the selected source under its normal permissions and can call the Pulse MCP contract.
-- Git is installed for team publication and synchronization; Personal memory remains useful without a Git remote.
-- Existing Personal candidate, presentation receipt, provenance, reviewed import, retrieval, continuity, and Home primitives are reusable, but the Git publication and shared-pack index path are new work.
-
-### Delivery Guardrails
-
-- Build in vertical slices whose acceptance example can be exercised by a user the same day.
-- Use at most one implementation worker and one independent reviewer for a slice.
-- Stop after two review rounds; unresolved non-blocking findings move to a labeled release-hardening backlog.
-- Classify every finding as current user-outcome blocker, public-release blocker, or backlog before changing scope.
-- Stop and re-scope when requirements grow materially, new infrastructure appears, or four hours pass without a runnable intermediate result.
-- Do not begin a later slice until the current slice has a real dogfood receipt on its target surface.
+- The active harness exposes a trustworthy workspace or repository identity that Pulse can bind and verify; planning must define the honest unsupported behavior for hosts that cannot.
+- Personal and Team may share schemas and retrieval semantics, but their credentials, storage, readiness, and failure modes remain separate.
+- The existing Personal Core, Memory Home, host adapters, Git publication path, and Remote Team authorization foundation are reusable evidence, not mandatory critical-path complexity.
+- The first Team proof may use one controlled deployment and one team, but its contracts must not claim multi-team production isolation until verified.
+- Source-system access remains separately authorized; a Team role does not automatically grant access to the underlying call, transcript, document, or repository.
 
 ### Sources and Research
 
-- `docs/plans/2026-07-15-001-feat-personal-pulse-one-command-onboarding-plan.md` documents the current Personal product contract and the missing clean-machine proof.
-- `docs/TEAM_REMOTE_PILOT.md` defines the existing Team work as a synthetic foundation rather than a completed two-person product.
-- `docs/PULSE_MATERIAL_GRAPH_CURRENT_STATE.md` inventories reusable memory capsules, source references, reviewed import, continuity, and retrieval primitives.
-- `docs/superpowers/specs/2026-07-10-pulse-team-pilot-design.md` supplies the durable separation between project operating artifacts, structured memory, and raw sources; this reset replaces its central-service-first critical path for Team v0.
-- [Claude-Mem installation](https://docs.claude-mem.ai/installation) and [architecture](https://docs.claude-mem.ai/architecture/overview) demonstrate a one-command local worker, hooks, SQLite, and multi-harness installation model.
-- [Mem0 REST API](https://docs.mem0.ai/open-source/features/rest-api) and [Zep multi-tenancy](https://help.getzep.com/faq) provide external reference points for identity-scoped memory and explicit shared context.
+- `docs/plans/2026-07-15-001-feat-personal-pulse-one-command-onboarding-plan.md` records the Personal install, consent, readiness, continuity, and token-evidence contracts.
+- `docs/plans/2026-07-17-001-feat-host-neutral-one-command-install-plan.md` records equal Claude Code, Cursor, and Codex bootstrap and one shared Personal Core.
+- `docs/TEAM_REMOTE_PILOT.md` inventories the existing synthetic Team identity, authorization, audit, revocation, deletion, and Airlock foundation and its unverified deployment gaps.
+- `docs/superpowers/specs/2026-07-10-pulse-team-pilot-design.md` supplies the central Team store, Viewer, source separation, and two-person pilot intent that this contract narrows into a product split.
+- [Mem0 self-hosted setup](https://docs.mem0.ai/open-source/setup) shows a server dashboard for memories, entities, keys, and request logs, while [Mem0 Organizations and Projects](https://docs.mem0.ai/api-reference/organizations-projects) places team isolation, membership, and project management in the managed Platform.
+- [Mem0 OSS-to-Platform migration](https://docs.mem0.ai/migration/oss-to-platform) explicitly identifies organizations and multi-tenancy as Platform-only capabilities, reinforcing the distinction between a memory server and a governed Team product.
 
 ---
 
 ## Planning Contract
 
-The Product Contract above is preserved without changing its R, A, F, or AE IDs. The units below implement that contract in daily vertical slices and do not revive the Remote Commons critical path.
+### Execution profile
 
-### Key Technical Decisions
+- **Shape:** Deliver vertical product proofs in dependency order. Personal proof closes before Team UI work expands.
+- **Reuse rule:** Extend the existing Personal Core, Memory Home, Team Store, Team gateway, and Git review/export seams. A new service, database technology, auth system, or model runtime requires contradiction evidence against those seams.
+- **Batch limit:** One active implementation unit at a time. Each feature-bearing unit ends with a runnable user flow and focused regression evidence before the next begins.
+- **Authoritative sequence:** U7 -> U8 -> U14 -> U9 -> U10 -> U16 -> U11 -> U18 -> U13 -> U15 -> U12 -> U17. `Depends on` fields below override numeric or document order.
+- **Anti-loop checkpoint:** If a unit cannot produce its named observable proof after one bounded implementation pass, stop that unit, record the exact missing contract, and re-plan only the blocked seam. Do not compensate by adding infrastructure or parallel product surfaces.
+- **Truth rule:** Synthetic tests prove contracts. Only a packed clean-room install proves Personal onboarding, and only two distinct authenticated principals against one controlled Team deployment prove the Team loop.
+- **External-mutation boundary:** Local code, tests, fixtures, and commits are authorized. npm publication, release upload, deployment, colleague enrollment, private-source import, push, pull request, and external messages require separate confirmation.
 
-- KTD1. **Use a metadata-only local source registry with a bound host filesystem adapter.** The trusted CLI/runtime resolves and reads the repository-relative regular file under the signed workspace binding, computes the version digest, and returns bounded ephemeral windows. The daemon persists only the portable project namespace, locator, source kind, byte count, version digest, timestamps, cursors, and processing state. It never persists source bytes, raw transcript windows, prompt-injection text, or unsafe spans.
-- KTD2. **Mirror Memory Tray governance without its Personal grace-period commit.** Reuse closed schemas, canonical digests, versioned edits, immutable presentation receipts, idempotency, audit, deterministic blocks, and terminal receipts. Git Team candidates use a separate explicit-approval state machine with no timer-based or background publication.
-- KTD3. **Trust Codex lifecycle events, not an agent's claim that approval happened.** The existing trusted `Stop` hook verifies that the exact canonical card block for one batch occurred in `last_assistant_message` and stores only its digest. The following trusted `UserPromptSubmit` hook may mint a short content-free approval lease only when the normalized user message is exactly `ok`, one matching batch is pending in the same project and task, and no card version changed. Raw assistant or user content is never persisted. Hosts without equivalent trusted events must use an authenticated human surface and cannot downgrade to agent-mediated approval. (session-settled: user-directed — chosen over letting the agent decide whether a reply was approval: privacy and publication authority must not depend on model judgment.)
-- KTD4. **Use atomic tools plus one safety-critical publication workflow.** Source status/register/read, candidate stage/edit/reject, card inspect, receipt inspect, and context query stay atomic. Publication is one workflow-level operation because approval consumption, exact-byte writes, local commit isolation, receipt finalization, and recovery must succeed or fail as one governed sequence.
-- KTD5. **Store approved memory as canonical JSON under `pulse-memory/`.** `pulse-memory/project.json` carries a random portable project namespace that survives independent clones. `pulse-memory/memories/<memory_id>.json` carries one readable versioned memory, approval and source references. `pulse-memory/publications/<batch_id>.json` binds the ordered object digests and approval without attempting to embed its own Git commit hash. Generated indexes, pending cards, private receipts, raw sources, secrets, machine-local repository IDs, binding digests, and databases stay outside this directory. Canonical JSON avoids a new YAML dependency and makes byte-for-byte approval verification deterministic.
-- KTD6. **Separate portable project identity from local binding identity.** The signed workspace binding and inode-derived repository ID remain local authority. The Git-tracked random project namespace identifies shared objects across clones; Pulse verifies the local binding owns the checkout before mapping that namespace into the local vault.
-- KTD7. **Use a recoverable two-phase Git publication.** Pulse consumes the approval lease and returns exact canonical file bytes plus digests under a `publishing` receipt. The CLI writes only new regular non-symlink files atomically, constructs the commit from an isolated temporary Git index, advances the current local `HEAD` only with a compare-and-swap from the expected parent, verifies the resulting tree, then finalizes the receipt with file identities and the commit hash. A crash or commit failure converges idempotently to `published_uncommitted`, `committed`, or a visible failure; it never duplicates objects or commits.
-- KTD8. **Never borrow the caller's Git index, hooks, or external authority.** Publication refuses overlapping target edits, ignored target paths, links, path escape, concurrent `HEAD` movement, or ambiguous identity. Unrelated working-tree and staged changes remain untouched. The isolated commit path does not run repository hooks and never invokes remote, fetch, pull, push, branch publication, PR, or message operations.
-- KTD9. **Project only an authorized Git snapshot into the existing local state-aware corpus.** On synchronized checkouts, the strict pack indexer reads committed canonical objects from the current `HEAD` tree, validates portable identity, schema, digest, approval manifest, status, supersession, and project visibility, then materializes active objects into the local project corpus. A locally `published_uncommitted` object is eligible only when the same bound vault holds its exact content-bound publication receipt. Arbitrary working-tree edits never enter retrieval. The normal retrieval, graph, continuity, reason breakdown, and delivery receipts remain authoritative; Remote Team retrieval and Commons projections are not used. Cross-member authenticity is the repository's write/merge policy in Git v0, while Pulse remains authoritative for its own exact-card publication path.
-- KTD10. **Classify work by user outcome before expanding it.** U1-U4 are one runnable Team Memory slice; U5 is the one-command Personal release slice; U6 is shared lifecycle/Home completion. A finding can block only the current user outcome or public release. OAuth, WebAuthn, remote synchronization, rich dashboards, and new source adapters remain backlog unless evidence invalidates the chosen architecture.
+### Milestones
 
-### High-Level Technical Design
+- **M1 — Personal usable and releaseable:** U7, U8, and U14. Close only when a packed one-command install proves same-project continuity, zero cross-project influence, safe Unassigned assignment, Memory Home receipts, and honest token evidence. Public npm publication remains a separately approved action.
+- **M2 — Team Project nucleus:** U9, U10, U16, U11, U18, and U13. Close only when two distinct humans use one controlled Team Project, approve one exact candidate, retrieve the same governed memory with provenance, and prove revocation/deletion and Personal separation. Deployment and participant enrollment remain separately approved actions.
+- **M3 — Bounded expansion:** U15, U12, and U17. Generalize selected-source ingestion, explicit workspace promotion, and separately approved Git export only after M2 closes; none of them may delay the first Personal or Team Project proof.
+- **Milestone rule:** Run the focused and repository baselines named in the Verification Contract before closing each milestone. `ce-work` finishes M1 before beginning M2 and finishes M2 before beginning M3.
+
+### Current implementation status
+
+The previous revision of this artifact used U1-U6 for the Git-first path. U1-U5 are present in history as the implemented Git review, exact-card, local publication, index, and Personal clean-room foundations. U6 is superseded by the central Team Board direction and remains reserved; its ID is not reused. New work therefore starts at U7.
+
+Three residuals block a truthful Personal claim today; the first two are the recorded P1 review findings:
+
+- The host-neutral install still duplicates part of the legacy Codex Core activation transaction (`docs/residual-review-findings/821ce8b.md`, issue 45).
+- The packed public-install and daemon-backed cross-host recall flow has not received physical clean-room attestation (`docs/residual-review-findings/821ce8b.md`, issue 46).
+- The checkout is version `0.7.0`, while the public npm `preview` tag is still `0.6.7`; public availability therefore trails the code and cannot be used as evidence for the current product.
+
+Two parity defects belong in the same bounded repair instead of becoming new architecture:
+
+- `pulse-app/internal/store/continuity_receipts.go` accepts Codex and Claude Code delivery hosts but not Cursor, although the compositor emits Cursor continuity events.
+- The local product advertises the Git Team tool set to every product host even though its exact-approval hook is Codex-specific; those tools must leave the default Personal surface and return later only as governed export operations.
+
+The Team backend is further ahead than the product surface: project grants, roles, request-bound principals, pre-retrieval authorization, audit, revocation, deletion, projection workers, and a publication Airlock exist. The missing nucleus is a central candidate lifecycle and Team Board; the current Team remember route writes authorized capsules directly.
+
+## Key Technical Decisions
+
+### KTD1. Keep Personal and Team operationally separate
+
+`session-settled:` Personal continues to use one local project-bound vault shared by installed harnesses. Team continues to use its dedicated Commons store and remote gateway. They may compose labeled context after independent authorization, but neither store adopts or silently falls back to the other. This preserves R1-R5, R17, R28, and R31 without forcing Team administration onto an individual.
+
+### KTD2. Treat the trusted workspace binding as the project identity
+
+`session-settled:` The existing signed binding registry and canonical Git workspace identity remain authoritative. Project visibility is applied before all local and Team candidate discovery. A host or model may not submit an alternate project label. This reuses `pulse-app/cli/src/workspace-binding.js`, the product runtime boundary, and Team `active_context`/grant checks for R6-R10.
+
+### KTD3. Make Unassigned a staging queue, never a retrieval scope
+
+An unbound harness may submit a bounded candidate to a device-local supervisor-owned Inbox, but no retrieval engine opens or indexes that queue. Assignment requires a currently trusted binding and creates a new project-bound candidate generation with a receipt; deletion removes the staged payload. This is smaller and safer than adding a global Personal scope and directly realizes R8.
+
+### KTD4. Add review before the existing Team memory write
+
+The Commons store receives bounded candidate batches, append-only lifecycle generations, presentations, decisions, and content-bound receipts. Approval calls the existing authorized Team memory write/projection path only for the exact displayed generation. Existing active Team memory remains the canonical retrieval object; review rows are workflow state, not a second retrieval corpus. Content is immutable during ordinary transitions but may be erased by the governed deletion worker, which leaves a metadata-only tombstone. This closes R18-R24 and R26 without replacing the authorization or projection substrate.
+
+### KTD5. Give the Board its own browser-principal contract
+
+Memory Home remains a local, OS-presence-bound Personal surface. Team Board gets a dedicated public OIDC client and browser session that bind issuer, subject, client, and requested `pulse:read` or `pulse:write` capability to the existing server-side Team principal. Every signed daemon request rechecks current membership, role, binding, and project grant. The publication Airlock contributes HTTPS host checks, bounded session, CSRF, CSP, admission, and step-up patterns; its owner-only `pulse:owner` identity is not reused as everyday Board identity. Candidate approval is available only to a browser-authenticated reviewer or owner with current project authority. The harness cannot mint the browser decision.
+
+### KTD6. Preserve host parity through domain operations
+
+Claude Code, Cursor, and Codex expose the same host-neutral proposal, inspect, receipt, and retrieval operations. Browser-only human actions return receipts that the harness can inspect afterward. No host-specific hook owns memory semantics; adapters translate lifecycle events into the same MCP and daemon contracts.
+
+### KTD7. Demote Git publication to an explicit export
+
+The implemented Git review/publication/index code is retained, but its entry point accepts only an already-approved Team object plus a separate repository export approval. Git output is derived, human-readable, and local-only until another explicit external action. It is excluded from Team authorization and live retrieval authority.
+
+### KTD8. Source evidence never inherits from Team membership
+
+A candidate carries a safe source summary, immutable source-version digest, and bounded freshness state, but Team membership does not grant access to the original source. Pulse can prove only `current_as_of_registered_version` or `unverified`, never that an external source has not changed. A reviewer may approve only when project policy says the bounded evidence is sufficient or when the reviewer separately reverified the source through an authorized harness. Registering a newer digest invalidates the prior presentation; Pulse does not proxy source credentials through the Board.
+
+## High-Level Technical Design
 
 ```mermaid
-flowchart TB
-  File["Repository text or Markdown file"] --> Register["Local source registry: metadata and version digest"]
-  Register --> Window["Bounded ephemeral source windows"]
-  Window --> Harness["Active Codex extraction"]
-  Harness --> Stage["Pulse validation and candidate batch"]
-  Stage --> Cards["Canonical plain-language card block"]
-  Cards --> Stop["Trusted Stop hook: exact display digest"]
-  Stop --> OK["Trusted next UserPromptSubmit: exact ok lease"]
-  OK --> Publish["Two-phase local publication"]
-  Publish --> Pack["pulse-memory canonical files"]
-  Publish --> Commit["Path-limited local Git commit"]
-  Pack --> Index["Strict local pack projection"]
-  Index --> Engine["Existing state-aware retrieval and continuity"]
+flowchart LR
+  Host["Claude Code / Cursor / Codex"] --> Bind{"trusted project binding"}
+  Bind -->|"missing"| Inbox["local Unassigned Inbox\nnot indexed"]
+  Bind -->|"personal"| Tray["Personal Memory Tray"]
+  Tray --> Personal["Personal Project Vault"]
+  Bind -->|"team proposal"| Gateway["Team OAuth gateway"]
+  Gateway --> Review["Commons candidate lifecycle"]
+  Review --> Board["Team Board"]
+  Board -->|"exact human approval"| TeamMemory["existing Team memory + projections"]
+  Personal --> Compose["labeled context composition"]
+  TeamMemory --> Compose
+  TeamMemory -->|"separate export approval"| Git["derived Git knowledge pack"]
 ```
 
-The source reader treats source text as inert data, never as instructions. The harness owns extraction judgment, while Pulse owns every durable transition and side effect.
+The central invariant is ordering: determine the authoritative boundary, authorize visibility, then search and rank. Review candidates and Unassigned items never participate in retrieval. Materializing an approved Team candidate is a state transition into the existing memory root/projection machinery, not a copy into a parallel index.
 
-```mermaid
-stateDiagram-v2
-  [*] --> proposed
-  proposed --> blocked: deterministic risk
-  proposed --> staged: validated or warned
-  staged --> presented: trusted exact card block
-  staged --> edited: user requests change
-  edited --> staged: new version and digest
-  staged --> rejected: reject or cancel
-  presented --> approved: trusted next exact ok
-  presented --> edited: content changes
-  approved --> publishing
-  publishing --> published_uncommitted: files written, commit unavailable
-  publishing --> committed: exact local commit verified
-  committed --> indexed
-  published_uncommitted --> indexed
-  indexed --> superseded: approved correction
-  indexed --> removed: approved removal
-```
+## System-Wide Impact
 
-### System-Wide Impact
-
-- **Host lifecycle:** `UserPromptSubmit` and `Stop` gain content-free shared-review lease handling alongside current turn and memory leases. No raw prompt or assistant response enters receipts, logs, or SQLite.
-- **MCP surface:** Codex receives closed tools for source registration/windows, candidate staging/review, and exact-batch publication. Existing recall, context, resume, status, and Tray tools remain the retrieval path.
-- **Local daemon/store:** A forward-only Personal/Desk migration adds source versions, batches, candidates, presentation/approval decisions, publication recovery, shared-index metadata, and receipts. Existing migrations and private Memory Tray tables remain immutable.
-- **Filesystem/Git:** The published CLI owns safe canonical file materialization and local commit verification. The Git pack is portable; private operational state remains under the bound local Pulse data directory.
-- **Retrieval:** Only validated active objects for the current portable project namespace enter candidate generation. Personal objects remain local to each member's bound vault; shared items are labeled with project, source, approval, file, and commit provenance after retrieval.
-- **Home:** The current store-backed Home snapshot later joins shared lifecycle and publication receipts. It does not become a second approval engine or a second database.
-- **Packaging:** New CLI modules must enter the npm `files` allowlist and vendored Codex runtime. Clean-room tests run against the packed artifact, not imports from the source checkout.
-
-### Risks and Dependencies
-
-| Risk | Consequence | Mitigation / gate |
-|---|---|---|
-| Hook output is unavailable or differs from the expected Codex event contract | Chat cannot prove the exact cards were shown | U2 fails closed and keeps Home as the only trusted fallback; no agent-mediated approval claim |
-| Source contains prompt injection, secrets, paths, or transcript-shaped text | Unsafe text influences extraction or enters shared memory | Treat windows as inert data, withhold deterministic unsafe spans, validate canonical candidates independently, and persist no source bytes |
-| Independent clones receive different local repository IDs | Shared memories cannot map to one project | Git-tracked random project namespace is canonical across clones; local binding remains local authority only |
-| Dirty index, ignored path, symlink, hook, or concurrent writer alters publication | Wrong files enter a commit or approved bytes drift | Exact path allowlist, exclusive publication lock, atomic no-follow writes, isolated temporary index, hook-free commit construction, compare-and-swap `HEAD`, tree rehash, and fail-closed overlap checks |
-| Crash occurs between approval, file write, commit, and indexing | Duplicate or half-published memory | Durable two-phase receipt, idempotency keys, recovery checkpoints, and terminal `published_uncommitted`/`committed` states |
-| Pack import bypasses Personal review or pollutes another project | Privacy leak or incorrect ranking | Only strict approved pack schema is eligible; project visibility and current/superseded status are filtered before materialization |
-| An agent or compromised teammate writes a plausible pack file outside Pulse | Unapproved context reaches another member | Ignore arbitrary working-tree files; index committed `HEAD` objects only; rely explicitly on repository write/merge policy for cross-member trust; label Git v0 as repository-trusted rather than cryptographically writer-attested |
-| Team work delays the still-missing clean install proof | Product remains developer-only | U5 is a separate public-release blocker; U1-U4 stop after a real local dogfood receipt and cannot expand into release infrastructure |
-| Existing U8 work overlaps from another dirty worktree | User changes are overwritten or mixed | Do not touch `.worktrees/pulse-codex-team-memory`; implement from this reset worktree and port only reviewed committed patterns |
-
-### Sequencing
-
-U1-U4 are the active slice and must be completed in order because each unit supplies authority consumed by the next. U5 can begin only after the Team slice produces a real second-worktree receipt. U6 follows the durable lifecycle contracts so Home renders authoritative state rather than inventing it.
-
----
+- **Personal CLI and installer:** One orchestration owner replaces the duplicated legacy activation path. Detection, resume, rollback, and harness registration remain idempotent across one or several installed hosts.
+- **Workspace binding:** The signed registry remains the only source of project identity. Unbound capture gets a distinct non-retrieval queue and an explicit assignment transition.
+- **Local Go server and Home:** Home projects Personal readiness, recent memories, continuity, token economy, pending Personal cards, and Unassigned counts/actions without becoming a Team authorization surface.
+- **Team Go store and server:** New candidate workflow tables and routes reuse current principal verification, mutation permits, writer leases, project grants, audit conventions, and projection completion.
+- **Node gateway and MCP:** The gateway adds a Board route and exact browser decisions; MCP adds host-neutral proposal/inspection/receipt operations and preserves labeled Personal/Team context composition.
+- **Git path:** Existing `git_team_memory_*` code becomes an export adapter. Its local commit and index behavior cannot be invoked by Team approval alone.
+- **Failure propagation:** Missing binding stages locally or refuses retrieval; Team outage is visible and closed; stale presentation returns conflict; revoked access fails the next request; failed projection keeps approval durable but memory unavailable until retry completes.
+- **Data integrity:** Every edit, scope move, correction, and supersession creates a new generation. Content-bearing rows remain immutable during normal lifecycle transitions; governed deletion erases their payload and appends a metadata-only tombstone. Audit and receipts remain metadata-only and bounded.
+- **Information hierarchy:** Home orders readiness blockers, pending Personal/Unassigned decisions, next-task context, token evidence, and history. Board lands on the current project and orders pending exact decisions and blocked recovery work before active memory and history; project switcher and role-aware navigation never reveal unauthorized project names.
+- **Accessibility:** Home and Board use semantic landmarks/headings, full keyboard operation, visible/restored focus, programmatic content/scope/warning labels, live async announcements, non-color lifecycle cues, minimum touch targets, and a single-column narrow-screen path for exact review.
 
 ## Implementation Units
 
-### U1. Add the metadata-only source and shared-review domain
+### U7. Repair the Personal install transaction and host parity
 
-- **Goal:** Give Pulse a durable local contract for versioned project sources and explicit shared candidate batches without storing raw source bytes or publishing anything.
-- **Requirements:** R3, R6-R13, R17; F2; AE2-AE3.
-- **Files:**
-  - Create `pulse-app/internal/store/migrations/048_git_team_memory_review.sql`
-  - Create `pulse-app/internal/store/project_source.go`
-  - Create `pulse-app/internal/store/project_source_test.go`
-  - Create `pulse-app/internal/store/git_team_memory_review.go`
-  - Create `pulse-app/internal/store/git_team_memory_review_test.go`
-  - Create `pulse-app/internal/server/project_source.go`
-  - Create `pulse-app/internal/server/project_source_test.go`
-  - Create `pulse-app/internal/server/git_team_memory_review.go`
-  - Create `pulse-app/internal/server/git_team_memory_review_test.go`
-  - Modify `pulse-app/internal/store/schema.go`
-  - Modify `pulse-app/internal/store/schema_manifest_test.go`
-  - Modify `pulse-app/internal/store/team_policy_test.go`
-  - Modify `pulse-app/internal/server/server.go`
-- **Approach:** Add Personal/Desk-only metadata tables and migration applicability policy for portable project namespace mapping, source locators and versions, batches, typed candidates, card generations, decisions, publication recovery, index state, immutable receipts, and audit. Reuse Memory Tray's canonicalization and all-or-nothing unsafe-batch behavior while defining separate explicit shared states. The daemon accepts only host-attested source metadata and enforces version/idempotency transitions; U2 supplies the signed-binding filesystem adapter that computes the digest and bounded windows without sending raw bytes into durable storage.
-- **Test scenarios:** Valid relative source and repeated unchanged registration; changed version; absolute path; traversal; symlink escape; oversized/binary source; secret/path/transcript spans; unknown candidate fields; unsafe candidate mixed into a batch; source version changes before staging; candidate edit invalidates the prior digest; rejected/blocked candidates never enter publication state; SQLite/WAL contains none of the source fixture's raw sentinel text.
-- **Verification:** `cd pulse-app && go test ./internal/store ./internal/server -count=1` passes, including migration applicability and raw-sentinel scans.
-- **Done when:** One local file version can produce a safe pending batch with stable source references and immutable candidate digests, while no API can approve, write Git files, or call a model.
-
-### U2. Bind Codex cards and exact `ok` to trusted host events
-
-- **Goal:** Make chat-first approval truthful without granting the agent publication authority.
-- **Requirements:** R2, R8-R17; F2-F3; AE3-AE5.
-- **Dependencies:** U1.
-- **Files:**
-  - Modify `pulse-app/cli/src/host-adapter.js`
-  - Modify `pulse-app/cli/src/codex-hooks.js`
-  - Modify `pulse-app/cli/src/codex-hooks.test.js`
-  - Modify `pulse-app/cli/src/codex-runtime.js`
-  - Modify `pulse-app/cli/src/codex-runtime.test.js`
-  - Create `pulse-app/cli/src/project-source.js`
-  - Create `pulse-app/cli/src/project-source.test.js`
-  - Modify `pulse-app/cli/package.json`
-  - Modify `mcp/src/index.ts`
-  - Create `mcp/src/git-team-memory.test.ts`
-  - Modify `plugins/pulse/hooks/hooks.json` only if the existing event payload contract requires a matcher change
-- **Approach:** Add the bound filesystem adapter and closed MCP tools for source status/register/window, candidate stage/edit/reject, and card/receipt inspection. The adapter canonicalizes the signed checkout, rejects traversal and links, reads bounded regular text/Markdown bytes, computes the version digest, withholds deterministic unsafe spans, and sends only metadata to the daemon. Render one canonical human card block with a batch ID and ordered card digests. Extend trusted `Stop` handling to verify that exact block in the actual assistant message and persist only a content-free presentation receipt. Extend trusted `UserPromptSubmit` handling to inspect but never persist the raw prompt and mint one short approval lease only for exact normalized `ok` after one matching presentation. Publication tool calls must consume that lease and recheck project, session, turn, batch generation, ordered digests, source version, and candidate states.
-- **Test scenarios:** Exact card block then exact `ok`; generic continue; `ok` embedded in a longer message; prompt-injected approval text in the source; card omitted or altered by the agent; edit after presentation; wrong task/project; expired lease; two pending batches; replay; raw prompt/assistant sentinel absent from files, DB, receipts, and logs.
-- **Verification:** `cd pulse-app/cli && npm test` and `cd mcp && npm test && npm run build` pass with the new host-attestation fixtures.
-- **Done when:** Codex can show the exact cards and obtain a publishable approval lease only from the user's next exact `ok`; an ordinary MCP/model call cannot mint it.
-
-### U3. Publish exact approved objects to a local Git commit
-
-- **Goal:** Turn one approved batch into portable human-readable files and one verified local commit without touching unrelated work or any remote.
-- **Requirements:** R18-R21, R26; F3; AE4-AE5.
-- **Dependencies:** U2.
-- **Files:**
-  - Create `pulse-app/cli/src/git-team-memory.js`
-  - Create `pulse-app/cli/src/git-team-memory.test.js`
-  - Modify `pulse-app/cli/src/codex-runtime.js`
-  - Modify `pulse-app/cli/src/codex-runtime.test.js`
-  - Modify `pulse-app/cli/src/cli.js`
-  - Modify `pulse-app/cli/package.json`
-  - Modify `pulse-app/cli/scripts/prepare-preview-vendor.mjs`
-  - Modify `mcp/src/index.ts`
-  - Modify `mcp/src/git-team-memory.test.ts`
-  - Modify `pulse-app/internal/store/git_team_memory_review.go`
-  - Modify `pulse-app/internal/store/git_team_memory_review_test.go`
-  - Modify `pulse-app/internal/server/git_team_memory_review.go`
-  - Modify `pulse-app/internal/server/git_team_memory_review_test.go`
-- **Approach:** Implement the two-phase publication contract. The daemon transitions an approved batch to `publishing` and returns canonical bytes for `pulse-memory/project.json`, memory objects, and the batch manifest. The CLI locks the pack, refuses links/overlaps/ignored targets, writes exact bytes atomically, builds the exact tree with a temporary index, creates a hook-free commit object, compare-and-swaps local `HEAD` from the expected parent, verifies committed tree digests, and finalizes the content-bound receipt. The project-visible approver label is shown on the cards and stored in the files; it is never inferred silently from a private Pulse identifier or email. When identity or `HEAD` movement prevents a commit after safe writes, report `published_uncommitted` and never stage unrelated paths. No code path may invoke a Git remote or network action.
-- **Test scenarios:** Clean repo; unrelated modified and staged files; target overlap; ignored directory; symlink/hardlink/path escape; absent or undisplayed approver label; missing Git identity; detached worktree; repository hooks are not run; concurrent `HEAD` advance; crash after first file and after commit; retry; stale approval; two concurrent publishers; spy Git executable proves no remote/fetch/pull/push/PR command.
-- **Verification:** `cd pulse-app/cli && npm test` plus focused Go and MCP tests pass; the fixture commit contains only the exact `pulse-memory/` paths and every resulting digest matches the approved batch.
-- **Done when:** A real exact `ok` yields readable approved files, one local commit or an honest recoverable `published_uncommitted` receipt, and zero external action.
-
-### U4. Index the shared pack through the existing state-aware engine
-
-- **Goal:** Prove that a second checkout receives and retrieves the approved memory without Commons or a second retrieval engine.
-- **Requirements:** R22-R24, R28; F4; AE6, plus the active-object part of AE8.
-- **Dependencies:** U3.
-- **Files:**
-  - Create `pulse-app/internal/store/git_team_memory_index.go`
-  - Create `pulse-app/internal/store/git_team_memory_index_test.go`
-  - Modify `pulse-app/internal/store/memory_capsule.go`
-  - Modify `pulse-app/internal/retrieve/hybrid.go`
-  - Create `pulse-app/internal/retrieve/git_team_memory_test.go`
-  - Create `pulse-app/internal/server/git_team_memory_index.go`
-  - Create `pulse-app/internal/server/git_team_memory_index_test.go`
-  - Modify `pulse-app/internal/server/server.go`
-  - Modify `pulse-app/cli/src/codex-hooks.js`
-  - Modify `pulse-app/cli/src/codex-hooks.test.js`
-  - Create `pulse-app/cli/scripts/git-team-memory-e2e.mjs`
-  - Modify `pulse-app/cli/package.json`
-  - Modify `Makefile`
-- **Approach:** On trusted session start and manual sync, read only committed `pulse-memory/project.json`, batch manifests, and memory objects from the current `HEAD` tree. Strictly validate schema, canonical bytes, identity, digest, approval, status, and supersession before atomically reconciling the local shared projection. Admit a local uncommitted object only when its exact receipt exists in the same bound vault. Materialize only active objects for this portable project namespace into the authorized local corpus before ranking; preserve a local provenance map for team labels, source refs, file/version, approval, and commit when available. Do not call Team Remote or create another ranker.
-- **Test scenarios:** Linked worktree at the publication commit; independent local clone fixture sharing the portable namespace; invalid/non-canonical/manual committed file; arbitrary uncommitted file ignored; wrong project ID; corrected/superseded/removed object; deletion between scans; idempotent unchanged scan; Personal object absent from a teammate vault; same state-aware query surfaces the shared item with reasons and provenance; no raw source content enters the index.
-- **Verification:** `cd pulse-app && go test ./internal/store ./internal/server ./internal/retrieve ./cmd/pulse -count=1`, the corresponding race gate, `cd pulse-app/cli && npm run test:git-team-memory`, and `make verify` pass.
-- **Done when:** The black-box local E2E creates a source, cards, trusted approval, local commit, second checkout, incremental index receipt, and fresh-task retrieval receipt through the existing engine.
-
-### U5. Finish the one-command Personal clean-room release proof
-
-- **Goal:** Turn the already implemented Personal path through Memory Home into a colleague-installable packed product rather than a source-checkout success.
+- **Goal:** Resolve the duplicated activation transaction and known three-host parity defects without changing the product architecture.
+- **Depends on:** None.
 - **Requirements:** R1-R5; F1; AE1.
-- **Dependencies:** U4's architecture and pack modules must be included in the packaged runtime, but Team adapters do not expand the install ceremony.
 - **Files:**
-  - Create `pulse-app/cli/scripts/personal-preview-clean-room.mjs`
-  - Create `pulse-app/cli/scripts/personal-preview-interruption-e2e.mjs`
-  - Create `pulse-app/cli/scripts/personal-preview-release-attestation.mjs`
-  - Modify `pulse-app/cli/scripts/codex-product-e2e.mjs`
-  - Modify `pulse-app/cli/src/release-gates.test.js`
-  - Modify `pulse-app/cli/package.json`
-  - Modify `Makefile`
-  - Modify `README.md`
-  - Modify `AGENTS.md`
-  - Modify `docs/INSTALL_WITH_AGENT.md`
-  - Create `docs/PERSONAL_PULSE_ONBOARDING.md`
-- **Approach:** Resume the unfinished clean-room/release unit from the prior Personal plan. Test a packed package with Node and Codex but no system Go/Python/API key; use production artifact verification, managed embedding runtime, signed binding, actual hooks, first presented memory, a fresh task, Home evidence, interruption/repair, and uninstall/wipe honesty. Keep publication, release upload, notarization submission, and colleague install outside automatic execution authority.
-- **Test scenarios:** Clean install; no compilers/interpreters; canceled consent; interrupted artifact/model download; reinstall/repair; missing or invalid signed manifest; full retrieval unavailable; one real memory and fresh task; Home receipt and honest measured/estimated/collecting token state; packed runtime includes Git Team modules without enabling remote side effects.
-- **Verification:** `cd pulse-app/cli && npm run test:codex-product`, the three clean-room scripts against `npm pack`, `make verify`, `make release-verify`, and a content-free physical Apple Silicon release attestation pass before public preview publication.
-- **Done when:** The one public command installs the packed release and proves Personal continuity on a clean supported Mac without user-installed build tools or model keys.
-
-### U6. Add shared lifecycle, corrections, and publication history to Home
-
-- **Goal:** Let a non-technical member understand what was proposed, blocked, approved, transferred, corrected, superseded, or removed without reading Git diffs.
-- **Requirements:** R11, R25-R28; F5; AE7-AE8.
-- **Dependencies:** U4.
-- **Files:**
-  - Modify `pulse-app/internal/store/memory_home.go`
-  - Modify `pulse-app/internal/store/memory_home_test.go`
-  - Create `pulse-app/internal/store/memory_home_shared_query.go`
-  - Modify `pulse-app/internal/server/memory_home.go`
-  - Modify `pulse-app/internal/server/memory_home_test.go`
-  - Modify `pulse-app/internal/server/home_routes.go`
-  - Modify `pulse-app/internal/server/home_routes_test.go`
-  - Modify `pulse-app/internal/store/git_team_memory_review.go`
-  - Modify `pulse-app/internal/store/git_team_memory_index.go`
   - Modify `pulse-app/cli/src/cli.js`
-- **Approach:** Extend the existing server-rendered Home snapshot with bounded shared review batches, deterministic blocks and harness warnings, exact card versions, decisions, publication/index receipts, commit provenance, and correction/supersession/removal history. Add manual changed-source review; an optional scheduler may enqueue detection only. Correction creates a new displayed version and approval cycle, while local reconciliation excludes the superseded version before retrieval.
-- **Test scenarios:** Empty state; proposed/warned/blocked batch; edit and re-presentation; rejected/canceled batch; committed and published-uncommitted outcomes; indexing failure/retry; correction/supersession/removal; unchanged evening run; narrow and keyboard-readable essential flow; raw source/private content absent from rendered HTML and snapshot JSON.
-- **Verification:** Focused store/server tests and browser QA against real Home fixtures pass, followed by `make verify`.
-- **Done when:** Home and chat show the same canonical cards and digests, Home preserves the complete lifecycle, and future context excludes superseded or removed Team Memory.
+  - Modify `pulse-app/cli/src/personal-install-command.js`
+  - Modify `pulse-app/cli/src/personal-install.js`
+  - Modify `pulse-app/internal/store/continuity_receipts.go`
+  - Modify corresponding focused tests under `pulse-app/cli/src/`
+  - Modify `pulse-app/cli/scripts/personal-preview-multiharness-e2e.mjs`
+- **Approach:** Collapse the public installer and reviewed legacy Codex connect path onto the resumable host-neutral Core transaction; keep the Codex host mutation as a thin rollback-safe adapter. The older Claude external-MCP compatibility command is not an installation or readiness authority and may be removed only after U14 proves its native replacement. Accept Cursor as a continuity delivery host while keeping measured provider usage unavailable until trustworthy Cursor usage evidence exists. Personal remember remains a proposal to the existing Memory Tray: every host receives candidate/version/digest/receipt, while Home owns edit, cancel, visible delay, and final save.
+- **Test scenarios:** One-host install plan; several-host shared Core; identical Tray proposal semantics; Cursor offer/ack without fabricated provider measurement; interruption and resume; reinstall without duplicate runtime; absent harness ignored; explicit non-ready verdict when prerequisites are missing.
+- **Observable proof:** Focused tests show one public Personal Core activation transaction plus a thin legacy Codex adapter, equivalent proposal/receipt behavior for all three hosts, and no duplicate runtime after interruption or reinstall.
 
----
+### U8. Add trusted project isolation and the Unassigned Inbox
+
+- **Goal:** Make project assignment explicit before retrieval and give ambiguous capture a safe visible destination.
+- **Depends on:** U7.
+- **Requirements:** R6-R10; F1-F2; AE2-AE3.
+- **Files:**
+  - Modify `pulse-app/cli/src/workspace-binding.js`
+  - Add `pulse-app/cli/src/unassigned-inbox.js` and focused tests
+  - Modify `pulse-app/cli/src/codex-runtime.js`
+  - Modify `pulse-app/internal/server/home_routes.go`
+  - Modify `pulse-app/internal/server/memory_home.go`
+  - Modify focused Home and multiharness product tests
+- **Approach:** Keep the bound vault as the only retrievable Personal store. When resolution returns an allowed unbound state, stage only validated structured candidates in a supervisor-owned local queue. Home shows explicit empty, unavailable, assigning, binding-changed, validation-rejected, moved-to-Tray, delete-confirmation, delete-complete, and retry states. The original card remains until a successful move/delete receipt is visible; assignment binds the exact staged digest to the current trusted project and then enters the ordinary Personal Tray. Retrieval, counts, graph, continuity, and token economy never read the Inbox.
+- **Test scenarios:** Installer-created human-approved binding; primary checkout and worktree identity; moved checkout; changed trust registry; cloned repository creates a distinct local identity; non-Git folder stages only to Inbox; Alpha memory invisible from Beta across two hosts; empty and unavailable Inbox; assignment loading and success; binding-changed conflict retains card; validation rejection; Inbox item has zero recall/count/trace influence; assignment to Alpha creates a new project-bound receipt and visible Tray handoff; delete confirmation/completion; secrets, transcript-like text, and path-like data are rejected before staging.
+- **Observable proof:** A user can see an unassigned card, assign it to the current project, and retrieve it later only there; the cross-project negative test observes no influence.
+
+### U14. Prove the packed Personal artifact and public release gate
+
+- **Goal:** Produce the physical evidence that distinguishes artifact-ready Personal from a publicly available preview.
+- **Depends on:** U7 and U8.
+- **Requirements:** R1-R10; F1-F2; AE1-AE3.
+- **Files:**
+  - Modify `pulse-app/cli/scripts/personal-preview-multiharness-e2e.mjs`
+  - Add or modify the physical acceptance harness under `pulse-app/cli/scripts/`
+  - Modify `pulse-app/cli/src/release-gates.test.js`
+  - Modify `docs/PERSONAL_PULSE_ONBOARDING.md` only after evidence exists
+- **Approach:** Test the packed tarball, bundled runtime, real daemon, one-command entry point, one installed supported host, actual Tray save, fresh-task delivery, Home readiness, token state, trusted project isolation, and Unassigned assignment on a supported clean machine. When multiple hosts exist, additionally prove they use the same bound project Core. Publication is a separate human-approved release action after this artifact gate passes; until then the checkout may be artifact-ready while npm `preview` remains older.
+- **Test scenarios:** Only Claude Code; only Cursor; only Codex; several hosts; no compiler/model key; real daemon retrieval; clean uninstall; Alpha memory survives a fresh Alpha task; Beta observes zero Alpha result/count/trace influence; an unbound candidate enters Inbox and is retrievable only after exact assignment; Home save/assignment/continuity receipts; physical prerequisite failure; packed digest versus checkout and public dist-tag mismatch.
+- **Observable proof:** A local release evidence bundle binds the exact tarball digest and proves the packed `0.7.0` artifact, same-project continuity, zero Beta influence, successful Inbox assignment, and honest Home/token receipts. A separate release receipt is required before documentation says the public npm command installs that version.
+
+### U15. Finish the host-neutral selected-source contract
+
+- **Goal:** Make calls, documents, and repository files enter the same bounded extraction path without expanding U8 into a connector project.
+- **Depends on:** U13.
+- **Requirements:** R12-R16; F1, F3; AE9.
+- **Files:**
+  - Modify the source registration and window contracts in `mcp/src/index.ts`
+  - Refactor source metadata from `pulse-app/internal/store/git_team_memory_review.go` into a host-neutral source domain
+  - Add focused source-version and safety tests in Go and MCP
+  - Modify supported-host adapter tests under `pulse-app/cli/src/`
+- **Approach:** Register only source kind, safe locator, version digest, byte count, and processing state. The active harness reads a separately authorized bounded window and proposes structured candidates; Pulse never persists the raw window. Replaying the same digest is idempotent. A changed digest opens a new review generation and suppresses already resolved material unless the harness explicitly supplies new evidence.
+- **Test scenarios:** Same version replay; changed version; stale review; already resolved candidate; bounded window; inaccessible source; unsafe locator; raw transcript and secret sentinels; equal Claude Code, Cursor, and Codex contracts.
+- **Observable proof:** The same selected text fixture yields one review batch across repeated processing, a changed version yields a new attributable generation, and no source bytes enter memory or receipts.
+
+### U9. Introduce the first Commons candidate lifecycle
+
+- **Goal:** Replace direct product writes with propose, inspect, edit, reject, present, approve, and active-memory materialization in the central Team Vault.
+- **Depends on:** U14.
+- **Requirements:** R17-R23, R27; F3; AE4-AE5.
+- **Files:**
+  - Add the next migration under `pulse-app/internal/store/migrations/`
+  - Add `pulse-app/internal/store/team_memory_review.go` and focused tests
+  - Add `pulse-app/internal/server/team_memory_review.go` and focused tests
+  - Modify `pulse-app/internal/server/team_router.go`
+  - Modify `pulse-app/internal/server/team_memory.go`
+  - Modify `pulse-app/internal/teamauth/` only where a distinct review action is required
+- **Approach:** Port the proven immutable generation, warning, presentation, decision, and receipt patterns from `git_team_memory_*` into Commons-owned tables keyed by authoritative team/project/principal facts. Enforce field and aggregate byte limits, candidate-count limits, per-principal and per-project admission limits, and bounded idempotency retention before durable writes. The product route stages first. Approval rechecks the presenter, candidate generation, scope, source digest, current role/grant, policy epoch, and writer lease in the mutation transaction before calling the existing memory materialization path.
+- **Test scenarios:** Stage and idempotent replay; edit invalidates presentation; scope change invalidates approval; reviewer versus member permissions; revoked grant between presentation and approval; newer registered source digest invalidates presentation; unverified freshness obeys project policy; unsafe content; per-field, batch, principal, and project limits reject before writes; bounded idempotency cleanup; duplicate decision; materialization failure and retry.
+- **Observable proof:** One authenticated member proposes a candidate, a reviewer approves the exact displayed generation, and only then does an active Team memory object appear with linked receipt and audit identifiers.
+
+### U10. Ship the read-only non-technical Team Board
+
+- **Goal:** Give members and reviewers one central place to understand authoritative shared-memory state before adding mutations.
+- **Depends on:** U9.
+- **Requirements:** R18-R27; F3, F5; AE4-AE5, AE8.
+- **Files:**
+  - Add `mcp/src/team-board-gateway.ts` and focused tests
+  - Modify shared browser security utilities currently used by `mcp/src/airlock-browser-gateway.ts`
+  - Modify `mcp/src/oauth-resource.ts`, `mcp/src/principal-context.ts`, and gateway composition in `mcp/src/index.ts`
+  - Add read-only Board routes under `pulse-app/internal/server/`
+  - Add Board projection queries under `pulse-app/internal/store/`
+  - Modify deployment allowlists and packaging contracts under `deploy/team/` and `mcp/`
+- **Approach:** Before freezing the Board session contract, run a content-free provider-conformance fixture for Authorization Code plus PKCE and the exact issuer, subject, client, capability, nonce, and redirect mapping. Then implement KTD5's dedicated Board OIDC client, browser-principal session, signed daemon request, and current principal/grant recheck while reusing the publication Airlock's defensive browser patterns. The Board renders authoritative candidate/memory states and recovery states such as `materializing`, `materialization_failed`, `removal_pending`, and `blocked`; it does not cache content as a second authority. Pending content is projected only to the proposer and current reviewers or owners. Owner administration remains separate.
+- **Test scenarios:** Authorization Code plus PKCE provider-conformance claims; loading, empty, partial, error, and success states; member sees only active project memory; proposer and reviewer see permitted pending cards; owner sees access/history; ordinary member cannot observe pending content; unauthorized project is concealed; OAuth subject/client mismatch and revoked binding fail; pagination is stable; content-free errors do not leak candidate existence; failed materialization and deletion show the responsible recovery action.
+- **Observable proof:** Two browser identities with different project grants receive different server-authorized Board projections and can inspect the lifecycle without any Board mutation authority.
+
+### U16. Add exact reviewer decisions to the Team Board
+
+- **Goal:** Complete the Board loop with digest-bound edit, reject, approve, correction, supersession, and removal actions.
+- **Depends on:** U9 and U10.
+- **Requirements:** R18-R27; F3; AE4-AE5, AE8.
+- **Files:**
+  - Modify `mcp/src/team-board-gateway.ts`
+  - Modify shared browser security utilities factored in U10
+  - Add Board mutation routes under `pulse-app/internal/server/`
+  - Modify candidate lifecycle files introduced in U9
+  - Modify deployment allowlists and packaging contracts
+- **Approach:** Add CSRF-protected browser actions that sign the authenticated human's exact candidate generation, project/scope, warnings, and decision. The daemon rechecks role, grant, policy epoch, source evidence policy, candidate generation, and writer lease. Edit or scope change invalidates presentation. The gateway never becomes an approval database. Every action has visible idle, dirty, confirmation, submitting, success, stale-conflict, forbidden, source-unavailable, retryable-failure, and terminal states; the exact card remains visible until success and the resulting receipt appears in its timeline.
+- **Test scenarios:** Reviewer versus member; exact approve; edit/reject; keyboard-only confirmation; stale generation returns to the changed card; source evidence inaccessible under policy; newer registered digest invalidates approval; unverified freshness obeys project policy; revoked grant between render and post; CSRF/session replay; cross-origin post; materialization failure and idempotent retry; correction, supersession, and removal pending; focus restoration and live status announcements.
+- **Observable proof:** An authorized reviewer approves exactly what the Board displayed; the same request from MCP, a stale page, an ordinary member, or a revoked reviewer is rejected.
+
+### U11. Compose approved Team context with Personal context
+
+- **Goal:** Deliver labeled private and shared memory through the same harness-native context flow without merging authority.
+- **Depends on:** U16.
+- **Requirements:** R25-R31; F4; AE4, AE7-AE8.
+- **Files:**
+  - Modify `pulse-app/internal/store/team_read_repository.go`
+  - Modify `pulse-app/internal/server/team_read.go`
+  - Modify `mcp/src/team-contracts.ts`
+  - Modify `mcp/src/index.ts`
+  - Modify `pulse-app/cli/src/codex-runtime.js`
+  - Modify shared Claude Code, Cursor, and Codex adapter tests
+- **Approach:** Preserve pre-retrieval project authorization in each store, then compose bounded results with explicit `personal_project`, `team_project`, or `team_workspace` provenance and existing ranking reasons. Receipts record the exact offered pack and token method without mixing incomparable Personal and Team savings baselines. Remove Git Team tools from the default product list; the only agent-side Team mutation is candidate proposal into the non-retrievable queue. Team failure remains visible and cannot be substituted with local data under a shared label.
+- **Test scenarios:** Personal plus Team result in one authorized project; Team-only and Personal-only results; ungranted member has zero result/count/trace influence; revocation affects the next request; Team outage is explicit; correction/deletion disappears from context and continuity; all three harnesses expose equivalent tools and labels.
+- **Observable proof:** An in-process two-principal acceptance fixture receives the same approved Team generation in separate harness contexts while their Personal memories remain different and private. Real-human evidence is reserved for U13.
+
+### U12. Add explicit Team Workspace promotion
+
+- **Goal:** Support selected cross-project Team knowledge without broadening visibility by default.
+- **Depends on:** U13 and U16.
+- **Requirements:** R11, R20-R24, R29; F5; AE6.
+- **Files:**
+  - Modify Team review/store/server files introduced in U9
+  - Modify Team Board files introduced in U10
+  - Modify Team context composition files from U11
+- **Approach:** Scope promotion creates a new approved workspace generation naming the exact included projects and preserves the project generation as history. Retrieval expands only to the explicit project set stored on that generation; there is no parent-scope inheritance.
+- **Test scenarios:** Project-to-workspace promotion; unrelated project excluded; partial project set; changed project set invalidates approval; stale project membership blocks read; correction and removal of promoted generation.
+- **Observable proof:** One approved Team rule becomes visible in exactly two selected projects while a third project in the same team observes no result, count, trace, or graph influence.
+
+### U17. Export approved Team knowledge to local Git
+
+- **Goal:** Reuse the existing Git path as a separately approved portable export.
+- **Depends on:** U13 and U16.
+- **Requirements:** R32-R35; F6; AE10.
+- **Files:**
+  - Refactor `pulse-app/internal/store/git_team_memory_*` as export-domain adapters
+  - Modify `pulse-app/cli/src/codex-hooks.js` and `pulse-app/cli/src/codex-runtime.js`
+  - Modify `mcp/src/index.ts` and Git export tests
+  - Modify Team Board history from U10/U16
+- **Approach:** A selected device with a current trusted binding requests exact approved Team object bytes from the gateway, presents the target repository and resulting file digest, and receives a short-lived export lease after a separate browser decision. The local adapter verifies repository identity, writes only approved paths, creates the local commit, and reconciles the content-bound receipt back into Team history. No push or pull request follows.
+- **Test scenarios:** Team approval does not authorize export; export from a different device or repository fails; changed bytes/destination invalidate approval; Personal object rejected; local commit touches only allowed paths; offline/final-receipt retry is idempotent; no remote mutation.
+- **Observable proof:** An approved Team object becomes an inspectable local Git artifact on the named bound device, and the Team Board shows the matching export receipt without treating Git as live memory.
+
+### U18. Activate the controlled Team deployment path
+
+- **Goal:** Replace synthetic-only deployment tripwires with a fail-closed, reversible path capable of running the already-tested Team product contracts.
+- **Depends on:** U10, U16, and U11.
+- **Requirements:** R17-R31; F3-F4; AE4, AE7-AE8.
+- **Files:**
+  - Modify runtime composition in `pulse-app/cmd/pulse/main.go`
+  - Modify gateway composition in `mcp/src/index.ts`
+  - Modify `deploy/team/` service, Caddy, environment, validation, and rollback contracts
+  - Modify issuer and resource verification under `mcp/src/oauth-resource.ts`
+  - Modify Team readiness and activation tests in Go, MCP, and deployment validation
+- **Approach:** Add explicit non-synthetic activation bound to one configured store/team, external HTTPS origin, live issuer/resource metadata, Board gateway, Team read/write routes, protected enrollment registry, writer lease, embedder readiness, credential references, and rollback generation. Startup remains closed unless every exact identity, origin, key reference, schema, projection, and acceptance-gate digest matches. This unit prepares deployment code; running it on shared infrastructure still requires fresh approval.
+- **Test scenarios:** External-origin mismatch; issuer/resource mismatch; missing or rotated credential; enrollment registry unavailable; embedder unavailable; stale writer lease; Board route disabled; real-content gate absent; rollback to previous generation; no Personal or synthetic fallback; secrets absent from config artifacts and logs.
+- **Observable proof:** Deployment validation can start a temporary externally addressed Team stack with labeled synthetic identities and then tear it down cleanly; no real person or private content is enrolled yet.
+
+### U13. Prove the gated two-person product nucleus
+
+- **Goal:** Replace synthetic-only confidence with one controlled real product flow while preserving honest preview claims.
+- **Depends on:** U18 and fresh deployment/participant approval.
+- **Requirements:** R17-R31; F3-F4; AE4, AE7-AE9.
+- **Files:**
+  - Modify `mcp/scripts/team-remote-real-acceptance.mjs`
+  - Modify `deploy/team/` validation and runbook files
+  - Modify `docs/TEAM_REMOTE_PILOT.md`
+  - Modify product packaging and release-gate tests only where required by the real flow
+- **Approach:** After fresh deployment and colleague-participation approval, exercise a temporary controlled deployment with two distinct authenticated human principals and separate device bindings, one granted project, one ungranted project, one approved candidate, one revoked grant, one deletion, and one outage. Use labeled non-private content. Record evidence artifacts without tokens, raw prompts, local paths, or source text. Without that approval, implementation may prepare and validate the acceptance harness but must leave this unit blocked rather than substituting synthetic evidence.
+- **Test scenarios:** Fresh enrollment; project grant; separate clients; proposal and Board approval; cross-member retrieval; ungranted concealment; immediate revocation; derivation-complete deletion; outage fail-closed; reinstall/reconnect; evidence redaction.
+- **Observable proof:** The Team proof in the Goal Capsule succeeds for two distinct members. Documentation still says controlled preview until a separately authorized deployment and release decision are made.
 
 ## Verification Contract
 
-### Required gates
+- **V1 Baseline gate:** The repository-wide verification suite is green before new feature work is credited; failures are classified as pre-existing or introduced with evidence.
+- **V2 Unit gate:** Each implementation unit's focused store, server, CLI, MCP, browser, and negative tests pass before wider suites run.
+- **V3 Personal package gate:** Tests execute against the packed npm artifact, the bundled runtime, and real supported-host configuration rather than source-tree shims.
+- **V4 Personal physical gate:** A supported clean machine with only one supported harness proves install, one memory, fresh-task delivery, Home readiness, honest token state, zero cross-project influence, and safe Unassigned assignment. Multi-harness parity is additionally proven where more than one host is present. This makes the artifact releaseable; a separate publication receipt makes the public npm command current.
+- **V5 Isolation gate:** Automated sentinels assert zero cross-project and unauthorized cross-member influence in rows, candidate sets, graph traversal, traces, counts, continuity, and token metrics.
+- **V6 Team lifecycle gate:** Candidate generation, exact presentation, approval, materialization, correction, supersession, revocation, deletion, audit, and outage behavior pass with distinct principals and current grants.
+- **V7 Agent parity gate:** Claude Code, Cursor, and Codex can discover and perform equivalent non-authoritative operations; browser-only decisions cannot be replayed or fabricated from MCP/tool calls.
+- **V8 Privacy gate:** Fixtures and evidence contain no raw transcripts, private project content, credentials, authorization material, unsafe paths, or hidden prompts. Content-bearing audit rows are rejected.
+- **V9 Release gate:** `make verify` and the repository release verification suite pass after focused gates. A failed physical or two-person gate blocks readiness claims even when all synthetic tests pass.
+- **V10 Accessibility gate:** Automated checks plus manual keyboard and narrow-screen passes prove Home and Board focus order, labels, live status, non-color state, and exact-card review remain operable without a pointer.
 
-| Gate | Applies to | Observable pass condition |
-|---|---|---|
-| `cd pulse-app && go test ./internal/store ./internal/server ./internal/retrieve ./cmd/pulse -count=1` | U1, U3, U4, U6 | Store, server, visibility, retrieval, migration, and receipt tests pass |
-| `cd pulse-app && go test -race ./internal/store ./internal/server ./internal/retrieve ./cmd/pulse -count=1` | U1, U3, U4, U6 | Publication, sync, receipt, and projection races pass |
-| `cd mcp && npm test && npm run build` | U2-U4 | Closed tool schemas, host binding, approval lease, and daemon routing pass |
-| `cd pulse-app/cli && npm test` | U2-U3, U5-U6 | Hook, Git safety, packaging, install, and Home client contracts pass |
-| `cd pulse-app/cli && npm run test:git-team-memory` | U4 | File-to-cards-to-commit-to-second-checkout retrieval passes without network Git actions |
-| `cd pulse-app/cli && npm run test:codex-product` | U2, U5 | Trusted Codex lifecycle, Personal continuity, and packed runtime pass |
-| `make verify` | U4-U6 | Normal repository gate passes with Team remote regressions unchanged |
-| `make release-verify` | U5 | Release artifacts, real local retrieval, race suites, and deployment-template checks pass |
+## Risks and Mitigations
 
-### Behavioral release gates
+- **Installer regression:** Removing duplicate activation can break recovery states. Preserve the existing journal schema, characterize every old entry state first, and keep the reviewed legacy Codex entry point as an adapter until packed interruption tests pass.
+- **Review/data split:** Candidate workflow state can diverge from materialized Team memory. Link approval and root creation in one transaction boundary or a durable resumable intent whose incomplete state is visible and idempotent.
+- **Authorization drift:** A role or grant can change between display and decision. Recheck principal, membership, grant, policy epoch, candidate generation, and writer lease immediately before mutation.
+- **Board as shadow authority:** Browser caches or gateway sessions could outlive store truth. Render from server read models, use short sessions and no-store responses, and treat all client fields as narrowing hints only.
+- **Cross-project side channels:** Filtering after ranking can leak through counts and traces. Keep scope in the earliest store query and include negative influence tests for every derived surface.
+- **Scope explosion:** Connectors, enterprise identity, billing, and general skill extraction can consume the release. They stay outside U7-U18; evidence of need creates a later plan.
+- **False completion:** Synthetic activation currently looks more mature than the product. V4 and V6 are named blockers and documentation must distinguish packed, physical, controlled, and production evidence.
 
-- **Current user-outcome gate:** A repository-local source reaches exact Codex cards, the next exact user `ok` creates only a local commit, and a second linked worktree retrieves the approved memory with source, approval, commit, and ranking reasons.
-- **Privacy gate:** Absolute/escaping paths, raw transcript shapes, secrets, Personal payloads, stale cards, injected approval language, wrong tasks/projects, and invalid pack objects produce zero Git files and zero shared retrieval candidates.
-- **Git isolation gate:** Unrelated working-tree and staged changes are byte-identical before and after publication; no remote Git or network publication command occurs.
-- **Personal product gate:** The packed one-command install succeeds on a clean supported Mac with no Go, Python, Make, Docker, or API key and proves one fresh-task Personal recall with honest token evidence.
-- **Regression budget:** One worker and one reviewer, maximum two review rounds. P0/P1 current-outcome defects block the slice; public-release blockers stay in U5; all other findings enter backlog.
+## Resolved During Planning
 
-### Planning boundary
+- The next code batch starts with U7 because the two Personal P1s block the fastest real user value and have narrower seams than the Team Board.
+- The Team backend is extended, not replaced. Its existing authorization, projection, revocation, deletion, and deployment templates remain the substrate.
+- Team review is inserted before active-memory materialization rather than added as a cosmetic Board over direct writes.
+- Unassigned is a non-retrieval staging queue, not a global memory scope.
+- Git remains implemented but moves after central Team approval as an optional export.
 
-Implementation may create local code commits and the synthetic/local dogfood commit required by AE4-AE6. It may not push a branch, open a PR, publish npm or GitHub releases, submit notarization, install on a colleague's machine, import real private sources, or send external messages without a new explicit confirmation.
+## Deferred Decisions
 
----
+- The commercial hosting provider, domain, and billing path for a persistent Team service require a separately authorized deployment decision after U13's controlled proof.
+- The exact source connector order begins only after the selected-source contract and two-person Board loop are stable.
+- Personal cross-project memory remains intentionally absent until measured usage demonstrates a recurring need that cannot be met by explicit Team Workspace promotion.
 
 ## Definition of Done
 
-- [ ] U1 records source identity/version and candidate lifecycle metadata without retaining raw source bytes.
-- [ ] U2 proves exact cards and the next exact user `ok` through trusted Codex lifecycle events; the agent cannot mint approval.
-- [ ] U3 writes only canonical `pulse-memory/` objects and creates one verified local commit or an honest recoverable uncommitted receipt.
-- [ ] U4 retrieves the approved object in a second checkout through the existing state-aware engine with project, source, approval, commit, and ranking provenance.
-- [ ] U5 proves the packed one-command Personal journey on a clean supported Mac without compilers, system Python, model keys, or manual configuration.
-- [ ] U6 makes every shared candidate and publication lifecycle visible in chat/Home and excludes corrected, superseded, removed, blocked, rejected, and pending objects from future context.
-- [ ] Personal memory never enters `pulse-memory/` or another member's local corpus without a separately displayed exact shared candidate and trusted approval.
-- [ ] No source text, prompt/assistant content, secret, unsafe path, private binding identity, generated index, live database, or Personal receipt is committed to Git.
-- [ ] No automatic action pushes, opens a PR, sends a message, changes repository access, or activates Remote Commons.
-- [ ] Each unit has its named red-first tests, relevant race coverage, a scoped commit, and no abandoned experimental path left in the diff.
-- [ ] U1-U4 produce one real local dogfood receipt before U5 or U6 begins; four hours without a runnable intermediate result triggers re-scoping instead of more architecture.
+- U7-U18 satisfy their named observable proofs in dependency order; no unit is credited by documentation or mocks alone.
+- The packed Personal artifact installs through its one-command entry point with any single supported harness and no compiler, Docker, manual configuration, or model key. Public npm availability is credited only after separately approved publication and dist-tag verification.
+- Personal memory survives a fresh task and supported-harness switch inside one project, appears in Home with receipts and honest token economy, and has zero influence in another project.
+- Unbound proposals stay visible but unretrievable until exact assignment to a trusted project.
+- The central Team Vault owns candidate lifecycle and active shared memory; the Team Board shows exact content, scope, warnings, actor, decision, correction, and history.
+- U13 is an explicit external-authority gate: two distinct authorized members retrieve one exact approved Team memory only after deployment and participation approval; an ungranted or revoked member cannot observe or influence it.
+- Deletion removes every retrieval derivative before reporting completion, and Team outage never masquerades as shared continuity.
+- Git export requires its own exact approval and performs no remote action automatically.
+- Repository verification, Personal physical proof, Team two-person proof, agent parity, and privacy gates pass.
+- No npm publication, release upload, deployment, colleague enrollment, push, pull request, private-source import, or external message occurs without fresh explicit confirmation.
