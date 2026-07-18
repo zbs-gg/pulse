@@ -11,6 +11,7 @@ import {
   buildPersonalInstallPlan,
   canonicalInstallPlanJSON,
   detectCodexCLI,
+  detectInstallResources,
   formatPersonalInstallPlan,
 } from './install-plan.js';
 
@@ -73,6 +74,18 @@ const cleanState = {
   install_receipt: 'missing', plugin: 'missing', presence: 'not_installed',
   principal: 'missing', runtime: 'missing', vault: 'missing',
 };
+
+test('resource detection delegates the port probe to platform services', () => {
+  let probed;
+  const resources = detectInstallResources({
+    home: '/missing-platform-home',
+    platformServices: {
+      probePort(port) { probed = port; return 'occupied'; },
+    },
+  });
+  assert.equal(probed, 18789);
+  assert.equal(resources.port_18789, 'occupied');
+});
 
 test('supported singleton-host Stage 1 plans are stable, explicit, and have no Go or Python requirement', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-install-plan.'));

@@ -43,7 +43,10 @@ type HomePresence interface {
 
 // Config holds the dependencies a server needs.
 type Config struct {
-	IPCSecret    string
+	IPCSecret string
+	// StartupNonce is an optional supervisor-provided process-instance proof.
+	// When set it is returned only from the authenticated loopback health route.
+	StartupNonce string
 	Outbox       *outbox.Outbox
 	Builder      *prompt.Builder
 	Claude       ClaudeAPI
@@ -104,6 +107,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Claude != nil && cfg.DefaultModel == "" {
 		return nil, errors.New("server: Claude set but DefaultModel is empty")
+	}
+	if cfg.StartupNonce != "" && !validStartupNonce(cfg.StartupNonce) {
+		return nil, errors.New("server: startup nonce must be 32 lowercase-hex bytes")
 	}
 	if cfg.TrayGracePeriod == 0 {
 		cfg.TrayGracePeriod = 10 * time.Second
@@ -328,13 +334,27 @@ func corsAllowedOrigins() []string {
 type healthResponse struct {
 	Status        string  `json:"status"`
 	UptimeSeconds float64 `json:"uptime_seconds"`
+	StartupNonce  string  `json:"startup_nonce,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResponse{
 		Status:        "ok",
 		UptimeSeconds: time.Since(s.started).Seconds(),
+		StartupNonce:  s.cfg.StartupNonce,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func validStartupNonce(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }

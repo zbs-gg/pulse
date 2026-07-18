@@ -2,7 +2,6 @@ package unassigned
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,9 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/platform"
 	"github.com/nkkmnk/pulse/internal/store"
 )
 
@@ -107,28 +106,24 @@ type Snapshot struct {
 	Activity []Activity
 }
 
-func privateOwner(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
-}
-
 func inspectPrivateDirectory(path string, missingOK bool) (bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) && missingOK {
-		return false, nil
-	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || !privateOwner(info) {
+	ok, err := platform.InspectPrivateDirectory(path, missingOK)
+	if err != nil {
 		return false, errUnsafe
 	}
-	return true, nil
+	return ok, nil
 }
 
 func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	if exists, err := platform.InspectPrivateDirectory(path, true); err != nil {
+		return errUnsafe
+	} else if exists {
+		return nil
+	}
+	if err := platform.EnsurePrivateDirectory(path); err != nil {
 		return errUnsafe
 	}
-	_, err := inspectPrivateDirectory(path, false)
-	return err
+	return nil
 }
 
 func strictDecode(raw []byte, target any) error {
@@ -261,25 +256,13 @@ func readUnlocked(path string) (inboxFile, error) {
 	if err != nil || !ok {
 		return empty, err
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+	raw, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MinimumBytes: 1, MaximumBytes: maxInboxBytes, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+	})
+	if errors.Is(err, os.ErrNotExist) {
 		return empty, nil
 	}
 	if err != nil {
-		return empty, errUnsafe
-	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || !privateOwner(info) || info.Size() < 1 || info.Size() > maxInboxBytes {
-		return empty, errUnsafe
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Nlink != 1 {
-		return empty, errUnsafe
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxInboxBytes+1))
-	if err != nil || len(raw) > maxInboxBytes {
 		return empty, errUnsafe
 	}
 	var inbox inboxFile
@@ -361,131 +344,25 @@ func List(path string) ([]Card, error) {
 }
 
 type heldLock struct {
-	file *os.File
-	path string
-	dev  uint64
-	ino  uint64
+	lock *platform.Lock
 }
 
 func (value *heldLock) release() {
 	if value == nil {
 		return
 	}
-	_ = value.file.Close()
-	info, err := os.Lstat(value.path)
-	if err != nil {
-		return
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if ok && uint64(stat.Dev) == value.dev && stat.Ino == value.ino {
-		_ = os.Remove(value.path)
-	}
-}
-
-func processAlive(pid int) bool {
-	if pid < 1 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
-}
-
-func readLockHolder(path string, expected os.FileInfo) (int, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return 0, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return 0, err
-	}
-	expectedStat, expectedOK := expected.Sys().(*syscall.Stat_t)
-	openedStat, openedOK := opened.Sys().(*syscall.Stat_t)
-	if !expectedOK || !openedOK || expectedStat.Dev != openedStat.Dev || expectedStat.Ino != openedStat.Ino {
-		return 0, os.ErrNotExist
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, 128))
-	if err != nil {
-		return 0, err
-	}
-	var pid int
-	var token string
-	if _, err := fmt.Sscanf(string(raw), "%d %s", &pid, &token); err != nil || !validHex(token, 32) {
-		return 0, nil
-	}
-	return pid, nil
+	_ = value.lock.Release()
 }
 
 func acquireLock(path string) (*heldLock, error) {
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-		if err == nil {
-			file := os.NewFile(uintptr(fd), path)
-			info, statErr := file.Stat()
-			if statErr != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, errUnsafe
-			}
-			stat, statOK := info.Sys().(*syscall.Stat_t)
-			if !statOK {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, errUnsafe
-			}
-			lock := &heldLock{file: file, path: path, dev: uint64(stat.Dev), ino: stat.Ino}
-			var token [16]byte
-			if _, err := rand.Read(token[:]); err != nil {
-				lock.release()
-				return nil, errUnsafe
-			}
-			if _, err := fmt.Fprintf(file, "%d %s\n", os.Getpid(), hex.EncodeToString(token[:])); err != nil {
-				lock.release()
-				return nil, errUnsafe
-			}
-			if err := file.Sync(); err != nil {
-				lock.release()
-				return nil, errUnsafe
-			}
-			return lock, nil
-		}
-		if !errors.Is(err, syscall.EEXIST) {
-			return nil, errUnsafe
-		}
-		info, inspectErr := os.Lstat(path)
-		if inspectErr == nil {
-			stat, statOK := info.Sys().(*syscall.Stat_t)
-			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 ||
-				!privateOwner(info) || !statOK || stat.Nlink != 1 {
-				return nil, errUnsafe
-			}
-			holderPID, readErr := readLockHolder(path, info)
-			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-				return nil, errUnsafe
-			}
-			if time.Since(info.ModTime()) > 30*time.Second && !processAlive(holderPID) {
-				current, currentErr := os.Lstat(path)
-				if currentErr == nil {
-					currentStat, currentOK := current.Sys().(*syscall.Stat_t)
-					if currentOK && currentStat.Dev == stat.Dev && currentStat.Ino == stat.Ino {
-						_ = os.Remove(path)
-						continue
-					}
-				}
-			}
-		} else if errors.Is(inspectErr, os.ErrNotExist) {
-			continue
-		} else {
-			return nil, errUnsafe
-		}
-		if time.Now().After(deadline) {
-			return nil, errBusy
-		}
-		time.Sleep(10 * time.Millisecond)
+	lock, err := platform.AcquireLock(path, 5*time.Second, 30*time.Second)
+	if errors.Is(err, platform.ErrLockBusy) {
+		return nil, errBusy
 	}
+	if err != nil {
+		return nil, errUnsafe
+	}
+	return &heldLock{lock: lock}, nil
 }
 
 func atomicWrite(path string, inbox inboxFile) error {
@@ -493,30 +370,7 @@ func atomicWrite(path string, inbox inboxFile) error {
 	if err != nil || len(raw)+1 > maxInboxBytes {
 		return errUnsafe
 	}
-	temporary := fmt.Sprintf("%s.%d.%d.new", path, os.Getpid(), time.Now().UnixNano())
-	fd, err := syscall.Open(temporary, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-	if err != nil {
-		return err
-	}
-	file := os.NewFile(uintptr(fd), temporary)
-	defer os.Remove(temporary)
-	if _, err = file.Write(append(raw, '\n')); err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(temporary, path)
-	}
-	if err == nil {
-		directory, openErr := os.Open(filepath.Dir(path))
-		if openErr == nil {
-			err = directory.Sync()
-			_ = directory.Close()
-		}
-	}
-	return err
+	return platform.AtomicWritePrivateFile(path, append(raw, '\n'))
 }
 
 func assignmentReceipt(status string, item inboxItem, destination Destination, now time.Time) receipt {

@@ -25,6 +25,7 @@ import {
   resolveWorkspaceBinding,
   verifyBindingRegistry,
 } from './workspace-binding.js';
+import { createPlatformServices } from './platform-services.js';
 
 function git(cwd, ...args) {
   const result = spawnSync('/usr/bin/git', args, { cwd, encoding: 'utf8' });
@@ -137,6 +138,31 @@ test('canonical workspace collapses nested paths and symlinks, survives rename, 
   assert.notEqual(worktreeIdentity.workspace_id, nested.workspace_id);
   assert.equal(worktreeIdentity.repository_id, nested.repository_id);
   assert.equal(worktreeIdentity.checkout_kind, 'worktree');
+});
+
+test('workspace Git discovery is delegated to platform services', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-platform-git.'));
+  try {
+    const repository = makeRepository(root);
+    const base = createPlatformServices();
+    const calls = [];
+    const platformServices = {
+      ...base,
+      runGit(cwd, args) {
+        calls.push({ cwd, args });
+        return base.runGit(cwd, args);
+      },
+    };
+    const workspace = canonicalizeWorkspace(repository, { platformServices });
+    assert.equal(workspace.canonical_path, realpathSync(repository));
+    assert.deepEqual(calls.map(({ args }) => args), [
+      ['rev-parse', '--show-toplevel'],
+      ['rev-parse', '--git-dir'],
+      ['rev-parse', '--git-common-dir'],
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('signed registry resolves exactly one immutable Team topology', () => {

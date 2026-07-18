@@ -6,10 +6,12 @@ import test from 'node:test';
 
 import {
   detectClaudeCodeCLI,
+  detectCodexCLI,
   detectCursorInstallation,
   detectSupportedHosts,
   SUPPORTED_HOST_IDS,
 } from './supported-hosts.js';
+import { createPlatformServices } from './platform-services.js';
 
 const available = (extra = {}) => ({ available: true, reason_code: null, ...extra });
 const missing = (host) => ({ available: false, reason_code: `${host}_missing` });
@@ -84,4 +86,23 @@ test('Cursor detection accepts the trusted app surface without a Cursor CLI', ()
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('Windows host discovery uses bounded native-adapter candidates and never POSIX mode bits', () => {
+  const codexPath = 'C:\\Users\\Pulse\\AppData\\Roaming\\npm\\codex.cmd';
+  const services = createPlatformServices({
+    platform: 'win32', home: 'C:\\Users\\Pulse',
+    nativeAdapter: {
+      inspectExecutable: (path) => ({
+        canonical_path: path, executable: true, owner_only: true, regular_file: true,
+        reparse_point: false, sha256: 'c'.repeat(64),
+      }),
+    },
+  });
+  const detected = detectCodexCLI({
+    candidates: [codexPath], platformServices: services,
+  });
+  assert.equal(detected.available, true);
+  assert.equal(detected.executable_path, codexPath);
+  assert.equal(detected.executable_sha256, 'c'.repeat(64));
 });

@@ -1,50 +1,28 @@
-import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+
+import { createPlatformServices, PlatformServicesError } from './platform-services.js';
 
 export const SUPPORTED_HOST_IDS = Object.freeze(['claude-code', 'codex', 'cursor']);
 
-const DEFAULT_CODEX_CANDIDATES = Object.freeze([
-  '/opt/homebrew/bin/codex',
-  '/usr/local/bin/codex',
-  '/usr/bin/codex',
-]);
-
-function claudeCandidates(home) {
-  return [
-    join(resolve(home), '.local', 'bin', 'claude'),
-    '/opt/homebrew/bin/claude',
-    '/usr/local/bin/claude',
-    '/usr/bin/claude',
-  ];
-}
-
-function canonicalExecutable(path) {
-  try {
-    const target = realpathSync(path);
-    const stat = statSync(target);
-    if (!stat.isFile() || (stat.mode & 0o111) === 0) return null;
-    return {
-      path: target,
-      sha256: createHash('sha256').update(readFileSync(target)).digest('hex'),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function detectCLI({ candidates, executablePath, label, versionProbe }) {
+function detectCLI({ candidates, executablePath, label, platformServices, versionProbe }) {
   if (!Array.isArray(candidates) || candidates.length > 32 ||
-      candidates.some((candidate) => typeof candidate !== 'string' || !isAbsolute(candidate) || resolve(candidate) !== candidate) ||
-      (executablePath !== undefined && (typeof executablePath !== 'string' || !isAbsolute(executablePath) || resolve(executablePath) !== executablePath)) ||
+      candidates.some((candidate) => !platformServices.isAbsolutePath(candidate)) ||
+      (executablePath !== undefined && !platformServices.isAbsolutePath(executablePath)) ||
       (versionProbe !== undefined && (typeof versionProbe !== 'function' || executablePath === undefined))) {
     throw new TypeError(`${label}_path_invalid`);
   }
-  const selected = executablePath
-    ? canonicalExecutable(executablePath)
-    : candidates.map(canonicalExecutable).find(Boolean);
+  let selected;
+  try {
+    selected = executablePath
+      ? platformServices.inspectExecutable(executablePath)
+      : candidates.map((candidate) => platformServices.inspectExecutable(candidate)).find(Boolean);
+  } catch (error) {
+    if (!(error instanceof PlatformServicesError)) throw error;
+    return {
+      available: false, executable_path: null, executable_sha256: null, version: null,
+      reason_code: `${label}_${error.code}`,
+    };
+  }
   if (!selected) {
     return {
       available: false,
@@ -54,11 +32,11 @@ function detectCLI({ candidates, executablePath, label, versionProbe }) {
       reason_code: `${label}_missing`,
     };
   }
-  const identity = { executable_path: selected.path, executable_sha256: selected.sha256 };
+  const identity = { executable_path: selected.canonical_path, executable_sha256: selected.sha256 };
   if (!versionProbe) return { available: true, ...identity, version: null, reason_code: null };
 
   let result;
-  try { result = versionProbe(selected.path); } catch {
+  try { result = versionProbe(selected.canonical_path); } catch {
     return { available: false, ...identity, version: null, reason_code: `${label}_probe_failed` };
   }
   if (result?.status !== 0) {
@@ -71,23 +49,29 @@ function detectCLI({ candidates, executablePath, label, versionProbe }) {
 }
 
 export function detectCodexCLI({
-  candidates = DEFAULT_CODEX_CANDIDATES,
+  candidates,
   codexPath,
+  platformServices = createPlatformServices(),
   versionProbe,
 } = {}) {
-  return detectCLI({ candidates, executablePath: codexPath, label: 'codex', versionProbe });
+  return detectCLI({
+    candidates: candidates ?? platformServices.hostCandidates().codex,
+    executablePath: codexPath, label: 'codex', platformServices, versionProbe,
+  });
 }
 
 export function detectClaudeCodeCLI({
   candidates,
   claudePath,
   home = homedir(),
+  platformServices = createPlatformServices({ home }),
   versionProbe,
 } = {}) {
   return detectCLI({
-    candidates: candidates ?? claudeCandidates(home),
+    candidates: candidates ?? platformServices.hostCandidates(home).claude,
     executablePath: claudePath,
     label: 'claude',
+    platformServices,
     versionProbe,
   });
 }
@@ -95,21 +79,23 @@ export function detectClaudeCodeCLI({
 export function detectCursorInstallation({
   appCandidates,
   home = homedir(),
+  platformServices = createPlatformServices({ home }),
 } = {}) {
-  const candidates = appCandidates ?? [
-    '/Applications/Cursor.app',
-    join(resolve(home), 'Applications', 'Cursor.app'),
-  ];
+  const candidates = appCandidates ?? platformServices.hostCandidates(home).cursor;
   if (!Array.isArray(candidates) || candidates.length > 16 ||
-      candidates.some((candidate) => typeof candidate !== 'string' || !isAbsolute(candidate) || resolve(candidate) !== candidate)) {
+      candidates.some((candidate) => !platformServices.isAbsolutePath(candidate))) {
     throw new TypeError('cursor_path_invalid');
   }
   for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
     try {
-      const path = realpathSync(candidate);
-      if (statSync(path).isDirectory()) return { available: true, app_path: path, reason_code: null };
-    } catch { /* try the next bounded app location */ }
+      const proof = platformServices.inspectApplication(candidate);
+      if (proof) return { available: true, app_path: proof.canonical_path, reason_code: null };
+    } catch (error) {
+      if (error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable') {
+        return { available: false, app_path: null, reason_code: `cursor_${error.code}` };
+      }
+      if (!(error instanceof PlatformServicesError)) throw error;
+    }
   }
   return { available: false, app_path: null, reason_code: 'cursor_missing' };
 }
@@ -132,9 +118,10 @@ function hostRecord(host, result) {
 
 export function detectSupportedHosts({
   home = homedir(),
-  detectClaude = () => detectClaudeCodeCLI({ home }),
-  detectCodex = () => detectCodexCLI(),
-  detectCursor = () => detectCursorInstallation({ home }),
+  platformServices = createPlatformServices({ home }),
+  detectClaude = () => detectClaudeCodeCLI({ home, platformServices }),
+  detectCodex = () => detectCodexCLI({ platformServices }),
+  detectCursor = () => detectCursorInstallation({ home, platformServices }),
 } = {}) {
   if (![detectClaude, detectCodex, detectCursor].every((detector) => typeof detector === 'function')) {
     throw new TypeError('supported_host_detector_invalid');

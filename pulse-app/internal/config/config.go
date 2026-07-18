@@ -5,14 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
+	"github.com/nkkmnk/pulse/internal/platform"
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
 
@@ -32,7 +31,7 @@ type Config struct {
 // Load reads config from dataDir. Generates secret.key if missing.
 // ANTHROPIC_API_KEY is optional in host-extracted memory mode.
 func Load(dataDir string) (*Config, error) {
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
+	if err := platform.EnsurePrivateDirectory(dataDir); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dataDir, err)
 	}
 
@@ -81,21 +80,18 @@ func LoadTeam(dataDir string) (*Config, error) {
 }
 
 func ensurePrivateTeamDataDir(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			return fmt.Errorf("create team data directory: %w", err)
-		}
-		if err := os.Chmod(path, 0700); err != nil {
-			return fmt.Errorf("secure team data directory: %w", err)
-		}
-		info, err = os.Lstat(path)
+	if _, supported := platform.CurrentUserID(); !supported {
+		return fmt.Errorf("team data directory security: %w", platform.ErrUnsupported)
 	}
+	exists, err := platform.InspectPrivateDirectory(path, true)
 	if err != nil {
-		return fmt.Errorf("inspect team data directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || !ownedByCurrentUser(info) {
 		return errors.New("team data directory must be an owner-only 0700 directory")
+	}
+	if exists {
+		return nil
+	}
+	if err := platform.EnsurePrivateDirectory(path); err != nil {
+		return fmt.Errorf("create team data directory: %w", err)
 	}
 	return nil
 }
@@ -105,7 +101,7 @@ func loadOrCreateTeamSecret(path string) (string, error) {
 	if err == nil {
 		return secret, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOENT) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 
@@ -114,64 +110,34 @@ func loadOrCreateTeamSecret(path string) (string, error) {
 		return "", fmt.Errorf("generate team IPC secret: %w", err)
 	}
 	encoded := hex.EncodeToString(random[:])
-	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
-	if errors.Is(err, syscall.EEXIST) {
+	_, err = platform.CreatePrivateFileExclusive(path, []byte(encoded))
+	if errors.Is(err, os.ErrExist) {
 		return readStrictTeamSecret(path)
 	}
 	if err != nil {
 		return "", fmt.Errorf("create team IPC secret: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), path)
-	removeOnFailure := true
-	defer func() {
-		_ = file.Close()
-		if removeOnFailure {
-			_ = os.Remove(path)
-		}
-	}()
-	if err := file.Chmod(0600); err != nil {
-		return "", fmt.Errorf("secure team IPC secret: %w", err)
-	}
-	if _, err := io.WriteString(file, encoded); err != nil {
-		return "", fmt.Errorf("write team IPC secret: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		return "", fmt.Errorf("sync team IPC secret: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close team IPC secret: %w", err)
-	}
-	removeOnFailure = false
 	return readStrictTeamSecret(path)
 }
 
 func readStrictTeamSecret(path string) (string, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return "", fmt.Errorf("open team IPC secret: %w", err)
+	uid, supported := platform.CurrentUserID()
+	if !supported {
+		return "", fmt.Errorf("team IPC secret security: %w", platform.ErrUnsupported)
 	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	info, err := file.Stat()
+	data, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MinimumBytes: 64, MaximumBytes: 64, ExpectedUID: &uid, OwnerOnly: true, SingleLink: true,
+	})
 	if err != nil {
-		return "", fmt.Errorf("inspect team IPC secret: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !ownedByCurrentUser(info) {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", os.ErrNotExist
+		}
 		return "", errors.New("team IPC secret must be an owner-only 0600 regular file")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, 65))
-	if err != nil {
-		return "", fmt.Errorf("read team IPC secret: %w", err)
 	}
 	if len(data) != 64 || !isLowerHex(data) {
 		return "", errors.New("team IPC secret must contain exactly 32 random bytes as lowercase hex")
 	}
 	return string(data), nil
-}
-
-func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func isLowerHex(value []byte) bool {
@@ -276,7 +242,9 @@ func loadExactTeamValue(name string) (string, error) {
 func loadMode(dataDir string) string {
 	mode := strings.TrimSpace(os.Getenv("PULSE_MODE"))
 	if mode == "" {
-		if data, err := os.ReadFile(filepath.Join(dataDir, "mode")); err == nil {
+		if data, err := platform.ReadPrivateFile(filepath.Join(dataDir, "mode"), platform.FilePolicy{
+			MaximumBytes: 64, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+		}); err == nil {
 			mode = strings.TrimSpace(string(data))
 		}
 	}
@@ -289,11 +257,16 @@ func loadMode(dataDir string) string {
 }
 
 func loadOrCreateSecret(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	data, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MinimumBytes: 64, MaximumBytes: 64, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+	})
 	if err == nil {
+		if !isLowerHex(data) {
+			return "", errors.New("personal IPC secret must contain exactly 32 random bytes as lowercase hex")
+		}
 		return string(data), nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	buf := make([]byte, 32)
@@ -301,7 +274,9 @@ func loadOrCreateSecret(path string) (string, error) {
 		return "", fmt.Errorf("rand: %w", err)
 	}
 	hx := hex.EncodeToString(buf)
-	if err := os.WriteFile(path, []byte(hx), 0600); err != nil {
+	if _, err := platform.CreatePrivateFileExclusive(path, []byte(hx)); errors.Is(err, os.ErrExist) {
+		return loadOrCreateSecret(path)
+	} else if err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return hx, nil

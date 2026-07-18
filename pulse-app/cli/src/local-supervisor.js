@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -19,6 +19,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
+import { defaultPlatformServices } from './platform-services.js';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const PRODUCT_BINDING_VERIFIER = fileURLToPath(new URL('./product-binding-verifier.js', import.meta.url));
@@ -301,19 +302,26 @@ function readRuntimeReceipt(path) {
   }
 }
 
-function processCommand(pid) {
-  const result = spawnSync('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
-  return result.status === 0 ? result.stdout.trim() : '';
+function processProof(pid, platformServices) {
+  try {
+    return platformServices.inspectProcess(pid);
+  } catch {
+    throw new SupervisorError('vault_process_inspection_unavailable', 'bound process identity cannot be proven');
+  }
 }
 
 function receiptMetadataMatches(runtime, receipt) {
   if (!receipt || receipt.schema !== 'pulse.local-vault-process.v1' ||
 		receipt.binding_digest !== runtime.binding_digest ||
 		(receipt.repository_id !== undefined && receipt.repository_id !== runtime.repository_id) ||
-		receipt.kind !== runtime.kind ||
+			receipt.kind !== runtime.kind ||
       receipt.store_id !== runtime.store_id || receipt.data_dir !== runtime.data_dir ||
       !Number.isSafeInteger(receipt.pid) || receipt.pid <= 1 || typeof receipt.executable !== 'string' ||
 			!/^[a-f0-9]{64}$/.test(receipt.executable_digest ?? '') ||
+			(receipt.startup_nonce !== undefined && !/^[a-f0-9]{64}$/.test(receipt.startup_nonce)) ||
+			(receipt.process_identity_token !== undefined &&
+				(typeof receipt.process_identity_token !== 'string' || receipt.process_identity_token.length < 1 ||
+					receipt.process_identity_token.length > 1024)) ||
 			(receipt.stop_requested_at !== undefined &&
 				(typeof receipt.stop_requested_at !== 'string' || Number.isNaN(Date.parse(receipt.stop_requested_at))))) {
     return false;
@@ -349,27 +357,33 @@ function managedEmbedderFromReceipt(receipt) {
   return value;
 }
 
-function receiptProcessMatches(runtime, receipt, command = processCommand(receipt.pid)) {
-  return command.includes(receipt.executable) && command.includes(`-data-dir ${runtime.data_dir}`) &&
-    command.includes(`-addr ${runtime.addr}`);
+function receiptProcessMatches(runtime, receipt, proof) {
+  const inspected = proof ?? processProof(receipt.pid, defaultPlatformServices);
+  if (inspected.running !== true || inspected.pid !== receipt.pid) return false;
+  if (receipt.process_identity_token !== undefined) {
+    return inspected.identity_token === receipt.process_identity_token;
+  }
+  return inspected.command.includes(receipt.executable) &&
+    inspected.command.includes(`-data-dir ${runtime.data_dir}`) && inspected.command.includes(`-addr ${runtime.addr}`);
 }
 
-export function inspectVaultRuntime(runtime) {
+export function inspectVaultRuntime(runtime, { platformServices = defaultPlatformServices } = {}) {
   const receipt = readRuntimeReceipt(runtime.pid_file);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
   if (!receiptMetadataMatches(runtime, receipt)) {
     return { status: 'stale_or_mismatched', runtime, fallback: false };
   }
-  const command = processCommand(receipt.pid);
-  if (command === '') {
+  const proof = processProof(receipt.pid, platformServices);
+  if (!proof.running) {
     const managedEmbedder = managedEmbedderFromReceipt(receipt) || undefined;
     return {
       status: 'crashed', runtime, pid: receipt.pid, executable: receipt.executable,
       executable_digest: receipt.executable_digest, managed_embedder: managedEmbedder, fallback: false,
 		legacy_authority: receipt.repository_id === undefined,
+      startup_nonce: receipt.startup_nonce,
     };
   }
-	if (!receiptProcessMatches(runtime, receipt, command)) {
+	if (!receiptProcessMatches(runtime, receipt, proof)) {
     return { status: 'stale_or_mismatched', runtime, fallback: false };
   }
   return {
@@ -377,32 +391,35 @@ export function inspectVaultRuntime(runtime) {
     executable_digest: receipt.executable_digest,
     managed_embedder: managedEmbedderFromReceipt(receipt) || undefined,
 		legacy_authority: receipt.repository_id === undefined,
+    startup_nonce: receipt.startup_nonce,
     fallback: false,
   };
 }
 
-async function waitForProcessExit(pid, timeoutMs = 3000) {
+async function waitForProcessExit(pid, timeoutMs = 3000, platformServices = defaultPlatformServices) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (processCommand(pid) === '') return;
+    if (!processProof(pid, platformServices).running) return;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   throw new SupervisorError('vault_stop_timeout', 'bound local vault did not stop in time');
 }
 
-async function terminateSpawnedProcess(pid) {
-  try { process.kill(pid, 'SIGTERM'); } catch { return; }
+async function terminateSpawnedProcess(pid, platformServices) {
+  if (!platformServices.terminateProcess(pid, { force: false })) return;
   try {
-    await waitForProcessExit(pid);
+    await waitForProcessExit(pid, 3000, platformServices);
     return;
   } catch (error) {
     if (!(error instanceof SupervisorError) || error.code !== 'vault_stop_timeout') throw error;
   }
-  try { process.kill(pid, 'SIGKILL'); } catch { return; }
-  await waitForProcessExit(pid, 1500);
+  if (!platformServices.terminateProcess(pid, { force: true })) return;
+  await waitForProcessExit(pid, 1500, platformServices);
 }
 
-async function waitForVault(runtime, timeoutMs, { fullRetrieval = false, retrievalSmoke = fullRetrieval } = {}) {
+async function waitForVault(runtime, timeoutMs, {
+  fullRetrieval = false, retrievalSmoke = fullRetrieval, startupNonce,
+} = {}) {
   const secretPath = join(runtime.data_dir, 'secret.key');
   const deadline = Date.now() + timeoutMs;
 	let lastCheck = 'daemon has not answered yet';
@@ -418,6 +435,15 @@ async function waitForVault(runtime, timeoutMs, { fullRetrieval = false, retriev
           headers: { 'X-Pulse-Key': secret }, signal: AbortSignal.timeout(500),
         });
         if (response.ok) {
+          if (startupNonce !== undefined) {
+            let health;
+            try { health = await response.json(); } catch { health = null; }
+            if (health?.startup_nonce !== startupNonce) {
+              lastCheck = 'health startup nonce does not match the launched process';
+              await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+              continue;
+            }
+          }
           if (!fullRetrieval) return;
 			lastCheck = 'health is ready; memory status is pending';
           const status = await fetch(`${runtime.base_url}/memory/status`, {
@@ -470,34 +496,41 @@ async function waitForVault(runtime, timeoutMs, { fullRetrieval = false, retriev
 }
 
 export async function assertVaultRuntimeHealthy(runtime, {
-	timeoutMs = 1500, status = inspectVaultRuntime(runtime), fullRetrievalSmoke = true,
+	timeoutMs = 1500, status, fullRetrievalSmoke = true, platformServices = defaultPlatformServices,
 } = {}) {
+	status ??= inspectVaultRuntime(runtime, { platformServices });
   if (status.status !== 'running') {
     throw new SupervisorError('vault_not_running', `bound local vault is ${status.status}`);
   }
 	await waitForVault(runtime, timeoutMs, {
 		fullRetrieval: Boolean(status.managed_embedder), retrievalSmoke: fullRetrievalSmoke,
+		startupNonce: status.startup_nonce,
 	});
   return status;
 }
 
 export async function startVaultRuntime(runtime, {
   daemonPath, managedEmbedder, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
+  platformServices = defaultPlatformServices, requireStartupNonce = true,
 } = {}) {
   const executable = trustedExecutable(daemonPath);
   const desiredDigest = executableDigest(executable);
   const desiredManaged = managedEmbedder ? inspectManagedEmbedderConfig(runtime, managedEmbedder) : undefined;
-  const status = inspectVaultRuntime(runtime);
+  if (typeof requireStartupNonce !== 'boolean') {
+    throw new SupervisorError('vault_startup_nonce_invalid', 'startup nonce policy is invalid');
+  }
+  const status = inspectVaultRuntime(runtime, { platformServices });
   let rollbackPath;
 	let rollbackManaged;
 	if (status.status === 'running') {
 		const sameManaged = status.managed_embedder?.config_digest === desiredManaged?.config_digest &&
 			status.managed_embedder?.config_path === desiredManaged?.config_path;
 		if (status.executable === executable && status.executable_digest === desiredDigest && sameManaged &&
+			(!requireStartupNonce || typeof status.startup_nonce === 'string') &&
 			status.legacy_authority !== true) return status;
 		rollbackPath = status.executable;
 		rollbackManaged = status.managed_embedder;
-		await stopVaultRuntimeAndWait(runtime);
+		await stopVaultRuntimeAndWait(runtime, { platformServices });
   }
   if (status.status === 'crashed') {
     // Exact receipt metadata plus a dead PID is safe to recover. Never signal
@@ -511,6 +544,7 @@ export async function startVaultRuntime(runtime, {
   ensurePrivateDirectory(dirname(runtime.log_file));
   ensurePrivateDirectory(runtime.cache_dir);
   const logFD = openSync(runtime.log_file, 'a', 0o600);
+  const startupNonce = requireStartupNonce ? platformServices.createStartupNonce() : undefined;
   const child = spawn(executable, ['-data-dir', runtime.data_dir, '-addr', runtime.addr], {
     detached: true,
     stdio: ['ignore', logFD, logFD],
@@ -528,6 +562,7 @@ export async function startVaultRuntime(runtime, {
       PULSE_DATA_DIR: runtime.data_dir,
       PULSE_CACHE_DIR: runtime.cache_dir,
       PULSE_HOST: host,
+      PULSE_STARTUP_NONCE: startupNonce ?? '',
       PULSE_MANAGED_EMBEDDER_CONFIG: desiredManaged?.config_path ?? '',
       PULSE_LOCAL_EMBED_PYTHON: '', PULSE_LOCAL_EMBED_HELPER: '', PULSE_LOCAL_EMBED_MODEL: '',
       ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '',
@@ -535,12 +570,25 @@ export async function startVaultRuntime(runtime, {
   });
   child.unref();
   closeSync(logFD);
+  let spawnedProof;
+  try {
+    spawnedProof = processProof(child.pid, platformServices);
+    if (!spawnedProof.running) {
+      throw new SupervisorError('vault_process_identity_unavailable', 'launched process identity cannot be proven');
+    }
+  } catch (error) {
+    try { await terminateSpawnedProcess(child.pid, platformServices); } catch { /* preserve identity failure */ }
+    throw error;
+  }
   const receipt = {
     schema: 'pulse.local-vault-process.v1', pid: child.pid,
 		executable, executable_digest: desiredDigest, binding_digest: runtime.binding_digest,
 		repository_id: runtime.repository_id,
     kind: runtime.kind, store_id: runtime.store_id, data_dir: runtime.data_dir,
     started_at: new Date().toISOString(),
+    ...(startupNonce ? { startup_nonce: startupNonce } : {}),
+    ...(typeof spawnedProof.identity_token === 'string' && spawnedProof.identity_token.length > 0
+      ? { process_identity_token: spawnedProof.identity_token } : {}),
     ...(desiredManaged ? {
       managed_embedder_config_path: desiredManaged.config_path,
       managed_embedder_config_digest: desiredManaged.config_digest,
@@ -554,12 +602,17 @@ export async function startVaultRuntime(runtime, {
   try {
     writeFileSync(temporary, JSON.stringify(receipt), { mode: 0o600, flag: 'wx' });
     renameSync(temporary, runtime.pid_file);
-    await waitForVault(runtime, timeoutMs, { fullRetrieval: Boolean(desiredManaged) });
-    return { status: 'running', runtime, pid: child.pid, managed_embedder: desiredManaged, fallback: false };
+    await waitForVault(runtime, timeoutMs, {
+      fullRetrieval: Boolean(desiredManaged), startupNonce,
+    });
+    return {
+      status: 'running', runtime, pid: child.pid, managed_embedder: desiredManaged,
+      startup_nonce: startupNonce, fallback: false,
+    };
   } catch (error) {
 	let terminationError;
 	try {
-		await terminateSpawnedProcess(child.pid);
+		await terminateSpawnedProcess(child.pid, platformServices);
 	} catch (failure) {
 		terminationError = failure;
 	}
@@ -570,6 +623,7 @@ export async function startVaultRuntime(runtime, {
       try {
         await startVaultRuntime(runtime, {
           daemonPath: rollbackPath, managedEmbedder: rollbackManaged, timeoutMs, host, allowRollback: false,
+          platformServices, requireStartupNonce: Boolean(status.startup_nonce),
         });
 	  } catch (failure) {
 		rollbackError = failure;
@@ -587,10 +641,11 @@ export async function startVaultRuntime(runtime, {
   }
 }
 
-export function stopVaultRuntime(runtime) {
+export function stopVaultRuntime(runtime, { platformServices = defaultPlatformServices } = {}) {
   const receipt = readRuntimeReceipt(runtime.pid_file);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
-  if (!receiptMetadataMatches(runtime, receipt) || !receiptProcessMatches(runtime, receipt)) {
+  const proof = processProof(receipt.pid, platformServices);
+  if (!receiptMetadataMatches(runtime, receipt) || !receiptProcessMatches(runtime, receipt, proof)) {
     throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to signal a mismatched process');
   }
 	const stoppingReceipt = { ...receipt, stop_requested_at: new Date().toISOString() };
@@ -601,28 +656,31 @@ export function stopVaultRuntime(runtime) {
 	} finally {
 		rmSync(temporary, { force: true });
 	}
-	try { process.kill(receipt.pid, 'SIGTERM'); } catch { /* process already exited */ }
+	platformServices.terminateProcess(receipt.pid, { force: false });
 	return { status: 'stopping', runtime, pid: receipt.pid, fallback: false };
 }
 
-export async function stopVaultRuntimeAndWait(runtime, { timeoutMs = 3000 } = {}) {
+export async function stopVaultRuntimeAndWait(runtime, {
+  timeoutMs = 3000, platformServices = defaultPlatformServices,
+} = {}) {
 	let receipt = readRuntimeReceipt(runtime.pid_file);
 	if (!receipt) return { status: 'stopped', runtime, fallback: false };
 	if (!receiptMetadataMatches(runtime, receipt)) {
 		throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
 	}
 	if (receipt.stop_requested_at === undefined) {
-		if (processCommand(receipt.pid) === '') {
+		const proof = processProof(receipt.pid, platformServices);
+		if (!proof.running) {
 			rmSync(runtime.pid_file, { force: true });
 			return { status: 'stopped', runtime, fallback: false };
 		}
-		if (!receiptProcessMatches(runtime, receipt)) {
+		if (!receiptProcessMatches(runtime, receipt, proof)) {
 			throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
 		}
-		stopVaultRuntime(runtime);
+		stopVaultRuntime(runtime, { platformServices });
 		receipt = readRuntimeReceipt(runtime.pid_file);
 	}
-	await waitForProcessExit(receipt.pid, timeoutMs);
+	await waitForProcessExit(receipt.pid, timeoutMs, platformServices);
 	rmSync(runtime.pid_file, { force: true });
 	return { status: 'stopped', runtime, fallback: false };
 }

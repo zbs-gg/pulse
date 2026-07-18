@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
@@ -19,6 +19,7 @@ import {
   vaultRuntimeFromBinding,
 } from './local-supervisor.js';
 import { activateArtifactVersion, readActivatedArtifact } from './artifact-installer.js';
+import { createPlatformServices } from './platform-services.js';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -203,7 +204,8 @@ try {
 }
 const server = createServer((request, response) => {
   if (request.url === '/health' && request.headers['x-pulse-key'] === 'a'.repeat(64)) {
-    response.end('{"status":"ok"}'); return;
+    response.end(JSON.stringify({ status: 'ok', ...(process.env.PULSE_STARTUP_NONCE
+      ? { startup_nonce: process.env.PULSE_STARTUP_NONCE } : {}) })); return;
   }
   response.statusCode = 401; response.end('denied');
 });
@@ -251,7 +253,9 @@ writeFileSync(dataDir + '/retrieval-count.txt', '0', { mode: 0o600 });
 const server = createServer((request, response) => {
   if (request.headers['x-pulse-key'] !== 'a'.repeat(64)) { response.statusCode = 401; response.end('denied'); return; }
   response.setHeader('content-type', 'application/json');
-  if (request.url === '/health') { response.end('{"status":"ok"}'); return; }
+  if (request.url === '/health') {
+    response.end(JSON.stringify({ status: 'ok', startup_nonce: process.env.PULSE_STARTUP_NONCE })); return;
+  }
   if (request.url === '/memory/status') { response.end('{"full_retrieval":true,"embedder":"bge-m3"}'); return; }
   if (request.url === '/retrieve' && request.method === 'POST') {
     const count = Number(readFileSync(dataDir + '/retrieval-count.txt', 'utf8')) + 1;
@@ -340,7 +344,7 @@ writeFileSync(dataDir + '/authority.json', JSON.stringify({
 }), { mode: 0o600 });
 const server = createServer((request, response) => {
   if (request.url === '/health' && request.headers['x-pulse-key'] === 'a'.repeat(64)) {
-    response.end('{"status":"ok"}');
+    response.end(JSON.stringify({ status: 'ok', startup_nonce: process.env.PULSE_STARTUP_NONCE }));
     return;
   }
   response.statusCode = 401;
@@ -365,7 +369,39 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(stopVaultRuntime(runtime).status, 'stopping');
 	assert.equal(existsSync(runtime.pid_file), true, 'stop receipt must survive until the daemon exits');
 	assert.equal((await stopVaultRuntimeAndWait(runtime)).status, 'stopped');
-	assert.equal(existsSync(runtime.pid_file), false);
+  assert.equal(existsSync(runtime.pid_file), false);
+});
+
+test('supervisor delegates process control and can bind readiness to a startup nonce', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-supervisor-platform-process.'));
+  const port = await freePort();
+  const selected = binding('personal', root);
+  selected.personal.base_url = `http://127.0.0.1:${port}`;
+  const runtime = vaultRuntimeFromBinding(selected);
+  const daemon = join(root, 'pulse-daemon-platform.mjs');
+  writeFakeDaemon(daemon, 'platform-daemon');
+  const base = createPlatformServices();
+  const calls = { inspect: 0, terminate: 0 };
+  const platformServices = {
+    ...base,
+    createStartupNonce: () => 'd'.repeat(64),
+    inspectProcess(pid) { calls.inspect += 1; return base.inspectProcess(pid); },
+    terminateProcess(pid, options) { calls.terminate += 1; return base.terminateProcess(pid, options); },
+  };
+  try {
+    const started = await startVaultRuntime(runtime, {
+      daemonPath: daemon, timeoutMs: 5000, platformServices, requireStartupNonce: true,
+    });
+    assert.equal(started.status, 'running');
+    assert.equal(JSON.parse(readFileSync(runtime.pid_file, 'utf8')).startup_nonce, 'd'.repeat(64));
+    assert.equal(inspectVaultRuntime(runtime, { platformServices }).status, 'running');
+    assert.equal((await stopVaultRuntimeAndWait(runtime, { platformServices })).status, 'stopped');
+    assert.ok(calls.inspect > 0);
+    assert.ok(calls.terminate > 0);
+  } finally {
+    try { await stopVaultRuntimeAndWait(runtime, { platformServices }); } catch { /* already stopped */ }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('supervisor recovers an exact crashed receipt and atomically restarts on daemon upgrade', async (t) => {

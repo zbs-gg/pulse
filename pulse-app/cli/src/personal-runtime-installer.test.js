@@ -274,6 +274,29 @@ test('Personal runtime inspection verifies the release without creating install 
   }
 });
 
+test('Personal release inspection obtains OS version through injected platform services', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-platform-version.'));
+  const manifestPath = join(root, 'manifest.json');
+  const value = fixture();
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
+  let calls = 0;
+  try {
+    const inspection = inspectPersonalRelease({
+      architecture: 'arm64', dataDir: join(root, 'data'), manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), packageVersion: '0.7.0', platform: 'darwin',
+      platformServices: { desktopOSVersion() { calls += 1; return '14.5'; } },
+      trustedKeys: [{
+        key_id: value.keyID, public_key_pem: value.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(inspection.ready, true);
+    assert.equal(calls, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('legacy v1 is historical-only and an unavailable target leaves zero install state', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-personal-target.'));
   const dataDir = join(root, 'data');

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, lstatSync, openSync, readFileSync, readSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
@@ -21,6 +20,7 @@ import {
   readMinimumReleaseEpoch,
   verifyReleaseManifestEnvelope,
 } from './release-manifest.js';
+import { createPlatformServices } from './platform-services.js';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(PACKAGE_ROOT, 'release', 'personal-preview-manifest.json');
@@ -60,17 +60,6 @@ function packageVersion(path = PACKAGE_JSON_PATH) {
   } catch (error) {
     if (error instanceof PersonalRuntimeInstallerError) throw error;
     fail('release_package_version_invalid');
-  }
-}
-
-function currentMacOSVersion() {
-  try {
-    const value = execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8', timeout: 3000 }).trim();
-    if (!/^\d+\.\d+(?:\.\d+)?$/.test(value)) fail('release_os_version_invalid');
-    return value;
-  } catch (error) {
-    if (error instanceof PersonalRuntimeInstallerError) throw error;
-    fail('release_os_version_invalid');
   }
 }
 
@@ -199,9 +188,10 @@ export async function provisionPersonalRuntime({
   materializers,
   libc,
   now = new Date(),
-  osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
+  osVersion,
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
+  platformServices = createPlatformServices({ platform, architecture }),
   testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
@@ -209,6 +199,8 @@ export async function provisionPersonalRuntime({
     fail('personal_runtime_configuration_invalid');
   }
   if (materializers !== undefined && !testMode) fail('release_test_materializer_forbidden');
+  let detectedOSVersion = osVersion;
+  try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
   const installRoot = join(resolve(dataDir), 'artifacts');
   const runtimeRoot = join(resolve(dataDir), 'runtime');
   const epochPath = join(runtimeRoot, 'minimum-release-epoch.json');
@@ -219,13 +211,13 @@ export async function provisionPersonalRuntime({
     existingLock();
   }
   const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, {
-    architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+        architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
   });
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
   const releaseLock = acquireInstallLock(lockPath);
   try {
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, {
-      architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+      architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
     });
     if (release.historical_only) fail('release_manifest_legacy');
     const activeSetPath = join(installRoot, 'active-release.json');
@@ -280,19 +272,22 @@ export function inspectPersonalRuntime({
   libc,
   manifestPath = DEFAULT_MANIFEST_PATH,
   now = new Date(),
-  osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
+  osVersion,
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
+  platformServices = createPlatformServices({ platform, architecture }),
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
+  let detectedOSVersion = osVersion;
+  try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
   const root = resolve(dataDir);
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
   );
   if (release.historical_only) {
     return Object.freeze({
@@ -332,19 +327,22 @@ export function inspectPersonalRelease({
   libc,
   manifestPath = DEFAULT_MANIFEST_PATH,
   now = new Date(),
-  osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
+  osVersion,
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
+  platformServices = createPlatformServices({ platform, architecture }),
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
+  let detectedOSVersion = osVersion;
+  try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
   const root = resolve(dataDir);
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
   );
   return Object.freeze({
     ready: !release.historical_only,

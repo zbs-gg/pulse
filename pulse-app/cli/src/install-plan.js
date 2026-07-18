@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process';
 import { statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { DesktopTargetError, resolveDesktopTarget } from './desktop-target.js';
+import { createPlatformServices, defaultPlatformServices } from './platform-services.js';
 import { assertSupportedNodeVersion } from './release-manifest.js';
 import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { personalPrincipalPath } from './personal-principal.js';
@@ -92,7 +92,7 @@ function nodeStatus(version) {
 
 export { detectCodexCLI };
 
-export function detectInstallResources({ home = homedir(), spawn = spawnSync } = {}) {
+export function detectInstallResources({ home = homedir(), platformServices = defaultPlatformServices } = {}) {
   let diskFreeBytes = null;
   try {
     const info = statfsSync(home);
@@ -106,11 +106,7 @@ export function detectInstallResources({ home = homedir(), spawn = spawnSync } =
     }
   } catch { /* report unknown without turning a read-only plan into a mutation */ }
   let port = 'unknown';
-  const probe = spawn('/usr/sbin/lsof', ['-nP', '-iTCP:18789', '-sTCP:LISTEN'], {
-    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 3000, killSignal: 'SIGTERM',
-  });
-  if (probe?.status === 0) port = 'occupied';
-  else if (probe?.status === 1 || probe?.error?.code === 'ENOENT') port = probe?.status === 1 ? 'free' : 'unknown';
+  try { port = platformServices.probePort(18789); } catch { /* fail closed as unknown */ }
   return {
     disk_free_bytes: diskFreeBytes,
     memory_total_bytes: totalmem(),
@@ -327,11 +323,12 @@ export function buildPersonalInstallPlan({
   architecture = process.arch,
   libc,
   nodeVersion = process.versions.node,
-  detectWorkspace = canonicalizeWorkspace,
+  detectWorkspace,
   detectClaude,
-  detectCodex = detectCodexCLI,
+  detectCodex,
   detectCursor,
   detectResources = detectInstallResources,
+  platformServices = createPlatformServices({ platform, architecture, home }),
   release,
   releaseReasonCode,
   currentState,
@@ -341,11 +338,12 @@ export function buildPersonalInstallPlan({
       resolve(pulseRoot) !== pulseRoot) {
     throw new TypeError('install_plan_path_invalid');
   }
-  const workspace = workspaceStatus(cwd, detectWorkspace);
+  const workspaceDetector = detectWorkspace ?? ((path) => canonicalizeWorkspace(path, { platformServices }));
+  const workspace = workspaceStatus(cwd, workspaceDetector);
   const hosts = detectSupportedHosts({
-    home,
+    home, platformServices,
     ...(detectClaude ? { detectClaude } : {}),
-    detectCodex,
+    ...(detectCodex ? { detectCodex } : {}),
     ...(detectCursor ? { detectCursor } : {}),
   });
   const codex = hosts.find((host) => host.host === 'codex');
@@ -358,7 +356,7 @@ export function buildPersonalInstallPlan({
     if (!(error instanceof DesktopTargetError)) throw error;
   }
   const detectedCurrentState = installCurrentState(currentState);
-  const resources = detectResources({ home });
+  const resources = detectResources({ home, platformServices });
   if (!resources || !['free', 'occupied', 'unknown'].includes(resources.port_18789) ||
       ![resources.disk_free_bytes, resources.memory_total_bytes]
         .every((value) => value === null || (Number.isSafeInteger(value) && value >= 0))) {

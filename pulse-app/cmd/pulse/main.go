@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/claude"
@@ -30,6 +29,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/health"
 	"github.com/nkkmnk/pulse/internal/model"
 	"github.com/nkkmnk/pulse/internal/outbox"
+	"github.com/nkkmnk/pulse/internal/platform"
 	"github.com/nkkmnk/pulse/internal/prompt"
 	"github.com/nkkmnk/pulse/internal/providers/anthropic"
 	"github.com/nkkmnk/pulse/internal/providers/openaicompat"
@@ -286,6 +286,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,
+		StartupNonce: os.Getenv("PULSE_STARTUP_NONCE"),
 		Outbox:       ob,
 		Builder:      builder,
 		Claude:       cc,
@@ -336,7 +337,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -602,7 +603,7 @@ func runTeam(dataDir, addr string) error {
 	}
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
 	defer signal.Stop(sigCh)
 	slog.Info("pulse team daemon listening", "addr", listener.Addr().String())
 	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
@@ -708,7 +709,7 @@ func runTeamOwnerAdmin(cfg *config.Config, addr string) error {
 		MaxHeaderBytes: 16 << 10,
 	}
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
 	defer signal.Stop(sigCh)
 	renewLease := func(ctx context.Context) error {
 		if lease == nil {
@@ -1031,23 +1032,14 @@ func readTeamCredentialFile(path string, maximum int64) (string, error) {
 	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
 		return "", errors.New("invalid team credential path")
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if _, supported := platform.CurrentUserID(); !supported {
+		return "", fmt.Errorf("team credential security: %w", platform.ErrUnsupported)
+	}
+	value, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MaximumBytes: maximum, RequireCurrentOwner: true, AllowRootOwner: true, OwnerOnly: true, SingleLink: true,
+	})
 	if err != nil {
-		return "", err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return "", errors.New("unsafe team credential file")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || (stat.Uid != uint32(os.Geteuid()) && stat.Uid != 0) {
-		return "", errors.New("team credential file has an unexpected owner")
-	}
-	value, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil || int64(len(value)) > maximum {
-		return "", errors.New("team credential file is too large")
+		return "", fmt.Errorf("unsafe team credential file: %w", err)
 	}
 	return string(value), nil
 }
@@ -1213,56 +1205,19 @@ func readOwnerOnlyRegularFile(path string, maximum int64) ([]byte, error) {
 	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
 		return nil, errors.New("invalid path")
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	data, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MaximumBytes: maximum, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+	})
 	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
-		return nil, errors.New("file has an unexpected owner")
-	}
-	if info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("file must be owner-only")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil || int64(len(data)) > maximum {
-		return nil, errors.New("file is too large")
+		return nil, fmt.Errorf("file must be owner-only: %w", err)
 	}
 	return data, nil
 }
 
 func validateManagedArtifactPath(path string, executable, directory bool) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("symbolic links are forbidden")
-	}
-	if directory {
-		if !info.IsDir() {
-			return errors.New("not a directory")
-		}
-	} else if !info.Mode().IsRegular() {
-		return errors.New("not a regular file")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
-		return errors.New("unexpected owner")
-	}
-	if info.Mode().Perm()&0022 != 0 {
-		return errors.New("group/other writable path")
-	}
-	if executable && info.Mode().Perm()&0111 == 0 {
-		return errors.New("not executable")
-	}
-	return nil
+	return platform.ValidatePrivatePath(path, platform.FilePolicy{
+		RequireCurrentOwner: true, NoUntrustedWrite: true, Directory: directory, Executable: executable,
+	})
 }
 
 // expanderFromEnv returns a query-expansion client when

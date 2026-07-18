@@ -18,9 +18,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/platform"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/teamauth"
 )
@@ -685,42 +685,28 @@ func LoadPrincipalVerifyKeyringFromEnv() (PrincipalVerifyKeyring, error) {
 	if path == "" {
 		return PrincipalVerifyKeyring{}, fmt.Errorf("%s is required", PrincipalVerifyKeyringEnv)
 	}
-	return loadPrincipalVerifyKeyring(path, uint32(os.Geteuid()))
+	uid, supported := platform.CurrentUserID()
+	if !supported {
+		return PrincipalVerifyKeyring{}, fmt.Errorf("principal verify keyring: %w", platform.ErrUnsupported)
+	}
+	return loadPrincipalVerifyKeyring(path, uid)
 }
 
 func LoadPrincipalVerifyKeyring(path string) (PrincipalVerifyKeyring, error) {
-	return loadPrincipalVerifyKeyring(path, uint32(os.Geteuid()))
+	uid, supported := platform.CurrentUserID()
+	if !supported {
+		return PrincipalVerifyKeyring{}, fmt.Errorf("principal verify keyring: %w", platform.ErrUnsupported)
+	}
+	return loadPrincipalVerifyKeyring(path, uid)
 }
 
 func loadPrincipalVerifyKeyring(path string, expectedUID uint32) (PrincipalVerifyKeyring, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	raw, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MinimumBytes: 1, MaximumBytes: PrincipalVerifyKeyringMaxBytes, ExpectedUID: &expectedUID,
+		OwnerOnly: true, SingleLink: true,
+	})
 	if err != nil {
-		return PrincipalVerifyKeyring{}, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = syscall.Close(fd)
-		return PrincipalVerifyKeyring{}, errors.New("open principal verify keyring")
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return PrincipalVerifyKeyring{}, err
-	}
-	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > PrincipalVerifyKeyringMaxBytes ||
-		info.Mode().Perm()&0o077 != 0 || info.Mode().Perm()&0o400 == 0 || info.Mode().Perm()&0o111 != 0 {
-		return PrincipalVerifyKeyring{}, errors.New("unsafe principal verify keyring file")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != expectedUID {
-		return PrincipalVerifyKeyring{}, errors.New("principal verify keyring owner mismatch")
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, PrincipalVerifyKeyringMaxBytes+1))
-	if err != nil {
-		return PrincipalVerifyKeyring{}, err
-	}
-	if len(raw) == 0 || len(raw) > PrincipalVerifyKeyringMaxBytes {
-		return PrincipalVerifyKeyring{}, errors.New("invalid principal verify keyring size")
+		return PrincipalVerifyKeyring{}, fmt.Errorf("unsafe principal verify keyring file: %w", err)
 	}
 	var parsed principalKeyringFile
 	if err := decodeStrictJSON(raw, &parsed); err != nil || len(parsed.Previous) > 4 {

@@ -1,8 +1,9 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { isAbsolute, join, resolve } from 'node:path';
+
+import { defaultPlatformServices } from './platform-services.js';
 
 const REGISTRY_SCHEMA = 'pulse.workspace-binding-registry.v1';
 const ANCHOR_SCHEMA = 'pulse.workspace-binding-anchor.v1';
@@ -52,15 +53,12 @@ function digest(label, ...parts) {
   return hash.digest('hex');
 }
 
-function gitValue(cwd, ...args) {
-  const result = spawnSync('/usr/bin/git', ['-C', cwd, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (result.status !== 0) {
+function gitValue(cwd, platformServices, ...args) {
+  try {
+    return platformServices.runGit(cwd, args);
+  } catch {
     throw new BindingError('workspace_not_git', 'workspace must be inside a Git checkout');
   }
-  return result.stdout.trim();
 }
 
 function inodeIdentity(path) {
@@ -68,11 +66,11 @@ function inodeIdentity(path) {
   return `${stat.dev}:${stat.ino}`;
 }
 
-export function canonicalizeWorkspace(inputPath) {
+export function canonicalizeWorkspace(inputPath, { platformServices = defaultPlatformServices } = {}) {
   const requestedPath = realpathSync(resolve(inputPath));
-  const topLevel = realpathSync(gitValue(requestedPath, 'rev-parse', '--show-toplevel'));
-  const gitDirRaw = gitValue(topLevel, 'rev-parse', '--git-dir');
-  const commonDirRaw = gitValue(topLevel, 'rev-parse', '--git-common-dir');
+  const topLevel = realpathSync(gitValue(requestedPath, platformServices, 'rev-parse', '--show-toplevel'));
+  const gitDirRaw = gitValue(topLevel, platformServices, 'rev-parse', '--git-dir');
+  const commonDirRaw = gitValue(topLevel, platformServices, 'rev-parse', '--git-common-dir');
   const gitDir = realpathSync(isAbsolute(gitDirRaw) ? gitDirRaw : resolve(topLevel, gitDirRaw));
   const commonDir = realpathSync(isAbsolute(commonDirRaw) ? commonDirRaw : resolve(topLevel, commonDirRaw));
   const checkoutIdentity = inodeIdentity(topLevel);
@@ -85,11 +83,6 @@ export function canonicalizeWorkspace(inputPath) {
     git_common_dir: commonDir,
     checkout_kind: gitDir === commonDir ? 'primary' : 'worktree',
   };
-}
-
-function pathInside(path, parent) {
-  const rel = relative(parent, path);
-  return rel === '' || (!rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && rel !== '..' && !isAbsolute(rel));
 }
 
 function requireOwnerIntegrityFile(path, code, { rootOnly = false } = {}) {
@@ -276,14 +269,16 @@ export function resolveWorkspaceBinding({
   publicKeyPath,
   anchorPath,
   rootAnchor = anchorPath === undefined,
+  platformServices = defaultPlatformServices,
 } = {}) {
-  const workspace = canonicalizeWorkspace(cwd);
+  const workspace = canonicalizeWorkspace(cwd, { platformServices });
   const defaults = defaultBindingPaths();
   const selectedRegistry = realpathSync(resolve(registryPath ?? defaults.registryPath));
   const selectedPublicKey = realpathSync(resolve(publicKeyPath ?? defaults.publicKeyPath));
   const selectedAnchor = realpathSync(resolve(anchorPath ?? defaults.anchorPath));
-  if (pathInside(selectedRegistry, workspace.canonical_path) || pathInside(selectedPublicKey, workspace.canonical_path) ||
-      pathInside(selectedAnchor, workspace.canonical_path)) {
+  if (platformServices.isPathInside(selectedRegistry, workspace.canonical_path) ||
+      platformServices.isPathInside(selectedPublicKey, workspace.canonical_path) ||
+      platformServices.isPathInside(selectedAnchor, workspace.canonical_path)) {
     throw new BindingError('binding_registry_in_workspace', 'binding registry, trust key, and anti-rollback anchor must live outside the workspace');
   }
   const registry = verifyBindingRegistry({
@@ -320,6 +315,7 @@ export function resolveWorkspaceBinding({
 
 export function inspectWorkspaceBinding(options = {}) {
   const cwd = options.cwd ?? process.cwd();
+  const platformServices = options.platformServices ?? defaultPlatformServices;
   try {
     return { status: 'bound', binding: resolveWorkspaceBinding(options) };
   } catch (error) {
@@ -328,7 +324,7 @@ export function inspectWorkspaceBinding(options = {}) {
       throw error;
     }
     const workspace = error.code === 'binding_missing'
-      ? canonicalizeWorkspace(cwd)
+      ? canonicalizeWorkspace(cwd, { platformServices })
       : { canonical_path: realpathSync(resolve(cwd)) };
     return {
       status: 'unassigned',

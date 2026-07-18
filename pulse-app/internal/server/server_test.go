@@ -68,6 +68,33 @@ func TestHealthReturnsOkWithAuth(t *testing.T) {
 	}
 }
 
+func TestHealthBindsTheSupervisorStartupNonce(t *testing.T) {
+	nonce := strings.Repeat("a", 64)
+	srv, err := New(Config{IPCSecret: "secret", StartupNonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/health", nil)
+	req.Header.Set("X-Pulse-Key", "secret")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var body healthResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.StartupNonce != nonce {
+		t.Fatalf("startup nonce=%q, want exact supervisor nonce", body.StartupNonce)
+	}
+	if _, err := New(Config{IPCSecret: "secret", StartupNonce: "not-a-nonce"}); err == nil {
+		t.Fatal("invalid startup nonce accepted")
+	}
+}
+
 func TestHealthRejectsWrongKey(t *testing.T) {
 	srv, err := New(Config{IPCSecret: "secret"})
 	if err != nil {
