@@ -37,14 +37,36 @@ const (
 	localManagedProtocolVersion = 1
 )
 
-// ManagedLocalConfig is the exact process contract for the Pulse-owned
-// bge-m3 runtime. Paths are resolved and validated by product startup before
-// this type is constructed.
+// ManagedVectorContract binds embeddings to the exact model semantics that
+// produced the stored vectors. Changing any field requires an explicit
+// migration/reindex contract rather than silently mixing vector spaces.
+type ManagedVectorContract struct {
+	Model        string `json:"model"`
+	Source       string `json:"source"`
+	Revision     string `json:"revision"`
+	Dimensions   int    `json:"dimensions"`
+	Pooling      string `json:"pooling"`
+	Normalized   bool   `json:"normalized"`
+	Opset        int    `json:"opset"`
+	Quantization string `json:"quantization"`
+}
+
+// ManagedLocalConfig is the engine-neutral v2 process contract for a
+// Pulse-owned local runner. Product startup verifies every path, tree digest,
+// argument, and vector field before constructing the client.
 type ManagedLocalConfig struct {
-	PythonExecutable string
-	HelperPath       string
-	ModelFile        string
-	SupportDirectory string
+	Schema                          string
+	Protocol                        int
+	Engine                          string
+	RunnerPath                      string
+	RunnerArgs                      []string
+	ModelRoot                       string
+	SupportRoot                     string
+	VectorContract                  ManagedVectorContract
+	EmbedderRuntimeActivationDigest string
+	EmbedderRuntimeTreeDigest       string
+	ModelActivationDigest           string
+	ModelTreeDigest                 string
 }
 
 type localClientConfig struct {
@@ -127,15 +149,11 @@ func NewLocal(pythonExe, helperPath, modelPath, modelName string) *LocalClient {
 // consult PATH, Python installations, API keys, or environment model paths.
 func NewManagedLocal(config ManagedLocalConfig) *LocalClient {
 	return newLocalClient(localClientConfig{
-		command: config.PythonExecutable,
-		commandArgs: []string{
-			config.HelperPath,
-			"--model-file", config.ModelFile,
-			"--support-dir", config.SupportDirectory,
-		},
-		dimensions:    localManagedDimensions,
+		command:       config.RunnerPath,
+		commandArgs:   config.RunnerArgs,
+		dimensions:    config.VectorContract.Dimensions,
 		managed:       true,
-		modelName:     localDefaultModelName,
+		modelName:     config.VectorContract.Model,
 		responseBytes: localMaximumResponseBytes,
 	})
 }

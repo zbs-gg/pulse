@@ -10,6 +10,7 @@ import test from 'node:test';
 import { canonicalReleaseJSON, releaseKeyID } from './release-manifest.js';
 import { readActivatedArtifactSet } from './artifact-installer.js';
 import { acquireInstallLock } from './install-journal.js';
+import { createPlatformServices } from './platform-services.js';
 import {
   commitPersonalRuntimeRelease,
   inspectPersonalRelease,
@@ -176,6 +177,15 @@ test('empty Personal install downloads the signed compatibility set and publishe
   const manifestPath = join(root, 'manifest.json');
   const dataDir = join(root, 'data');
   const value = fixture();
+  const basePlatformServices = createPlatformServices({ platform: 'darwin', architecture: 'arm64' });
+  let privateDirectoryCalls = 0;
+  const platformServices = {
+    ...basePlatformServices,
+    ensurePrivateDirectory(path) {
+      privateDirectoryCalls += 1;
+      return basePlatformServices.ensurePrivateDirectory(path);
+    },
+  };
   writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
   const requests = [];
   try {
@@ -189,12 +199,14 @@ test('empty Personal install downloads the signed compatibility set and publishe
       materializers: value.materializers,
       now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
       packageVersion: '0.7.0', platform: 'darwin', testMode: true,
+      platformServices,
       trustedKeys: [{
         key_id: value.keyID, public_key_pem: value.publicKey,
         valid_from_epoch: 1, valid_through_epoch: 20,
       }],
     });
     assert.equal(requests.length, 5);
+    assert.ok(privateDirectoryCalls > 0, 'selected platform services reach artifact activation and private journals');
     assert.equal(installed.release.manifest_digest.length, 64);
     assert.deepEqual(Object.keys(installed.activationSet.activations).sort(), Object.keys(value.files).sort());
     assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'install-journal.json'), 'utf8')).phase, 'activated');

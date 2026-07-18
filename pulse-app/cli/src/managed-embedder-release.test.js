@@ -11,11 +11,34 @@ import {
   buildRuntimeInternalManifest,
   isMachO,
   loadManagedEmbedderSourceManifest,
+  managedEmbedderRuntimeContract,
 } from './managed-embedder-release.js';
 
 function expectCode(action, code) {
   assert.throws(action, (error) => error instanceof ManagedEmbedderReleaseError && error.code === code);
 }
+
+test('portable managed runtime contract is target-neutral and keeps MLX legacy-only', () => {
+  assert.deepEqual(managedEmbedderRuntimeContract({ engine: 'transformers-js-onnx', platform: 'win32' }), {
+    engine: 'transformers-js-onnx',
+    runner_relative_path: 'bin/pulse-embedder.exe',
+    vector_contract: {
+      dimensions: 1024, model: 'bge-m3', normalized: true, opset: 17, pooling: 'cls',
+      quantization: 'dynamic-int8',
+      revision: '5617a9f61b028005a4858fdac845db406aefb181', source: 'BAAI/bge-m3',
+    },
+  });
+  assert.deepEqual(managedEmbedderRuntimeContract({ engine: 'transformers-js-onnx', platform: 'linux' }), {
+    engine: 'transformers-js-onnx',
+    runner_relative_path: 'bin/pulse-embedder',
+    vector_contract: {
+      dimensions: 1024, model: 'bge-m3', normalized: true, opset: 17, pooling: 'cls',
+      quantization: 'dynamic-int8',
+      revision: '5617a9f61b028005a4858fdac845db406aefb181', source: 'BAAI/bge-m3',
+    },
+  });
+  expectCode(() => managedEmbedderRuntimeContract({ engine: 'mlx', platform: 'darwin' }), 'managed_embedder_engine_legacy');
+});
 
 test('managed runtime sources are exact, data-only, permissive, and version pinned', () => {
   const value = loadManagedEmbedderSourceManifest();

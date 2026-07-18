@@ -123,6 +123,26 @@ func TestManagedLocalAcceptsExactProtocolAndNormalizedVectors(t *testing.T) {
 	}
 }
 
+func TestManagedLocalV2UsesExactRunnerAndBoundedArgs(t *testing.T) {
+	config := ManagedLocalConfig{
+		RunnerPath: os.Args[0],
+		RunnerArgs: []string{"-test.run=TestLocalHelperProcess", "--model-root", "/tmp/model root"},
+		Engine:     "transformers-js-onnx",
+		VectorContract: ManagedVectorContract{
+			Model: "bge-m3", Source: "BAAI/bge-m3",
+			Revision:   "5617a9f61b028005a4858fdac845db406aefb181",
+			Dimensions: 1024, Pooling: "cls", Normalized: true, Opset: 17, Quantization: "dynamic-int8",
+		},
+	}
+	client := NewManagedLocal(config)
+	if client.command != config.RunnerPath || strings.Join(client.commandArgs, "\x00") != strings.Join(config.RunnerArgs, "\x00") {
+		t.Fatalf("runner contract = %q %q", client.command, client.commandArgs)
+	}
+	if client.Model() != "bge-m3" || client.dimensions != 1024 {
+		t.Fatalf("vector contract = %s/%d", client.Model(), client.dimensions)
+	}
+}
+
 func TestManagedLocalDoesNotPassRemoteProviderEnvironment(t *testing.T) {
 	t.Setenv("COHERE_API_KEY", "must-not-reach-managed-helper")
 	client := managedTestClient(t, "env")
@@ -254,10 +274,14 @@ func TestManagedLocalRealBGEVectorWhenReleaseInputsAreAvailable(t *testing.T) {
 		t.Skip("managed release inputs are not available")
 	}
 	client := NewManagedLocal(ManagedLocalConfig{
-		PythonExecutable: python,
-		HelperPath:       helper,
-		ModelFile:        model,
-		SupportDirectory: support,
+		RunnerPath: python,
+		RunnerArgs: []string{helper, "--model-file", model, "--support-dir", support},
+		Engine:     "mlx",
+		VectorContract: ManagedVectorContract{
+			Model: "bge-m3", Source: "BAAI/bge-m3",
+			Revision:   "5617a9f61b028005a4858fdac845db406aefb181",
+			Dimensions: 1024, Pooling: "cls", Normalized: true, Opset: 17, Quantization: "dynamic-int8",
+		},
 	})
 	t.Cleanup(func() { _ = client.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

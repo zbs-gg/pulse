@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nkkmnk/pulse/internal/claude"
 	"github.com/nkkmnk/pulse/internal/config"
@@ -1087,23 +1088,39 @@ func initRetrieval(s *store.Store, dataDir string, productLocal bool) (*retrieve
 	return engine, nil
 }
 
-const managedEmbedderConfigSchema = "pulse.managed_embedder.config.v1"
+const (
+	managedEmbedderConfigSchemaV1   = "pulse.managed_embedder.config.v1"
+	managedEmbedderConfigSchemaV2   = "pulse.managed_embedder.config.v2"
+	managedEmbedderProtocol         = 1
+	managedEmbedderMaximumArgs      = 8
+	managedEmbedderMaximumArgBytes  = 4096
+	managedEmbedderMaximumArgsBytes = 16 * 1024
+)
+
+type managedVectorContract struct {
+	Dimensions   int    `json:"dimensions"`
+	Model        string `json:"model"`
+	Normalized   bool   `json:"normalized"`
+	Opset        int    `json:"opset"`
+	Pooling      string `json:"pooling"`
+	Quantization string `json:"quantization"`
+	Revision     string `json:"revision"`
+	Source       string `json:"source"`
+}
 
 type managedEmbedderDiskConfig struct {
-	Dimensions                      int    `json:"dimensions"`
-	EmbedderRuntimeActivationDigest string `json:"embedder_runtime_activation_digest"`
-	EmbedderRuntimeTreeDigest       string `json:"embedder_runtime_tree_digest"`
-	HelperPath                      string `json:"helper_path"`
-	Model                           string `json:"model"`
-	ModelActivationDigest           string `json:"model_activation_digest"`
-	ModelFile                       string `json:"model_file"`
-	ModelTreeDigest                 string `json:"model_tree_digest"`
-	Normalized                      bool   `json:"normalized"`
-	Pooling                         string `json:"pooling"`
-	Protocol                        int    `json:"protocol"`
-	PythonExecutable                string `json:"python_executable"`
-	Schema                          string `json:"schema"`
-	SupportDirectory                string `json:"support_directory"`
+	EmbedderRuntimeActivationDigest string                `json:"embedder_runtime_activation_digest"`
+	EmbedderRuntimeTreeDigest       string                `json:"embedder_runtime_tree_digest"`
+	Engine                          string                `json:"engine"`
+	ModelActivationDigest           string                `json:"model_activation_digest"`
+	ModelRoot                       string                `json:"model_root"`
+	ModelTreeDigest                 string                `json:"model_tree_digest"`
+	Protocol                        int                   `json:"protocol"`
+	RunnerArgs                      []string              `json:"runner_args"`
+	RunnerPath                      string                `json:"runner_path"`
+	Schema                          string                `json:"schema"`
+	SupportRoot                     string                `json:"support_root"`
+	VectorContract                  managedVectorContract `json:"vector_contract"`
 }
 
 func managedEmbedderFromConfig() (retrieve.Embedder, string, error) {
@@ -1130,6 +1147,18 @@ func loadManagedEmbedderConfig() (embed.ManagedLocalConfig, error) {
 	if err != nil {
 		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config open: %w", err)
 	}
+	var header struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config decode: %w", err)
+	}
+	if header.Schema == managedEmbedderConfigSchemaV1 {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config v1 is historical and not ready for universal retrieval")
+	}
+	if header.Schema != managedEmbedderConfigSchemaV2 {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config contract mismatch")
+	}
 	var disk managedEmbedderDiskConfig
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -1140,8 +1169,13 @@ func loadManagedEmbedderConfig() (embed.ManagedLocalConfig, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return embed.ManagedLocalConfig{}, errors.New("managed embedder config decode: trailing JSON")
 	}
-	if disk.Schema != managedEmbedderConfigSchema || disk.Model != "bge-m3" || disk.Dimensions != 1024 ||
-		disk.Pooling != "cls" || !disk.Normalized || disk.Protocol != 1 {
+	if disk.Schema != managedEmbedderConfigSchemaV2 || disk.Protocol != managedEmbedderProtocol ||
+		disk.Engine != "transformers-js-onnx" ||
+		disk.VectorContract.Model != "bge-m3" || disk.VectorContract.Source != "BAAI/bge-m3" ||
+		disk.VectorContract.Revision != "5617a9f61b028005a4858fdac845db406aefb181" ||
+		disk.VectorContract.Dimensions != 1024 || disk.VectorContract.Pooling != "cls" ||
+		!disk.VectorContract.Normalized || disk.VectorContract.Opset != 17 ||
+		disk.VectorContract.Quantization != "dynamic-int8" {
 		return embed.ManagedLocalConfig{}, errors.New("managed embedder config contract mismatch")
 	}
 	for label, digest := range map[string]string{
@@ -1155,38 +1189,72 @@ func loadManagedEmbedderConfig() (embed.ManagedLocalConfig, error) {
 		}
 	}
 	for label, value := range map[string]string{
-		"python": disk.PythonExecutable, "helper": disk.HelperPath, "model": disk.ModelFile, "support": disk.SupportDirectory,
+		"runner": disk.RunnerPath, "model root": disk.ModelRoot, "support root": disk.SupportRoot,
 	} {
 		if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsRune(value, '\x00') {
 			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder %s path is not absolute and clean", label)
 		}
 	}
-	if filepath.Ext(disk.ModelFile) != ".safetensors" {
-		return embed.ManagedLocalConfig{}, errors.New("managed embedder model must be a safetensors file")
+	if len(disk.RunnerArgs) == 0 || len(disk.RunnerArgs) > managedEmbedderMaximumArgs {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder runner args are outside the bounded contract")
 	}
-	if err := validateManagedArtifactPath(disk.PythonExecutable, true, false); err != nil {
-		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder python: %w", err)
+	totalArgBytes := 0
+	for index, argument := range disk.RunnerArgs {
+		totalArgBytes += len(argument)
+		if argument == "" || len(argument) > managedEmbedderMaximumArgBytes || !utf8.ValidString(argument) ||
+			strings.ContainsRune(argument, '\x00') || strings.ContainsAny(argument, "\r\n") || strings.Contains(argument, "://") {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner arg %d is invalid", index)
+		}
+		if filepath.IsAbs(argument) && !managedPathInside(disk.ModelRoot, argument) &&
+			!managedPathInside(disk.SupportRoot, argument) {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner arg %d escapes verified roots", index)
+		}
 	}
-	if err := validateManagedArtifactPath(disk.HelperPath, false, false); err != nil {
-		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder helper: %w", err)
+	if totalArgBytes > managedEmbedderMaximumArgsBytes {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder runner args exceed the bounded contract")
 	}
-	if err := validateManagedArtifactPath(disk.ModelFile, false, false); err != nil {
-		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model: %w", err)
+	if !managedPathInside(disk.ModelRoot, disk.SupportRoot) || disk.ModelRoot == disk.SupportRoot {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder support root must be inside the verified model root")
 	}
-	if err := validateManagedArtifactPath(disk.SupportDirectory, false, true); err != nil {
-		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support directory: %w", err)
+	if err := validateManagedArtifactPath(disk.RunnerPath, true, false); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner: %w", err)
 	}
-	for _, name := range []string{"config.json", "tokenizer.json"} {
-		if err := validateManagedArtifactPath(filepath.Join(disk.SupportDirectory, name), false, false); err != nil {
+	if err := validateManagedArtifactPath(disk.ModelRoot, false, true); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model root: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.SupportRoot, false, true); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support root: %w", err)
+	}
+	for _, name := range []string{"model_int8.onnx", "pulse-model-contract.json"} {
+		if err := validateManagedArtifactPath(filepath.Join(disk.ModelRoot, name), false, false); err != nil {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model %s: %w", name, err)
+		}
+	}
+	for _, name := range []string{"config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"} {
+		if err := validateManagedArtifactPath(filepath.Join(disk.SupportRoot, name), false, false); err != nil {
 			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support %s: %w", name, err)
 		}
 	}
 	return embed.ManagedLocalConfig{
-		PythonExecutable: disk.PythonExecutable,
-		HelperPath:       disk.HelperPath,
-		ModelFile:        disk.ModelFile,
-		SupportDirectory: disk.SupportDirectory,
+		Schema: disk.Schema, Protocol: disk.Protocol, Engine: disk.Engine,
+		RunnerPath: disk.RunnerPath, RunnerArgs: append([]string(nil), disk.RunnerArgs...),
+		ModelRoot: disk.ModelRoot, SupportRoot: disk.SupportRoot,
+		VectorContract: embed.ManagedVectorContract{
+			Model: disk.VectorContract.Model, Source: disk.VectorContract.Source,
+			Revision: disk.VectorContract.Revision, Dimensions: disk.VectorContract.Dimensions,
+			Pooling: disk.VectorContract.Pooling, Normalized: disk.VectorContract.Normalized,
+			Opset: disk.VectorContract.Opset, Quantization: disk.VectorContract.Quantization,
+		},
+		EmbedderRuntimeActivationDigest: disk.EmbedderRuntimeActivationDigest,
+		EmbedderRuntimeTreeDigest:       disk.EmbedderRuntimeTreeDigest,
+		ModelActivationDigest:           disk.ModelActivationDigest, ModelTreeDigest: disk.ModelTreeDigest,
 	}, nil
+}
+
+func managedPathInside(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) &&
+		!filepath.IsAbs(relative)
 }
 
 func validManagedDigest(value string) bool {

@@ -115,7 +115,7 @@ func managedEmbedderFixture(t *testing.T) (string, map[string]any) {
 	root := t.TempDir()
 	runtimeDir := filepath.Join(root, "artifacts", "embedder-runtime", "versions", strings.Repeat("a", 64))
 	modelDir := filepath.Join(root, "artifacts", "model", "versions", strings.Repeat("b", 64))
-	supportDir := filepath.Join(runtimeDir, "support")
+	supportDir := filepath.Join(modelDir, "support")
 	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -125,15 +125,16 @@ func managedEmbedderFixture(t *testing.T) (string, map[string]any) {
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	python := filepath.Join(runtimeDir, "runtime", "bin", "python3.12")
-	helper := filepath.Join(runtimeDir, "helper.py")
-	model := filepath.Join(modelDir, "model.safetensors")
+	runner := filepath.Join(runtimeDir, "bin", "pulse-embedder")
+	model := filepath.Join(modelDir, "model_int8.onnx")
 	for path, mode := range map[string]os.FileMode{
-		python:                                   0o755,
-		helper:                                   0o644,
+		runner:                                   0o755,
 		model:                                    0o644,
 		filepath.Join(supportDir, "config.json"): 0o644,
-		filepath.Join(supportDir, "tokenizer.json"): 0o644,
+		filepath.Join(supportDir, "tokenizer.json"):          0o644,
+		filepath.Join(supportDir, "tokenizer_config.json"):   0o644,
+		filepath.Join(supportDir, "special_tokens_map.json"): 0o644,
+		filepath.Join(modelDir, "pulse-model-contract.json"): 0o644,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -143,20 +144,23 @@ func managedEmbedderFixture(t *testing.T) (string, map[string]any) {
 		}
 	}
 	return root, map[string]any{
-		"dimensions":                         1024,
+		"engine":                             "transformers-js-onnx",
 		"embedder_runtime_activation_digest": strings.Repeat("c", 64),
 		"embedder_runtime_tree_digest":       strings.Repeat("d", 64),
-		"helper_path":                        helper,
-		"model":                              "bge-m3",
 		"model_activation_digest":            strings.Repeat("e", 64),
-		"model_file":                         model,
+		"model_root":                         modelDir,
 		"model_tree_digest":                  strings.Repeat("f", 64),
-		"normalized":                         true,
-		"pooling":                            "cls",
 		"protocol":                           1,
-		"python_executable":                  python,
-		"schema":                             "pulse.managed_embedder.config.v1",
-		"support_directory":                  supportDir,
+		"runner_args":                        []string{"--model-root", modelDir, "--support-root", supportDir},
+		"runner_path":                        runner,
+		"schema":                             "pulse.managed_embedder.config.v2",
+		"support_root":                       supportDir,
+		"vector_contract": map[string]any{
+			"model": "bge-m3", "source": "BAAI/bge-m3",
+			"revision":   "5617a9f61b028005a4858fdac845db406aefb181",
+			"dimensions": 1024, "pooling": "cls", "normalized": true,
+			"opset": 17, "quantization": "dynamic-int8",
+		},
 	}
 }
 
@@ -181,7 +185,8 @@ func TestManagedEmbedderConfigRequiresExactPrivateContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ModelFile != value["model_file"] || config.PythonExecutable != value["python_executable"] {
+	if config.RunnerPath != value["runner_path"] || config.ModelRoot != value["model_root"] ||
+		len(config.RunnerArgs) != 4 {
 		t.Fatalf("config = %+v", config)
 	}
 
@@ -189,6 +194,91 @@ func TestManagedEmbedderConfigRequiresExactPrivateContract(t *testing.T) {
 	writeManagedEmbedderFixture(t, root, value)
 	if _, err := loadManagedEmbedderConfig(); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("unknown-field error = %v", err)
+	}
+}
+
+func TestManagedEmbedderConfigV1IsHistoricalNotReady(t *testing.T) {
+	root, value := managedEmbedderFixture(t)
+	value["schema"] = "pulse.managed_embedder.config.v1"
+	delete(value, "runner_path")
+	delete(value, "runner_args")
+	delete(value, "engine")
+	delete(value, "model_root")
+	delete(value, "support_root")
+	delete(value, "vector_contract")
+	value["python_executable"] = filepath.Join(root, "legacy", "python")
+	value["helper_path"] = filepath.Join(root, "legacy", "helper.py")
+	value["model_file"] = filepath.Join(root, "legacy", "model.safetensors")
+	value["support_directory"] = filepath.Join(root, "legacy", "support")
+	value["model"] = "bge-m3"
+	value["dimensions"] = 1024
+	value["pooling"] = "cls"
+	value["normalized"] = true
+	path := writeManagedEmbedderFixture(t, root, value)
+	t.Setenv("PULSE_MANAGED_EMBEDDER_CONFIG", path)
+	if _, err := loadManagedEmbedderConfig(); err == nil || !strings.Contains(err.Error(), "historical") {
+		t.Fatalf("v1 compatibility error = %v", err)
+	}
+}
+
+func TestManagedEmbedderConfigRejectsRunnerAndVectorDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(root string, value map[string]any)
+		want   string
+	}{
+		{
+			name:   "wrong engine",
+			mutate: func(_ string, value map[string]any) { value["engine"] = "python-system" },
+			want:   "contract mismatch",
+		},
+		{
+			name: "vector dimension drift",
+			mutate: func(_ string, value map[string]any) {
+				value["vector_contract"].(map[string]any)["dimensions"] = 384
+			},
+			want: "contract mismatch",
+		},
+		{
+			name: "too many args",
+			mutate: func(_ string, value map[string]any) {
+				value["runner_args"] = make([]string, managedEmbedderMaximumArgs+1)
+				for index := range value["runner_args"].([]string) {
+					value["runner_args"].([]string)[index] = "--safe"
+				}
+			},
+			want: "bounded",
+		},
+		{
+			name: "remote arg",
+			mutate: func(_ string, value map[string]any) {
+				value["runner_args"] = []string{"--model", "https://example.test/model.onnx"}
+			},
+			want: "arg 1 is invalid",
+		},
+		{
+			name:   "support escapes model tree",
+			mutate: func(root string, value map[string]any) { value["support_root"] = filepath.Join(root, "outside") },
+			want:   "inside",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, original := managedEmbedderFixture(t)
+			encoded, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err := json.Unmarshal(encoded, &value); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(root, value)
+			path := writeManagedEmbedderFixture(t, root, value)
+			t.Setenv("PULSE_MANAGED_EMBEDDER_CONFIG", path)
+			if _, err := loadManagedEmbedderConfig(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

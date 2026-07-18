@@ -107,8 +107,8 @@ function loadReleaseTestMaterializers(path) {
         !isAbsolute(fixture.source_root) || !fixture.tree_manifest) fail('release_test_materializer_spec_invalid');
     materializers[kind] = {
       treeManifest: fixture.tree_manifest,
-      materialize: (_carrier, target, artifact) => materializeVerifiedTree(
-        fixture.source_root, target, artifact, fixture.tree_manifest,
+      materialize: (_carrier, target, artifact, _treeManifest, options) => materializeVerifiedTree(
+        fixture.source_root, target, artifact, fixture.tree_manifest, options,
       ),
     };
   }
@@ -159,9 +159,9 @@ function journalRecord(release, previous, phase) {
   };
 }
 
-function recoverInvalidCurrent(artifact, installRoot) {
+function recoverInvalidCurrent(artifact, installRoot, platformServices) {
   try {
-    recoverArtifactActivation(artifact.id, { installRoot });
+    recoverArtifactActivation(artifact.id, { installRoot, platformServices });
   } catch {
     throw new PersonalRuntimeInstallerError('artifact_activation_unrecoverable');
   }
@@ -207,14 +207,14 @@ export async function provisionPersonalRuntime({
   const journalPath = join(runtimeRoot, 'install-journal.json');
   const lockPath = join(runtimeRoot, 'install.lock');
   if (existsSync(lockPath)) {
-    const existingLock = acquireInstallLock(lockPath);
+    const existingLock = acquireInstallLock(lockPath, { platformServices });
     existingLock();
   }
   const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, {
         architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
   });
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
-  const releaseLock = acquireInstallLock(lockPath);
+  const releaseLock = acquireInstallLock(lockPath, { platformServices });
   try {
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, {
       architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
@@ -223,26 +223,26 @@ export async function provisionPersonalRuntime({
     const activeSetPath = join(installRoot, 'active-release.json');
     const previous = previousActivationDigest(activeSetPath);
     try {
-      const activationSet = readActivatedArtifactSet(release, { installRoot });
-      writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'));
+      const activationSet = readActivatedArtifactSet(release, { installRoot, platformServices });
+      writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'), { platformServices });
       return { activationSet, release };
     } catch { /* provision or repair the exact signed set below */ }
 
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'planned'));
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'planned'), { platformServices });
     const stagingRoot = join(installRoot, 'downloads');
     const staged = {};
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'downloading'));
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'downloading'), { platformServices });
     for (const kind of Object.keys(release.artifacts).sort()) {
       const artifact = release.artifacts[kind];
-      staged[kind] = await downloadVerifiedArtifact(artifact, { stagingRoot, fetchImpl });
+      staged[kind] = await downloadVerifiedArtifact(artifact, { stagingRoot, fetchImpl, platformServices });
     }
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'artifacts_staged'));
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'activating'));
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'artifacts_staged'), { platformServices });
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'activating'), { platformServices });
     for (const kind of Object.keys(release.artifacts).sort()) {
       const artifact = release.artifacts[kind];
       const fixture = materializers?.[kind];
       const options = {
-        installRoot,
+        installRoot, platformServices,
         ...(kind === 'model' ? { treeManifest: fixture?.treeManifest ?? modelTree(artifact) } : {}),
         ...(fixture ? {
           materialize: fixture.materialize,
@@ -254,12 +254,12 @@ export async function provisionPersonalRuntime({
         await activateArtifactVersion(artifact, staged[kind].path, options);
       } catch (error) {
         if (error?.code !== 'artifact_activation_current_invalid') throw error;
-        recoverInvalidCurrent(artifact, installRoot);
+        recoverInvalidCurrent(artifact, installRoot, platformServices);
         await activateArtifactVersion(artifact, staged[kind].path, options);
       }
     }
-    const activationSet = writeActivatedArtifactSet(release, { installRoot });
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'));
+    const activationSet = writeActivatedArtifactSet(release, { installRoot, platformServices });
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'), { platformServices });
     return { activationSet, release };
   } finally {
     releaseLock();
@@ -299,7 +299,7 @@ export function inspectPersonalRuntime({
   }
   try {
     const activationSet = readActivatedArtifactSet(release, {
-      installRoot: join(root, 'artifacts'),
+      installRoot: join(root, 'artifacts'), platformServices,
     });
     return Object.freeze({
       activationSet,

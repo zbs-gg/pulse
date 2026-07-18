@@ -5,15 +5,20 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
+import { managedEmbedderRuntimeContract } from './managed-embedder-release.js';
 import { defaultPlatformServices } from './platform-services.js';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const PRODUCT_BINDING_VERIFIER = fileURLToPath(new URL('./product-binding-verifier.js', import.meta.url));
-const MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v1';
+const MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v2';
+const LEGACY_MANAGED_CONFIG_SCHEMA = 'pulse.managed_embedder.config.v1';
 const MANAGED_CONFIG_KEYS = [
-  'dimensions', 'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest', 'helper_path',
-  'model', 'model_activation_digest', 'model_file', 'model_tree_digest', 'normalized', 'pooling',
-  'protocol', 'python_executable', 'schema', 'support_directory',
+  'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest', 'engine', 'model_activation_digest',
+  'model_root', 'model_tree_digest', 'protocol', 'runner_args', 'runner_path', 'schema', 'support_root',
+  'vector_contract',
+];
+const VECTOR_CONTRACT_KEYS = [
+  'dimensions', 'model', 'normalized', 'opset', 'pooling', 'quantization', 'revision', 'source',
 ];
 
 export class SupervisorError extends Error {
@@ -101,7 +106,11 @@ function atomicPrivateJSON(path, value, platformServices) {
 function inside(root, candidate) {
   const base = resolve(root);
   const value = resolve(candidate);
-  return value.startsWith(`${base}${sep}`);
+  return value === base || value.startsWith(`${base}${sep}`);
+}
+
+function samePlatformPath(first, second, platformServices) {
+  return platformServices.isPathInside(first, second) && platformServices.isPathInside(second, first);
 }
 
 function activatedFile(activation, relativePath, platformServices, { executable = false } = {}) {
@@ -109,13 +118,17 @@ function activatedFile(activation, relativePath, platformServices, { executable 
   if (!inside(activation.version_path, path)) {
     throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
   }
+  let executableProof;
   try {
     platformServices.readIntegrityFile(path, { owner: 'current', maxBytes: 64 * 1024 * 1024 });
-    if (executable && !platformServices.inspectExecutable(path)) throw new Error('not executable');
+    if (executable) {
+      executableProof = platformServices.inspectExecutable(path);
+      if (!executableProof?.executable) throw new Error('not executable');
+    }
   } catch {
     throw new SupervisorError('managed_artifact_file_unsafe', `managed artifact file is unsafe: ${relativePath}`);
   }
-  return path;
+  return executable ? executableProof.canonical_path : path;
 }
 
 function activatedDirectory(activation, relativePath, platformServices) {
@@ -150,14 +163,47 @@ export function inspectManagedEmbedderConfig(
   try { config = JSON.parse(bytes); } catch {
     throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config is not valid JSON');
   }
+  if (config?.schema === LEGACY_MANAGED_CONFIG_SCHEMA) {
+    throw new SupervisorError('managed_embedder_config_legacy', 'managed embedder config v1 is historical and not ready');
+  }
+  const expectedVector = managedEmbedderRuntimeContract({ engine: 'transformers-js-onnx' }).vector_contract;
+  const vector = config?.vector_contract;
+  const argsValid = Array.isArray(config?.runner_args) && config.runner_args.length <= 8 &&
+    config.runner_args.every((value) => typeof value === 'string' && value.length >= 1 && value.length <= 4096 &&
+      !value.includes('\0') && !/[\r\n]/.test(value)) && Buffer.byteLength(config.runner_args.join('\0')) <= 16 * 1024;
   if (Object.keys(config).sort().join('\0') !== [...MANAGED_CONFIG_KEYS].sort().join('\0') ||
       bytes !== `${canonicalJSON(config)}\n` || config.schema !== MANAGED_CONFIG_SCHEMA || config.protocol !== 1 ||
-      config.model !== 'bge-m3' || config.dimensions !== 1024 || config.pooling !== 'cls' || config.normalized !== true ||
+      config.engine !== 'transformers-js-onnx' || !argsValid ||
+      Object.keys(vector ?? {}).sort().join('\0') !== [...VECTOR_CONTRACT_KEYS].sort().join('\0') ||
+      canonicalJSON(vector) !== canonicalJSON(expectedVector) ||
       ![config.embedder_runtime_activation_digest, config.embedder_runtime_tree_digest,
         config.model_activation_digest, config.model_tree_digest].every((value) => SHA256.test(value ?? '')) ||
-      ![config.python_executable, config.helper_path, config.support_directory, config.model_file]
-        .every((value) => typeof value === 'string' && isAbsolute(value))) {
+      ![config.runner_path, config.model_root, config.support_root]
+        .every((value) => typeof value === 'string' && isAbsolute(value)) ||
+      !inside(config.model_root, config.support_root)) {
     throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config contract is invalid');
+  }
+  const expectedArgs = ['--model-root', config.model_root, '--support-root', config.support_root];
+  if (canonicalJSON(config.runner_args) !== canonicalJSON(expectedArgs)) {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder runner arguments are invalid');
+  }
+  try {
+    const runner = platformServices.inspectExecutable(config.runner_path);
+    if (!runner?.executable || !samePlatformPath(runner.canonical_path, config.runner_path, platformServices)) {
+      throw new Error('runner is not exact');
+    }
+    platformServices.assertPrivateState(config.model_root, { kind: 'directory' });
+    platformServices.assertPrivateState(config.support_root, { kind: 'directory' });
+    platformServices.inspectPathIdentity(join(config.model_root, 'model_int8.onnx'), { kind: 'file' });
+    for (const controlPath of [
+      join(config.model_root, 'pulse-model-contract.json'),
+      join(config.support_root, 'config.json'),
+      join(config.support_root, 'special_tokens_map.json'),
+      join(config.support_root, 'tokenizer.json'),
+      join(config.support_root, 'tokenizer_config.json'),
+    ]) platformServices.readIntegrityFile(controlPath, { owner: 'current', maxBytes: 64 * 1024 * 1024 });
+  } catch {
+    throw new SupervisorError('managed_embedder_config_unsafe', 'managed embedder files do not match the private v2 contract');
   }
   for (const field of [
     'embedder_runtime_activation_digest', 'embedder_runtime_tree_digest',
@@ -177,6 +223,12 @@ export function activateManagedEmbedderConfig(
       !managedEmbedder.config ||
       createHash('sha256').update(`${canonicalJSON(managedEmbedder.config)}\n`).digest('hex') !== managedEmbedder.config_digest) {
     throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder activation is invalid');
+  }
+  if (managedEmbedder.config.schema === LEGACY_MANAGED_CONFIG_SCHEMA) {
+    throw new SupervisorError('managed_embedder_config_legacy', 'managed embedder config v1 is historical and not ready');
+  }
+  if (managedEmbedder.config.schema !== MANAGED_CONFIG_SCHEMA) {
+    throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder activation schema is invalid');
   }
   atomicPrivateJSON(managedEmbedder.config_path, managedEmbedder.config, platformServices);
   return inspectManagedEmbedderConfig(runtime, managedEmbedder, { platformServices });
@@ -198,27 +250,34 @@ export function resolveManagedRuntime(runtime, {
     );
   }
   const daemonPath = activatedFile(daemonActivation, 'bin/pulse', platformServices, { executable: true });
-  const pythonExecutable = activatedFile(embedderActivation, 'runtime/bin/python3.12', platformServices, { executable: true });
-  const helperPath = activatedFile(embedderActivation, 'helper.py', platformServices);
-  const supportDirectory = activatedDirectory(embedderActivation, 'support', platformServices);
-  activatedFile(embedderActivation, 'support/config.json', platformServices);
-  activatedFile(embedderActivation, 'support/tokenizer.json', platformServices);
-  const modelFile = activatedFile(modelActivation, 'model.safetensors', platformServices);
+  const modelRoot = activatedDirectory(modelActivation, '.', platformServices);
+  const supportRoot = activatedDirectory(modelActivation, 'support', platformServices);
+  activatedFile(modelActivation, 'model_int8.onnx', platformServices);
+  activatedFile(modelActivation, 'pulse-model-contract.json', platformServices);
+  for (const supportFile of [
+    'config.json', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json',
+  ]) activatedFile(modelActivation, `support/${supportFile}`, platformServices);
+  const contract = managedEmbedderRuntimeContract({
+    engine: 'transformers-js-onnx', platform: platformServices.platform,
+  });
+  let runnerPath;
+  try {
+    runnerPath = activatedFile(embedderActivation, contract.runner_relative_path, platformServices, { executable: true });
+  } catch { throw new SupervisorError('managed_embedder_portable_unavailable', 'portable managed embedder runner is unavailable'); }
+  const runnerArgs = ['--model-root', modelRoot, '--support-root', supportRoot];
   const config = {
-    dimensions: 1024,
     embedder_runtime_activation_digest: embedderActivation.activation_digest,
     embedder_runtime_tree_digest: embedderActivation.tree_digest,
-    helper_path: helperPath,
-    model: 'bge-m3',
+    engine: contract.engine,
     model_activation_digest: modelActivation.activation_digest,
-    model_file: modelFile,
+    model_root: modelRoot,
     model_tree_digest: modelActivation.tree_digest,
-    normalized: true,
-    pooling: 'cls',
     protocol: 1,
-    python_executable: pythonExecutable,
+    runner_args: runnerArgs,
+    runner_path: runnerPath,
     schema: MANAGED_CONFIG_SCHEMA,
-    support_directory: supportDirectory,
+    support_root: supportRoot,
+    vector_contract: contract.vector_contract,
   };
   ensurePrivateDirectory(runtime.data_dir, platformServices);
   const configPath = join(runtime.data_dir, 'runtime', 'managed-embedder.json');

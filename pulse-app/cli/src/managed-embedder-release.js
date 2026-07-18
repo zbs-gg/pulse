@@ -39,6 +39,16 @@ const MACH_O_MAGICS = new Set([
   'feedface', 'feedfacf', 'cefaedfe', 'cffaedfe',
   'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca',
 ]);
+const VECTOR_CONTRACT = Object.freeze({
+  dimensions: 1024,
+  model: 'bge-m3',
+  normalized: true,
+  opset: 17,
+  pooling: 'cls',
+  quantization: 'dynamic-int8',
+  revision: '5617a9f61b028005a4858fdac845db406aefb181',
+  source: 'BAAI/bge-m3',
+});
 
 export class ManagedEmbedderReleaseError extends Error {
   constructor(code) {
@@ -55,6 +65,18 @@ function fail(code) {
 function exactKeys(value, expected, code) {
   if (!value || Array.isArray(value) || typeof value !== 'object' ||
       Object.keys(value).sort().join('\0') !== [...expected].sort().join('\0')) fail(code);
+}
+
+export function managedEmbedderRuntimeContract({ engine = 'transformers-js-onnx', platform = process.platform } = {}) {
+  if (engine === 'mlx') fail('managed_embedder_engine_legacy');
+  if (!['darwin', 'linux', 'win32'].includes(platform) || engine !== 'transformers-js-onnx') {
+    fail('managed_embedder_engine_invalid');
+  }
+  return Object.freeze({
+    engine,
+    runner_relative_path: platform === 'win32' ? 'bin/pulse-embedder.exe' : 'bin/pulse-embedder',
+    vector_contract: VECTOR_CONTRACT,
+  });
 }
 
 export function canonicalRuntimeJSON(value) {

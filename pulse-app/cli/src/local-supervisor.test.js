@@ -13,6 +13,7 @@ import {
 	assertVaultRuntimeHealthy,
 	inspectVaultRuntime,
 	resolveManagedRuntime,
+	inspectManagedEmbedderConfig,
 	startVaultRuntime,
 	stopVaultRuntime,
 	stopVaultRuntimeAndWait,
@@ -47,10 +48,10 @@ function safetensorsFixture() {
 async function activateManagedRuntimeFixtures(root) {
   const installRoot = join(root, 'artifacts');
   const daemon = Buffer.from('#!/bin/sh\nexit 0\n');
-  const python = Buffer.from('#!/bin/sh\nexit 0\n');
-  const helper = Buffer.from('managed helper fixture\n');
+  const portableRunner = Buffer.from('#!/bin/sh\nexit 0\n');
   const config = Buffer.from('{}\n');
   const tokenizer = Buffer.from('{}\n');
+  const modelContract = Buffer.from('{}\n');
   const model = safetensorsFixture();
   const fixtures = [
     {
@@ -59,14 +60,15 @@ async function activateManagedRuntimeFixtures(root) {
     },
     {
       descriptor: artifact('pulse-embedder-runtime', 'embedder-runtime', '2'.repeat(64)),
-      files: [
-        ['runtime/bin/python3.12', python, 0o700], ['helper.py', helper, 0o600],
-        ['support/config.json', config, 0o600], ['support/tokenizer.json', tokenizer, 0o600],
-      ],
+      files: [['bin/pulse-embedder', portableRunner, 0o700]],
     },
     {
-      descriptor: artifact('pulse-model', 'model', '3'.repeat(64)),
-      files: [['model.safetensors', model, 0o600]],
+      descriptor: artifact('pulse-model', 'model-runtime', '3'.repeat(64)),
+      files: [
+        ['model_int8.onnx', model, 0o600], ['pulse-model-contract.json', modelContract, 0o600],
+        ['support/config.json', config, 0o600], ['support/special_tokens_map.json', config, 0o600],
+        ['support/tokenizer.json', tokenizer, 0o600], ['support/tokenizer_config.json', config, 0o600],
+      ],
     },
   ];
   for (const fixture of fixtures) {
@@ -93,7 +95,7 @@ async function activateManagedRuntimeFixtures(root) {
     verifiedActivations: {
       daemon: readActivatedArtifact('pulse-daemon', { installRoot, expectedKind: 'daemon' }),
       embedderRuntime: readActivatedArtifact('pulse-embedder-runtime', { installRoot, expectedKind: 'embedder-runtime' }),
-      model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model' }),
+      model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model-runtime' }),
     },
   };
 }
@@ -114,12 +116,53 @@ test('managed product runtime resolves three verified activations and atomically
   assert.match(managed.managed_embedder.config_digest, /^[a-f0-9]{64}$/);
   assert.equal(statSync(managed.managed_embedder.config_path).mode & 0o777, 0o600);
   const disk = JSON.parse(readFileSync(managed.managed_embedder.config_path, 'utf8'));
-  assert.equal(disk.schema, 'pulse.managed_embedder.config.v1');
-  assert.equal(disk.python_executable.endsWith('/runtime/bin/python3.12'), true);
-  assert.equal(disk.helper_path.endsWith('/helper.py'), true);
-  assert.equal(disk.model_file.endsWith('/model.safetensors'), true);
-  assert.equal(disk.dimensions, 1024);
-  assert.equal(disk.normalized, true);
+  assert.equal(disk.schema, 'pulse.managed_embedder.config.v2');
+  assert.equal(disk.engine, 'transformers-js-onnx');
+  assert.equal(disk.runner_path.endsWith('/bin/pulse-embedder'), true);
+  assert.deepEqual(disk.runner_args, [
+    '--model-root', verifiedActivations.model.version_path,
+    '--support-root', join(verifiedActivations.model.version_path, 'support'),
+  ]);
+  assert.equal(disk.model_root, verifiedActivations.model.version_path);
+  assert.equal(disk.support_root, join(verifiedActivations.model.version_path, 'support'));
+  assert.deepEqual(disk.vector_contract, {
+    dimensions: 1024, model: 'bge-m3', normalized: true, opset: 17, pooling: 'cls',
+    quantization: 'dynamic-int8',
+    revision: '5617a9f61b028005a4858fdac845db406aefb181', source: 'BAAI/bge-m3',
+  });
+  assert.equal('python_executable' in disk, false);
+  assert.equal('helper_path' in disk, false);
+
+  const basePlatformServices = createPlatformServices();
+  const caseInsensitivePlatformServices = {
+    ...basePlatformServices,
+    inspectExecutable(path) {
+      const proof = basePlatformServices.inspectExecutable(path);
+      return proof ? { ...proof, canonical_path: proof.canonical_path.toUpperCase() } : null;
+    },
+    isPathInside(candidate, parent) {
+      if (candidate.toLowerCase() === parent.toLowerCase()) return true;
+      return basePlatformServices.isPathInside(candidate, parent);
+    },
+  };
+  assert.equal(inspectManagedEmbedderConfig(runtime, managed.managed_embedder, {
+    platformServices: caseInsensitivePlatformServices,
+  }).config.runner_path, disk.runner_path);
+});
+
+test('managed embedder v1 remains explicit legacy state and cannot satisfy portable readiness', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-managed-v1.'));
+  const runtime = vaultRuntimeFromBinding(binding('personal', root));
+  const configPath = join(runtime.data_dir, 'runtime', 'managed-embedder.json');
+  const bytes = '{"schema":"pulse.managed_embedder.config.v1"}\n';
+  try {
+    mkdirSync(join(runtime.data_dir, 'runtime'), { recursive: true, mode: 0o700 });
+    writeFileSync(configPath, bytes, { mode: 0o600 });
+    assert.throws(
+      () => inspectManagedEmbedderConfig(runtime, { config_path: configPath, config_digest: sha256(bytes) }),
+      (error) => error instanceof SupervisorError && error.code === 'managed_embedder_config_legacy',
+    );
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 function binding(mode, root) {
