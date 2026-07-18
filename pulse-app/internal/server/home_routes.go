@@ -2,9 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,14 +13,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/unassigned"
-	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 const (
-	homeOpenPresenceTTL         = 90 * time.Second
-	homeOpenPresencePolicyEpoch = uint64(1)
-	homeOpenPresenceDisplay     = "Open Pulse Memory Home for this bound workspace"
-	homeSessionRequestMaxBytes  = int64(4 << 10)
+	homeSessionRequestMaxBytes = int64(4 << 10)
 )
 
 var (
@@ -91,17 +84,6 @@ func (s *Server) handleHomeSessionIssue(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
 	}
-	now := s.homeNow()
-	challenge, err := s.newHomeOpenPresenceChallenge(now, request.LiveReadiness)
-	if err != nil {
-		http.Error(w, "Home session unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	assertion, err := s.cfg.HomePresence.Authorize(r.Context(), challenge)
-	if err != nil || !validHomeOpenPresenceAssertion(challenge, assertion, s.homeNow()) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	session, err := s.homeSessions.Create(request.LiveReadiness)
 	if err != nil {
 		http.Error(w, "Home session unavailable", http.StatusServiceUnavailable)
@@ -132,56 +114,6 @@ func parseHomeSessionRequest(w http.ResponseWriter, r *http.Request) (homeSessio
 		return request, err
 	}
 	return request, nil
-}
-
-func (s *Server) newHomeOpenPresenceChallenge(
-	now time.Time,
-	readiness personalLiveReadinessSnapshot,
-) (userpresence.Challenge, error) {
-	if s == nil || s.cfg.Store == nil || s.cfg.HomePresence == nil {
-		return userpresence.Challenge{}, errors.New("Home presence is unavailable")
-	}
-	bindingDigest, repositoryID, ok := s.cfg.Store.ProductRuntimeBoundary()
-	if !ok {
-		return userpresence.Challenge{}, errors.New("Home boundary is unavailable")
-	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return userpresence.Challenge{}, errors.New("generate Home presence nonce")
-	}
-	readinessDigest, err := personalLiveReadinessDigest(readiness)
-	if err != nil {
-		return userpresence.Challenge{}, err
-	}
-	return userpresence.Challenge{
-		Action: userpresence.ActionHomeOpen,
-		Digest: homeOpenPresenceDigest(
-			s.cfg.Store.StoreID(), bindingDigest, repositoryID, s.homeSessions.expectedOrigin, readinessDigest,
-		),
-		Nonce: hex.EncodeToString(nonce), PolicyEpoch: homeOpenPresencePolicyEpoch,
-		ExpiresAt: now.Add(homeOpenPresenceTTL), Display: homeOpenPresenceDisplay,
-	}, nil
-}
-
-func homeOpenPresenceDigest(storeID, bindingDigest, repositoryID, homeOrigin, readinessDigest string) string {
-	digest := sha256.Sum256([]byte(strings.Join([]string{
-		"pulse-home-open-v2", storeID, bindingDigest, repositoryID, homeOrigin, readinessDigest,
-	}, "\x00")))
-	return hex.EncodeToString(digest[:])
-}
-
-func validHomeOpenPresenceAssertion(
-	challenge userpresence.Challenge,
-	assertion userpresence.Assertion,
-	now time.Time,
-) bool {
-	nonceHash := sha256.Sum256([]byte("pulse-user-presence-nonce-v1\x00" + challenge.Nonce))
-	challengeCreatedAt := challenge.ExpiresAt.UTC().Add(-homeOpenPresenceTTL)
-	approvedAt := assertion.ApprovedAt.UTC()
-	return assertion.Action == challenge.Action && assertion.Digest == challenge.Digest && assertion.Nonce == "" &&
-		assertion.NonceHash == hex.EncodeToString(nonceHash[:]) && assertion.PolicyEpoch == challenge.PolicyEpoch &&
-		assertion.ExpiresAt.UTC().Equal(challenge.ExpiresAt.UTC()) && !approvedAt.Before(challengeCreatedAt) &&
-		!approvedAt.After(now.UTC()) && approvedAt.Before(challenge.ExpiresAt.UTC())
 }
 
 func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {

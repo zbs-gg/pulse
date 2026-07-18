@@ -18,14 +18,7 @@ import (
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
-	"github.com/nkkmnk/pulse/internal/userpresence"
 )
-
-type homePresenceStub struct {
-	err        error
-	challenges []userpresence.Challenge
-	mutate     func(userpresence.Assertion) userpresence.Assertion
-}
 
 type homeBindingVerifierStub struct {
 	err   error
@@ -41,23 +34,7 @@ type warmingProductTestEmbedder struct{ productTestEmbedder }
 
 func (warmingProductTestEmbedder) Ready() bool { return false }
 
-func (s *homePresenceStub) Authorize(_ context.Context, challenge userpresence.Challenge) (userpresence.Assertion, error) {
-	s.challenges = append(s.challenges, challenge)
-	if s.err != nil {
-		return userpresence.Assertion{}, s.err
-	}
-	nonceHash := sha256.Sum256([]byte("pulse-user-presence-nonce-v1\x00" + challenge.Nonce))
-	assertion := userpresence.Assertion{
-		Action: challenge.Action, Digest: challenge.Digest, NonceHash: fmt.Sprintf("%x", nonceHash[:]),
-		PolicyEpoch: challenge.PolicyEpoch, ApprovedAt: time.Now().UTC(), ExpiresAt: challenge.ExpiresAt,
-	}
-	if s.mutate != nil {
-		assertion = s.mutate(assertion)
-	}
-	return assertion, nil
-}
-
-func TestMemoryHomeRequiresPresenceAuthorizer(t *testing.T) {
+func TestMemoryHomeOrdinarySessionNeedsNoNativePresenceAndGrantsNoProtectedRoute(t *testing.T) {
 	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_home_presence_required")
 	if err != nil {
 		t.Fatal(err)
@@ -70,10 +47,28 @@ func TestMemoryHomeRequiresPresenceAuthorizer(t *testing.T) {
 	if err := vault.ConfigureContinuityDeliveryAuthority(binding, "repository_pulse"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{
+	srv, err := New(Config{
 		IPCSecret: "home-test-daemon-secret", Store: vault, HomeOrigin: testViewerSessionOrigin,
-	}); err == nil {
-		t.Fatal("Memory Home accepted IPC-only configuration without an OS presence authorizer")
+		HomeBindingVerifier: &homeBindingVerifierStub{},
+	})
+	if err != nil {
+		t.Fatalf("ordinary Memory Home must not require native presence: %v", err)
+	}
+	issued := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z"))
+	if issued.Code != http.StatusOK {
+		t.Fatalf("ordinary Home session status=%d body=%s", issued.Code, issued.Body.String())
+	}
+	handoff := decodeHomeSessionResponse(t, issued)
+	for _, path := range []string{"wipe", "binding/replace", "protected/authorize"} {
+		request := httptest.NewRequest(http.MethodPost, handoff.TargetURL+path, nil)
+		request.Host = srv.homeSessions.expectedHost
+		request.RemoteAddr = "127.0.0.1:54321"
+		request.AddCookie(&http.Cookie{Name: handoff.CookieName, Value: handoff.CookieValue, Path: handoff.CookiePath})
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("ordinary Home session reached protected route %q: status=%d", path, response.Code)
+		}
 	}
 }
 
@@ -395,9 +390,8 @@ func TestHomeSessionIssueReturnsBoundedCookieHandoffWithoutSettingBrowserAuthori
 	}
 }
 
-func TestHomeSessionRequiresOneExactClosedLiveReadinessSnapshotBeforePresence(t *testing.T) {
-	presence := &homePresenceStub{}
-	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+func TestHomeSessionRequiresOneExactClosedLiveReadinessSnapshotBeforeSessionCreation(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
 	valid := testHomeSessionRequestBody("codex_plugin_unavailable", "2026-07-16T08:00:00Z")
 	tests := []struct {
 		name string
@@ -411,22 +405,20 @@ func TestHomeSessionRequiresOneExactClosedLiveReadinessSnapshotBeforePresence(t 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			beforeChallenges := len(presence.challenges)
 			beforeSessions := homeSessionCount(srv)
 			response := issueHomeSession(t, srv, test.body)
 			if response.Code != http.StatusBadRequest {
 				t.Fatalf("invalid readiness status=%d body=%s", response.Code, response.Body.String())
 			}
-			if len(presence.challenges) != beforeChallenges || homeSessionCount(srv) != beforeSessions {
-				t.Fatal("invalid readiness reached presence or created a session")
+			if homeSessionCount(srv) != beforeSessions {
+				t.Fatal("invalid readiness created a session")
 			}
 		})
 	}
 }
 
-func TestHomeSessionBindsReadinessDigestAndRendersExactNonReadyDoctorReason(t *testing.T) {
-	presence := &homePresenceStub{}
-	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
+func TestHomeSessionBindsAndRendersExactNonReadyDoctorReason(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
 	checkedAt := "2026-07-16T08:00:00Z"
 	pluginBody := testHomeSessionRequestBody("codex_plugin_unavailable", checkedAt)
 	pluginResponse := issueHomeSession(t, srv, pluginBody)
@@ -445,9 +437,6 @@ func TestHomeSessionBindsReadinessDigestAndRendersExactNonReadyDoctorReason(t *t
 	lifecycleResponse := issueHomeSession(t, srv, lifecycleBody)
 	if lifecycleResponse.Code != http.StatusOK {
 		t.Fatalf("lifecycle readiness session status=%d body=%s", lifecycleResponse.Code, lifecycleResponse.Body.String())
-	}
-	if len(presence.challenges) != 2 || presence.challenges[0].Digest == presence.challenges[1].Digest {
-		t.Fatalf("Home presence digest did not bind the exact readiness snapshot: %#v", presence.challenges)
 	}
 	lifecyclePage := serveHomeHandoffPage(t, srv, decodeHomeSessionResponse(t, lifecycleResponse))
 	if !strings.Contains(lifecyclePage.Body.String(), "codex_hook_lifecycle_required") ||
@@ -491,77 +480,6 @@ func TestHomeNeverPromotesNonReadySnapshotAndDowngradesReadyWhenRetrievalDisappe
 		t.Fatalf("server failed to downgrade warming retrieval: %s", warmingPage.Body.String())
 	}
 }
-
-func TestHomeSessionIssueDeniesWithoutFreshOSPresenceAndCreatesNoSession(t *testing.T) {
-	presence := &homePresenceStub{err: userpresence.ErrPresenceDenied}
-	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
-	response := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z"))
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("denied presence status=%d body=%s", response.Code, response.Body.String())
-	}
-	if len(presence.challenges) != 1 {
-		t.Fatalf("presence challenges=%d, want 1", len(presence.challenges))
-	}
-	if count := homeSessionCount(srv); count != 0 {
-		t.Fatalf("denied OS presence created %d browser sessions", count)
-	}
-}
-
-func TestHomeSessionIssueBindsFreshContentFreePresenceToExactHomeBoundary(t *testing.T) {
-	presence := &homePresenceStub{}
-	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
-	startedAt := time.Now().UTC()
-	checkedAt := "2026-07-16T08:00:00Z"
-	readiness := personalLiveReadinessForReason("personal_live_ready", checkedAt)
-	body := testHomeSessionRequestBody("personal_live_ready", checkedAt)
-	response := issueHomeSession(t, srv, body)
-	if response.Code != http.StatusOK {
-		t.Fatalf("session issue status=%d body=%s", response.Code, response.Body.String())
-	}
-	if len(presence.challenges) != 1 {
-		t.Fatalf("presence challenges=%d, want 1", len(presence.challenges))
-	}
-	challenge := presence.challenges[0]
-	binding := strings.Repeat("a", 64)
-	wantDigest := expectedHomeOpenPresenceDigest(
-		"store_personal_home_routes", binding, "repository_pulse", testViewerSessionOrigin, readiness,
-	)
-	if challenge.Action != userpresence.ActionHomeOpen || challenge.Digest != wantDigest ||
-		challenge.PolicyEpoch != homeOpenPresencePolicyEpoch || challenge.Display != homeOpenPresenceDisplay ||
-		challenge.ExpiresAt.After(startedAt.Add(homeOpenPresenceTTL+time.Second)) || !challenge.ExpiresAt.After(startedAt) {
-		t.Fatalf("unsafe Home presence challenge: %#v", challenge)
-	}
-	for _, content := range []string{"store_personal_home_routes", binding, "repository_pulse", testViewerSessionOrigin} {
-		if strings.Contains(challenge.Display, content) || strings.Contains(challenge.Nonce, content) {
-			t.Fatalf("Home challenge exposed boundary content %q: %#v", content, challenge)
-		}
-	}
-	if count := homeSessionCount(srv); count != 1 {
-		t.Fatalf("approved OS presence created %d sessions, want 1", count)
-	}
-
-	second := issueHomeSession(t, srv, body)
-	if second.Code != http.StatusOK || len(presence.challenges) != 2 ||
-		presence.challenges[1].Nonce == challenge.Nonce {
-		t.Fatalf("Home session did not use a fresh single-use challenge: status=%d challenges=%#v", second.Code, presence.challenges)
-	}
-}
-
-func TestHomeSessionIssueRejectsMismatchedPresenceAssertionAndCreatesNoSession(t *testing.T) {
-	presence := &homePresenceStub{mutate: func(assertion userpresence.Assertion) userpresence.Assertion {
-		assertion.Digest = strings.Repeat("f", 64)
-		return assertion
-	}}
-	srv, _ := newHomeRouteFixtureWithPresence(t, presence)
-	response := issueHomeSession(t, srv, testHomeSessionRequestBody("personal_live_ready", "2026-07-16T08:00:00Z"))
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("mismatched assertion status=%d body=%s", response.Code, response.Body.String())
-	}
-	if count := homeSessionCount(srv); count != 0 {
-		t.Fatalf("mismatched assertion created %d sessions", count)
-	}
-}
-
 func TestHomePresentationCreatesExactReceiptAndGETCannotMutate(t *testing.T) {
 	srv, vault := newHomeRouteFixture(t)
 	pending := newHomeRoutePending(t, vault, "presentation", "Show the exact memory before saving it.")
@@ -853,10 +771,6 @@ func homeRouteCandidate(t *testing.T, vault *store.Store, candidateID string) st
 }
 
 func newHomeRouteFixture(t *testing.T) (*Server, *store.Store) {
-	return newHomeRouteFixtureWithPresence(t, &homePresenceStub{})
-}
-
-func newHomeRouteFixtureWithPresence(t *testing.T, presence HomePresence) (*Server, *store.Store) {
 	t.Helper()
 	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_home_routes")
 	if err != nil {
@@ -872,7 +786,6 @@ func newHomeRouteFixtureWithPresence(t *testing.T, presence HomePresence) (*Serv
 	}
 	srv, err := New(Config{
 		IPCSecret: "home-test-daemon-secret", Store: vault, HomeOrigin: testViewerSessionOrigin,
-		HomePresence:        presence,
 		HomeBindingVerifier: &homeBindingVerifierStub{},
 		TrayGracePeriod:     30 * time.Second, Billing: BillingStatus{Host: "codex", Mode: "host-extracted"},
 		Retrieval: retrieve.New(retrieve.Config{Store: vault, Embedder: productTestEmbedder{}}),
@@ -968,20 +881,6 @@ func homeSessionCount(srv *Server) int {
 	srv.homeSessions.mu.Lock()
 	defer srv.homeSessions.mu.Unlock()
 	return len(srv.homeSessions.sessions)
-}
-
-func expectedHomeOpenPresenceDigest(
-	storeID, bindingDigest, repositoryID, homeOrigin string,
-	readiness personalLiveReadinessSnapshot,
-) string {
-	readinessDigest := sha256.Sum256([]byte(strings.Join([]string{
-		"pulse-personal-live-readiness-v1", readiness.Schema, readiness.Outcome, readiness.ReasonCode,
-		readiness.NextAction.Code, readiness.NextAction.Label, readiness.CheckedAt,
-	}, "\x00")))
-	digest := sha256.Sum256([]byte(strings.Join([]string{
-		"pulse-home-open-v2", storeID, bindingDigest, repositoryID, homeOrigin, fmt.Sprintf("%x", readinessDigest[:]),
-	}, "\x00")))
-	return fmt.Sprintf("%x", digest[:])
 }
 
 func assertHomeHeaders(t *testing.T, header http.Header) {

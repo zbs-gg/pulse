@@ -35,8 +35,9 @@ type ContextQueryAPI interface {
 	Query(context.Context, contextquery.ContextQueryRequest) (*contextquery.ContextResult, error)
 }
 
-// HomePresence is the OS-backed user-presence boundary required before a
-// browser session can be issued for Memory Home.
+// HomePresence is retained as an optional compatibility dependency for
+// protected native-confirmation flows. Opening ordinary Memory Home never
+// consumes it and never upgrades a browser session into enhanced proof.
 type HomePresence interface {
 	Authorize(context.Context, userpresence.Challenge) (userpresence.Assertion, error)
 }
@@ -71,8 +72,8 @@ type Config struct {
 	// or Desk Memory Home. Empty keeps the Home surface disabled (legacy Local
 	// Preview and tests that do not configure a product browser surface).
 	HomeOrigin string
-	// HomePresence authorizes each Memory Home session with a fresh native
-	// user-presence challenge. It is mandatory whenever HomeOrigin is enabled.
+	// HomePresence is optional. It may support separately routed protected
+	// actions, but it is neither a constructor nor ordinary Home prerequisite.
 	HomePresence HomePresence
 	// UnassignedInboxPath is the owner-only, non-retrievable queue shared by
 	// installed harnesses before a user chooses an exact project. Empty hides
@@ -122,9 +123,6 @@ func New(cfg Config) (*Server, error) {
 		traySchedules: make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
 	}
 	if cfg.HomeOrigin != "" {
-		if cfg.HomePresence == nil {
-			return nil, errors.New("server: Memory Home requires OS-backed user presence")
-		}
 		parsedHomeOrigin, err := url.Parse(cfg.HomeOrigin)
 		if err != nil || parsedHomeOrigin.Scheme != "http" || parsedHomeOrigin.Hostname() != "127.0.0.1" || parsedHomeOrigin.Port() == "" {
 			return nil, errors.New("server: Memory Home requires an exact http://127.0.0.1 origin")
