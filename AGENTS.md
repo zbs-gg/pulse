@@ -9,6 +9,16 @@ Publication gate: these host-neutral instructions apply to the public npm path
 only when `preview` contains `pulse.personal_install_plan.v2` and the matching
 signed artifacts. Until then, report this branch as pending publication.
 
+## Codex Cloud workspace
+
+For cloud source work, run `./scripts/codex-cloud-setup.sh` as both the setup
+and maintenance script. It installs only locked development dependencies and
+builds source; it must not install Pulse, start a user daemon, inspect
+`~/.pulse`, or receive release/runtime secrets. Continue the active plan in
+`docs/plans/2026-07-17-001-feat-host-neutral-one-command-install-plan.md` from
+the first incomplete unit. Cloud fixture evidence never replaces the native
+product/release gates named in that plan.
+
 The product promise is concrete: a normal memory is shown before it is saved,
 survives into a fresh task in a verified host, carries provenance and retrieval reasons,
 and appears in Memory Home with honest token-economy evidence.
