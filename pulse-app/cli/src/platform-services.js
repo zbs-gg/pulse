@@ -1,11 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes as cryptoRandomBytes } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
+  readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
 import { homedir, release as osReleaseDefault } from 'node:os';
-import path, { win32 } from 'node:path';
+import path, { dirname, win32 } from 'node:path';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const STARTUP_NONCE = /^[a-f0-9]{64}$/;
+const LOCK_SCHEMA = 'pulse.platform_lock.v1';
+const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 const PORT_PROBE = String.raw`
 const net = require('node:net');
 const port = Number(process.argv[1]);
@@ -196,6 +201,239 @@ export function createPlatformServices({
     });
   }
 
+  function validatePrivatePath(statePath) {
+    if (typeof statePath !== 'string' || !pathAPI.isAbsolute(statePath) || pathAPI.resolve(statePath) !== statePath) {
+      fail('platform_private_state_invalid');
+    }
+  }
+
+  function validateByteBounds({ minBytes = 0, maxBytes = 1 << 20 } = {}) {
+    if (!Number.isSafeInteger(minBytes) || minBytes < 0 || !Number.isSafeInteger(maxBytes) ||
+        maxBytes < minBytes || maxBytes > 64 * 1024 * 1024) {
+      fail('platform_private_state_invalid');
+    }
+    return { minBytes, maxBytes };
+  }
+
+  function syncDirectory(directoryPath) {
+    const descriptor = openSync(directoryPath, 'r');
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  }
+
+  function ensurePrivateDirectory(directoryPath) {
+    validatePrivatePath(directoryPath);
+    if (platform === 'win32') {
+      nativeOperation(nativeAdapter, 'ensurePrivateDirectory')(directoryPath);
+      return assertPrivateState(directoryPath, { kind: 'directory' });
+    }
+    try { mkdirSync(directoryPath, { recursive: true, mode: 0o700 }); } catch {
+      fail('platform_private_state_unsafe');
+    }
+    try { return assertPrivateState(directoryPath, { kind: 'directory' }); } catch (error) {
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_private_state_unsafe');
+    }
+  }
+
+  function readPrivateFile(filePath, {
+    missing = false, encoding = 'utf8', minBytes = 0, maxBytes = 1 << 20,
+  } = {}) {
+    validatePrivatePath(filePath);
+    const bounds = validateByteBounds({ minBytes, maxBytes });
+    if (typeof missing !== 'boolean' || (encoding !== null && encoding !== 'utf8')) fail('platform_private_state_invalid');
+    if (platform === 'win32') {
+      let value;
+      try {
+        assertPrivateState(filePath, { kind: 'file' });
+        value = nativeOperation(nativeAdapter, 'readPrivateFile')(filePath, { encoding, ...bounds });
+      } catch (error) {
+        if (missing && error?.code === 'ENOENT') return null;
+        throw error;
+      }
+      if (!(typeof value === 'string' || Buffer.isBuffer(value))) fail('platform_private_state_unsafe');
+      const size = Buffer.byteLength(value);
+      if (size < bounds.minBytes || size > bounds.maxBytes) fail('platform_private_state_unsafe');
+      assertPrivateState(filePath, { kind: 'file' });
+      return value;
+    }
+    let descriptor;
+    try {
+      descriptor = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = fstatSync(descriptor);
+      const linked = lstatSync(filePath);
+      const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : opened.uid;
+      if (!opened.isFile() || opened.nlink !== 1 || opened.uid !== currentUID || (opened.mode & 0o077) !== 0 ||
+          linked.isSymbolicLink() || linked.dev !== opened.dev || linked.ino !== opened.ino) {
+        fail('platform_private_state_unsafe');
+      }
+      const bytes = readFileSync(descriptor);
+      if (bytes.length < bounds.minBytes || bytes.length > bounds.maxBytes) fail('platform_private_state_unsafe');
+      const after = lstatSync(filePath);
+      if (after.dev !== opened.dev || after.ino !== opened.ino) fail('platform_private_state_unsafe');
+      return encoding === null ? bytes : bytes.toString(encoding);
+    } catch (error) {
+      if (missing && error?.code === 'ENOENT') return null;
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_private_state_unsafe');
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
+  }
+
+  function atomicWritePrivateFile(filePath, data, {
+    ensureParent = true, maxBytes = 1 << 20,
+  } = {}) {
+    validatePrivatePath(filePath);
+    const { maxBytes: boundedMax } = validateByteBounds({ minBytes: 0, maxBytes });
+    if (typeof ensureParent !== 'boolean' || !(typeof data === 'string' || Buffer.isBuffer(data)) ||
+        Buffer.byteLength(data) > boundedMax) fail('platform_private_state_invalid');
+    if (platform === 'win32') {
+      nativeOperation(nativeAdapter, 'atomicWritePrivateFile')(filePath, data, { ensureParent, maxBytes: boundedMax });
+      return assertPrivateState(filePath, { kind: 'file' });
+    }
+    const parent = dirname(filePath);
+    if (ensureParent) ensurePrivateDirectory(parent);
+    else {
+      try { assertPrivateState(parent, { kind: 'directory' }); } catch (error) {
+        if (error instanceof PlatformServicesError) throw error;
+        fail('platform_private_state_unsafe');
+      }
+    }
+    const temporary = `${filePath}.new-${process.pid}-${randomBytes(16).toString('hex')}`;
+    let descriptor;
+    try {
+      descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      writeFileSync(descriptor, data);
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, filePath);
+      syncDirectory(parent);
+      return assertPrivateState(filePath, { kind: 'file' });
+    } catch (error) {
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_private_state_write_failed');
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+      rmSync(temporary, { force: true });
+    }
+  }
+
+  function removePrivateFile(filePath, { missing = true } = {}) {
+    validatePrivatePath(filePath);
+    if (typeof missing !== 'boolean') fail('platform_private_state_invalid');
+    if (platform === 'win32') {
+      const result = nativeOperation(nativeAdapter, 'removePrivateFile')(filePath, { missing });
+      if (typeof result !== 'boolean') fail('platform_private_state_unsafe');
+      return result;
+    }
+    const quarantine = `${filePath}.remove-${randomBytes(16).toString('hex')}`;
+    try {
+      const before = lstatSync(filePath);
+      assertPrivateState(filePath, { kind: 'file' });
+      renameSync(filePath, quarantine);
+      const moved = lstatSync(quarantine);
+      if (moved.dev !== before.dev || moved.ino !== before.ino) fail('platform_private_state_unsafe');
+      assertPrivateState(quarantine, { kind: 'file' });
+      rmSync(quarantine);
+      syncDirectory(dirname(filePath));
+      return true;
+    } catch (error) {
+      if (missing && error?.code === 'ENOENT') return false;
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_private_state_unsafe');
+    }
+  }
+
+  function lockRecord() {
+    const processProof = inspectProcess(process.pid);
+    if (!processProof.running || typeof processProof.identity_token !== 'string') fail('platform_lock_identity_unavailable');
+    return {
+      schema: LOCK_SCHEMA,
+      created_at: new Date().toISOString(),
+      pid: process.pid,
+      process_identity: processProof.identity_token,
+      token: randomBytes(32).toString('hex'),
+    };
+  }
+
+  function readLock(lockPath) {
+    const bytes = readPrivateFile(lockPath, { minBytes: 1, maxBytes: 2048 });
+    let record;
+    try { record = JSON.parse(bytes); } catch { fail('platform_lock_unsafe'); }
+    if (!exactObject(record, ['created_at', 'pid', 'process_identity', 'schema', 'token']) ||
+        record.schema !== LOCK_SCHEMA || !Number.isSafeInteger(record.pid) || record.pid <= 1 ||
+        typeof record.process_identity !== 'string' || record.process_identity.length < 1 ||
+        !SHA256.test(record.token ?? '') || Number.isNaN(Date.parse(record.created_at)) ||
+        bytes !== `${JSON.stringify(record)}\n`) fail('platform_lock_unsafe');
+    return record;
+  }
+
+  function acquirePrivateLock(lockPath, { staleAfterMs = 0, timeoutMs = 0 } = {}) {
+    validatePrivatePath(lockPath);
+    if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs < 0 || !Number.isSafeInteger(timeoutMs) ||
+        timeoutMs < 0 || timeoutMs > 60_000) fail('platform_lock_invalid');
+    if (platform === 'win32') {
+      const release = nativeOperation(nativeAdapter, 'acquirePrivateLock')(lockPath, { staleAfterMs, timeoutMs });
+      if (typeof release !== 'function') fail('platform_lock_unsafe');
+      return release;
+    }
+    ensurePrivateDirectory(dirname(lockPath));
+    const owner = lockRecord();
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      try {
+        const descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        try { writeFileSync(descriptor, `${JSON.stringify(owner)}\n`); fsyncSync(descriptor); } finally { closeSync(descriptor); }
+        syncDirectory(dirname(lockPath));
+        break;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') fail('platform_lock_failed');
+        let existing;
+        try { existing = readLock(lockPath); } catch (inspectionError) {
+          if (inspectionError?.code === 'ENOENT') continue;
+          if (inspectionError instanceof PlatformServicesError) throw inspectionError;
+          fail('platform_lock_unsafe');
+        }
+        const processProof = inspectProcess(existing.pid);
+        const liveOwner = processProof.running && processProof.identity_token === existing.process_identity;
+        const oldEnough = Date.now() - Date.parse(existing.created_at) >= staleAfterMs;
+        if (!liveOwner && oldEnough) {
+          const quarantine = `${lockPath}.stale-${randomBytes(16).toString('hex')}`;
+          try {
+            renameSync(lockPath, quarantine);
+            const moved = readLock(quarantine);
+            if (moved.token !== existing.token) fail('platform_lock_occupied');
+            removePrivateFile(quarantine, { missing: false });
+            continue;
+          } catch (recoveryError) {
+            if (recoveryError instanceof PlatformServicesError && recoveryError.code === 'platform_lock_unsafe') throw recoveryError;
+          }
+        }
+        if (Date.now() >= deadline) fail('platform_lock_occupied');
+        Atomics.wait(LOCK_WAIT, 0, 0, 10);
+      }
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      let current;
+      try { current = readLock(lockPath); } catch (error) {
+        if (error instanceof PlatformServicesError) throw error;
+        fail('platform_unlock_failed');
+      }
+      if (current.token !== owner.token || current.pid !== owner.pid || current.process_identity !== owner.process_identity) {
+        fail('platform_unlock_not_owner');
+      }
+      try { removePrivateFile(lockPath, { missing: false }); } catch (error) {
+        if (error instanceof PlatformServicesError) throw error;
+        fail('platform_unlock_failed');
+      }
+      released = true;
+    };
+  }
+
   function probePort(port) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) fail('platform_port_invalid');
     let result;
@@ -335,9 +573,12 @@ export function createPlatformServices({
     architecture,
     path_delimiter: pathAPI.delimiter,
     path_separator: pathAPI.sep,
+    acquirePrivateLock,
     assertPrivateState,
+    atomicWritePrivateFile,
     createStartupNonce,
     desktopOSVersion,
+    ensurePrivateDirectory,
     hostCandidates,
     inspectApplication,
     inspectExecutable,
@@ -345,6 +586,8 @@ export function createPlatformServices({
     isAbsolutePath,
     isPathInside,
     probePort,
+    readPrivateFile,
+    removePrivateFile,
     resolvePath,
     runGit,
     terminateProcess,

@@ -1,7 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
-import {
-  chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
-} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
@@ -24,6 +21,7 @@ import {
   writeHostTurnContext,
 } from './codex-runtime.js';
 import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
+import { defaultPlatformServices } from './platform-services.js';
 
 const HOST = 'cursor';
 const MAX_HOOK_INPUT = 1 << 20;
@@ -38,11 +36,8 @@ function lifecycleDirectory(resolved) {
   return join(dataDir, 'runtime', 'cursor-lifecycle');
 }
 
-function privateDirectory(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const info = lstatSync(path);
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o077) !== 0) {
+function privateDirectory(path, platformServices) {
+  try { platformServices.ensurePrivateDirectory(path); } catch {
     throw new Error('cursor_lifecycle_directory_unsafe');
   }
 }
@@ -61,18 +56,16 @@ function cursorLifecycleResult(record) {
   };
 }
 
-export function inspectCursorLifecycleReadiness(resolved) {
+export function inspectCursorLifecycleReadiness(resolved, { platformServices = defaultPlatformServices } = {}) {
   const directory = lifecycleDirectory(resolved);
   const observed = emptyObserved();
   let updatedAt;
   for (const event of LIFECYCLE_EVENTS) {
     const path = join(directory, `${event}.json`);
     try {
-      const info = lstatSync(path);
-      const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid ||
-          (info.mode & 0o077) !== 0 || info.size > 2048) throw new Error('unsafe');
-      const record = JSON.parse(readFileSync(path, 'utf8'));
+      const bytes = platformServices.readPrivateFile(path, { missing: true, maxBytes: 2048 });
+      if (bytes === null) continue;
+      const record = JSON.parse(bytes);
       if (record?.schema !== 'pulse.cursor_lifecycle_event.v1' ||
           record.binding_digest !== resolved.binding.binding_digest || record.event !== event ||
           Number.isNaN(Date.parse(record.observed_at))) throw new Error('invalid');
@@ -86,15 +79,17 @@ export function inspectCursorLifecycleReadiness(resolved) {
   return cursorLifecycleResult({ observed, updated_at: updatedAt });
 }
 
-export function recordCursorLifecycleReadiness(resolved, event, now = new Date()) {
+export function recordCursorLifecycleReadiness(
+  resolved, event, now = new Date(), { platformServices = defaultPlatformServices } = {},
+) {
   if (!LIFECYCLE_EVENTS.includes(event) || !(now instanceof Date) || Number.isNaN(now.valueOf())) {
     throw new Error('cursor_lifecycle_event_invalid');
   }
   const directory = lifecycleDirectory(resolved);
-  privateDirectory(resolve(resolved.runtime.data_dir));
-  privateDirectory(dirname(directory));
-  privateDirectory(directory);
-  const current = inspectCursorLifecycleReadiness(resolved);
+  privateDirectory(resolve(resolved.runtime.data_dir), platformServices);
+  privateDirectory(dirname(directory), platformServices);
+  privateDirectory(directory, platformServices);
+  const current = inspectCursorLifecycleReadiness(resolved, { platformServices });
   if (current.observed[event] === true) return current;
   const record = {
     schema: 'pulse.cursor_lifecycle_event.v1',
@@ -103,19 +98,10 @@ export function recordCursorLifecycleReadiness(resolved, event, now = new Date()
     observed_at: now.toISOString(),
   };
   const path = join(directory, `${event}.json`);
-  const temporary = join(directory, `.${event}.${process.pid}.${randomBytes(8).toString('hex')}.new`);
-  try {
-    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { flag: 'wx', mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    const descriptor = openSync(temporary, 'r');
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    renameSync(temporary, path);
-    const directoryDescriptor = openSync(directory, 'r');
-    try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-  return inspectCursorLifecycleReadiness(resolved);
+  platformServices.atomicWritePrivateFile(path, `${JSON.stringify(record)}\n`, {
+    ensureParent: false, maxBytes: 2048,
+  });
+  return inspectCursorLifecycleReadiness(resolved, { platformServices });
 }
 
 function opaqueTurnCorrelation(kind, value) {

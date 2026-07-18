@@ -1,11 +1,9 @@
 import { randomBytes as cryptoRandomBytes } from 'node:crypto';
-import {
-  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
-} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { acquireInstallLock, InstallJournalError } from './install-journal.js';
+import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const SCHEMA = 'pulse.personal_principal.v1';
 const PRINCIPAL_ID = /^principal_[a-f0-9]{32}$/;
@@ -26,51 +24,26 @@ export function personalPrincipalPath(home = homedir()) {
   return join(resolve(home), '.pulse', 'identity', 'personal-principal.json');
 }
 
-function currentUID(stat) {
-  return typeof process.geteuid === 'function' ? process.geteuid() : stat.uid;
-}
-
-function inspectPrivateDirectory(path, { missing = false } = {}) {
-  let stat;
-  try { stat = lstatSync(path); } catch (error) {
+function inspectPrivateDirectory(path, platformServices, { missing = false } = {}) {
+  try { platformServices.assertPrivateState(path, { kind: 'directory' }); } catch (error) {
     if (missing && error?.code === 'ENOENT') return false;
-    fail('principal_directory_unsafe');
-  }
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== currentUID(stat) || (stat.mode & 0o077) !== 0) {
     fail('principal_directory_unsafe');
   }
   return true;
 }
 
-function syncDirectory(path) {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+function ensurePrivateDirectory(path, platformServices) {
+  try { platformServices.ensurePrivateDirectory(path); } catch { fail('principal_directory_unsafe'); }
 }
 
-function ensurePrivateDirectory(path) {
-  try {
-    mkdirSync(path, { mode: 0o700 });
-    syncDirectory(dirname(path));
-  } catch (error) {
-    if (error?.code !== 'EEXIST') fail('principal_directory_unsafe');
-  }
-  inspectPrivateDirectory(path);
-}
-
-function acquirePrincipalCreationLock(path) {
+function acquirePrincipalCreationLock(path, platformServices) {
   const deadline = Date.now() + 5000;
   while (true) {
     try {
-      return acquireInstallLock(path);
+      return acquireInstallLock(path, { platformServices });
     } catch (error) {
-      let disappearedDuringInspection = false;
-      if (error instanceof InstallJournalError && error.code === 'install_lock_unsafe') {
-        try { lstatSync(path); } catch (statError) {
-          disappearedDuringInspection = statError?.code === 'ENOENT';
-        }
-      }
       if (!(error instanceof InstallJournalError) ||
-          (error.code !== 'install_locked' && !disappearedDuringInspection)) {
+          (error.code !== 'install_locked' && error.code !== 'install_lock_unsafe')) {
         fail('principal_write_failed');
       }
       if (Date.now() >= deadline) fail('principal_write_failed');
@@ -83,19 +56,15 @@ function canonicalRecord(record) {
   return `${JSON.stringify({ principal_id: record.principal_id, schema: record.schema })}\n`;
 }
 
-function readRecord(path) {
-  let stat;
-  try { stat = lstatSync(path); } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    fail('principal_file_unsafe');
-  }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== currentUID(stat) ||
-      (stat.mode & 0o077) !== 0 || stat.size < 1 || stat.size > 4096) {
-    fail('principal_file_unsafe');
-  }
+function readRecord(path, platformServices) {
   let bytes;
   let record;
-  try { bytes = readFileSync(path, 'utf8'); record = JSON.parse(bytes); } catch { fail('principal_invalid'); }
+  try { bytes = platformServices.readPrivateFile(path, { missing: true, minBytes: 1, maxBytes: 4096 }); } catch (error) {
+    if (error instanceof PlatformServicesError || error?.code === 'ENOENT') fail('principal_file_unsafe');
+    fail('principal_file_unsafe');
+  }
+  if (bytes === null) return null;
+  try { record = JSON.parse(bytes); } catch { fail('principal_invalid'); }
   if (!record || Array.isArray(record) || typeof record !== 'object' ||
       Object.keys(record).sort().join('\0') !== 'principal_id\0schema' ||
       record.schema !== SCHEMA || !PRINCIPAL_ID.test(record.principal_id ?? '')) {
@@ -105,19 +74,20 @@ function readRecord(path) {
   return Object.freeze({ schema: record.schema, principal_id: record.principal_id });
 }
 
-export function readPersonalPrincipal({ home = homedir() } = {}) {
+export function readPersonalPrincipal({ home = homedir(), platformServices = defaultPlatformServices } = {}) {
   const path = personalPrincipalPath(home);
   const pulseDirectory = dirname(dirname(path));
   const identityDirectory = dirname(path);
-  if (!inspectPrivateDirectory(pulseDirectory, { missing: true })) return null;
-  if (!inspectPrivateDirectory(identityDirectory, { missing: true })) return null;
-  return readRecord(path);
+  if (!inspectPrivateDirectory(pulseDirectory, platformServices, { missing: true })) return null;
+  if (!inspectPrivateDirectory(identityDirectory, platformServices, { missing: true })) return null;
+  return readRecord(path, platformServices);
 }
 
 export function ensurePersonalPrincipal({
   home = homedir(), consentGranted = false, randomBytes = cryptoRandomBytes,
+  platformServices = defaultPlatformServices,
 } = {}) {
-  const existing = readPersonalPrincipal({ home });
+  const existing = readPersonalPrincipal({ home, platformServices });
   if (existing) return existing;
   if (consentGranted !== true) fail('principal_consent_required');
   if (typeof randomBytes !== 'function') fail('principal_random_unavailable');
@@ -125,33 +95,28 @@ export function ensurePersonalPrincipal({
   const path = personalPrincipalPath(home);
   const pulseDirectory = dirname(dirname(path));
   const identityDirectory = dirname(path);
-  ensurePrivateDirectory(pulseDirectory);
-  ensurePrivateDirectory(identityDirectory);
-  const releaseLock = acquirePrincipalCreationLock(join(identityDirectory, 'personal-principal.lock'));
+  ensurePrivateDirectory(pulseDirectory, platformServices);
+  ensurePrivateDirectory(identityDirectory, platformServices);
+  const releaseLock = acquirePrincipalCreationLock(join(identityDirectory, 'personal-principal.lock'), platformServices);
   try {
-    const raced = readRecord(path);
+    const raced = readRecord(path, platformServices);
     if (raced) return raced;
 
     const entropy = randomBytes(16);
     if (!Buffer.isBuffer(entropy) || entropy.length !== 16) fail('principal_random_unavailable');
     const record = { schema: SCHEMA, principal_id: `principal_${entropy.toString('hex')}` };
-    const temporary = join(identityDirectory, `.personal-principal.${process.pid}.${Date.now()}.${cryptoRandomBytes(8).toString('hex')}.new`);
     try {
-      writeFileSync(temporary, canonicalRecord(record), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      const descriptor = openSync(temporary, 'r');
-      try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-      renameSync(temporary, path);
-      syncDirectory(identityDirectory);
+      platformServices.atomicWritePrivateFile(path, canonicalRecord(record), {
+        ensureParent: false, maxBytes: 4096,
+      });
     } catch (error) {
       if (error instanceof PersonalPrincipalError) throw error;
       fail('principal_write_failed');
-    } finally {
-      rmSync(temporary, { force: true });
     }
   } finally {
     releaseLock();
   }
-  const result = readRecord(path);
+  const result = readRecord(path, platformServices);
   if (!result) fail('principal_write_failed');
   return result;
 }

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -56,6 +59,7 @@ test('Windows trust and process operations fail closed without the native adapte
 
 test('Windows native adapter must prove ACL ownership and reject reparse points', () => {
   const terminated = [];
+  const privateOperations = [];
   const nativeAdapter = {
     inspectExecutable: (path) => ({
       canonical_path: path, executable: true, regular_file: true, reparse_point: false,
@@ -66,6 +70,14 @@ test('Windows native adapter must prove ACL ownership and reject reparse points'
     }),
     inspectProcess: (pid) => ({ running: true, pid, command: 'pulse.exe -data-dir C:\\vault', identity_token: 'proc-1234' }),
     terminateProcess: (pid, options) => { terminated.push({ pid, options }); return true; },
+    ensurePrivateDirectory: (path) => { privateOperations.push(['ensure', path]); },
+    readPrivateFile: (path) => { privateOperations.push(['read', path]); return '{}\n'; },
+    atomicWritePrivateFile: (path) => { privateOperations.push(['write', path]); },
+    removePrivateFile: (path) => { privateOperations.push(['remove', path]); return true; },
+    acquirePrivateLock: (path) => {
+      privateOperations.push(['lock', path]);
+      return () => privateOperations.push(['unlock', path]);
+    },
   };
   const services = createPlatformServices({
     platform: 'win32', home: 'C:\\Users\\Pulse', nativeAdapter,
@@ -80,6 +92,16 @@ test('Windows native adapter must prove ACL ownership and reject reparse points'
   assert.deepEqual(terminated, [{ pid: 1234, options: { force: true } }]);
   assert.equal(services.createStartupNonce(), '07'.repeat(32));
   assert.equal(services.isPathInside('C:\\Users\\Pulse\\Project\\file', 'c:\\users\\pulse\\project'), true);
+  const privateRoot = 'C:\\Users\\Pulse\\.pulse';
+  const privateFile = `${privateRoot}\\state.json`;
+  services.ensurePrivateDirectory(privateRoot);
+  services.atomicWritePrivateFile(privateFile, '{}\n');
+  assert.equal(services.readPrivateFile(privateFile), '{}\n');
+  assert.equal(services.removePrivateFile(privateFile), true);
+  services.acquirePrivateLock(`${privateRoot}\\state.lock`)();
+  assert.deepEqual(privateOperations.map(([operation]) => operation), [
+    'ensure', 'write', 'read', 'remove', 'lock', 'unlock',
+  ]);
 
   const unsafe = createPlatformServices({
     platform: 'win32',
@@ -112,4 +134,52 @@ test('Git discovery uses a bounded verified executable and never inherited PATH'
   assert.equal(calls[0].command, '/usr/bin/git');
   assert.deepEqual(calls[0].args, ['-C', '/repo/nested', 'rev-parse', '--show-toplevel']);
   assert.equal(calls[0].options.env.PATH, undefined);
+});
+
+test('portable private-state services own directory creation, bounded reads, atomic writes, removal, and locks', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-platform-private-'));
+  try {
+    const services = createPlatformServices();
+    const directory = join(root, 'private');
+    const file = join(directory, 'state.json');
+    services.ensurePrivateDirectory(directory);
+    services.atomicWritePrivateFile(file, '{"ok":true}\n', { maxBytes: 1024 });
+    assert.equal(services.readPrivateFile(file, { maxBytes: 1024 }), '{"ok":true}\n');
+
+    const release = services.acquirePrivateLock(`${file}.lock`, { staleAfterMs: 30_000 });
+    assert.throws(
+      () => services.acquirePrivateLock(`${file}.lock`, { staleAfterMs: 30_000 }),
+      (error) => error instanceof PlatformServicesError && error.code === 'platform_lock_occupied',
+    );
+    release();
+    services.acquirePrivateLock(`${file}.lock`, { staleAfterMs: 30_000 })();
+
+    services.removePrivateFile(file);
+    assert.equal(existsSync(file), false);
+    assert.equal(services.readPrivateFile(file, { missing: true, maxBytes: 1024 }), null);
+
+    writeFileSync(file, 'unsafe', { mode: 0o600 });
+    chmodSync(file, 0o644);
+    assert.throws(
+      () => services.readPrivateFile(file, { maxBytes: 1024 }),
+      (error) => error instanceof PlatformServicesError && error.code === 'platform_private_state_unsafe',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows private-state mutations and locks fail closed without native operations', () => {
+  const services = createPlatformServices({ platform: 'win32', home: 'C:\\Users\\Pulse' });
+  const root = 'C:\\Users\\Pulse\\.pulse';
+  for (const operation of [
+    () => services.ensurePrivateDirectory(root),
+    () => services.readPrivateFile(`${root}\\state.json`, { missing: true }),
+    () => services.atomicWritePrivateFile(`${root}\\state.json`, '{}\n'),
+    () => services.removePrivateFile(`${root}\\state.json`),
+    () => services.acquirePrivateLock(`${root}\\state.lock`),
+  ]) {
+    assert.throws(operation, (error) =>
+      error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable');
+  }
 });

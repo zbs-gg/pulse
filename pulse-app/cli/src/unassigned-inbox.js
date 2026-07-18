@@ -1,10 +1,8 @@
-import { createHash, randomBytes } from 'node:crypto';
-import {
-  chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, renameSync, rmSync, writeFileSync,
-} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+
+import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const SCHEMA = 'pulse.unassigned_inbox.v1';
 const CANDIDATE_SCHEMA = 'pulse.unassigned_candidate.v1';
@@ -13,7 +11,6 @@ const MAX_ITEMS = 50;
 const MAX_RECEIPTS = 100;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_CANDIDATE_BYTES = 32 * 1024;
-const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
 const HOSTS = new Set(['chatgpt', 'claude', 'codex', 'claude-code', 'gemini-cli', 'cursor', 'langchain', 'crewai', 'pulse-cli']);
 const SCOPES = new Set(['current_turn', 'user_selected_excerpt', 'project_context', 'install_event']);
@@ -53,10 +50,6 @@ export class UnassignedInboxError extends Error {
 }
 
 function fail(code, message = code) { throw new UnassignedInboxError(code, message); }
-
-function currentUID(stat) {
-  return typeof process.geteuid === 'function' ? process.geteuid() : stat.uid;
-}
 
 function canonicalValue(value) {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
@@ -180,34 +173,18 @@ function cleanCapsule(input, expectedHost) {
 
 function emptyInbox() { return { schema: SCHEMA, items: [], receipts: [] }; }
 
-function inspectPrivateDirectory(path, { missing = false } = {}) {
-  let stat;
-  try { stat = lstatSync(path); } catch (error) {
+function inspectPrivateDirectory(path, platformServices, { missing = false } = {}) {
+  try { platformServices.assertPrivateState(path, { kind: 'directory' }); } catch (error) {
     if (missing && error?.code === 'ENOENT') return false;
     fail('unassigned_directory_unsafe', 'unassigned inbox directory is unsafe');
-  }
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== currentUID(stat) || (stat.mode & 0o077) !== 0) {
-    fail('unassigned_directory_unsafe', 'unassigned inbox directory is unsafe: it must be owner-only');
   }
   return true;
 }
 
-function ensurePrivateDirectory(path) {
-  try { mkdirSync(path, { recursive: true, mode: 0o700 }); } catch { fail('unassigned_directory_unsafe'); }
-  inspectPrivateDirectory(path);
-}
-
-function inspectInboxFile(path) {
-  let stat;
-  try { stat = lstatSync(path); } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    fail('unassigned_file_unsafe', 'unassigned inbox file is unsafe');
+function ensurePrivateDirectory(path, platformServices) {
+  try { platformServices.ensurePrivateDirectory(path); } catch {
+    fail('unassigned_directory_unsafe', 'unassigned inbox directory is unsafe');
   }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== currentUID(stat) ||
-      (stat.mode & 0o077) !== 0 || stat.size < 1 || stat.size > MAX_FILE_BYTES) {
-    fail('unassigned_file_unsafe', 'unassigned inbox file is unsafe: it must be a private regular file');
-  }
-  return stat;
 }
 
 function validateStoredInbox(value) {
@@ -261,103 +238,45 @@ function validateStoredInbox(value) {
   return value;
 }
 
-function readUnlocked(path) {
-  if (!inspectPrivateDirectory(dirname(path), { missing: true })) return emptyInbox();
-  if (!inspectInboxFile(path)) return emptyInbox();
+function readUnlocked(path, platformServices) {
+  if (!inspectPrivateDirectory(dirname(path), platformServices, { missing: true })) return emptyInbox();
+  let bytes;
+  try { bytes = platformServices.readPrivateFile(path, { missing: true, minBytes: 1, maxBytes: MAX_FILE_BYTES }); } catch {
+    fail('unassigned_file_unsafe', 'unassigned inbox file is unsafe: it must be a private regular file');
+  }
+  if (bytes === null) return emptyInbox();
   let value;
-  try { value = JSON.parse(readFileSync(path, 'utf8')); } catch { fail('unassigned_invalid', 'unassigned inbox is invalid JSON'); }
+  try { value = JSON.parse(bytes); } catch { fail('unassigned_invalid', 'unassigned inbox is invalid JSON'); }
   return validateStoredInbox(value);
 }
 
-function syncDirectory(path) {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-}
-
-function writeUnlocked(path, value) {
-  ensurePrivateDirectory(dirname(path));
+function writeUnlocked(path, value, platformServices) {
+  ensurePrivateDirectory(dirname(path), platformServices);
   const bytes = `${canonicalJSON(value)}\n`;
   if (Buffer.byteLength(bytes) > MAX_FILE_BYTES) fail('unassigned_capacity', 'unassigned inbox is full');
-  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
   try {
-    const descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(descriptor, bytes); fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, path);
-    syncDirectory(dirname(path));
-  } finally {
-    rmSync(temporary, { force: true });
+    platformServices.atomicWritePrivateFile(path, bytes, { ensureParent: false, maxBytes: MAX_FILE_BYTES });
+  } catch {
+    fail('unassigned_file_unsafe', 'unassigned inbox file cannot be written safely');
   }
 }
 
-function withLock(path, operation) {
-  ensurePrivateDirectory(dirname(path));
+function withLock(path, platformServices, operation) {
+  ensurePrivateDirectory(dirname(path), platformServices);
   const lockPath = `${path}.lock`;
-  const deadline = Date.now() + 5000;
-  const token = randomBytes(16).toString('hex');
-  let descriptor;
-  let acquired;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      acquired = fstatSync(descriptor);
-      writeFileSync(descriptor, `${process.pid} ${token}\n`);
-      fsyncSync(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-        descriptor = undefined;
-        try {
-          const current = lstatSync(lockPath);
-          if (acquired && current.dev === acquired.dev && current.ino === acquired.ino) rmSync(lockPath);
-        } catch {}
-      }
-      if (error?.code !== 'EEXIST') fail('unassigned_lock_unsafe', 'unassigned inbox lock cannot be created');
-      try {
-        const stat = lstatSync(lockPath);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== currentUID(stat) ||
-            (stat.mode & 0o077) !== 0) fail('unassigned_lock_unsafe');
-        let holderPID = 0;
-        try {
-          const lockFD = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-          try {
-            const opened = fstatSync(lockFD);
-            if (opened.dev !== stat.dev || opened.ino !== stat.ino) continue;
-            const match = readFileSync(lockFD, 'utf8').match(/^(\d+) [a-f0-9]{32}\n$/);
-            holderPID = match ? Number(match[1]) : 0;
-          } finally { closeSync(lockFD); }
-        } catch (inspectionError) {
-          if (inspectionError?.code === 'ENOENT') continue;
-          fail('unassigned_lock_unsafe');
-        }
-        let holderAlive = holderPID > 0;
-        if (holderAlive) {
-          try { process.kill(holderPID, 0); } catch (probeError) { holderAlive = probeError?.code === 'EPERM'; }
-        }
-        if (!holderAlive && Date.now() - stat.mtimeMs > 30_000) {
-          const current = lstatSync(lockPath);
-          if (current.dev === stat.dev && current.ino === stat.ino) rmSync(lockPath);
-          continue;
-        }
-      } catch (inspectionError) {
-        if (inspectionError instanceof UnassignedInboxError) throw inspectionError;
-        if (inspectionError?.code === 'ENOENT') continue;
-        fail('unassigned_lock_unsafe');
-      }
-      if (Date.now() >= deadline) fail('unassigned_locked', 'unassigned inbox is busy');
-      Atomics.wait(LOCK_WAIT, 0, 0, 10);
+  let release;
+  try {
+    release = platformServices.acquirePrivateLock(lockPath, { staleAfterMs: 30_000, timeoutMs: 5000 });
+  } catch (error) {
+    if (error instanceof PlatformServicesError && error.code === 'platform_lock_occupied') {
+      fail('unassigned_locked', 'unassigned inbox is busy');
     }
+    fail('unassigned_lock_unsafe', 'unassigned inbox lock cannot be created');
   }
   try {
     return operation();
   } finally {
-    closeSync(descriptor);
-    try {
-      const current = lstatSync(lockPath);
-      if (acquired && current.dev === acquired.dev && current.ino === acquired.ino) rmSync(lockPath);
-    } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
-    }
+    try { release(); } catch { fail('unassigned_lock_unsafe', 'unassigned inbox lock cannot be released'); }
   }
 }
 
@@ -366,13 +285,14 @@ export function unassignedInboxPath(home = homedir()) {
   return join(resolve(home), '.pulse', 'supervisor', 'unassigned-inbox.json');
 }
 
-export function readUnassignedInbox(path = unassignedInboxPath()) {
+export function readUnassignedInbox(path = unassignedInboxPath(), { platformServices = defaultPlatformServices } = {}) {
   if (typeof path !== 'string' || !isAbsolute(path)) fail('unassigned_path_invalid');
-  return readUnlocked(resolve(path));
+  return readUnlocked(resolve(path), platformServices);
 }
 
 export function stageUnassignedCapsule(input, {
   path = unassignedInboxPath(), host, idempotencyKey, now = new Date(),
+  platformServices = defaultPlatformServices,
 } = {}) {
   if (typeof path !== 'string' || !isAbsolute(path)) fail('unassigned_path_invalid');
   if (!HOSTS.has(host)) fail('unassigned_host_invalid');
@@ -386,8 +306,8 @@ export function stageUnassignedCapsule(input, {
   const receiptID = `unassigned_receipt_${digest('pulse-unassigned-stage-receipt-v1', { idempotency_key: idempotencyKey, item_id: itemID }).slice(0, 32)}`;
   const createdAt = now.toISOString();
   const selectedPath = resolve(path);
-  return withLock(selectedPath, () => {
-    const inbox = readUnlocked(selectedPath);
+  return withLock(selectedPath, platformServices, () => {
+    const inbox = readUnlocked(selectedPath, platformServices);
     const priorReceipt = inbox.receipts.find((receipt) => receipt.receipt_id === receiptID);
     if (priorReceipt) {
       const priorItem = inbox.items.find((item) => item.item_id === priorReceipt.item_id);
@@ -431,7 +351,7 @@ export function stageUnassignedCapsule(input, {
     inbox.items.push(item);
     inbox.receipts.push(receipt);
     if (inbox.receipts.length > MAX_RECEIPTS) inbox.receipts.splice(0, inbox.receipts.length - MAX_RECEIPTS);
-    writeUnlocked(selectedPath, inbox);
+    writeUnlocked(selectedPath, inbox, platformServices);
     return {
       schema: 'pulse.unassigned_stage_receipt.v1', status: 'staged', destination: 'unassigned_inbox',
       receipts: [{ ...receipt, destination: 'unassigned_inbox' }],

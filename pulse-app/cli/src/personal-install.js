@@ -1,10 +1,7 @@
-import { randomBytes } from 'node:crypto';
-import {
-  chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync,
-} from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
+import { defaultPlatformServices } from './platform-services.js';
 import { SUPPORTED_HOST_IDS } from './supported-hosts.js';
 
 const STEP = Object.freeze({
@@ -200,26 +197,14 @@ function receiptFor(result) {
   };
 }
 
-function requirePrivateDirectory(path) {
-  let info;
-  try {
-    mkdirSync(path, { recursive: true, mode: 0o700 });
-    info = lstatSync(path);
-  } catch { fail('install_receipt_directory_unsafe'); }
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o077) !== 0) {
-    fail('install_receipt_directory_unsafe');
-  }
-}
-
-function syncDirectory(path) {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+function requirePrivateDirectory(path, platformServices) {
+  try { platformServices.ensurePrivateDirectory(path); } catch { fail('install_receipt_directory_unsafe'); }
 }
 
 export function writePersonalInstallReceipt(receipt, {
   dataDir,
   now = new Date(),
+  platformServices = defaultPlatformServices,
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
       !receipt || receipt.schema !== 'pulse.personal_install_receipt.v2' ||
@@ -235,9 +220,9 @@ export function writePersonalInstallReceipt(receipt, {
   const hostStatus = normalizePersonalInstallHostStatus(receipt.host_status);
   const root = resolve(dataDir);
   const directory = join(root, 'receipts', 'install');
-  requirePrivateDirectory(root);
-  requirePrivateDirectory(dirname(directory));
-  requirePrivateDirectory(directory);
+  requirePrivateDirectory(root, platformServices);
+  requirePrivateDirectory(dirname(directory), platformServices);
+  requirePrivateDirectory(directory, platformServices);
   const record = {
     completed_steps: [...receipt.completed_steps],
     created_at: now.toISOString(),
@@ -250,19 +235,13 @@ export function writePersonalInstallReceipt(receipt, {
     workspace_id: receipt.workspace_id,
   };
   const path = join(directory, `${receipt.workspace_id}.json`);
-  const temporary = join(directory, `.${receipt.workspace_id}.${process.pid}.${randomBytes(8).toString('hex')}.new`);
   try {
-    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    const descriptor = openSync(temporary, 'r');
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    renameSync(temporary, path);
-    syncDirectory(directory);
+    platformServices.atomicWritePrivateFile(path, `${JSON.stringify(record)}\n`, {
+      ensureParent: false, maxBytes: 64 * 1024,
+    });
   } catch (error) {
     if (error instanceof PersonalInstallError) throw error;
     fail('install_receipt_write_failed');
-  } finally {
-    rmSync(temporary, { force: true });
   }
   return path;
 }
