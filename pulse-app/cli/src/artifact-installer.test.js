@@ -318,6 +318,14 @@ test('activation switches an atomic regular-file pointer and recovery restores p
     assert.equal(readActivatedArtifact('pulse-daemon', {
       installRoot, expectedKind: 'daemon', expectedSha256: digest(second),
     }).tree_digest.length, 64);
+    const linkedPointer = join(root, 'linked-current.json');
+    linkSync(join(installRoot, 'pulse-daemon', 'current.json'), linkedPointer);
+    assert.throws(
+      () => readActivatedArtifact('pulse-daemon', { installRoot }),
+      /artifact_activation_pointer_unsafe/,
+      'activation pointers with an extra hard link are not private state',
+    );
+    rmSync(linkedPointer);
     await activateArtifactVersion(two, twoPath, {
       installRoot, materialize, testOnlyMaterializer: true,
       treeManifest: treeManifest([{ path: 'bin/pulse', bytes: second, mode: 0o700, executable: true }]),

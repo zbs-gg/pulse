@@ -7,6 +7,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { defaultPlatformServices } from './platform-services.js';
+
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const TREE_SCHEMA = 'pulse.artifact_tree.v1';
@@ -47,33 +49,24 @@ function canonical(value) {
 
 export function canonicalArtifactJSON(value) { return canonical(value); }
 
-function ensurePrivateDirectory(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const stat = lstatSync(path);
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : stat.uid;
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o077) !== 0) fail('artifact_directory_unsafe');
-}
-
-function syncDirectory(path) {
-  const fd = openSync(path, 'r');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-
-function atomicJSON(path, value) {
-  ensurePrivateDirectory(dirname(path));
-  const temporary = `${path}.new-${process.pid}-${Date.now()}`;
+function ensurePrivateDirectory(path, platformServices = defaultPlatformServices) {
   try {
-    writeFileSync(temporary, `${canonical(value)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    const fd = openSync(temporary, 'r');
-    try { fsyncSync(fd); } finally { closeSync(fd); }
-    renameSync(temporary, path);
-    syncDirectory(dirname(path));
-  } catch (error) {
-    rmSync(temporary, { force: true });
-    if (error instanceof ArtifactInstallerError) throw error;
-    fail('artifact_metadata_write_failed');
-  }
+    platformServices.ensurePrivateDirectory(resolve(path));
+  } catch { fail('artifact_directory_unsafe'); }
+}
+
+function assertPrivateState(path, kind, code, platformServices = defaultPlatformServices) {
+  try { return platformServices.assertPrivateState(resolve(path), { kind }); } catch { fail(code); }
+}
+
+function inspectPathIdentity(path, kind, code, platformServices = defaultPlatformServices) {
+  try { return platformServices.inspectPathIdentity(resolve(path), { kind }); } catch { fail(code); }
+}
+
+function atomicJSON(path, value, platformServices = defaultPlatformServices) {
+  try {
+    platformServices.atomicWritePrivateFile(resolve(path), `${canonical(value)}\n`, { maxBytes: 2 * 1024 * 1024 });
+  } catch { fail('artifact_metadata_write_failed'); }
 }
 
 function validateDescriptor(artifact) {
@@ -96,12 +89,13 @@ function defaultAvailableBytes(path) {
   return Number(stat.bavail) * Number(stat.bsize);
 }
 
-function sha256File(path) {
+function sha256File(path, platformServices = defaultPlatformServices) {
+  const before = inspectPathIdentity(path, 'file', 'artifact_file_unsafe', platformServices);
   let fd;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { fail('artifact_file_unsafe'); }
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); } catch { fail('artifact_file_unsafe'); }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1) fail('artifact_file_unsafe');
+    if (!stat.isFile()) fail('artifact_file_unsafe');
     const hash = createHash('sha256');
     const buffer = Buffer.allocUnsafe(1024 * 1024);
     let offset = 0;
@@ -111,28 +105,33 @@ function sha256File(path) {
       hash.update(buffer.subarray(0, count));
       offset += count;
     }
+    const after = inspectPathIdentity(path, 'file', 'artifact_file_unsafe', platformServices);
+    if (after.identity_token !== before.identity_token) fail('artifact_file_unsafe');
     return { digest: hash.digest('hex'), stat };
   } finally { closeSync(fd); }
 }
 
-function securePartialSize(path) {
+function securePartialSize(path, platformServices = defaultPlatformServices) {
   if (!existsSync(path)) return 0;
-  const stat = lstatSync(path);
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : stat.uid;
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== uid || (stat.mode & 0o177) !== 0) {
-    fail('artifact_partial_unsafe');
-  }
-  return stat.size;
+  assertPrivateState(path, 'file', 'artifact_partial_unsafe', platformServices);
+  return statSync(path).size;
 }
 
-function openPartial(path, { append, expectedSize }) {
-  const flags = constants.O_WRONLY | constants.O_NOFOLLOW |
-    (append ? constants.O_APPEND : constants.O_CREAT | constants.O_EXCL);
+function openPartial(path, { append, expectedSize }, platformServices = defaultPlatformServices) {
+  const absolute = resolve(path);
+  if (!append) {
+    try { platformServices.atomicWritePrivateFile(absolute, Buffer.alloc(0), { ensureParent: false, maxBytes: 1 }); } catch {
+      fail('artifact_partial_unsafe');
+    }
+  }
+  assertPrivateState(absolute, 'file', 'artifact_partial_unsafe', platformServices);
+  const identity = inspectPathIdentity(absolute, 'file', 'artifact_partial_unsafe', platformServices);
+  const flags = constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_APPEND;
   let fd;
-  try { fd = openSync(path, flags, 0o600); } catch { fail('artifact_partial_unsafe'); }
+  try { fd = openSync(absolute, flags); } catch { fail('artifact_partial_unsafe'); }
   const stat = fstatSync(fd);
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : stat.uid;
-  if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid || (stat.mode & 0o177) !== 0 || stat.size !== expectedSize) {
+  const after = inspectPathIdentity(absolute, 'file', 'artifact_partial_unsafe', platformServices);
+  if (!stat.isFile() || stat.size !== expectedSize || after.identity_token !== identity.identity_token) {
     closeSync(fd);
     fail('artifact_partial_unsafe');
   }
@@ -143,12 +142,10 @@ function strongETag(value) {
   return typeof value === 'string' && /^"[^"\r\n]{1,200}"$/.test(value) ? value : null;
 }
 
-function readDownloadMetadata(path, artifact) {
-  if (!existsSync(path)) return null;
+function readDownloadMetadata(path, artifact, platformServices = defaultPlatformServices) {
   try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.size > 4096) return null;
-    const bytes = readFileSync(path, 'utf8');
+    const bytes = platformServices.readPrivateFile(resolve(path), { missing: true, maxBytes: 4096 });
+    if (bytes === null) return null;
     const value = JSON.parse(bytes);
     if (bytes !== `${canonical(value)}\n` || value.schema !== DOWNLOAD_SCHEMA || value.url !== artifact.url ||
         value.sha256 !== artifact.sha256 || value.bytes !== artifact.bytes || !strongETag(value.etag)) return null;
@@ -225,23 +222,25 @@ function nextBodyChunk(iterator, controller, idleTimeoutMs) {
 export async function downloadVerifiedArtifact(artifact, {
   stagingRoot, fetchImpl = globalThis.fetch, availableBytes = defaultAvailableBytes, minimumFreeBytes = 256 * 1024 * 1024,
   overallTimeoutMs = 30 * 60 * 1000, idleTimeoutMs = 30 * 1000,
+  platformServices = defaultPlatformServices,
 } = {}) {
   const url = validateDescriptor(artifact);
   if (typeof stagingRoot !== 'string' || !stagingRoot || typeof fetchImpl !== 'function') fail('artifact_download_configuration_invalid');
-  ensurePrivateDirectory(stagingRoot);
+  ensurePrivateDirectory(stagingRoot, platformServices);
   const partPath = join(stagingRoot, `${artifact.sha256}.part`);
   const metadataPath = join(stagingRoot, `${artifact.sha256}.download.json`);
   const verifiedPath = join(stagingRoot, `${artifact.sha256}.verified`);
   if (existsSync(verifiedPath)) {
     const stat = lstatSync(verifiedPath);
     if (stat.isFile() && !stat.isSymbolicLink() && stat.size === artifact.bytes &&
-        sha256File(verifiedPath).digest === artifact.sha256) {
+        assertPrivateState(verifiedPath, 'file', 'artifact_file_unsafe', platformServices) &&
+        sha256File(verifiedPath, platformServices).digest === artifact.sha256) {
       return { path: verifiedPath, resumed_from: artifact.bytes, status: 'already_verified' };
     }
     rmSync(verifiedPath, { force: true });
   }
-  let existing = securePartialSize(partPath);
-  const metadata = readDownloadMetadata(metadataPath, artifact);
+  let existing = securePartialSize(partPath, platformServices);
+  const metadata = readDownloadMetadata(metadataPath, artifact, platformServices);
   if (!Number.isSafeInteger(existing) || existing < 0 || existing >= artifact.bytes || (existing > 0 && !metadata)) {
     rmSync(partPath, { force: true });
     rmSync(metadataPath, { force: true });
@@ -269,7 +268,7 @@ export async function downloadVerifiedArtifact(artifact, {
     if (response.status !== 206 || !match || Number(match[1]) !== existing ||
         Number(match[2]) !== artifact.bytes - 1 || Number(match[3]) !== artifact.bytes) {
       if (response.status !== 200) fail('artifact_range_invalid');
-      if (availableBytes(stagingRoot) + securePartialSize(partPath) < artifact.bytes + minimumFreeBytes) {
+      if (availableBytes(stagingRoot) + securePartialSize(partPath, platformServices) < artifact.bytes + minimumFreeBytes) {
         fail('artifact_disk_insufficient');
       }
       append = false;
@@ -281,9 +280,9 @@ export async function downloadVerifiedArtifact(artifact, {
   const etag = strongETag(response.headers?.get?.('etag'));
   if (!etag) fail('artifact_etag_invalid');
   if (append && etag !== metadata.etag) fail('artifact_range_invalid');
-  atomicJSON(metadataPath, { schema: DOWNLOAD_SCHEMA, url: artifact.url, sha256: artifact.sha256, bytes: artifact.bytes, etag });
+  atomicJSON(metadataPath, { schema: DOWNLOAD_SCHEMA, url: artifact.url, sha256: artifact.sha256, bytes: artifact.bytes, etag }, platformServices);
   if (!append && existsSync(partPath)) rmSync(partPath, { force: true });
-  const fd = openPartial(partPath, { append, expectedSize: existing });
+  const fd = openPartial(partPath, { append, expectedSize: existing }, platformServices);
   let written = existing;
   try {
     if (!response.body || typeof response.body[Symbol.asyncIterator] !== 'function') fail('artifact_body_invalid');
@@ -310,12 +309,12 @@ export async function downloadVerifiedArtifact(artifact, {
     closeSync(fd);
   }
   if (written !== artifact.bytes) fail('artifact_size_mismatch');
-  const actual = sha256File(partPath).digest;
+  assertPrivateState(partPath, 'file', 'artifact_partial_unsafe', platformServices);
+  const actual = sha256File(partPath, platformServices).digest;
   if (actual !== artifact.sha256) fail('artifact_digest_mismatch');
   renameSync(partPath, verifiedPath);
-  syncDirectory(stagingRoot);
+  assertPrivateState(verifiedPath, 'file', 'artifact_file_unsafe', platformServices);
   rmSync(metadataPath, { force: true });
-  syncDirectory(stagingRoot);
   return { path: verifiedPath, resumed_from: existing, status: 'verified' };
 }
 
@@ -343,15 +342,12 @@ function validateTreeManifest(manifest) {
 
 export function validateArtifactTree(root, manifest, {
   maxFiles = 4096, maxTotalBytes = 4 * 1024 * 1024 * 1024, maxEntries = 8192, maxDepth = 32,
+  platformServices = defaultPlatformServices,
 } = {}) {
   const entries = validateTreeManifest(manifest);
   if (entries.size > maxFiles) fail('artifact_tree_too_many_files');
   const rootPath = resolve(root);
-  const rootStat = lstatSync(rootPath);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : rootStat.uid;
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== currentUID || (rootStat.mode & 0o077) !== 0) {
-    fail('artifact_tree_root_invalid');
-  }
+  assertPrivateState(rootPath, 'directory', 'artifact_tree_root_invalid', platformServices);
   const actual = [];
   const allowedDirectories = new Set(['']);
   for (const path of entries.keys()) {
@@ -368,15 +364,14 @@ export function validateArtifactTree(root, manifest, {
       const stat = lstatSync(path);
       if (stat.isSymbolicLink()) fail('artifact_tree_link');
       if (stat.isDirectory()) {
-        if (stat.uid !== currentUID || (stat.mode & 0o077) !== 0) fail('artifact_tree_directory_unsafe');
+        assertPrivateState(path, 'directory', 'artifact_tree_directory_unsafe', platformServices);
         const rel = directoryRelative ? `${directoryRelative}/${name}` : name;
         if (!allowedDirectories.has(rel)) fail('artifact_tree_unexpected');
         walk(path, rel, depth + 1);
         continue;
       }
-      if (stat.nlink !== 1) fail('artifact_tree_link');
       if (!stat.isFile()) fail('artifact_tree_special');
-      if (stat.uid !== currentUID) fail('artifact_tree_file_invalid');
+      try { platformServices.assertPrivateState(resolve(path), { kind: 'file' }); } catch { fail('artifact_tree_link'); }
       const rel = relative(rootPath, path).split(sep).join('/');
       if (!safeRelativePath(rel)) fail('artifact_tree_path_invalid');
       actual.push({ rel, path, stat });
@@ -390,13 +385,22 @@ export function validateArtifactTree(root, manifest, {
     const expected = entries.get(rel);
     total += stat.size;
     if (total > maxTotalBytes) fail('artifact_tree_too_large');
-    if (stat.size !== expected.bytes || (stat.mode & 0o777) !== expected.mode) fail('artifact_tree_file_invalid');
-    if (sha256File(path).digest !== expected.sha256) fail('artifact_tree_digest_mismatch');
+    if (stat.size !== expected.bytes) fail('artifact_tree_file_invalid');
+    if (platformServices.platform === 'win32') {
+      if (expected.executable) {
+        let proof;
+        try { proof = platformServices.inspectExecutable(resolve(path)); } catch { fail('artifact_tree_file_invalid'); }
+        if (!proof?.executable || !proof.owner_only) fail('artifact_tree_file_invalid');
+      }
+    } else if ((stat.mode & 0o777) !== expected.mode) {
+      fail('artifact_tree_file_invalid');
+    }
+    if (sha256File(path, platformServices).digest !== expected.sha256) fail('artifact_tree_digest_mismatch');
   }
   return { files: actual.length, bytes: total };
 }
 
-function copyManifestFiles(sourceRoot, targetRoot, treeManifest) {
+function copyManifestFiles(sourceRoot, targetRoot, treeManifest, platformServices = defaultPlatformServices) {
   const resolvedSourceRoot = resolve(sourceRoot);
   const resolvedTargetRoot = resolve(targetRoot);
   for (const entry of treeManifest.files) {
@@ -405,22 +409,33 @@ function copyManifestFiles(sourceRoot, targetRoot, treeManifest) {
     if (!source.startsWith(`${resolvedSourceRoot}${sep}`) || !target.startsWith(`${resolvedTargetRoot}${sep}`)) {
       fail('artifact_tree_path_invalid');
     }
-    ensurePrivateDirectory(dirname(target));
+    ensurePrivateDirectory(dirname(target), platformServices);
     try { copyFileSync(source, target, constants.COPYFILE_EXCL); } catch { fail('artifact_materialize_failed'); }
-    chmodSync(target, entry.mode);
+    if (platformServices.platform !== 'win32') chmodSync(target, entry.mode);
+    assertPrivateState(target, 'file', 'artifact_materialize_failed', platformServices);
+    if (entry.executable && platformServices.platform === 'win32') {
+      let proof;
+      try { proof = platformServices.inspectExecutable(resolve(target)); } catch { fail('artifact_materialize_failed'); }
+      if (!proof?.executable || !proof.owner_only) fail('artifact_materialize_failed');
+    }
   }
 }
 
-export async function materializeVerifiedTree(sourceRoot, targetRoot, _artifact, treeManifest) {
-  validateArtifactTree(sourceRoot, treeManifest);
-  copyManifestFiles(sourceRoot, targetRoot, treeManifest);
+export async function materializeVerifiedTree(sourceRoot, targetRoot, _artifact, treeManifest, {
+  platformServices = defaultPlatformServices,
+} = {}) {
+  validateArtifactTree(sourceRoot, treeManifest, { platformServices });
+  copyManifestFiles(sourceRoot, targetRoot, treeManifest, platformServices);
 }
 
-function readCarrierTreeManifest(root) {
+function readCarrierTreeManifest(root, platformServices = defaultPlatformServices) {
   const path = join(root, CARRIER_TREE_FILE);
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 2 * 1024 * 1024) fail('artifact_carrier_manifest_unsafe');
-  const bytes = readFileSync(path, 'utf8');
+  let bytes;
+  try {
+    bytes = platformServices.readIntegrityFile(resolve(path), {
+      owner: 'root-or-current', encoding: 'utf8', maxBytes: 2 * 1024 * 1024,
+    });
+  } catch { fail('artifact_carrier_manifest_unsafe'); }
   return parseCarrierTreeManifest(bytes);
 }
 
@@ -433,7 +448,9 @@ function parseCarrierTreeManifest(bytes) {
   return manifest;
 }
 
-function validateCarrierDirectory(root, manifest, { maxEntries = 8192, maxDepth = 32 } = {}) {
+function validateCarrierDirectory(root, manifest, {
+  maxEntries = 8192, maxDepth = 32, platformServices = defaultPlatformServices,
+} = {}) {
   const payload = validateTreeManifest(manifest);
   const expectedFiles = new Set([...payload.keys(), CARRIER_TREE_FILE]);
   for (const optional of OPTIONAL_CARRIER_CONTROL_FILES) {
@@ -445,11 +462,7 @@ function validateCarrierDirectory(root, manifest, { maxEntries = 8192, maxDepth 
     for (let count = 1; count < parts.length; count += 1) allowedDirectories.add(parts.slice(0, count).join('/'));
   }
   const rootPath = resolve(root);
-  const rootStat = lstatSync(rootPath);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : rootStat.uid;
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || ![0, currentUID].includes(rootStat.uid) || (rootStat.mode & 0o022) !== 0) {
-    fail('artifact_carrier_root_unsafe');
-  }
+  inspectPathIdentity(rootPath, 'directory', 'artifact_carrier_root_unsafe', platformServices);
   const seen = new Set();
   let visited = 0;
   const walk = (directory, prefix = '', depth = 0) => {
@@ -459,21 +472,27 @@ function validateCarrierDirectory(root, manifest, { maxEntries = 8192, maxDepth 
       if (visited > maxEntries) fail('artifact_carrier_too_many_entries');
       const path = join(directory, name);
       const stat = lstatSync(path);
-      if (stat.isSymbolicLink() || (![0, currentUID].includes(stat.uid)) || (stat.mode & 0o022) !== 0) fail('artifact_carrier_entry_unsafe');
+      if (stat.isSymbolicLink()) fail('artifact_carrier_entry_unsafe');
       const rel = prefix ? `${prefix}/${name}` : name;
       if (stat.isDirectory()) {
+        inspectPathIdentity(path, 'directory', 'artifact_carrier_entry_unsafe', platformServices);
         if (!allowedDirectories.has(rel)) fail('artifact_carrier_unexpected');
         walk(path, rel, depth + 1);
         continue;
       }
-      if (!stat.isFile() || stat.nlink !== 1 || !expectedFiles.has(rel)) fail('artifact_carrier_unexpected');
+      if (!stat.isFile() || !expectedFiles.has(rel)) fail('artifact_carrier_unexpected');
+      inspectPathIdentity(path, 'file', 'artifact_carrier_entry_unsafe', platformServices);
       seen.add(rel);
       if (payload.has(rel)) {
         const expected = payload.get(rel);
-        const actual = sha256File(path);
+        const actual = sha256File(path, platformServices);
         if (actual.stat.size !== expected.bytes || actual.digest !== expected.sha256) fail('artifact_carrier_digest_mismatch');
       } else if (stat.size > 2 * 1024 * 1024) {
         fail('artifact_carrier_control_too_large');
+      } else {
+        try {
+          platformServices.readIntegrityFile(resolve(path), { owner: 'root-or-current', maxBytes: 2 * 1024 * 1024 });
+        } catch { fail('artifact_carrier_entry_unsafe'); }
       }
     }
   };
@@ -481,10 +500,12 @@ function validateCarrierDirectory(root, manifest, { maxEntries = 8192, maxDepth 
   if (seen.size !== expectedFiles.size || [...expectedFiles].some((path) => !seen.has(path))) fail('artifact_carrier_missing');
 }
 
-export async function materializeVerifiedCarrierDirectory(sourceRoot, targetRoot, _artifact) {
-  const treeManifest = readCarrierTreeManifest(sourceRoot);
-  validateCarrierDirectory(sourceRoot, treeManifest);
-  copyManifestFiles(sourceRoot, targetRoot, treeManifest);
+export async function materializeVerifiedCarrierDirectory(sourceRoot, targetRoot, _artifact, {
+  platformServices = defaultPlatformServices,
+} = {}) {
+  const treeManifest = readCarrierTreeManifest(sourceRoot, platformServices);
+  validateCarrierDirectory(sourceRoot, treeManifest, { platformServices });
+  copyManifestFiles(sourceRoot, targetRoot, treeManifest, platformServices);
   return { treeManifest };
 }
 
@@ -508,8 +529,8 @@ export function codesignIdentityMatches(details, { identifier, teamIdentifier },
     (!requireIdentifier || actual.identifier === identifier);
 }
 
-function verifyNativeCarrier(carrier, artifact) {
-  const actual = sha256File(carrier);
+function verifyNativeCarrier(carrier, artifact, platformServices = defaultPlatformServices) {
+  const actual = sha256File(carrier, platformServices);
   if (actual.stat.size !== artifact.bytes || actual.digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
   if (artifact.format !== 'dmg' || artifact.signing?.notarized !== true || artifact.signing?.stapled !== true ||
       artifact.signing?.gatekeeper !== true || artifact.signing?.scheme !== 'apple-developer-id') fail('artifact_carrier_policy_invalid');
@@ -528,8 +549,8 @@ function verifyNativeCarrier(carrier, artifact) {
   })) fail('artifact_carrier_identity_invalid');
 }
 
-function verifyMountedExecutables(root, artifact) {
-  const manifest = readCarrierTreeManifest(root);
+function verifyMountedExecutables(root, artifact, platformServices = defaultPlatformServices) {
+  const manifest = readCarrierTreeManifest(root, platformServices);
   for (const entry of manifest.files.filter((item) => item.executable)) {
     const path = join(root, entry.path);
     try { execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', path], { stdio: 'ignore' }); } catch {
@@ -548,9 +569,11 @@ function verifyMountedExecutables(root, artifact) {
   }
 }
 
-export async function materializeVerifiedDmg(carrier, targetRoot, artifact) {
+export async function materializeVerifiedDmg(carrier, targetRoot, artifact, _treeManifest, {
+  platformServices = defaultPlatformServices,
+} = {}) {
   if (process.platform !== 'darwin') fail('artifact_carrier_platform_invalid');
-  verifyNativeCarrier(carrier, artifact);
+  verifyNativeCarrier(carrier, artifact, platformServices);
   const work = mkdtempSync(join(tmpdir(), 'pulse-artifact-mount-'));
   const mount = join(work, 'mount');
   mkdirSync(mount, { mode: 0o700 });
@@ -558,9 +581,9 @@ export async function materializeVerifiedDmg(carrier, targetRoot, artifact) {
   try {
     execFileSync('/usr/bin/hdiutil', ['attach', '-readonly', '-nobrowse', '-mountpoint', mount, carrier], { stdio: 'ignore' });
     attached = true;
-    verifyMountedExecutables(mount, artifact);
-    const result = await materializeVerifiedCarrierDirectory(mount, targetRoot, artifact);
-    if (sha256File(carrier).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
+    verifyMountedExecutables(mount, artifact, platformServices);
+    const result = await materializeVerifiedCarrierDirectory(mount, targetRoot, artifact, { platformServices });
+    if (sha256File(carrier, platformServices).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
     return result;
   } catch (error) {
     if (error instanceof ArtifactInstallerError) throw error;
@@ -654,47 +677,55 @@ async function preflightArchive(carrier) {
   return manifest;
 }
 
-export async function materializeVerifiedTarGz(carrier, targetRoot, artifact) {
-  const actual = sha256File(carrier);
+export async function materializeVerifiedTarGz(carrier, targetRoot, artifact, _treeManifest, {
+  platformServices = defaultPlatformServices,
+} = {}) {
+  const actual = sha256File(carrier, platformServices);
   if (artifact.format !== 'tar.gz' || actual.stat.size !== artifact.bytes || actual.digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
   await preflightArchive(carrier);
   const work = mkdtempSync(join(tmpdir(), 'pulse-artifact-archive-'));
   try {
     execFileSync('/usr/bin/tar', ['-xzf', carrier, '-C', work, '--no-same-owner', '--no-same-permissions'], { stdio: 'ignore' });
-    if (sha256File(carrier).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
-    return await materializeVerifiedCarrierDirectory(work, targetRoot, artifact);
+    if (sha256File(carrier, platformServices).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
+    return await materializeVerifiedCarrierDirectory(work, targetRoot, artifact, { platformServices });
   } catch (error) {
     if (error instanceof ArtifactInstallerError) throw error;
     fail('artifact_archive_extract_failed');
   } finally { rmSync(work, { recursive: true, force: true }); }
 }
 
-export async function materializeVerifiedModelFile(sourceFile, targetRoot, artifact, treeManifest) {
+export async function materializeVerifiedModelFile(sourceFile, targetRoot, artifact, treeManifest, {
+  platformServices = defaultPlatformServices,
+} = {}) {
   const entries = validateTreeManifest(treeManifest);
   const entry = [...entries.values()][0];
   if (artifact.kind !== 'model' || entries.size !== 1 || !entry.path.endsWith('.safetensors') || entry.executable) {
     fail('artifact_model_tree_invalid');
   }
-  const source = sha256File(sourceFile);
+  const source = sha256File(sourceFile, platformServices);
   if (source.stat.size !== entry.bytes || source.digest !== entry.sha256 || source.digest !== artifact.sha256) {
     fail('artifact_model_file_invalid');
   }
   const target = resolve(targetRoot, entry.path);
   if (!target.startsWith(`${resolve(targetRoot)}${sep}`)) fail('artifact_tree_path_invalid');
-  ensurePrivateDirectory(dirname(target));
+  ensurePrivateDirectory(dirname(target), platformServices);
   try { copyFileSync(sourceFile, target, constants.COPYFILE_EXCL); } catch { fail('artifact_materialize_failed'); }
-  chmodSync(target, entry.mode);
+  if (platformServices.platform !== 'win32') chmodSync(target, entry.mode);
+  assertPrivateState(target, 'file', 'artifact_materialize_failed', platformServices);
 }
 
-export function validateSafetensorsFile(path, { maxHeaderBytes = 16 * 1024 * 1024, maxTensors = 200_000 } = {}) {
+export function validateSafetensorsFile(path, {
+  maxHeaderBytes = 16 * 1024 * 1024, maxTensors = 200_000, platformServices = defaultPlatformServices,
+} = {}) {
+  const before = inspectPathIdentity(path, 'file', 'safetensors_file_invalid', platformServices);
   let fd;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { fail('safetensors_file_invalid'); }
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); } catch { fail('safetensors_file_invalid'); }
   let stat;
   let header;
   let headerLength;
   try {
     stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size < 10) fail('safetensors_file_invalid');
+    if (!stat.isFile() || stat.size < 10) fail('safetensors_file_invalid');
     const prefix = Buffer.alloc(8);
     if (readSync(fd, prefix, 0, 8, 0) !== 8) fail('safetensors_header_invalid');
     headerLength = Number(prefix.readBigUInt64LE(0));
@@ -704,6 +735,8 @@ export function validateSafetensorsFile(path, { maxHeaderBytes = 16 * 1024 * 102
     const headerBytes = Buffer.alloc(headerLength);
     if (readSync(fd, headerBytes, 0, headerLength, 8) !== headerLength) fail('safetensors_header_invalid');
     try { header = JSON.parse(headerBytes.toString('utf8').trimEnd()); } catch { fail('safetensors_header_invalid'); }
+    const after = inspectPathIdentity(path, 'file', 'safetensors_file_invalid', platformServices);
+    if (after.identity_token !== before.identity_token) fail('safetensors_file_invalid');
   } finally { closeSync(fd); }
   if (!header || Array.isArray(header) || typeof header !== 'object') fail('safetensors_header_invalid');
   const tensors = Object.entries(header).filter(([name]) => name !== '__metadata__');
@@ -734,12 +767,13 @@ export function validateSafetensorsFile(path, { maxHeaderBytes = 16 * 1024 * 102
 
 function pointerPath(artifactRoot, name) { return join(artifactRoot, name); }
 
-function readPointer(path) {
-  if (!existsSync(path)) return null;
+function readPointer(path, platformServices = defaultPlatformServices) {
+  let bytes;
   try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.size > 8192) fail('artifact_activation_pointer_unsafe');
-    const bytes = readFileSync(path, 'utf8');
+    bytes = platformServices.readPrivateFile(resolve(path), { missing: true, maxBytes: 8192 });
+  } catch { fail('artifact_activation_pointer_unsafe'); }
+  if (bytes === null) return null;
+  try {
     const value = JSON.parse(bytes);
     if (bytes !== `${canonical(value)}\n` || value.schema !== POINTER_SCHEMA ||
         Object.keys(value).sort().join('\0') !== 'activation_digest\0artifact_id\0epoch\0schema\0sha256\0version\0version_path' ||
@@ -767,31 +801,23 @@ function installedMetadata(artifact, treeManifest) {
   };
 }
 
-function validateDataOnlyModel(root, artifact, treeManifest) {
+function validateDataOnlyModel(root, artifact, treeManifest, platformServices = defaultPlatformServices) {
   if (artifact.kind !== 'model') return;
   if (!artifact.model_policy || artifact.model_policy.data_only !== true || artifact.model_policy.custom_code !== false) {
     fail('artifact_model_policy_invalid');
   }
   const files = treeManifest.files.filter((entry) => entry.path !== INSTALLED_METADATA);
   if (files.length !== 1 || !files[0].path.endsWith('.safetensors') || files[0].executable) fail('artifact_model_tree_invalid');
-  validateSafetensorsFile(join(root, files[0].path));
+  validateSafetensorsFile(join(root, files[0].path), { platformServices });
 }
 
-function readInstalledMetadata(path) {
-  let stat;
+function readInstalledMetadata(path, platformServices = defaultPlatformServices) {
   let bytes;
   let value;
   try {
-    stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || stat.size > 2 * 1024 * 1024) {
-      fail('artifact_activation_metadata_unsafe');
-    }
-    bytes = readFileSync(path, 'utf8');
-    value = JSON.parse(bytes);
-  } catch (error) {
-    if (error instanceof ArtifactInstallerError) throw error;
-    fail('artifact_activation_metadata_invalid');
-  }
+    bytes = platformServices.readPrivateFile(resolve(path), { maxBytes: 2 * 1024 * 1024 });
+  } catch { fail('artifact_activation_metadata_unsafe'); }
+  try { value = JSON.parse(bytes); } catch { fail('artifact_activation_metadata_invalid'); }
   if (bytes !== `${canonical(value)}\n` || value.schema !== INSTALLED_SCHEMA ||
       Object.keys(value).sort().join('\0') !== 'artifact_id\0carrier_sha256\0epoch\0kind\0schema\0tree\0tree_digest\0version' ||
       !SAFE_ID.test(value.artifact_id) || !SAFE_ID.test(value.kind) || !SHA256.test(value.carrier_sha256) ||
@@ -803,7 +829,9 @@ function readInstalledMetadata(path) {
   return { value, digest: createHash('sha256').update(bytes).digest('hex') };
 }
 
-function validateActivationPointer(artifactID, pointer, { installRoot, expectedKind, expectedSha256 } = {}) {
+function validateActivationPointer(artifactID, pointer, {
+  installRoot, expectedKind, expectedSha256, platformServices = defaultPlatformServices,
+} = {}) {
   const artifactRoot = join(resolve(installRoot), artifactID);
   if (!pointer || pointer.artifact_id !== artifactID || (expectedSha256 && pointer.sha256 !== expectedSha256)) {
     fail('artifact_activation_identity_mismatch');
@@ -812,11 +840,9 @@ function validateActivationPointer(artifactID, pointer, { installRoot, expectedK
   const expectedVersionPath = join(versionsRoot, createHash('sha256').update(canonical({
     epoch: pointer.epoch, sha256: pointer.sha256, version: pointer.version,
   })).digest('hex'));
-  if (resolve(pointer.version_path) !== expectedVersionPath || !existsSync(expectedVersionPath) ||
-      !lstatSync(expectedVersionPath).isDirectory() || lstatSync(expectedVersionPath).isSymbolicLink()) {
-    fail('artifact_activation_path_invalid');
-  }
-  const metadata = readInstalledMetadata(join(expectedVersionPath, INSTALLED_METADATA));
+  if (resolve(pointer.version_path) !== expectedVersionPath || !existsSync(expectedVersionPath)) fail('artifact_activation_path_invalid');
+  assertPrivateState(expectedVersionPath, 'directory', 'artifact_activation_path_invalid', platformServices);
+  const metadata = readInstalledMetadata(join(expectedVersionPath, INSTALLED_METADATA), platformServices);
   if (metadata.digest !== pointer.activation_digest || metadata.value.artifact_id !== artifactID ||
       metadata.value.version !== pointer.version || metadata.value.epoch !== pointer.epoch ||
       metadata.value.carrier_sha256 !== pointer.sha256 ||
@@ -830,15 +856,17 @@ function validateActivationPointer(artifactID, pointer, { installRoot, expectedK
       mode: 0o600,
       executable: false,
     }],
-  });
+  }, { platformServices });
   return { ...pointer, kind: metadata.value.kind, epoch: metadata.value.epoch, tree_digest: metadata.value.tree_digest };
 }
 
-export function readActivatedArtifact(artifactID, { installRoot, expectedKind, expectedSha256 } = {}) {
+export function readActivatedArtifact(artifactID, {
+  installRoot, expectedKind, expectedSha256, platformServices = defaultPlatformServices,
+} = {}) {
   if (!SAFE_ID.test(artifactID ?? '') || typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
   const artifactRoot = join(resolve(installRoot), artifactID);
-  const pointer = readPointer(join(artifactRoot, 'current.json'));
-  return validateActivationPointer(artifactID, pointer, { installRoot, expectedKind, expectedSha256 });
+  const pointer = readPointer(join(artifactRoot, 'current.json'), platformServices);
+  return validateActivationPointer(artifactID, pointer, { installRoot, expectedKind, expectedSha256, platformServices });
 }
 
 function activationPointerRecord(activation) {
@@ -865,20 +893,13 @@ function validateVerifiedRelease(release) {
   return kinds;
 }
 
-function readActivationSetRecord(path) {
+function readActivationSetRecord(path, platformServices = defaultPlatformServices) {
   let bytes;
   let value;
   try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || stat.size > 64 * 1024) {
-      fail('artifact_activation_set_unsafe');
-    }
-    bytes = readFileSync(path, 'utf8');
-    value = JSON.parse(bytes);
-  } catch (error) {
-    if (error instanceof ArtifactInstallerError) throw error;
-    fail('artifact_activation_set_invalid');
-  }
+    bytes = platformServices.readPrivateFile(resolve(path), { maxBytes: 64 * 1024 });
+  } catch { fail('artifact_activation_set_unsafe'); }
+  try { value = JSON.parse(bytes); } catch { fail('artifact_activation_set_invalid'); }
   if (bytes !== `${canonical(value)}\n` || !value || Array.isArray(value) ||
       Object.keys(value).sort().join('\0') !== 'activations\0epoch\0manifest_digest\0schema\0version' ||
       value.schema !== ACTIVE_SET_SCHEMA || typeof value.manifest_digest !== 'string' || !SHA256.test(value.manifest_digest) ||
@@ -889,10 +910,10 @@ function readActivationSetRecord(path) {
   return value;
 }
 
-export function readActivatedArtifactSet(release, { installRoot } = {}) {
+export function readActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
   const kinds = validateVerifiedRelease(release);
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
-  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE));
+  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
   if (record.manifest_digest !== release.manifest_digest || record.version !== release.version || record.epoch !== release.epoch ||
       Object.keys(record.activations).sort().join('\0') !== kinds.join('\0')) {
     fail('artifact_activation_set_identity_mismatch');
@@ -905,7 +926,7 @@ export function readActivatedArtifactSet(release, { installRoot } = {}) {
       fail('artifact_release_invalid');
     }
     const activation = validateActivationPointer(artifact.id, record.activations[kind], {
-      installRoot, expectedKind: kind, expectedSha256: artifact.sha256,
+      installRoot, expectedKind: kind, expectedSha256: artifact.sha256, platformServices,
     });
     if (activation.version !== release.version || activation.epoch !== release.epoch) {
       fail('artifact_activation_set_identity_mismatch');
@@ -918,9 +939,9 @@ export function readActivatedArtifactSet(release, { installRoot } = {}) {
 // Resolve the last atomically committed compatibility set without consulting
 // mutable per-artifact current pointers. Lazy recovery uses this generation
 // while a newer install may still be switching individual artifacts.
-export function readCommittedArtifactSet({ installRoot } = {}) {
+export function readCommittedArtifactSet({ installRoot, platformServices = defaultPlatformServices } = {}) {
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
-  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE));
+  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
   const kinds = Object.keys(record.activations).sort();
   if (kinds.length < 1 || kinds.length > 16 || kinds.some((kind) => !SAFE_ID.test(kind))) {
     fail('artifact_activation_set_invalid');
@@ -932,7 +953,7 @@ export function readCommittedArtifactSet({ installRoot } = {}) {
       fail('artifact_activation_set_invalid');
     }
     const activation = validateActivationPointer(pointer.artifact_id, pointer, {
-      installRoot, expectedKind: kind,
+      installRoot, expectedKind: kind, platformServices,
     });
     if (activation.version !== record.version || activation.epoch !== record.epoch) {
       fail('artifact_activation_set_identity_mismatch');
@@ -942,14 +963,14 @@ export function readCommittedArtifactSet({ installRoot } = {}) {
   return Object.freeze({ activations: Object.freeze(activations), record: Object.freeze(record) });
 }
 
-export function writeActivatedArtifactSet(release, { installRoot } = {}) {
+export function writeActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
   const kinds = validateVerifiedRelease(release);
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
   const activations = {};
   for (const kind of kinds) {
     const artifact = release.artifacts[kind];
     const activation = readActivatedArtifact(artifact.id, {
-      installRoot, expectedKind: kind, expectedSha256: artifact.sha256,
+      installRoot, expectedKind: kind, expectedSha256: artifact.sha256, platformServices,
     });
     if (activation.version !== release.version || activation.epoch !== release.epoch) {
       fail('artifact_activation_set_identity_mismatch');
@@ -962,8 +983,8 @@ export function writeActivatedArtifactSet(release, { installRoot } = {}) {
     manifest_digest: release.manifest_digest,
     schema: ACTIVE_SET_SCHEMA,
     version: release.version,
-  });
-  return readActivatedArtifactSet(release, { installRoot });
+  }, platformServices);
+  return readActivatedArtifactSet(release, { installRoot, platformServices });
 }
 
 function defaultMaterializerFor(artifact) {
@@ -976,6 +997,7 @@ function defaultMaterializerFor(artifact) {
 export async function activateArtifactVersion(artifact, stagedPath, {
   installRoot, materialize, treeManifest, testOnlyMaterializer = false,
   availableBytes = defaultAvailableBytes, minimumFreeBytes = 256 * 1024 * 1024,
+  platformServices = defaultPlatformServices,
 } = {}) {
   validateDescriptor(artifact);
   const selectedMaterializer = materialize ?? defaultMaterializerFor(artifact);
@@ -986,15 +1008,17 @@ export async function activateArtifactVersion(artifact, stagedPath, {
   }
   const artifactRoot = join(resolve(installRoot), artifact.id);
   const versionsRoot = join(artifactRoot, 'versions');
-  ensurePrivateDirectory(versionsRoot);
+  ensurePrivateDirectory(versionsRoot, platformServices);
   const currentPath = pointerPath(artifactRoot, 'current.json');
   const previousPath = pointerPath(artifactRoot, 'previous.json');
   let current = null;
   let currentPointer = null;
   if (existsSync(currentPath)) {
     try {
-      currentPointer = readPointer(currentPath);
-      current = validateActivationPointer(artifact.id, currentPointer, { installRoot, expectedKind: artifact.kind });
+      currentPointer = readPointer(currentPath, platformServices);
+      current = validateActivationPointer(artifact.id, currentPointer, {
+        installRoot, expectedKind: artifact.kind, platformServices,
+      });
     } catch { fail('artifact_activation_current_invalid'); }
     const expectedTreeDigest = treeManifest === undefined ? null : createHash('sha256').update(canonical(treeManifest)).digest('hex');
     if (current.sha256 === artifact.sha256 && current.version === artifact.version && current.epoch === artifact.epoch) {
@@ -1014,22 +1038,22 @@ export async function activateArtifactVersion(artifact, stagedPath, {
       fail('artifact_disk_insufficient');
     }
     const temporary = `${target}.new-${process.pid}-${Date.now()}`;
-    mkdirSync(temporary, { mode: 0o700 });
+    ensurePrivateDirectory(temporary, platformServices);
     try {
-      const materialized = await selectedMaterializer(stagedPath, temporary, artifact, treeManifest);
+      const materialized = await selectedMaterializer(stagedPath, temporary, artifact, treeManifest, { platformServices });
       activationTree = materialized?.treeManifest ?? treeManifest;
-      validateArtifactTree(temporary, activationTree);
-      validateDataOnlyModel(temporary, artifact, activationTree);
+      validateArtifactTree(temporary, activationTree, { platformServices });
+      validateDataOnlyModel(temporary, artifact, activationTree, platformServices);
       const metadata = installedMetadata(artifact, activationTree);
-      atomicJSON(join(temporary, INSTALLED_METADATA), metadata);
+      atomicJSON(join(temporary, INSTALLED_METADATA), metadata, platformServices);
       renameSync(temporary, target);
-      syncDirectory(versionsRoot);
+      assertPrivateState(target, 'directory', 'artifact_activation_path_invalid', platformServices);
     } catch (error) {
       rmSync(temporary, { recursive: true, force: true });
       throw error;
     }
   } else {
-    const metadata = readInstalledMetadata(join(target, INSTALLED_METADATA));
+    const metadata = readInstalledMetadata(join(target, INSTALLED_METADATA), platformServices);
     activationTree = treeManifest ?? metadata.value.tree;
     if (canonical(metadata.value) !== canonical(installedMetadata(artifact, activationTree))) fail('artifact_activation_identity_mismatch');
     validateArtifactTree(target, {
@@ -1038,35 +1062,40 @@ export async function activateArtifactVersion(artifact, stagedPath, {
         path: INSTALLED_METADATA, bytes: statSync(join(target, INSTALLED_METADATA)).size,
         sha256: metadata.digest, mode: 0o600, executable: false,
       }],
-    });
-    validateDataOnlyModel(target, artifact, activationTree);
+    }, { platformServices });
+    validateDataOnlyModel(target, artifact, activationTree, platformServices);
   }
-  if (currentPointer) atomicJSON(previousPath, currentPointer);
-  const activationDigest = sha256File(join(target, INSTALLED_METADATA)).digest;
+  if (currentPointer) atomicJSON(previousPath, currentPointer, platformServices);
+  const activationDigest = sha256File(join(target, INSTALLED_METADATA), platformServices).digest;
   const next = {
     schema: POINTER_SCHEMA, artifact_id: artifact.id, epoch: artifact.epoch,
     sha256: artifact.sha256, version: artifact.version,
     version_path: target, activation_digest: activationDigest,
   };
-  atomicJSON(currentPath, next);
+  atomicJSON(currentPath, next, platformServices);
   return next;
 }
 
-export function recoverArtifactActivation(artifactID, { installRoot } = {}) {
+export function recoverArtifactActivation(artifactID, {
+  installRoot, platformServices = defaultPlatformServices,
+} = {}) {
   if (!SAFE_ID.test(artifactID ?? '') || typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
   const artifactRoot = join(resolve(installRoot), artifactID);
   const currentPath = pointerPath(artifactRoot, 'current.json');
   const previousPath = pointerPath(artifactRoot, 'previous.json');
   try {
-    const current = readPointer(currentPath);
-    if (current) return { status: 'current', activation: validateActivationPointer(artifactID, current, { installRoot }) };
+    const current = readPointer(currentPath, platformServices);
+    if (current) return {
+      status: 'current',
+      activation: validateActivationPointer(artifactID, current, { installRoot, platformServices }),
+    };
   } catch { /* try previous */ }
   let previous;
   let validatedPrevious;
   try {
-    previous = readPointer(previousPath);
-    validatedPrevious = validateActivationPointer(artifactID, previous, { installRoot });
+    previous = readPointer(previousPath, platformServices);
+    validatedPrevious = validateActivationPointer(artifactID, previous, { installRoot, platformServices });
   } catch { fail('artifact_activation_unrecoverable'); }
-  atomicJSON(currentPath, previous);
+  atomicJSON(currentPath, previous, platformServices);
   return { status: 'rolled_back', activation: validatedPrevious };
 }
