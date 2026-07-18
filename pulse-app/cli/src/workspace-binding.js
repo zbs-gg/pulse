@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -61,11 +61,6 @@ function gitValue(cwd, platformServices, ...args) {
   }
 }
 
-function inodeIdentity(path) {
-  const stat = statSync(path, { bigint: true });
-  return `${stat.dev}:${stat.ino}`;
-}
-
 export function canonicalizeWorkspace(inputPath, { platformServices = defaultPlatformServices } = {}) {
   const requestedPath = realpathSync(resolve(inputPath));
   const topLevel = realpathSync(gitValue(requestedPath, platformServices, 'rev-parse', '--show-toplevel'));
@@ -73,8 +68,14 @@ export function canonicalizeWorkspace(inputPath, { platformServices = defaultPla
   const commonDirRaw = gitValue(topLevel, platformServices, 'rev-parse', '--git-common-dir');
   const gitDir = realpathSync(isAbsolute(gitDirRaw) ? gitDirRaw : resolve(topLevel, gitDirRaw));
   const commonDir = realpathSync(isAbsolute(commonDirRaw) ? commonDirRaw : resolve(topLevel, commonDirRaw));
-  const checkoutIdentity = inodeIdentity(topLevel);
-  const repositoryIdentity = inodeIdentity(commonDir);
+  let checkoutIdentity;
+  let repositoryIdentity;
+  try {
+    checkoutIdentity = platformServices.inspectPathIdentity(topLevel, { kind: 'directory' }).identity_token;
+    repositoryIdentity = platformServices.inspectPathIdentity(commonDir, { kind: 'directory' }).identity_token;
+  } catch {
+    throw new BindingError('workspace_identity_unsafe', 'workspace filesystem identity cannot be proven');
+  }
   return {
     schema: 'pulse.workspace-identity.v1',
     workspace_id: `workspace_${digest('pulse-workspace-v1', checkoutIdentity).slice(0, 32)}`,
@@ -85,19 +86,21 @@ export function canonicalizeWorkspace(inputPath, { platformServices = defaultPla
   };
 }
 
-function requireOwnerIntegrityFile(path, code, { rootOnly = false } = {}) {
+function readOwnerIntegrityFile(
+  path, code, { rootOnly = false, encoding = null, maxBytes = 64 * 1024 * 1024,
+    platformServices = defaultPlatformServices } = {},
+) {
   const absolute = resolve(path);
-  const linkInfo = lstatSync(absolute);
-  if (linkInfo.isSymbolicLink() || !linkInfo.isFile()) {
-    throw new BindingError(code, 'binding trust file must be a regular non-symlink file');
-  }
-  const info = statSync(absolute);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  const ownerAllowed = rootOnly ? info.uid === 0 : info.uid === currentUID;
-  if ((info.mode & 0o022) !== 0 || !ownerAllowed) {
+  try {
+    return {
+      absolute,
+      bytes: platformServices.readIntegrityFile(absolute, {
+        owner: rootOnly ? 'root' : 'current', encoding, maxBytes,
+      }),
+    };
+  } catch {
     throw new BindingError(code, 'binding trust file must be owner-controlled and not group/world writable');
   }
-  return absolute;
 }
 
 export function defaultBindingPaths(home = homedir()) {
@@ -125,11 +128,12 @@ export function verifyBindingRegistryAnchor({
   anchorPath,
   registryEpoch,
   rootAnchor = false,
+  platformServices = defaultPlatformServices,
 }) {
-  const safeRegistryPath = requireOwnerIntegrityFile(registryPath, 'binding_registry_unsafe');
-  const safeAnchorPath = requireOwnerIntegrityFile(anchorPath, 'binding_anchor_unsafe', { rootOnly: rootAnchor });
-  const registryBytes = readFileSync(safeRegistryPath);
-  const anchorBytes = readFileSync(safeAnchorPath);
+  const { bytes: registryBytes } = readOwnerIntegrityFile(registryPath, 'binding_registry_unsafe', { platformServices });
+  const { bytes: anchorBytes } = readOwnerIntegrityFile(anchorPath, 'binding_anchor_unsafe', {
+    rootOnly: rootAnchor, platformServices,
+  });
   let anchor;
   try {
     anchor = JSON.parse(anchorBytes);
@@ -154,12 +158,18 @@ export function verifyBindingRegistryAnchor({
   return anchor;
 }
 
-export function verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey = false }) {
-  const safeRegistryPath = requireOwnerIntegrityFile(registryPath, 'binding_registry_unsafe');
-  const safePublicKeyPath = requireOwnerIntegrityFile(publicKeyPath, 'binding_key_unsafe', { rootOnly: rootPublicKey });
+export function verifyBindingRegistry({
+  registryPath, publicKeyPath, rootPublicKey = false, platformServices = defaultPlatformServices,
+}) {
+  const { bytes: registryBytes } = readOwnerIntegrityFile(registryPath, 'binding_registry_unsafe', {
+    encoding: 'utf8', platformServices,
+  });
+  const { bytes: publicKeyBytes } = readOwnerIntegrityFile(publicKeyPath, 'binding_key_unsafe', {
+    rootOnly: rootPublicKey, platformServices,
+  });
   let envelope;
   try {
-    envelope = JSON.parse(readFileSync(safeRegistryPath, 'utf8'));
+    envelope = JSON.parse(registryBytes);
   } catch {
     throw new BindingError('binding_registry_invalid', 'binding registry is not valid JSON');
   }
@@ -169,7 +179,7 @@ export function verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicK
   }
   let publicKey;
   try {
-    publicKey = createPublicKey(readFileSync(safePublicKeyPath));
+    publicKey = createPublicKey(publicKeyBytes);
   } catch {
     throw new BindingError('binding_key_invalid', 'binding verification key is invalid');
   }
@@ -285,12 +295,14 @@ export function resolveWorkspaceBinding({
     registryPath: selectedRegistry,
     publicKeyPath: selectedPublicKey,
     rootPublicKey: publicKeyPath === undefined,
+    platformServices,
   });
   verifyBindingRegistryAnchor({
     registryPath: selectedRegistry,
     anchorPath: selectedAnchor,
     registryEpoch: registry.epoch,
     rootAnchor,
+    platformServices,
   });
   const matches = registry.bindings.filter((item) => item?.workspace?.workspace_id === workspace.workspace_id);
   if (matches.length === 0) {

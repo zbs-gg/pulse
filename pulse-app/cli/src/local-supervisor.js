@@ -1,20 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, openSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -88,11 +74,8 @@ export function vaultRuntimeFromBinding(binding) {
   };
 }
 
-function ensurePrivateDirectory(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+function ensurePrivateDirectory(path, platformServices) {
+  try { platformServices.ensurePrivateDirectory(path); } catch {
     throw new SupervisorError('vault_directory_unsafe', 'vault directory must be owner-only 0700 and not a symlink');
   }
 }
@@ -103,23 +86,15 @@ function canonicalJSON(value) {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
 }
 
-function syncDirectory(path) {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-}
-
-function atomicPrivateJSON(path, value) {
-  ensurePrivateDirectory(dirname(path));
-  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
+function atomicPrivateJSON(path, value, platformServices) {
+  ensurePrivateDirectory(dirname(path), platformServices);
   try {
-    writeFileSync(temporary, `${canonicalJSON(value)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    chmodSync(temporary, 0o600);
-    const descriptor = openSync(temporary, 'r');
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    renameSync(temporary, path);
-    syncDirectory(dirname(path));
-  } finally {
-    rmSync(temporary, { force: true });
+    platformServices.atomicWritePrivateFile(path, `${canonicalJSON(value)}\n`, {
+      ensureParent: false, maxBytes: 64 * 1024,
+    });
+  } catch (error) {
+    if (error instanceof SupervisorError) throw error;
+    throw new SupervisorError('vault_private_state_write_failed', 'vault private state cannot be written safely');
   }
 }
 
@@ -129,46 +104,45 @@ function inside(root, candidate) {
   return value.startsWith(`${base}${sep}`);
 }
 
-function activatedFile(activation, relativePath, { executable = false } = {}) {
+function activatedFile(activation, relativePath, platformServices, { executable = false } = {}) {
   const path = join(activation.version_path, relativePath);
   if (!inside(activation.version_path, path)) {
     throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
   }
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
-      (info.mode & 0o022) !== 0 || (executable && (info.mode & 0o111) === 0)) {
+  try {
+    platformServices.readIntegrityFile(path, { owner: 'current', maxBytes: 64 * 1024 * 1024 });
+    if (executable && !platformServices.inspectExecutable(path)) throw new Error('not executable');
+  } catch {
     throw new SupervisorError('managed_artifact_file_unsafe', `managed artifact file is unsafe: ${relativePath}`);
   }
   return path;
 }
 
-function activatedDirectory(activation, relativePath) {
+function activatedDirectory(activation, relativePath, platformServices) {
   const path = join(activation.version_path, relativePath);
   if (!inside(activation.version_path, path)) {
     throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
   }
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+  try { platformServices.assertPrivateState(path, { kind: 'directory' }); } catch {
     throw new SupervisorError('managed_artifact_directory_unsafe', `managed artifact directory is unsafe: ${relativePath}`);
   }
   return path;
 }
 
-export function inspectManagedEmbedderConfig(runtime, managedEmbedder) {
+export function inspectManagedEmbedderConfig(
+  runtime, managedEmbedder, { platformServices = defaultPlatformServices } = {},
+) {
   if (!managedEmbedder || typeof managedEmbedder !== 'object' ||
       managedEmbedder.config_path !== join(runtime.data_dir, 'runtime', 'managed-embedder.json') ||
       !SHA256.test(managedEmbedder.config_digest ?? '')) {
     throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder config identity is invalid');
   }
-  const info = lstatSync(managedEmbedder.config_path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
-      (info.mode & 0o077) !== 0 || info.size > 16 * 1024) {
+  let bytes;
+  try {
+    bytes = platformServices.readPrivateFile(managedEmbedder.config_path, { minBytes: 1, maxBytes: 16 * 1024 });
+  } catch {
     throw new SupervisorError('managed_embedder_config_unsafe', 'managed embedder config must be a private regular file');
   }
-  const bytes = readFileSync(managedEmbedder.config_path, 'utf8');
   if (createHash('sha256').update(bytes).digest('hex') !== managedEmbedder.config_digest) {
     throw new SupervisorError('managed_embedder_config_digest_mismatch', 'managed embedder config digest changed');
   }
@@ -196,18 +170,20 @@ export function inspectManagedEmbedderConfig(runtime, managedEmbedder) {
   return { ...managedEmbedder, config };
 }
 
-export function activateManagedEmbedderConfig(runtime, managedEmbedder) {
+export function activateManagedEmbedderConfig(
+  runtime, managedEmbedder, { platformServices = defaultPlatformServices } = {},
+) {
   if (!managedEmbedder || managedEmbedder.config_path !== join(runtime.data_dir, 'runtime', 'managed-embedder.json') ||
       !managedEmbedder.config ||
       createHash('sha256').update(`${canonicalJSON(managedEmbedder.config)}\n`).digest('hex') !== managedEmbedder.config_digest) {
     throw new SupervisorError('managed_embedder_config_invalid', 'managed embedder activation is invalid');
   }
-  atomicPrivateJSON(managedEmbedder.config_path, managedEmbedder.config);
-  return inspectManagedEmbedderConfig(runtime, managedEmbedder);
+  atomicPrivateJSON(managedEmbedder.config_path, managedEmbedder.config, platformServices);
+  return inspectManagedEmbedderConfig(runtime, managedEmbedder, { platformServices });
 }
 
 export function resolveManagedRuntime(runtime, {
-  installRoot, publishConfig = true, verifiedActivations,
+  installRoot, publishConfig = true, verifiedActivations, platformServices = defaultPlatformServices,
 } = {}) {
   if (typeof installRoot !== 'string' || !isAbsolute(installRoot)) {
     throw new SupervisorError('managed_artifact_root_invalid', 'managed artifact root must be absolute');
@@ -221,13 +197,13 @@ export function resolveManagedRuntime(runtime, {
       'managed product runtime requires one verified signed compatibility set',
     );
   }
-  const daemonPath = activatedFile(daemonActivation, 'bin/pulse', { executable: true });
-  const pythonExecutable = activatedFile(embedderActivation, 'runtime/bin/python3.12', { executable: true });
-  const helperPath = activatedFile(embedderActivation, 'helper.py');
-  const supportDirectory = activatedDirectory(embedderActivation, 'support');
-  activatedFile(embedderActivation, 'support/config.json');
-  activatedFile(embedderActivation, 'support/tokenizer.json');
-  const modelFile = activatedFile(modelActivation, 'model.safetensors');
+  const daemonPath = activatedFile(daemonActivation, 'bin/pulse', platformServices, { executable: true });
+  const pythonExecutable = activatedFile(embedderActivation, 'runtime/bin/python3.12', platformServices, { executable: true });
+  const helperPath = activatedFile(embedderActivation, 'helper.py', platformServices);
+  const supportDirectory = activatedDirectory(embedderActivation, 'support', platformServices);
+  activatedFile(embedderActivation, 'support/config.json', platformServices);
+  activatedFile(embedderActivation, 'support/tokenizer.json', platformServices);
+  const modelFile = activatedFile(modelActivation, 'model.safetensors', platformServices);
   const config = {
     dimensions: 1024,
     embedder_runtime_activation_digest: embedderActivation.activation_digest,
@@ -244,7 +220,7 @@ export function resolveManagedRuntime(runtime, {
     schema: MANAGED_CONFIG_SCHEMA,
     support_directory: supportDirectory,
   };
-  ensurePrivateDirectory(runtime.data_dir);
+  ensurePrivateDirectory(runtime.data_dir, platformServices);
   const configPath = join(runtime.data_dir, 'runtime', 'managed-embedder.json');
   let managedEmbedder = {
     config_path: configPath,
@@ -255,7 +231,7 @@ export function resolveManagedRuntime(runtime, {
     model_tree_digest: modelActivation.tree_digest,
     config,
   };
-  if (publishConfig) managedEmbedder = activateManagedEmbedderConfig(runtime, managedEmbedder);
+  if (publishConfig) managedEmbedder = activateManagedEmbedderConfig(runtime, managedEmbedder, { platformServices });
   const identity = (activation, path) => ({
     artifact_id: activation.artifact_id,
     artifact_sha256: activation.sha256,
@@ -263,7 +239,9 @@ export function resolveManagedRuntime(runtime, {
     tree_digest: activation.tree_digest,
     version: activation.version,
     version_path: activation.version_path,
-    ...(path ? { path, digest: createHash('sha256').update(readFileSync(path)).digest('hex') } : {}),
+    ...(path ? { path, digest: createHash('sha256').update(platformServices.readIntegrityFile(path, {
+      owner: 'current', maxBytes: 64 * 1024 * 1024,
+    })).digest('hex') } : {}),
   });
   return {
     schema: 'pulse.managed_product_runtime.v1',
@@ -274,29 +252,32 @@ export function resolveManagedRuntime(runtime, {
   };
 }
 
-function trustedExecutable(path) {
-  const executable = realpathSync(resolve(path));
-  const info = statSync(executable);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || (info.mode & 0o111) === 0 || (info.mode & 0o022) !== 0 || ![0, currentUID].includes(info.uid)) {
+function trustedExecutable(path, platformServices) {
+  let proof;
+  try {
+    proof = platformServices.inspectExecutable(resolve(path));
+    if (!proof) throw new Error('missing executable proof');
+    platformServices.readIntegrityFile(proof.canonical_path, { owner: 'root-or-current', maxBytes: 64 * 1024 * 1024 });
+  } catch {
     throw new SupervisorError('vault_binary_unsafe', 'vault daemon must be an owner/root-controlled executable');
   }
-  return executable;
+  return proof.canonical_path;
 }
 
-function executableDigest(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+function executableDigest(path, platformServices) {
+  return createHash('sha256').update(platformServices.readIntegrityFile(path, {
+    owner: 'root-or-current', maxBytes: 64 * 1024 * 1024,
+  })).digest('hex');
 }
 
-function readRuntimeReceipt(path) {
-  if (!existsSync(path)) return undefined;
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0 || info.size > 8192) {
+function readRuntimeReceipt(path, platformServices) {
+  let bytes;
+  try { bytes = platformServices.readPrivateFile(path, { missing: true, maxBytes: 8192 }); } catch {
     throw new SupervisorError('vault_runtime_receipt_unsafe', 'runtime receipt is unsafe');
   }
+  if (bytes === null) return undefined;
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
+    return JSON.parse(bytes);
   } catch {
     throw new SupervisorError('vault_runtime_receipt_invalid', 'runtime receipt is invalid');
   }
@@ -310,7 +291,7 @@ function processProof(pid, platformServices) {
   }
 }
 
-function receiptMetadataMatches(runtime, receipt) {
+function receiptMetadataMatches(runtime, receipt, platformServices) {
   if (!receipt || receipt.schema !== 'pulse.local-vault-process.v1' ||
 		receipt.binding_digest !== runtime.binding_digest ||
 		(receipt.repository_id !== undefined && receipt.repository_id !== runtime.repository_id) ||
@@ -327,11 +308,11 @@ function receiptMetadataMatches(runtime, receipt) {
     return false;
   }
   try {
-    if (trustedExecutable(receipt.executable) !== receipt.executable ||
-        executableDigest(receipt.executable) !== receipt.executable_digest) return false;
+    if (trustedExecutable(receipt.executable, platformServices) !== receipt.executable ||
+        executableDigest(receipt.executable, platformServices) !== receipt.executable_digest) return false;
     const managed = managedEmbedderFromReceipt(receipt);
     if (managed === null) return false;
-    if (managed) inspectManagedEmbedderConfig(runtime, managed);
+    if (managed) inspectManagedEmbedderConfig(runtime, managed, { platformServices });
     return true;
   } catch {
     return false;
@@ -368,9 +349,9 @@ function receiptProcessMatches(runtime, receipt, proof) {
 }
 
 export function inspectVaultRuntime(runtime, { platformServices = defaultPlatformServices } = {}) {
-  const receipt = readRuntimeReceipt(runtime.pid_file);
+  const receipt = readRuntimeReceipt(runtime.pid_file, platformServices);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
-  if (!receiptMetadataMatches(runtime, receipt)) {
+  if (!receiptMetadataMatches(runtime, receipt, platformServices)) {
     return { status: 'stale_or_mismatched', runtime, fallback: false };
   }
   const proof = processProof(receipt.pid, platformServices);
@@ -419,18 +400,15 @@ async function terminateSpawnedProcess(pid, platformServices) {
 
 async function waitForVault(runtime, timeoutMs, {
   fullRetrieval = false, retrievalSmoke = fullRetrieval, startupNonce,
+  platformServices = defaultPlatformServices,
 } = {}) {
   const secretPath = join(runtime.data_dir, 'secret.key');
   const deadline = Date.now() + timeoutMs;
 	let lastCheck = 'daemon has not answered yet';
   while (Date.now() < deadline) {
     try {
-      if (existsSync(secretPath)) {
-        const info = lstatSync(secretPath);
-        if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || info.size !== 64) {
-          throw new SupervisorError('vault_secret_unsafe', 'vault IPC secret is unsafe');
-        }
-        const secret = readFileSync(secretPath, 'utf8');
+      const secret = platformServices.readPrivateFile(secretPath, { missing: true, minBytes: 64, maxBytes: 64 });
+      if (secret !== null) {
         const response = await fetch(`${runtime.base_url}/health`, {
           headers: { 'X-Pulse-Key': secret }, signal: AbortSignal.timeout(500),
         });
@@ -483,6 +461,9 @@ async function waitForVault(runtime, timeoutMs, {
       }
     } catch (error) {
       if (error instanceof SupervisorError) throw error;
+	  if (error?.code === 'platform_private_state_unsafe') {
+		throw new SupervisorError('vault_secret_unsafe', 'vault IPC secret is unsafe');
+	  }
 	  lastCheck = `readiness request failed (${error?.name ?? 'Error'})`;
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
@@ -504,7 +485,7 @@ export async function assertVaultRuntimeHealthy(runtime, {
   }
 	await waitForVault(runtime, timeoutMs, {
 		fullRetrieval: Boolean(status.managed_embedder), retrievalSmoke: fullRetrievalSmoke,
-		startupNonce: status.startup_nonce,
+		startupNonce: status.startup_nonce, platformServices,
 	});
   return status;
 }
@@ -513,9 +494,10 @@ export async function startVaultRuntime(runtime, {
   daemonPath, managedEmbedder, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
   platformServices = defaultPlatformServices, requireStartupNonce = true,
 } = {}) {
-  const executable = trustedExecutable(daemonPath);
-  const desiredDigest = executableDigest(executable);
-  const desiredManaged = managedEmbedder ? inspectManagedEmbedderConfig(runtime, managedEmbedder) : undefined;
+  const executable = trustedExecutable(daemonPath, platformServices);
+  const desiredDigest = executableDigest(executable, platformServices);
+  const desiredManaged = managedEmbedder
+    ? inspectManagedEmbedderConfig(runtime, managedEmbedder, { platformServices }) : undefined;
   if (typeof requireStartupNonce !== 'boolean') {
     throw new SupervisorError('vault_startup_nonce_invalid', 'startup nonce policy is invalid');
   }
@@ -535,21 +517,21 @@ export async function startVaultRuntime(runtime, {
   if (status.status === 'crashed') {
     // Exact receipt metadata plus a dead PID is safe to recover. Never signal
     // it: the PID may already have been recycled after a reboot.
-    rmSync(runtime.pid_file, { force: true });
+    platformServices.removePrivateFile(runtime.pid_file, { missing: true });
   }
   if (status.status === 'stale_or_mismatched') {
     throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to replace a mismatched runtime receipt');
   }
-  ensurePrivateDirectory(runtime.data_dir);
-  ensurePrivateDirectory(dirname(runtime.log_file));
-  ensurePrivateDirectory(runtime.cache_dir);
+  ensurePrivateDirectory(runtime.data_dir, platformServices);
+  ensurePrivateDirectory(dirname(runtime.log_file), platformServices);
+  ensurePrivateDirectory(runtime.cache_dir, platformServices);
   const logFD = openSync(runtime.log_file, 'a', 0o600);
   const startupNonce = requireStartupNonce ? platformServices.createStartupNonce() : undefined;
   const child = spawn(executable, ['-data-dir', runtime.data_dir, '-addr', runtime.addr], {
     detached: true,
     stdio: ['ignore', logFD, logFD],
     env: {
-      HOME: process.env.HOME ?? '', PATH: '/usr/bin:/bin',
+      HOME: process.env.HOME ?? '', PATH: '',
       PULSE_RUNTIME_MODE: runtime.runtime_mode,
       PULSE_VAULT_STORE_ID: runtime.store_id,
       PULSE_BINDING_DIGEST: runtime.binding_digest,
@@ -598,12 +580,12 @@ export async function startVaultRuntime(runtime, {
       model_tree_digest: desiredManaged.model_tree_digest,
     } : {}),
   };
-  const temporary = `${runtime.pid_file}.new`;
   try {
-    writeFileSync(temporary, JSON.stringify(receipt), { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, runtime.pid_file);
+    platformServices.atomicWritePrivateFile(runtime.pid_file, `${canonicalJSON(receipt)}\n`, {
+      ensureParent: false, maxBytes: 8192,
+    });
     await waitForVault(runtime, timeoutMs, {
-      fullRetrieval: Boolean(desiredManaged), startupNonce,
+      fullRetrieval: Boolean(desiredManaged), startupNonce, platformServices,
     });
     return {
       status: 'running', runtime, pid: child.pid, managed_embedder: desiredManaged,
@@ -616,8 +598,7 @@ export async function startVaultRuntime(runtime, {
 	} catch (failure) {
 		terminationError = failure;
 	}
-    rmSync(temporary, { force: true });
-    rmSync(runtime.pid_file, { force: true });
+	try { platformServices.removePrivateFile(runtime.pid_file, { missing: true }); } catch { /* preserve activation failure */ }
 	let rollbackError;
     if (allowRollback && rollbackPath) {
       try {
@@ -642,20 +623,16 @@ export async function startVaultRuntime(runtime, {
 }
 
 export function stopVaultRuntime(runtime, { platformServices = defaultPlatformServices } = {}) {
-  const receipt = readRuntimeReceipt(runtime.pid_file);
+  const receipt = readRuntimeReceipt(runtime.pid_file, platformServices);
   if (!receipt) return { status: 'stopped', runtime, fallback: false };
   const proof = processProof(receipt.pid, platformServices);
-  if (!receiptMetadataMatches(runtime, receipt) || !receiptProcessMatches(runtime, receipt, proof)) {
+  if (!receiptMetadataMatches(runtime, receipt, platformServices) || !receiptProcessMatches(runtime, receipt, proof)) {
     throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to signal a mismatched process');
   }
 	const stoppingReceipt = { ...receipt, stop_requested_at: new Date().toISOString() };
-	const temporary = `${runtime.pid_file}.${process.pid}.${Date.now()}.stopping`;
-	try {
-		writeFileSync(temporary, JSON.stringify(stoppingReceipt), { mode: 0o600, flag: 'wx' });
-		renameSync(temporary, runtime.pid_file);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
+	platformServices.atomicWritePrivateFile(runtime.pid_file, `${canonicalJSON(stoppingReceipt)}\n`, {
+		ensureParent: false, maxBytes: 8192,
+	});
 	platformServices.terminateProcess(receipt.pid, { force: false });
 	return { status: 'stopping', runtime, pid: receipt.pid, fallback: false };
 }
@@ -663,24 +640,24 @@ export function stopVaultRuntime(runtime, { platformServices = defaultPlatformSe
 export async function stopVaultRuntimeAndWait(runtime, {
   timeoutMs = 3000, platformServices = defaultPlatformServices,
 } = {}) {
-	let receipt = readRuntimeReceipt(runtime.pid_file);
+	let receipt = readRuntimeReceipt(runtime.pid_file, platformServices);
 	if (!receipt) return { status: 'stopped', runtime, fallback: false };
-	if (!receiptMetadataMatches(runtime, receipt)) {
+	if (!receiptMetadataMatches(runtime, receipt, platformServices)) {
 		throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
 	}
 	if (receipt.stop_requested_at === undefined) {
 		const proof = processProof(receipt.pid, platformServices);
 		if (!proof.running) {
-			rmSync(runtime.pid_file, { force: true });
+			platformServices.removePrivateFile(runtime.pid_file, { missing: true });
 			return { status: 'stopped', runtime, fallback: false };
 		}
 		if (!receiptProcessMatches(runtime, receipt, proof)) {
 			throw new SupervisorError('vault_runtime_receipt_mismatch', 'refusing to stop a mismatched process');
 		}
 		stopVaultRuntime(runtime, { platformServices });
-		receipt = readRuntimeReceipt(runtime.pid_file);
+		receipt = readRuntimeReceipt(runtime.pid_file, platformServices);
 	}
 	await waitForProcessExit(receipt.pid, timeoutMs, platformServices);
-	rmSync(runtime.pid_file, { force: true });
+	platformServices.removePrivateFile(runtime.pid_file, { missing: true });
 	return { status: 'stopped', runtime, fallback: false };
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,7 @@ import {
   callBoundTeamTool,
   consumeCodexToolLease,
 	consumeHostToolLease,
+	readRuntimeSecret,
 	stageUnassignedProductCandidate,
 	readProductActivation,
   readCodexTurnContext,
@@ -239,6 +240,45 @@ test('connect and lazy reconciliation serialize on one vault activation lock', a
 	}
 	const releaseSecond = await acquireVaultActivationLock(runtime);
 	await releaseSecond();
+});
+
+test('vault activation lock delegates to the portable lock service without a system utility', async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-portable-vault-lock.'));
+	const calls = [];
+	let released = false;
+	const platformServices = {
+		ensurePrivateDirectory(path) { calls.push(['directory', path]); },
+		acquirePrivateLock(path, options) {
+			calls.push(['lock', path, options]);
+			return () => { released = true; };
+		},
+	};
+	const release = await acquireVaultActivationLock({ data_dir: dataDir }, { platformServices });
+	assert.deepEqual(calls, [
+		['directory', dataDir],
+		['lock', join(dataDir, 'supervisor-activation.lock'), { staleAfterMs: 30_000, timeoutMs: 3_000 }],
+	]);
+	await release();
+	assert.equal(released, true);
+});
+
+test('runtime secret and tool leases reject hard-linked private state', () => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-runtime-hardlink.'));
+	const secretPath = join(dataDir, 'secret.key');
+	writeFileSync(secretPath, 'a'.repeat(64), { mode: 0o600 });
+	linkSync(secretPath, join(dataDir, 'secret-copy.key'));
+	assert.throws(() => readRuntimeSecret({ data_dir: dataDir }), /vault_secret_unsafe/);
+
+	const { resolved, event } = fixture();
+	const now = new Date('2026-07-14T10:00:00Z');
+	const toolName = 'mcp__pulse-product__pulse_remember';
+	const args = { schema: 'pulse.memory_capsule.v1', items: [], raw_input_included: false };
+	writeCodexToolLease(resolved, event, toolName, args, 'tool-hardlink', now);
+	const leaseRoot = join(resolved.runtime.data_dir, 'codex-tool-leases');
+	const digestDirectory = join(leaseRoot, readdirSync(leaseRoot)[0]);
+	const original = readdirSync(digestDirectory).find((name) => name.endsWith('.json'));
+	linkSync(join(digestDirectory, original), join(digestDirectory, `${'f'.repeat(64)}.json`));
+	assert.throws(() => consumeCodexToolLease(resolved, toolName, args, now), /host_tool_lease_unavailable/);
 });
 
 test('legacy v2 product activation is explicitly non-ready', () => {

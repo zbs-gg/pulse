@@ -215,6 +215,83 @@ export function createPlatformServices({
     return { minBytes, maxBytes };
   }
 
+  function inspectPathIdentity(identityPath, { kind } = {}) {
+    validatePrivatePath(identityPath);
+    if (!['file', 'directory'].includes(kind)) fail('platform_path_identity_invalid');
+    if (platform === 'win32') {
+      const proof = nativeOperation(nativeAdapter, 'inspectPathIdentity')(identityPath, { kind });
+      if (!exactObject(proof, ['canonical_path', 'identity_token', 'kind', 'reparse_point']) ||
+          proof.kind !== kind || proof.reparse_point !== false ||
+          typeof proof.canonical_path !== 'string' || !pathAPI.isAbsolute(proof.canonical_path) ||
+          typeof proof.identity_token !== 'string' || proof.identity_token.length < 1 || proof.identity_token.length > 1024) {
+        fail('platform_path_identity_unsafe');
+      }
+      return Object.freeze(proof);
+    }
+    try {
+      const info = lstatSync(identityPath);
+      if (info.isSymbolicLink() || (kind === 'file' ? !info.isFile() : !info.isDirectory())) {
+        fail('platform_path_identity_unsafe');
+      }
+      return Object.freeze({
+        canonical_path: realpathSync(identityPath),
+        identity_token: createHash('sha256').update(`${kind}\0${info.dev}\0${info.ino}`).digest('hex'),
+        kind,
+        reparse_point: false,
+      });
+    } catch (error) {
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_path_identity_unsafe');
+    }
+  }
+
+  function readIntegrityFile(filePath, {
+    owner = 'current', encoding = null, maxBytes = 64 * 1024 * 1024,
+  } = {}) {
+    validatePrivatePath(filePath);
+    const { maxBytes: boundedMax } = validateByteBounds({ minBytes: 0, maxBytes });
+    if (!['current', 'root', 'root-or-current'].includes(owner) || (encoding !== null && encoding !== 'utf8')) {
+      fail('platform_integrity_state_invalid');
+    }
+    if (platform === 'win32') {
+      const result = nativeOperation(nativeAdapter, 'readIntegrityFile')(filePath, { owner, maxBytes: boundedMax });
+      if (!exactObject(result, ['bytes', 'canonical_path', 'owner', 'regular_file', 'reparse_point']) ||
+          result.owner !== owner || result.regular_file !== true || result.reparse_point !== false ||
+          typeof result.canonical_path !== 'string' || !pathAPI.isAbsolute(result.canonical_path) ||
+          !(typeof result.bytes === 'string' || Buffer.isBuffer(result.bytes)) ||
+          Buffer.byteLength(result.bytes) > boundedMax) {
+        fail('platform_integrity_state_unsafe');
+      }
+      const bytes = Buffer.isBuffer(result.bytes) ? result.bytes : Buffer.from(result.bytes);
+      return encoding === null ? bytes : bytes.toString(encoding);
+    }
+    let descriptor;
+    try {
+      descriptor = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = fstatSync(descriptor);
+      const linked = lstatSync(filePath);
+      const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : opened.uid;
+      const ownerAllowed = owner === 'root' ? opened.uid === 0
+        : owner === 'root-or-current' ? opened.uid === 0 || opened.uid === currentUID
+          : opened.uid === currentUID;
+      if (!opened.isFile() || linked.isSymbolicLink() || linked.dev !== opened.dev || linked.ino !== opened.ino ||
+          (opened.mode & 0o022) !== 0 || !ownerAllowed || opened.size > boundedMax) {
+        fail('platform_integrity_state_unsafe');
+      }
+      const bytes = readFileSync(descriptor);
+      const after = lstatSync(filePath);
+      if (after.dev !== opened.dev || after.ino !== opened.ino || bytes.length > boundedMax) {
+        fail('platform_integrity_state_unsafe');
+      }
+      return encoding === null ? bytes : bytes.toString(encoding);
+    } catch (error) {
+      if (error instanceof PlatformServicesError) throw error;
+      fail('platform_integrity_state_unsafe');
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
+  }
+
   function syncDirectory(directoryPath) {
     const descriptor = openSync(directoryPath, 'r');
     try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
@@ -582,10 +659,12 @@ export function createPlatformServices({
     hostCandidates,
     inspectApplication,
     inspectExecutable,
+    inspectPathIdentity,
     inspectProcess,
     isAbsolutePath,
     isPathInside,
     probePort,
+    readIntegrityFile,
     readPrivateFile,
     removePrivateFile,
     resolvePath,

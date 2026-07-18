@@ -146,11 +146,16 @@ test('workspace Git discovery is delegated to platform services', () => {
     const repository = makeRepository(root);
     const base = createPlatformServices();
     const calls = [];
+    const identities = [];
     const platformServices = {
       ...base,
       runGit(cwd, args) {
         calls.push({ cwd, args });
         return base.runGit(cwd, args);
+      },
+      inspectPathIdentity(path, options) {
+        identities.push({ path, options });
+        return base.inspectPathIdentity(path, options);
       },
     };
     const workspace = canonicalizeWorkspace(repository, { platformServices });
@@ -160,8 +165,35 @@ test('workspace Git discovery is delegated to platform services', () => {
       ['rev-parse', '--git-dir'],
       ['rev-parse', '--git-common-dir'],
     ]);
+    assert.deepEqual(identities.map(({ options }) => options), [
+      { kind: 'directory' }, { kind: 'directory' },
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('binding trust-file reads are delegated with exact owner policy', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-binding-integrity.'));
+  try {
+    const repository = makeRepository(home, 'work');
+    const base = createPlatformServices();
+    const workspace = canonicalizeWorkspace(repository, { platformServices: base });
+    const paths = signedRegistry(home, {
+      schema: 'pulse.workspace-binding-registry.v1', epoch: 7, bindings: [teamBinding(workspace)],
+    });
+    const reads = [];
+    const platformServices = {
+      ...base,
+      readIntegrityFile(path, options) {
+        reads.push({ path, options });
+        return base.readIntegrityFile(path, options);
+      },
+    };
+    assert.equal(resolveWorkspaceBinding({ cwd: repository, ...paths, platformServices }).mode, 'team');
+    assert.deepEqual(reads.map(({ options }) => options.owner), ['current', 'current', 'current', 'current']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

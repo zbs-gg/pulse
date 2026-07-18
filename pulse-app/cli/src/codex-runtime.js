@@ -1,18 +1,6 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import {
-	chmodSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-	readFileSync,
-	readdirSync,
-	realpathSync,
-	renameSync,
-  rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { readCommittedArtifactSet } from './artifact-installer.js';
 import { inspectCodexRuntimeAt } from './codex-install.js';
@@ -35,27 +23,54 @@ import { callTeamRemoteTool, isReadOnlyTeamTool } from './team-remote-client.js'
 import { renderGitTeamMemoryCards } from './host-adapter.js';
 import { ensureBoundPortableProjectID, readBoundProjectSourceWindow } from './project-source.js';
 import { publishGitTeamMemory, syncCommittedGitTeamMemory } from './git-team-memory.js';
+import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
-function requirePrivateFile(path, label, maxBytes = 8192, { allowReadOnlyShared = false } = {}) {
-	const info = lstatSync(path);
-	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-		(allowReadOnlyShared ? (info.mode & 0o022) !== 0 : (info.mode & 0o077) !== 0) || info.size > maxBytes) {
-		throw new Error(`${label}_unsafe`);
+function mappedPlatformError(label, error) {
+	if (error instanceof PlatformServicesError) {
+		throw new Error(`${label}_unsafe:${error.code}`);
 	}
-	return { info, currentUID };
+	throw error;
+}
+
+function readPrivateText(path, maxBytes, label, platformServices = defaultPlatformServices) {
+	try {
+		return platformServices.readPrivateFile(path, { encoding: 'utf8', minBytes: 1, maxBytes });
+	} catch (error) {
+		return mappedPlatformError(label, error);
+	}
+}
+
+function readPrivateJSON(path, maxBytes, label, platformServices = defaultPlatformServices) {
+	return JSON.parse(readPrivateText(path, maxBytes, label, platformServices));
+}
+
+function samePlatformPath(left, right, platformServices = defaultPlatformServices) {
+	return platformServices.isPathInside(left, right) && platformServices.isPathInside(right, left);
+}
+
+function inspectPrivateExecutable(path, label, platformServices = defaultPlatformServices) {
+	try {
+		platformServices.assertPrivateState(path, { kind: 'file' });
+		const proof = platformServices.inspectExecutable(path);
+		if (!proof || proof.owner_only !== true || proof.regular_file !== true || proof.reparse_point !== false) {
+			throw new Error(`${label}_unsafe`);
+		}
+		return proof;
+	} catch (error) {
+		if (error instanceof PlatformServicesError) return mappedPlatformError(label, error);
+		throw error;
+	}
 }
 
 export function readProductActivationBundle(
 	dataDir = process.env.PULSE_DATA_DIR,
-	{ verifyArtifacts = true } = {},
+	{ verifyArtifacts = true, platformServices = defaultPlatformServices } = {},
 ) {
 	if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) throw new Error('product_activation_data_dir_invalid');
 	const path = join(resolve(dataDir), 'runtime', 'product-daemon.json');
-	requirePrivateFile(path, 'product_activation');
-	const activation = JSON.parse(readFileSync(path, 'utf8'));
+	const activation = readPrivateJSON(path, 8192, 'product_activation', platformServices);
 	if (activation?.schema === 'pulse.product_activation.v2') {
 		throw new Error('product_activation_v2_not_ready');
 	}
@@ -110,10 +125,8 @@ export function readProductActivationBundle(
 			manifest.plugin_tree_digest !== activation.plugin_tree_digest) {
 		throw new Error('product_activation_runtime_digest_mismatch');
 	}
-	const { currentUID } = requirePrivateFile(activation.daemon_path, 'product_daemon', 1024 * 1024 * 1024);
-	const daemonInfo = lstatSync(activation.daemon_path);
-	if (daemonInfo.uid !== currentUID || (daemonInfo.mode & 0o111) === 0 ||
-			createHash('sha256').update(readFileSync(activation.daemon_path)).digest('hex') !== activation.daemon_digest) {
+	const daemonProof = inspectPrivateExecutable(activation.daemon_path, 'product_daemon', platformServices);
+	if (daemonProof.sha256 !== activation.daemon_digest) {
 		throw new Error('product_activation_daemon_digest_mismatch');
 	}
 	if (!verifyArtifacts) return { activation };
@@ -132,7 +145,14 @@ export function readProductActivationBundle(
 			committedSet.record.epoch !== activation.release_epoch ||
 			daemon.artifact_id !== activation.daemon_artifact_id || daemon.sha256 !== activation.daemon_artifact_sha256 ||
 			daemon.activation_digest !== activation.daemon_activation_digest || daemon.tree_digest !== activation.daemon_tree_digest ||
-			realpathSync(activation.daemon_path) !== realpathSync(join(daemon.version_path, 'bin', 'pulse')) ||
+			!samePlatformPath(
+				daemonProof.canonical_path,
+				inspectPrivateExecutable(
+					join(daemon.version_path, 'bin', platformServices.platform === 'win32' ? 'pulse.exe' : 'pulse'),
+					'product_daemon_artifact', platformServices,
+				).canonical_path,
+				platformServices,
+			) ||
 			embedderRuntime.artifact_id !== activation.embedder_runtime_artifact_id ||
 			embedderRuntime.sha256 !== activation.embedder_runtime_artifact_sha256 ||
 			embedderRuntime.activation_digest !== activation.embedder_runtime_activation_digest ||
@@ -152,41 +172,31 @@ export function readProductActivationBundle(
 	};
 }
 
-export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR) {
-	return readProductActivationBundle(dataDir).activation;
+export function readProductActivation(dataDir = process.env.PULSE_DATA_DIR, options = {}) {
+	return readProductActivationBundle(dataDir, options).activation;
 }
 
-export async function acquireVaultActivationLock(runtime) {
-	const lockf = '/usr/bin/lockf';
-	if (!existsSync(lockf)) throw new Error('vault_activation_lock_unavailable');
-	mkdirSync(runtime.data_dir, { recursive: true, mode: 0o700 });
-	const path = join(runtime.data_dir, 'supervisor-activation.lock');
-	const helper = 'process.stdout.write("ready\\n");process.stdin.resume();process.stdin.on("end",()=>process.exit(0));';
-	const child = spawn(lockf, ['-k', '-t', '3', path, process.execPath, '-e', helper], {
-		stdio: ['pipe', 'pipe', 'pipe'],
-	});
-	await new Promise((resolveReady, rejectReady) => {
-		const timer = setTimeout(() => {
-			child.kill('SIGTERM');
-			rejectReady(new Error('vault_activation_lock_timeout'));
-		}, 5000);
-		child.stdout.setEncoding('utf8');
-		child.stdout.once('data', (chunk) => {
-			clearTimeout(timer);
-			if (String(chunk).includes('ready')) resolveReady();
-			else rejectReady(new Error('vault_activation_lock_invalid'));
-		});
-		child.once('error', rejectReady);
-		child.once('exit', (status) => rejectReady(new Error(`vault_activation_lock_failed:${status}`)));
-	});
-	chmodSync(path, 0o600);
-	return async () => {
-		child.stdin.end();
-		await new Promise((resolveExit) => child.once('exit', resolveExit));
-	};
+export async function acquireVaultActivationLock(runtime, { platformServices = defaultPlatformServices } = {}) {
+	try {
+		platformServices.ensurePrivateDirectory(runtime.data_dir);
+		const release = platformServices.acquirePrivateLock(
+			join(runtime.data_dir, 'supervisor-activation.lock'),
+			{ staleAfterMs: 30_000, timeoutMs: 3_000 },
+		);
+		return async () => release();
+	} catch (error) {
+		if (error instanceof PlatformServicesError) {
+			if (error.code === 'platform_lock_occupied') throw new Error('vault_activation_lock_timeout');
+			if (error.code === 'platform_native_adapter_unavailable') throw new Error('vault_activation_lock_unavailable');
+			throw new Error(`vault_activation_lock_failed:${error.code}`);
+		}
+		throw error;
+	}
 }
 
-function managedRuntimeForActivation(runtime, bundle, { publishConfig = false } = {}) {
+function managedRuntimeForActivation(runtime, bundle, {
+	publishConfig = false, platformServices = defaultPlatformServices,
+} = {}) {
 	const { activation, activations } = bundle;
 	const dataDir = process.env.PULSE_DATA_DIR;
 	if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) throw new Error('product_activation_data_dir_invalid');
@@ -198,7 +208,11 @@ function managedRuntimeForActivation(runtime, bundle, { publishConfig = false } 
 			managed.daemon.activation_digest !== activation.daemon_activation_digest ||
 			managed.daemon.tree_digest !== activation.daemon_tree_digest ||
 			managed.daemon.digest !== activation.daemon_digest ||
-			realpathSync(managed.daemon.path) !== realpathSync(activation.daemon_path) ||
+			!samePlatformPath(
+				inspectPrivateExecutable(managed.daemon.path, 'product_managed_daemon', platformServices).canonical_path,
+				inspectPrivateExecutable(activation.daemon_path, 'product_daemon', platformServices).canonical_path,
+				platformServices,
+			) ||
 			managed.embedder_runtime.artifact_id !== activation.embedder_runtime_artifact_id ||
 			managed.embedder_runtime.artifact_sha256 !== activation.embedder_runtime_artifact_sha256 ||
 			managed.embedder_runtime.activation_digest !== activation.embedder_runtime_activation_digest ||
@@ -212,14 +226,18 @@ function managedRuntimeForActivation(runtime, bundle, { publishConfig = false } 
 	return managed;
 }
 
-function runtimeMatchesActivation(status, activation, managedEmbedder) {
+function runtimeMatchesActivation(status, activation, managedEmbedder, platformServices = defaultPlatformServices) {
 	const managedIdentityMatches = status.managed_embedder?.config_path ===
 		join(status.runtime.data_dir, 'runtime', 'managed-embedder.json') &&
 		status.managed_embedder?.embedder_runtime_activation_digest === activation.embedder_runtime_activation_digest &&
 		status.managed_embedder?.embedder_runtime_tree_digest === activation.embedder_runtime_tree_digest &&
 		status.managed_embedder?.model_activation_digest === activation.model_activation_digest &&
 		status.managed_embedder?.model_tree_digest === activation.model_tree_digest;
-	return status.status === 'running' && realpathSync(status.executable) === realpathSync(activation.daemon_path) &&
+	return status.status === 'running' && samePlatformPath(
+		inspectPrivateExecutable(status.executable, 'product_running_daemon', platformServices).canonical_path,
+		inspectPrivateExecutable(activation.daemon_path, 'product_daemon', platformServices).canonical_path,
+		platformServices,
+	) &&
 			status.executable_digest === activation.daemon_digest &&
 			managedIdentityMatches && (!managedEmbedder || (
 				status.managed_embedder.config_path === managedEmbedder.config_path &&
@@ -227,11 +245,11 @@ function runtimeMatchesActivation(status, activation, managedEmbedder) {
 			));
 }
 
-export async function ensureActivatedVaultRuntime(resolved) {
-	let bundle = readProductActivationBundle(undefined, { verifyArtifacts: false });
+export async function ensureActivatedVaultRuntime(resolved, { platformServices = defaultPlatformServices } = {}) {
+	let bundle = readProductActivationBundle(undefined, { verifyArtifacts: false, platformServices });
 	let { activation } = bundle;
 	let status = inspectVaultRuntime(resolved.runtime);
-	if (runtimeMatchesActivation(status, activation)) {
+	if (runtimeMatchesActivation(status, activation, undefined, platformServices)) {
 		try {
 			await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
 			return activation;
@@ -244,13 +262,13 @@ export async function ensureActivatedVaultRuntime(resolved) {
 	if (!['running', 'stopped', 'crashed'].includes(status.status)) {
 		throw new Error(`product_vault_${status.status}`);
 	}
-	const release = await acquireVaultActivationLock(resolved.runtime);
+	const release = await acquireVaultActivationLock(resolved.runtime, { platformServices });
 	try {
-		bundle = readProductActivationBundle();
+		bundle = readProductActivationBundle(undefined, { platformServices });
 		activation = bundle.activation;
-		let managedRuntime = managedRuntimeForActivation(resolved.runtime, bundle);
+		let managedRuntime = managedRuntimeForActivation(resolved.runtime, bundle, { platformServices });
 		status = inspectVaultRuntime(resolved.runtime);
-		if (runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder)) {
+		if (runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder, platformServices)) {
 			try {
 				await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
 				return activation;
@@ -261,7 +279,7 @@ export async function ensureActivatedVaultRuntime(resolved) {
 			}
 		}
 		let started = false;
-		if (!runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder)) {
+		if (!runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder, platformServices)) {
 			if (!['running', 'stopped', 'crashed'].includes(status.status)) {
 				throw new Error(`product_vault_${status.status}`);
 			}
@@ -467,27 +485,32 @@ export async function callBoundTeamTool(resolved, host, name, input, {
 	return teamRequest(binding, name, bindTeamActiveContext(binding, input));
 }
 
-export function resolveBoundCodexRuntime(input = {}, { host = 'codex' } = {}) {
+export function resolveBoundCodexRuntime(input = {}, {
+	host = 'codex', platformServices = defaultPlatformServices,
+} = {}) {
   const resolved = resolveCodexRuntime(input);
   const { runtime } = resolved;
   const capturePath = join(runtime.data_dir, 'capture-state.json');
-  if (!existsSync(capturePath)) throw new Error('capture_state_missing');
-  const capture = JSON.parse(readFileSync(capturePath, 'utf8'));
+	let captureRaw;
+	try {
+		captureRaw = platformServices.readPrivateFile(capturePath, {
+			missing: true, encoding: 'utf8', minBytes: 1, maxBytes: 8192,
+		});
+	} catch (error) {
+		return mappedPlatformError('capture_state', error);
+	}
+	if (captureRaw === null) throw new Error('capture_state_missing');
+	const capture = JSON.parse(captureRaw);
   if (!captureEnabledForHost(capture, host)) {
     throw new Error('capture_disabled');
   }
   return resolved;
 }
 
-export function readRuntimeSecret(runtime) {
+export function readRuntimeSecret(runtime, { platformServices = defaultPlatformServices } = {}) {
   const path = join(runtime.data_dir, 'secret.key');
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-      (info.mode & 0o077) !== 0 || info.size !== 64) {
-    throw new Error('vault_secret_unsafe');
-  }
-  const secret = readFileSync(path, 'utf8');
+	const secret = readPrivateText(path, 64, 'vault_secret', platformServices);
+	if (Buffer.byteLength(secret) !== 64) throw new Error('vault_secret_unsafe');
   if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error('vault_secret_invalid');
   return secret;
 }
@@ -496,7 +519,9 @@ export async function boundPulseRequest(resolved, path, options = {}) {
   const method = options.method ?? 'POST';
   const headers = {
     Accept: 'application/json',
-    'X-Pulse-Key': readRuntimeSecret(resolved.runtime),
+    'X-Pulse-Key': readRuntimeSecret(resolved.runtime, {
+		platformServices: options.platformServices ?? defaultPlatformServices,
+	}),
   };
   if (method !== 'GET') {
     headers['Content-Type'] = 'application/json';
@@ -519,7 +544,9 @@ export async function boundPulseRequest(resolved, path, options = {}) {
 }
 
 export async function activatedBoundPulseRequest(resolved, path, options = {}) {
-	await ensureActivatedVaultRuntime(resolved);
+	await ensureActivatedVaultRuntime(resolved, {
+		platformServices: options.platformServices ?? defaultPlatformServices,
+	});
 	return boundPulseRequest(resolved, path, options);
 }
 
@@ -705,32 +732,35 @@ export function hostFinalizeMarkerPath(dataDir, host, sessionID, turnID) {
   return join(dataDir, `${slug}-turn-finalized`, `${digest}.json`);
 }
 
-function atomicWriteJSON(path, value) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.${Date.now()}.new`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+function atomicWriteJSON(path, value, {
+	platformServices = defaultPlatformServices, maxBytes = 8192, label = 'private_state',
+} = {}) {
+	const data = `${JSON.stringify(value)}\n`;
+	try {
+		platformServices.atomicWritePrivateFile(path, data, { ensureParent: true, maxBytes });
+	} catch (error) {
+		return mappedPlatformError(label, error);
+	}
 }
 
-function readOwnerJSON(path, maxBytes, unsafeCode) {
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-      (info.mode & 0o077) !== 0 || info.size > maxBytes) {
-    throw new Error(unsafeCode);
-  }
-  return JSON.parse(readFileSync(path, 'utf8'));
+function readOwnerJSON(path, maxBytes, unsafeCode, platformServices = defaultPlatformServices) {
+	try {
+		return JSON.parse(platformServices.readPrivateFile(path, {
+			encoding: 'utf8', minBytes: 1, maxBytes,
+		}));
+	} catch (error) {
+		if (error instanceof PlatformServicesError) throw new Error(`${unsafeCode}:${error.code}`);
+		throw error;
+	}
 }
 
-export function writeCodexTurnContext(resolved, event, now = new Date()) {
-  return writeHostTurnContext(resolved, event, 'codex', now);
+export function writeCodexTurnContext(resolved, event, now = new Date(), options = {}) {
+	return writeHostTurnContext(resolved, event, 'codex', now, options);
 }
 
-export function writeHostTurnContext(resolved, event, host, now = new Date()) {
+export function writeHostTurnContext(resolved, event, host, now = new Date(), {
+	platformServices = defaultPlatformServices,
+} = {}) {
   const slug = hostSlug(host).replaceAll('-', '_');
   const context = {
     schema: `pulse.${slug}_turn_context.v1`,
@@ -745,15 +775,20 @@ export function writeHostTurnContext(resolved, event, host, now = new Date()) {
     resolver_epoch: resolved.binding.resolver_epoch,
     expires_at: new Date(now.valueOf() + 6 * 60 * 60 * 1000).toISOString(),
   };
-  atomicWriteJSON(hostTurnContextPath(resolved.runtime.data_dir, host, event.session_id), context);
+	atomicWriteJSON(hostTurnContextPath(resolved.runtime.data_dir, host, event.session_id), context, {
+		platformServices, maxBytes: 8192, label: 'host_turn_context',
+	});
   return context;
 }
 
-export function writeCodexToolLease(resolved, event, toolName, toolInput, toolUseID, now = new Date()) {
-  return writeHostToolLease(resolved, event, 'codex', toolName, toolInput, toolUseID, now);
+export function writeCodexToolLease(resolved, event, toolName, toolInput, toolUseID, now = new Date(), options = {}) {
+	return writeHostToolLease(resolved, event, 'codex', toolName, toolInput, toolUseID, now, options);
 }
 
-export function writeHostToolLease(resolved, event, host, toolName, toolInput, toolUseID, now = new Date()) {
+export function writeHostToolLease(
+	resolved, event, host, toolName, toolInput, toolUseID, now = new Date(),
+	{ platformServices = defaultPlatformServices } = {},
+) {
   const slug = hostSlug(host).replaceAll('-', '_');
   if (!STABLE_ID.test(toolUseID ?? '')) throw new Error('invalid_host_tool_lease');
   const action = productToolAction(toolName);
@@ -781,89 +816,103 @@ export function writeHostToolLease(resolved, event, host, toolName, toolInput, t
     .update('\x1f')
     .update(toolUseID)
     .digest('hex');
-  atomicWriteJSON(join(
-    resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, lease.tool_input_digest, `${name}.json`,
-  ), lease);
-  return lease;
+	const directory = join(resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, lease.tool_input_digest);
+	let release;
+	try {
+		platformServices.ensurePrivateDirectory(directory);
+		release = platformServices.acquirePrivateLock(join(directory, '.consume.lock'), {
+			staleAfterMs: 30_000, timeoutMs: 3_000,
+		});
+		atomicWriteJSON(join(directory, `${name}.json`), lease, {
+			platformServices, maxBytes: 8192, label: 'host_tool_lease',
+		});
+	} catch (error) {
+		if (error instanceof PlatformServicesError) throw new Error(`host_tool_lease_unsafe:${error.code}`);
+		throw error;
+	} finally {
+		release?.();
+	}
+	return lease;
 }
 
-export function consumeCodexToolLease(resolved, toolName, toolInput, now = new Date()) {
-  return consumeHostToolLease(resolved, 'codex', toolName, toolInput, now);
+export function consumeCodexToolLease(resolved, toolName, toolInput, now = new Date(), options = {}) {
+	return consumeHostToolLease(resolved, 'codex', toolName, toolInput, now, options);
 }
 
-export function consumeHostToolLease(resolved, host, toolName, toolInput, now = new Date()) {
+export function consumeHostToolLease(resolved, host, toolName, toolInput, now = new Date(), {
+	platformServices = defaultPlatformServices,
+} = {}) {
   const slug = hostSlug(host).replaceAll('-', '_');
   const action = productToolAction(toolName);
   const inputDigest = hostToolInputDigest(host, toolName, toolInput);
-  const directory = join(resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, inputDigest);
-  if (!existsSync(directory)) throw new Error('host_tool_lease_unavailable');
-  const directoryInfo = lstatSync(directory);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : directoryInfo.uid;
-  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || directoryInfo.uid !== currentUID ||
-      (directoryInfo.mode & 0o077) !== 0) {
-    throw new Error('host_tool_lease_directory_unsafe');
-  }
-  const matches = [];
-  for (const name of readdirSync(directory)) {
-    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-    const path = join(directory, name);
-    let info;
-    try { info = lstatSync(path); } catch { continue; }
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-        (info.mode & 0o077) !== 0 || info.size > 8192) continue;
-    let lease;
-    try { lease = JSON.parse(readFileSync(path, 'utf8')); } catch {
-      rmSync(path, { force: true });
-      continue;
-    }
-    const expiry = Date.parse(lease?.expires_at);
-    const issued = Date.parse(lease?.issued_at);
-    if (!Number.isNaN(expiry) && expiry <= now.valueOf()) {
-      rmSync(path, { force: true });
-      continue;
-    }
-    if (lease?.schema !== `pulse.${slug}_tool_lease.v1` || lease.host !== host ||
-        lease.workspace !== resolved.binding.workspace.canonical_path ||
-        lease.binding_digest !== resolved.binding.binding_digest || lease.policy_epoch !== 0 ||
-        lease.resolver_epoch !== resolved.binding.resolver_epoch || lease.tool_name !== action ||
-        lease.tool_input_digest !== inputDigest || !STABLE_ID.test(lease.session_id ?? '') ||
-        !STABLE_ID.test(lease.turn_id ?? '') || !/^event_[a-f0-9]{64}$/.test(lease.source_event_key ?? '') ||
-        !/^lifecycle:[a-f0-9]{64}$/.test(lease.idempotency_key ?? '') ||
-        Number.isNaN(issued) || issued > now.valueOf() + 5_000 || Number.isNaN(expiry)) continue;
-    matches.push({ path, lease, issued });
-  }
-  if (matches.length === 0) throw new Error('host_tool_lease_unavailable');
-  const turnKey = (match) => [
-    match.lease.session_id, match.lease.turn_id, match.lease.source_event_key,
-    match.lease.idempotency_key,
-  ].join('\x1f');
-  if (new Set(matches.map(turnKey)).size !== 1) throw new Error('host_tool_lease_ambiguous');
-  matches.sort((left, right) => right.issued - left.issued || right.path.localeCompare(left.path));
-  const selected = matches[0];
-  const consumed = `${selected.path}.${process.pid}.${Date.now()}.consumed`;
-  try {
-    renameSync(selected.path, consumed);
-    for (const stale of matches.slice(1)) rmSync(stale.path, { force: true });
-    return selected.lease;
-  } finally {
-    rmSync(consumed, { force: true });
-  }
+	const directory = join(resolved.runtime.data_dir, `${hostSlug(host)}-tool-leases`, inputDigest);
+	if (!existsSync(directory)) throw new Error('host_tool_lease_unavailable');
+	let release;
+	try {
+		platformServices.assertPrivateState(directory, { kind: 'directory' });
+		release = platformServices.acquirePrivateLock(join(directory, '.consume.lock'), {
+			staleAfterMs: 30_000, timeoutMs: 3_000,
+		});
+		const matches = [];
+		for (const name of readdirSync(directory)) {
+			if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+			const path = join(directory, name);
+			let raw;
+			try {
+				raw = platformServices.readPrivateFile(path, { encoding: 'utf8', minBytes: 1, maxBytes: 8192 });
+			} catch {
+				continue;
+			}
+			let lease;
+			try { lease = JSON.parse(raw); } catch {
+				platformServices.removePrivateFile(path, { missing: true });
+				continue;
+			}
+			const expiry = Date.parse(lease?.expires_at);
+			const issued = Date.parse(lease?.issued_at);
+			if (!Number.isNaN(expiry) && expiry <= now.valueOf()) {
+				platformServices.removePrivateFile(path, { missing: true });
+				continue;
+			}
+			if (lease?.schema !== `pulse.${slug}_tool_lease.v1` || lease.host !== host ||
+					lease.workspace !== resolved.binding.workspace.canonical_path ||
+					lease.binding_digest !== resolved.binding.binding_digest || lease.policy_epoch !== 0 ||
+					lease.resolver_epoch !== resolved.binding.resolver_epoch || lease.tool_name !== action ||
+					lease.tool_input_digest !== inputDigest || !STABLE_ID.test(lease.session_id ?? '') ||
+					!STABLE_ID.test(lease.turn_id ?? '') || !/^event_[a-f0-9]{64}$/.test(lease.source_event_key ?? '') ||
+					!/^lifecycle:[a-f0-9]{64}$/.test(lease.idempotency_key ?? '') ||
+					Number.isNaN(issued) || issued > now.valueOf() + 5_000 || Number.isNaN(expiry)) continue;
+			matches.push({ path, lease, issued });
+		}
+		if (matches.length === 0) throw new Error('host_tool_lease_unavailable');
+		const turnKey = (match) => [
+			match.lease.session_id, match.lease.turn_id, match.lease.source_event_key,
+			match.lease.idempotency_key,
+		].join('\x1f');
+		if (new Set(matches.map(turnKey)).size !== 1) throw new Error('host_tool_lease_ambiguous');
+		matches.sort((left, right) => right.issued - left.issued || right.path.localeCompare(left.path));
+		const selected = matches[0];
+		platformServices.removePrivateFile(selected.path, { missing: false });
+		for (const stale of matches.slice(1)) platformServices.removePrivateFile(stale.path, { missing: true });
+		return selected.lease;
+	} catch (error) {
+		if (error instanceof PlatformServicesError) throw new Error(`host_tool_lease_unavailable:${error.code}`);
+		throw error;
+	} finally {
+		release?.();
+	}
 }
 
-export function readCodexTurnContext(resolved, event, now = new Date()) {
-  return readHostTurnContext(resolved, event, 'codex', now);
+export function readCodexTurnContext(resolved, event, now = new Date(), options = {}) {
+	return readHostTurnContext(resolved, event, 'codex', now, options);
 }
 
-export function readHostTurnContext(resolved, event, host, now = new Date()) {
+export function readHostTurnContext(resolved, event, host, now = new Date(), {
+	platformServices = defaultPlatformServices,
+} = {}) {
   const slug = hostSlug(host).replaceAll('-', '_');
   const path = hostTurnContextPath(resolved.runtime.data_dir, host, event.session_id);
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-      (info.mode & 0o077) !== 0 || info.size > 8192) {
-    throw new Error('host_turn_context_unsafe');
-  }
-  const context = JSON.parse(readFileSync(path, 'utf8'));
+	const context = readOwnerJSON(path, 8192, 'host_turn_context_unsafe', platformServices);
   if (context?.schema !== `pulse.${slug}_turn_context.v1` || context.host !== host ||
       context.session_id !== event.session_id || context.turn_id !== event.turn_id ||
       context.source_event_key !== event.source_event_key ||
@@ -877,11 +926,13 @@ export function readHostTurnContext(resolved, event, host, now = new Date()) {
   return context;
 }
 
-export function readCodexFinalizeMarker(resolved, event) {
-  return readHostFinalizeMarker(resolved, event, 'codex');
+export function readCodexFinalizeMarker(resolved, event, options = {}) {
+	return readHostFinalizeMarker(resolved, event, 'codex', options);
 }
 
-export function writeHostFinalizeMarker(resolved, event, host, result, now = new Date()) {
+export function writeHostFinalizeMarker(resolved, event, host, result, now = new Date(), {
+	platformServices = defaultPlatformServices,
+} = {}) {
   const slug = hostSlug(host).replaceAll('-', '_');
   const finalize = result?.finalize_receipt;
   const marker = {
@@ -896,22 +947,18 @@ export function writeHostFinalizeMarker(resolved, event, host, result, now = new
     status: result?.status,
     observed_at: now.toISOString(),
   };
-  atomicWriteJSON(hostFinalizeMarkerPath(
-    resolved.runtime.data_dir, host, event.session_id, event.turn_id,
-  ), marker);
+	atomicWriteJSON(hostFinalizeMarkerPath(
+		resolved.runtime.data_dir, host, event.session_id, event.turn_id,
+	), marker, { platformServices, maxBytes: 4096, label: 'host_finalize_marker' });
   return marker;
 }
 
-export function readHostFinalizeMarker(resolved, event, host) {
+export function readHostFinalizeMarker(resolved, event, host, {
+	platformServices = defaultPlatformServices,
+} = {}) {
   const slug = hostSlug(host).replaceAll('-', '_');
   const path = hostFinalizeMarkerPath(resolved.runtime.data_dir, host, event.session_id, event.turn_id);
-  const info = lstatSync(path);
-  const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-      (info.mode & 0o077) !== 0 || info.size > 4096) {
-    throw new Error('host_finalize_marker_unsafe');
-  }
-  const marker = JSON.parse(readFileSync(path, 'utf8'));
+	const marker = readOwnerJSON(path, 4096, 'host_finalize_marker_unsafe', platformServices);
   if (marker?.schema !== `pulse.${slug}_finalize_marker.v1` || marker.host !== host ||
       marker.session_id !== event.session_id || marker.turn_id !== event.turn_id ||
       marker.binding_digest !== resolved.binding.binding_digest ||

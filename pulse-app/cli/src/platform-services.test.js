@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -182,4 +182,71 @@ test('Windows private-state mutations and locks fail closed without native opera
     assert.throws(operation, (error) =>
       error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable');
   }
+});
+
+test('portable path identity is opaque, rename-stable, kind-bound, and clone-distinct', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-platform-identity-'));
+  try {
+    const services = createPlatformServices();
+    const first = join(root, 'first');
+    const moved = join(root, 'moved');
+    const clone = join(root, 'clone');
+    services.ensurePrivateDirectory(first);
+    services.ensurePrivateDirectory(clone);
+    const before = services.inspectPathIdentity(first, { kind: 'directory' });
+    renameSync(first, moved);
+    const after = services.inspectPathIdentity(moved, { kind: 'directory' });
+    const separate = services.inspectPathIdentity(clone, { kind: 'directory' });
+    assert.match(before.identity_token, /^[a-f0-9]{64}$/);
+    assert.equal(after.identity_token, before.identity_token);
+    assert.notEqual(separate.identity_token, before.identity_token);
+    assert.equal(Object.values(before).some((value) => String(value).includes(':')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('integrity reads allow non-writable owner or root authority without requiring owner-only mode', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-platform-integrity-'));
+  try {
+    const services = createPlatformServices();
+    const file = join(root, 'registry.json');
+    writeFileSync(file, '{}\n', { mode: 0o644 });
+    assert.equal(services.readIntegrityFile(file, { owner: 'current', encoding: 'utf8' }), '{}\n');
+    chmodSync(file, 0o666);
+    assert.throws(
+      () => services.readIntegrityFile(file, { owner: 'current' }),
+      (error) => error instanceof PlatformServicesError && error.code === 'platform_integrity_state_unsafe',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows path identity and integrity reads require exact native proofs', () => {
+  const root = 'C:\\Users\\Pulse\\Project';
+  const file = 'C:\\ProgramData\\Pulse\\trust.json';
+  const unavailable = createPlatformServices({ platform: 'win32', home: 'C:\\Users\\Pulse' });
+  assert.throws(
+    () => unavailable.inspectPathIdentity(root, { kind: 'directory' }),
+    (error) => error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable',
+  );
+  assert.throws(
+    () => unavailable.readIntegrityFile(file, { owner: 'root' }),
+    (error) => error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable',
+  );
+
+  const services = createPlatformServices({
+    platform: 'win32', home: 'C:\\Users\\Pulse',
+    nativeAdapter: {
+      inspectPathIdentity: (path, { kind }) => ({
+        canonical_path: path, identity_token: 'native-volume-file-id', kind, reparse_point: false,
+      }),
+      readIntegrityFile: (path, { owner }) => ({
+        bytes: '{}\n', canonical_path: path, owner, regular_file: true, reparse_point: false,
+      }),
+    },
+  });
+  assert.equal(services.inspectPathIdentity(root, { kind: 'directory' }).identity_token, 'native-volume-file-id');
+  assert.equal(services.readIntegrityFile(file, { owner: 'root', encoding: 'utf8' }), '{}\n');
 });

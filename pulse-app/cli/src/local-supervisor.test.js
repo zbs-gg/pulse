@@ -381,12 +381,19 @@ test('supervisor delegates process control and can bind readiness to a startup n
   const daemon = join(root, 'pulse-daemon-platform.mjs');
   writeFakeDaemon(daemon, 'platform-daemon');
   const base = createPlatformServices();
-  const calls = { inspect: 0, terminate: 0 };
+  const calls = { inspect: 0, terminate: 0, ensure: 0, read: 0, write: 0, executable: 0, integrity: 0 };
   const platformServices = {
     ...base,
     createStartupNonce: () => 'd'.repeat(64),
     inspectProcess(pid) { calls.inspect += 1; return base.inspectProcess(pid); },
     terminateProcess(pid, options) { calls.terminate += 1; return base.terminateProcess(pid, options); },
+    ensurePrivateDirectory(path) { calls.ensure += 1; return base.ensurePrivateDirectory(path); },
+    readPrivateFile(path, options) { calls.read += 1; return base.readPrivateFile(path, options); },
+    atomicWritePrivateFile(path, bytes, options) {
+      calls.write += 1; return base.atomicWritePrivateFile(path, bytes, options);
+    },
+    inspectExecutable(path) { calls.executable += 1; return base.inspectExecutable(path); },
+    readIntegrityFile(path, options) { calls.integrity += 1; return base.readIntegrityFile(path, options); },
   };
   try {
     const started = await startVaultRuntime(runtime, {
@@ -398,6 +405,11 @@ test('supervisor delegates process control and can bind readiness to a startup n
     assert.equal((await stopVaultRuntimeAndWait(runtime, { platformServices })).status, 'stopped');
     assert.ok(calls.inspect > 0);
     assert.ok(calls.terminate > 0);
+    assert.ok(calls.ensure > 0);
+    assert.ok(calls.read > 0);
+    assert.ok(calls.write > 0);
+    assert.ok(calls.executable > 0);
+    assert.ok(calls.integrity > 0);
   } finally {
     try { await stopVaultRuntimeAndWait(runtime, { platformServices }); } catch { /* already stopped */ }
     rmSync(root, { recursive: true, force: true });
