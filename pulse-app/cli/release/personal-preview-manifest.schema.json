@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://zbs.gg/schemas/pulse/personal-preview-manifest.v1.json",
-  "title": "Pulse Personal Preview signed release manifest payload",
+  "$id": "https://zbs.gg/schemas/pulse/personal-preview-release-catalog.v2.json",
+  "title": "Pulse Personal Preview signed desktop release catalog",
   "type": "object",
   "additionalProperties": false,
-  "required": ["allowed_origins", "artifacts", "release", "schema"],
+  "required": ["allowed_origins", "common_artifacts", "release", "schema", "targets"],
   "properties": {
-    "schema": { "const": "pulse.personal_preview.release_manifest.v1" },
+    "schema": { "const": "pulse.personal_preview.release_catalog.v2" },
     "allowed_origins": {
       "type": "array",
       "minItems": 1,
@@ -28,20 +28,53 @@
         "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$" }
       }
     },
-    "artifacts": {
+    "common_artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["daemon", "embedder-runtime", "model", "plugin-runtime", "presence-helper"],
+      "required": ["model", "plugin-runtime"],
       "properties": {
-        "daemon": { "$ref": "#/$defs/artifact" },
-        "embedder-runtime": { "$ref": "#/$defs/artifact" },
         "model": { "$ref": "#/$defs/artifact" },
-        "plugin-runtime": { "$ref": "#/$defs/artifact" },
-        "presence-helper": { "$ref": "#/$defs/artifact" }
+        "plugin-runtime": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "enum": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"]
+      },
+      "patternProperties": {
+        "^(darwin-(arm64|x64)|linux-(arm64|x64)-gnu|win32-(arm64|x64))$": { "$ref": "#/$defs/target" }
       }
     }
   },
   "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "artifacts", "capabilities", "libc", "platform"],
+      "properties": {
+        "architecture": { "enum": ["arm64", "x64"] },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["daemon", "embedder-runtime"],
+          "properties": {
+            "daemon": { "$ref": "#/$defs/artifact" },
+            "embedder-runtime": { "$ref": "#/$defs/artifact" },
+            "presence-helper": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" }
+        },
+        "libc": { "enum": ["gnu", null] },
+        "platform": { "enum": ["darwin", "linux", "win32"] }
+      }
+    },
     "artifact": {
       "type": "object",
       "additionalProperties": false,
@@ -50,7 +83,7 @@
         "model_policy", "origin", "platform", "sha256", "signing", "url", "version"
       ],
       "properties": {
-        "architecture": { "const": "arm64" },
+        "architecture": { "enum": ["all", "arm64", "x64"] },
         "bytes": { "type": "integer", "minimum": 1, "maximum": 68719476736 },
         "epoch": { "type": "integer", "minimum": 1 },
         "executable": { "type": "boolean" },
@@ -65,15 +98,12 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["custom_code", "data_only"],
-              "properties": {
-                "custom_code": { "const": false },
-                "data_only": { "const": true }
-              }
+              "properties": { "custom_code": { "const": false }, "data_only": { "const": true } }
             }
           ]
         },
         "origin": { "type": "string", "format": "uri", "pattern": "^https://" },
-        "platform": { "const": "darwin" },
+        "platform": { "enum": ["all", "darwin", "linux", "win32"] },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "signing": {
           "type": "object",

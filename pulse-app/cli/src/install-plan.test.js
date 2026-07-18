@@ -34,19 +34,26 @@ const hostMissing = (host) => () => ({ available: false, version: null, reason_c
 const claudeReady = () => ({ available: true, version: '2.1.196', reason_code: null });
 const cursorReady = () => ({ available: true, reason_code: null });
 
-function verifiedRelease() {
+function verifiedRelease({
+  targetID = 'darwin-arm64', capabilities = targetID.startsWith('darwin-') ? ['presence-helper'] : [], historical = false,
+} = {}) {
+  const artifactBytes = [
+    ['daemon', 10],
+    ['embedder-runtime', 20],
+    ['model', 30],
+    ['plugin-runtime', 40],
+    ...(capabilities.includes('presence-helper') ? [['presence-helper', 50]] : []),
+  ];
   return {
     schema: 'pulse.verified_release_manifest.v1',
     version: '0.7.0',
     epoch: 7,
     manifest_digest: 'a'.repeat(64),
-    artifacts: Object.fromEntries([
-      ['daemon', 10],
-      ['embedder-runtime', 20],
-      ['model', 30],
-      ['plugin-runtime', 40],
-      ['presence-helper', 50],
-    ].map(([kind, bytes]) => [kind, {
+    catalog_schema: historical ? null : 'pulse.personal_preview.release_catalog.v2',
+    capabilities,
+    historical_only: historical,
+    target_id: targetID,
+    artifacts: Object.fromEntries(artifactBytes.map(([kind, bytes]) => [kind, {
       bytes,
       id: `pulse-${kind}`,
       origin: kind === 'model' ? 'https://models.zbs.gg' : 'https://releases.zbs.gg',
@@ -141,8 +148,44 @@ test('unsupported machine and no supported harness use stable reason codes witho
   });
   assert.equal(plan.outcome, 'unsupported');
   assert.deepEqual(plan.reason_codes, [
-    'platform_unsupported', 'architecture_unsupported', 'node_unsupported', 'workspace_not_git', 'supported_harness_missing',
+    'release_target_unavailable', 'node_unsupported', 'workspace_not_git', 'supported_harness_missing',
   ]);
+});
+
+test('all six catalog targets are eligible while musl and historical v1 stay unavailable without mutation', () => {
+  const targets = [
+    ['darwin', 'arm64', undefined, 'darwin-arm64'],
+    ['darwin', 'x64', undefined, 'darwin-x64'],
+    ['linux', 'arm64', 'gnu', 'linux-arm64-gnu'],
+    ['linux', 'x64', 'gnu', 'linux-x64-gnu'],
+    ['win32', 'arm64', undefined, 'win32-arm64'],
+    ['win32', 'x64', undefined, 'win32-x64'],
+  ];
+  const base = {
+    cwd: '/project', home: '/tmp/pulse-target-home', nodeVersion: '20.0.0', currentState: cleanState,
+    detectWorkspace: () => ({ canonical_path: '/project', checkout_kind: 'primary', repository_id: 'repository_a', workspace_id: 'workspace_a' }),
+    detectCodex: codexReady, detectResources: () => ampleResources,
+  };
+  for (const [platform, architecture, libc, targetID] of targets) {
+    const plan = buildPersonalInstallPlan({
+      ...base, platform, architecture, libc, release: verifiedRelease({ targetID }),
+    });
+    assert.equal(plan.outcome, 'ready_to_install', targetID);
+    assert.equal(plan.detected.target.id, targetID);
+    assert.equal(plan.release.target_id, targetID);
+  }
+  const musl = buildPersonalInstallPlan({
+    ...base, platform: 'linux', architecture: 'x64', libc: 'musl',
+    release: verifiedRelease({ targetID: 'linux-x64-gnu' }),
+  });
+  assert.equal(musl.outcome, 'unsupported');
+  assert.ok(musl.reason_codes.includes('release_target_unavailable'));
+  const legacy = buildPersonalInstallPlan({
+    ...base, platform: 'darwin', architecture: 'arm64',
+    release: verifiedRelease({ historical: true }),
+  });
+  assert.equal(legacy.outcome, 'action_required');
+  assert.ok(legacy.reason_codes.includes('release_manifest_legacy'));
 });
 
 test('detected but incompatible supported harnesses have a distinct no-mutation reason', () => {

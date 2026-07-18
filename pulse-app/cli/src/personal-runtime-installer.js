@@ -181,6 +181,7 @@ function recoverInvalidCurrent(artifact, installRoot) {
 function readVerifiedPersonalRelease(manifestPath, epochPath, verification) {
   return verifyReleaseManifestEnvelope(readCanonicalEnvelope(manifestPath), {
     architecture: verification.architecture,
+    libc: verification.libc,
     minimumAcceptedEpoch: readMinimumReleaseEpoch(epochPath),
     now: verification.now,
     osVersion: verification.osVersion,
@@ -196,6 +197,7 @@ export async function provisionPersonalRuntime({
   fetchImpl = globalThis.fetch,
   manifestPath = DEFAULT_MANIFEST_PATH,
   materializers,
+  libc,
   now = new Date(),
   osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
   packageVersion: expectedPackageVersion = packageVersion(),
@@ -212,11 +214,20 @@ export async function provisionPersonalRuntime({
   const epochPath = join(runtimeRoot, 'minimum-release-epoch.json');
   const journalPath = join(runtimeRoot, 'install-journal.json');
   const lockPath = join(runtimeRoot, 'install.lock');
+  if (existsSync(lockPath)) {
+    const existingLock = acquireInstallLock(lockPath);
+    existingLock();
+  }
+  const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, {
+    architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+  });
+  if (preflightRelease.historical_only) fail('release_manifest_legacy');
   const releaseLock = acquireInstallLock(lockPath);
   try {
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, {
-      architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+      architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
     });
+    if (release.historical_only) fail('release_manifest_legacy');
     const activeSetPath = join(installRoot, 'active-release.json');
     const previous = previousActivationDigest(activeSetPath);
     try {
@@ -266,6 +277,7 @@ export async function provisionPersonalRuntime({
 export function inspectPersonalRuntime({
   architecture = process.arch,
   dataDir,
+  libc,
   manifestPath = DEFAULT_MANIFEST_PATH,
   now = new Date(),
   osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
@@ -280,8 +292,16 @@ export function inspectPersonalRuntime({
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    { architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
   );
+  if (release.historical_only) {
+    return Object.freeze({
+      activationSet: null,
+      ready: false,
+      reason_code: 'release_manifest_legacy',
+      release,
+    });
+  }
   try {
     const activationSet = readActivatedArtifactSet(release, {
       installRoot: join(root, 'artifacts'),
@@ -309,6 +329,7 @@ export function inspectPersonalRuntime({
 export function inspectPersonalRelease({
   architecture = process.arch,
   dataDir,
+  libc,
   manifestPath = DEFAULT_MANIFEST_PATH,
   now = new Date(),
   osVersion = process.platform === 'darwin' ? currentMacOSVersion() : '',
@@ -323,11 +344,11 @@ export function inspectPersonalRelease({
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    { architecture, libc, now, osVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
   );
   return Object.freeze({
-    ready: true,
-    reason_code: 'release_manifest_verified',
+    ready: !release.historical_only,
+    reason_code: release.historical_only ? 'release_manifest_legacy' : 'release_manifest_verified',
     release,
   });
 }
@@ -339,6 +360,7 @@ export function commitPersonalRuntimeRelease(release, { dataDir } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
+  if (release?.historical_only !== false) fail('release_manifest_legacy');
   const root = resolve(dataDir);
   const installRoot = join(root, 'artifacts');
   const runtimeRoot = join(root, 'runtime');

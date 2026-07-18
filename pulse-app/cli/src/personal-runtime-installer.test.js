@@ -36,9 +36,12 @@ function safetensors() {
 }
 
 function fixture() {
-  const pair = generateKeyPairSync('ed25519');
-  const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' });
+  const rootPair = generateKeyPairSync('ed25519');
+  const channelPair = generateKeyPairSync('ed25519');
+  const publicKey = rootPair.publicKey.export({ type: 'spki', format: 'pem' });
   const keyID = releaseKeyID(publicKey);
+  const channelPublicKey = channelPair.publicKey.export({ type: 'spki', format: 'pem' });
+  const channelKeyID = releaseKeyID(channelPublicKey);
   const files = {
     daemon: [['bin/pulse', Buffer.from('#!/bin/sh\nexit 0\n'), 0o700]],
     'embedder-runtime': [
@@ -77,19 +80,50 @@ function fixture() {
     };
   }
   const payload = {
-    allowed_origins: ['https://releases.zbs.gg'], artifacts,
+    allowed_origins: ['https://releases.zbs.gg'],
+    common_artifacts: {
+      model: { ...artifacts.model, architecture: 'all', minimum_os: '0.0', platform: 'all' },
+      'plugin-runtime': { ...artifacts['plugin-runtime'], architecture: 'all', minimum_os: '0.0', platform: 'all' },
+    },
     release: {
       channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
-      issued_at: '2026-07-15T00:00:00.000Z', key_id: keyID,
+      issued_at: '2026-07-15T00:00:00.000Z', key_id: channelKeyID,
       package: '@zbs-gg/pulse', version: '0.7.0',
     },
-    schema: 'pulse.personal_preview.release_manifest.v1',
+    schema: 'pulse.personal_preview.release_catalog.v2',
+    targets: {
+      'darwin-arm64': {
+        architecture: 'arm64',
+        artifacts: {
+          daemon: artifacts.daemon,
+          'embedder-runtime': artifacts['embedder-runtime'],
+          'presence-helper': artifacts['presence-helper'],
+        },
+        capabilities: ['presence-helper'], libc: null, platform: 'darwin',
+      },
+    },
+  };
+  const authorityPayload = {
+    channel: 'preview', epoch: 7, expires_at: '2026-08-02T00:00:00.000Z',
+    issued_at: '2026-07-15T00:00:00.000Z',
+    keys: [{
+      key_id: channelKeyID, public_key_pem: channelPublicKey,
+      valid_from_epoch: 7, valid_through_epoch: 9,
+    }],
+    revoked_key_ids: [], schema: 'pulse.release_authority.v1',
   };
   const envelope = {
-    payload, schema: 'pulse.release_envelope.v1',
+    authority: {
+      payload: authorityPayload, schema: 'pulse.release_authority_envelope.v1',
+      signature: {
+        algorithm: 'ed25519', key_id: keyID,
+        value: sign(null, Buffer.from(canonicalReleaseJSON(authorityPayload)), rootPair.privateKey).toString('base64'),
+      },
+    },
+    payload, schema: 'pulse.release_catalog_envelope.v2',
     signature: {
-      algorithm: 'ed25519', key_id: keyID,
-      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), pair.privateKey).toString('base64'),
+      algorithm: 'ed25519', key_id: channelKeyID,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), channelPair.privateKey).toString('base64'),
     },
   };
   const materializers = Object.fromEntries(Object.entries(files).map(([kind, entries]) => [kind, {
@@ -104,7 +138,37 @@ function fixture() {
       return { treeManifest: tree(entries) };
     },
   }]));
-  return { carriers, envelope, files, materializers, publicKey, keyID };
+  return {
+    artifacts, carriers, channelPrivateKey: channelPair.privateKey, envelope, files, materializers,
+    publicKey, keyID, rootPrivateKey: rootPair.privateKey,
+  };
+}
+
+function legacyEnvelope(value) {
+  const payload = {
+    allowed_origins: ['https://releases.zbs.gg'], artifacts: value.artifacts,
+    release: {
+      channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
+      issued_at: '2026-07-15T00:00:00.000Z', key_id: value.keyID,
+      package: '@zbs-gg/pulse', version: '0.7.0',
+    },
+    schema: 'pulse.personal_preview.release_manifest.v1',
+  };
+  return {
+    payload, schema: 'pulse.release_envelope.v1',
+    signature: {
+      algorithm: 'ed25519', key_id: value.keyID,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), value.rootPrivateKey).toString('base64'),
+    },
+  };
+}
+
+function resignCatalog(value) {
+  value.envelope.signature.value = sign(
+    null,
+    Buffer.from(canonicalReleaseJSON(value.envelope.payload)),
+    value.channelPrivateKey,
+  ).toString('base64');
 }
 
 test('empty Personal install downloads the signed compatibility set and publishes one atomic activation', async () => {
@@ -205,6 +269,42 @@ test('Personal runtime inspection verifies the release without creating install 
     assert.equal(inspection.ready, false);
     assert.equal(inspection.release.epoch, 7);
     assert.equal(existsSync(dataDir), false, 'inspection must not create Pulse product state');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy v1 is historical-only and an unavailable target leaves zero install state', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-target.'));
+  const dataDir = join(root, 'data');
+  const manifestPath = join(root, 'manifest.json');
+  const value = fixture();
+  const trustedKeys = [{
+    key_id: value.keyID, public_key_pem: value.publicKey,
+    valid_from_epoch: 1, valid_through_epoch: 20,
+  }];
+  try {
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(legacyEnvelope(value))}\n`, { mode: 0o600 });
+    const historical = inspectPersonalRelease({
+      architecture: 'arm64', dataDir, manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', trustedKeys,
+    });
+    assert.equal(historical.ready, false);
+    assert.equal(historical.reason_code, 'release_manifest_legacy');
+    assert.equal(historical.release.historical_only, true);
+    assert.equal(existsSync(dataDir), false);
+
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
+    delete value.envelope.payload.targets['darwin-arm64'];
+    resignCatalog(value);
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
+    await assert.rejects(() => provisionPersonalRuntime({
+      architecture: 'arm64', dataDir, manifestPath,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
+    }), (error) => error.code === 'release_target_unavailable');
+    assert.equal(existsSync(dataDir), false, 'unavailable target must fail before the install lock mutates state');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

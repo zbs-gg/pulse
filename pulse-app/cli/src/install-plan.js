@@ -3,7 +3,8 @@ import { statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
-import { assertSupportedNodeVersion, RELEASE_ARTIFACT_KINDS } from './release-manifest.js';
+import { DesktopTargetError, resolveDesktopTarget } from './desktop-target.js';
+import { assertSupportedNodeVersion } from './release-manifest.js';
 import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { personalPrincipalPath } from './personal-principal.js';
 import { DEFAULT_TRUST_PATHS } from './trust-helper.js';
@@ -48,12 +49,15 @@ const RELEASE_REASON_CODES = new Set([
   'minimum_epoch_write_failed',
   'personal_runtime_configuration_invalid',
   'release_identity_invalid',
+  'release_authority_expired',
+  'release_key_revoked',
   'release_key_epoch_invalid',
   'release_key_id_invalid',
   'release_key_id_mismatch',
   'release_key_invalid',
   'release_key_unknown',
   'release_manifest_noncanonical',
+  'release_manifest_legacy',
   'release_manifest_unavailable',
   'release_manifest_unsafe',
   'release_os_version_invalid',
@@ -67,6 +71,7 @@ const RELEASE_REASON_CODES = new Set([
   'release_test_asset_url_invalid',
   'release_test_materializer_forbidden',
   'release_test_materializer_spec_invalid',
+  'release_target_unavailable',
   'trusted_keys_invalid',
   'verification_time_invalid',
 ]);
@@ -118,10 +123,18 @@ function releaseStatus(release) {
   if (release.schema !== 'pulse.verified_release_manifest.v1' ||
       typeof release.version !== 'string' || !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
       !/^[a-f0-9]{64}$/.test(release.manifest_digest ?? '') ||
-      !release.artifacts || Object.keys(release.artifacts).sort().join('\0') !== [...RELEASE_ARTIFACT_KINDS].sort().join('\0')) {
+      typeof release.target_id !== 'string' || typeof release.historical_only !== 'boolean' ||
+      !Array.isArray(release.capabilities) || !release.artifacts || Array.isArray(release.artifacts)) {
     throw new TypeError('install_plan_release_invalid');
   }
-  const artifacts = RELEASE_ARTIFACT_KINDS.map((kind) => {
+  const kinds = Object.keys(release.artifacts).sort();
+  const required = ['daemon', 'embedder-runtime', 'model', 'plugin-runtime'];
+  if (required.some((kind) => !kinds.includes(kind)) ||
+      kinds.some((kind) => ![...required, 'presence-helper'].includes(kind)) ||
+      kinds.includes('presence-helper') !== release.capabilities.includes('presence-helper')) {
+    throw new TypeError('install_plan_release_invalid');
+  }
+  const artifacts = kinds.map((kind) => {
     const artifact = release.artifacts[kind];
     if (!artifact || !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 1 ||
         typeof artifact.id !== 'string' || typeof artifact.origin !== 'string' || typeof artifact.url !== 'string') {
@@ -137,10 +150,14 @@ function releaseStatus(release) {
   });
   return {
     artifacts,
+    capabilities: [...release.capabilities],
+    catalog_schema: release.catalog_schema ?? null,
     epoch: release.epoch,
+    historical_only: release.historical_only,
     manifest_digest: release.manifest_digest,
     origins: [...new Set(artifacts.map((artifact) => artifact.origin))].sort(),
     total_download_bytes: artifacts.reduce((total, artifact) => total + artifact.bytes, 0),
+    target_id: release.target_id,
     version: release.version,
   };
 }
@@ -248,7 +265,7 @@ Project: ${workspace?.canonical_path ?? 'unavailable'}
 Workspace: ${workspace?.workspace_id ?? 'unavailable'}
 Repository: ${workspace?.repository_id ?? 'unavailable'}
 Supported harnesses: Claude Code, Codex, Cursor
-Activation: every compatible harness detected on this Mac
+Activation: every compatible harness detected on this desktop
 Detected harnesses:
 ${detectedHosts.map((host) => `  - ${host.host}: ${host.compatible ? 'compatible' : host.detected ? `incompatible (${host.reason_code ?? 'unknown'})` : 'not installed'}`).join('\n')}
 Preflight: ${plan.outcome}
@@ -284,7 +301,7 @@ ${approvals.join('\n')}
 Removal boundary:
   - runtime uninstall: unavailable in this U3 build
   - disconnect removes only the selected harness integration; the signed binding and Personal vault are preserved
-  - wipe is separate, destructive, and requires fresh OS-backed presence
+  - wipe is separate, destructive, and requires fresh enhanced user presence
   - disconnect commands: ${(plan.rollback.disconnect_commands ?? []).join(', ') || 'none until a harness is detected'}
 ${reasons}
 Nothing above is written until you approve this disclosure in the interactive wizard.`;
@@ -308,6 +325,7 @@ export function buildPersonalInstallPlan({
   codexHome = join(home, '.codex'),
   platform = process.platform,
   architecture = process.arch,
+  libc,
   nodeVersion = process.versions.node,
   detectWorkspace = canonicalizeWorkspace,
   detectClaude,
@@ -333,6 +351,12 @@ export function buildPersonalInstallPlan({
   const codex = hosts.find((host) => host.host === 'codex');
   const node = nodeStatus(nodeVersion);
   const verifiedRelease = releaseStatus(release);
+  let target = null;
+  try {
+    target = resolveDesktopTarget({ platform, architecture, libc });
+  } catch (error) {
+    if (!(error instanceof DesktopTargetError)) throw error;
+  }
   const detectedCurrentState = installCurrentState(currentState);
   const resources = detectResources({ home });
   if (!resources || !['free', 'occupied', 'unknown'].includes(resources.port_18789) ||
@@ -342,8 +366,7 @@ export function buildPersonalInstallPlan({
   }
   const requiredDiskBytes = (verifiedRelease?.total_download_bytes ?? 0) + INSTALL_HEADROOM_BYTES;
   const reasons = [];
-  if (platform !== 'darwin') reasons.push('platform_unsupported');
-  if (architecture !== 'arm64') reasons.push('architecture_unsupported');
+  if (!target) reasons.push('release_target_unavailable');
   if (!node.ok) reasons.push('node_unsupported');
   if (workspace.reason_code) reasons.push(workspace.reason_code);
   const compatibleHosts = hosts.filter((host) => host.compatible);
@@ -353,11 +376,13 @@ export function buildPersonalInstallPlan({
       : 'supported_harness_missing');
   }
   if (!verifiedRelease) reasons.push(verifiedReleaseReason(releaseReasonCode));
+  else if (verifiedRelease.historical_only) reasons.push('release_manifest_legacy');
+  else if (target && verifiedRelease.target_id !== target.id) reasons.push('release_target_unavailable');
   reasons.push(...unsafeCurrentStateReasons(detectedCurrentState));
   if (resources.disk_free_bytes !== null && resources.disk_free_bytes < requiredDiskBytes) reasons.push('disk_insufficient');
   if (resources.memory_total_bytes !== null && resources.memory_total_bytes < MINIMUM_MEMORY_BYTES) reasons.push('memory_insufficient');
   const unsupported = reasons.some((reason) => [
-    'platform_unsupported', 'architecture_unsupported', 'node_unsupported',
+    'release_target_unavailable', 'node_unsupported',
   ].includes(reason));
   const codexRoot = resolve(codexHome);
   const workspacePath = workspace.identity?.canonical_path ?? resolve(cwd);
@@ -375,8 +400,9 @@ export function buildPersonalInstallPlan({
     reason_codes: reasons,
     next_action: planNextAction(outcome, reasons),
     detected: {
-      platform: { actual: platform, required: 'darwin', ok: platform === 'darwin' },
-      architecture: { actual: architecture, required: 'arm64', ok: architecture === 'arm64' },
+      platform: { actual: platform, required: 'darwin|win32|linux', ok: target !== null },
+      architecture: { actual: architecture, required: 'arm64|x64', ok: target !== null },
+      target,
       node,
       codex,
       hosts,
@@ -397,7 +423,9 @@ export function buildPersonalInstallPlan({
       { path: join(pulseRoot, 'vaults', 'personal', 'store_personal_<generated>'), purpose: 'private_memory_vault', preserved_on_uninstall: true },
       { path: join(pulseRoot, 'caches', 'personal', 'store_personal_<generated>'), purpose: 'rebuildable_retrieval_cache', preserved_on_uninstall: false },
       { path: join(pulseRoot, 'receipts', 'install', '<workspace_id>.json'), purpose: 'install_receipt', preserved_on_uninstall: false },
-      { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
+      ...(verifiedRelease?.capabilities.includes('presence-helper') ? [
+        { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
+      ] : []),
       { path: dirname(DEFAULT_TRUST_PATHS.publicKeyPath), purpose: 'root_owned_binding_trust', preserved_on_uninstall: true },
       { path: join(resolve(home), '.pulse', 'product-locators.json'), purpose: 'shared_harness_workspace_locator', preserved_on_uninstall: false },
       ...compatibleHosts.map((host) => ({
@@ -436,7 +464,9 @@ export function buildPersonalInstallPlan({
     },
     required_human_approvals: [
       { code: 'install_disclosure_consent', automatable_by_yes: false },
-      { code: 'macos_presence_and_binding', automatable_by_yes: false },
+      ...(verifiedRelease?.capabilities.includes('presence-helper') ? [
+        { code: 'macos_presence_and_binding', automatable_by_yes: false },
+      ] : []),
       ...(codex?.activation_target ? [{ code: 'codex_hook_trust', automatable_by_yes: false }] : []),
       { code: 'binding_replacement_if_needed', automatable_by_yes: false },
     ],
