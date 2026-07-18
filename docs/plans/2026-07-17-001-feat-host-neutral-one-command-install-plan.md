@@ -1,22 +1,24 @@
 ---
-title: Host-Neutral One-Command Install - Plan
+title: Universal Desktop One-Command Install - Plan
 type: feat
 date: 2026-07-17
+updated: 2026-07-18
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
 ---
 
-# Host-Neutral One-Command Install - Plan
+# Universal Desktop One-Command Install - Plan
 
 ## Goal Capsule
 
-- **Objective:** Make the public Pulse Personal install command bootstrap the complete local product when a Mac has only Claude Code, only Cursor, or only Codex, while preserving one shared Core and one bound local vault when several harnesses are present.
-- **Authority:** This plan narrows the Personal install slice in `docs/plans/2026-07-15-001-feat-personal-pulse-one-command-onboarding-plan.md` and the multiharness decision in `docs/plans/2026-07-16-001-feat-personal-git-team-memory-reset-plan.md`; the user's current host-parity direction overrides the older Codex-only onboarding boundary.
-- **Execution profile:** Test-first changes in the published Node CLI and its packed clean-room acceptance scripts. No new daemon, database, cloud service, model, or per-harness memory store.
-- **Stop conditions:** Stop rather than claim product readiness if no compatible supported harness exists, Core/full retrieval is unhealthy, or no detected compatible harness can be verified. A failed secondary harness remains visible as degraded host parity without blocking healthy memory use through a verified host.
-- **Tail owner:** This change owns implementation, CLI and clean-room verification, review, PR creation, and CI. npm publication and release-asset upload remain outside automatic authority.
+- **Objective:** Make `npx -y @zbs-gg/pulse@preview install` provision the same project-bound Pulse Personal product on macOS, Windows, and Linux when the machine has Claude Code, Cursor, or Codex, with no separately installed Go, Python, Make, Docker, model, or API key.
+- **Authority:** This updates the existing Host-Neutral plan in place. The user-approved universal-desktop direction supersedes its Apple-Silicon-only actor and its deferral of Windows, Linux, and Intel macOS. The already-landed shared-Core and three-harness work remains the foundation and must not be forked by platform.
+- **Execution profile:** Test-first extension of the published Node CLI, Go daemon, managed embedder protocol, signed release contract, Personal authority boundary, packed clean-room proof, and GitHub Actions. Team Memory, cross-machine synchronization, and new source connectors stay out of scope.
+- **Supported targets:** `darwin-arm64`, `darwin-x64`, `win32-arm64`, `win32-x64`, `linux-arm64-gnu`, and `linux-x64-gnu`. A target is product-supported only after its exact packed install and full-retrieval proof passes on a native runner; unsupported libc/OS variants stop before mutation with a stable reason.
+- **Stop conditions:** Stop rather than claim readiness if the signed target is unavailable, native private-state guarantees cannot be established, the portable embedder fails the quality gate, no supported harness can prove lifecycle readiness, or an OS/harness pair lacks native clean-room evidence.
+- **Tail owner:** This change owns implementation, simplification, review, native browser/product testing, PR creation, CI, and the credential-gated release workflow that proves published bytes before promotion. Invoking production signing, uploading release assets, or moving an npm dist-tag remains an explicit post-merge release action.
 
 ---
 
@@ -24,109 +26,142 @@ execution: code
 
 ### Summary
 
-Pulse will use one public install command to provision its local Core once and attach every supported harness detected on the Mac through that harness's native plugin surface. Claude Code, Cursor, and Codex are equal bootstrap hosts: any one is sufficient, absent hosts are informational, and multiple hosts share the same signed project binding and vault.
+Pulse Personal is one local product with platform adapters, not three OS products. The public npm command selects one signed target variant, provisions one portable Go/SQLite Core and one project-bound vault, starts one real local embedder, and attaches every compatible Claude Code, Cursor, and Codex installation through native harness adapters. The terminal, JSON output, doctor, and Memory Home report the exact target, security profile, host lifecycle state, shared store identity, and full-retrieval proof.
 
 ### Problem Frame
 
-The product already contains native plugin code for Claude Code, Cursor, and Codex, but the Personal installer still treats Codex as the mandatory bootstrap path. `install-plan.js` blocks on `codex_missing`, `personal-install.js` exposes a `codex_activated` checkpoint, and `personalInstallDependencies()` verifies and calls Codex before it can prove the shared runtime. A user with only Claude Code or only Cursor therefore cannot install Pulse even though the required adapters exist.
+The current branch solved the harness problem but not the platform problem. The shared Core, host registry, binding, and vault already exist, yet the preflight requires `darwin/arm64`; the release envelope describes one Apple-only DMG set; the managed embedder is a Python/MLX bundle; presence is a mandatory Swift/root helper; Windows cannot compile several Go POSIX primitives; and the Node installer assumes Unix permissions, paths, locks, process inspection, signals, archives, and host locations.
 
-This is an orchestration defect, not a request for another distribution format or a second memory engine. The install experience must stay one command, local-first, inspectable, resumable, and honest about host-owned trust or reload actions.
+Removing the two platform checks would therefore create a dangerous false claim. Universal support requires one versioned desktop target contract and narrow OS adapters beneath the existing domain/Core boundary. Retrieval, storage, object IDs, project isolation, consent, receipts, and harness semantics remain common.
 
 ### Actors
 
-- A1. A person in a Git project on a supported Apple Silicon Mac with Node 20+ and at least one supported harness installed.
-- A2. A detected supported harness: Claude Code, Cursor, or Codex.
-- A3. Pulse Core: the signed runtime, daemon, managed embedder, project binding, shared locator, and bound local vault.
+- A1. A non-technical person in a Git project on a supported macOS, Windows, or Linux desktop with Node 20+ and at least one supported harness installed.
+- A2. Claude Code, Cursor, or Codex acting as an equal Pulse host.
+- A3. Pulse Personal Core: one local Go daemon, pure-Go SQLite store, project binding, managed embedder, Memory Home, and shared locator.
+- A4. A platform adapter that proves target compatibility, private local state, process lifecycle, artifact trust, host discovery, and interactive human authority without changing memory semantics.
 
 ### Requirements
 
-#### Detection and disclosure
+#### One command and one product
 
-- R1. Preflight detects Claude Code, Cursor, and Codex independently and reports a bounded per-host state that distinguishes absent, detected-compatible, and detected-incompatible hosts.
-- R2. Installation is eligible when at least one supported harness is detected and compatible; an absent harness never adds a blocking reason.
-- R3. A machine with no supported harness stops before consent with `supported_harness_missing`; a machine with supported harnesses detected but none compatible stops with `supported_harness_incompatible`. Both states name the per-host evidence and create no Pulse state.
-- R4. Pre-consent detection remains read-only and does not execute a project-local binary; CLI-host executable identity is rechecked after consent before mutation, while Cursor may be detected from its trusted application/plugin-home surface without requiring a Cursor CLI.
+- R1. The public entry point remains `npx -y @zbs-gg/pulse@preview install`; it must not ask the user to install Go, Python, Make, Docker, a model, an embedding API key, or a second harness.
+- R2. Installation selects exactly one supported desktop target from the signed release authority before disclosure or download. Unsupported OS, architecture, libc, or missing target artifacts stop with stable reasons and zero Pulse mutation.
+- R3. Every target provisions the same Personal Core contract, one signed project binding, one shared locator, one daemon, and one vault. Platform and harness adapters must not create stores, sync copies, or alternate retrieval engines.
+- R4. Claude Code, Cursor, and Codex remain equal bootstrap hosts. At least one compatible host is required; absent hosts are informational; a failed secondary host degrades parity without replacing a healthy Core.
 
-#### Shared product and native activation
+#### Signed target catalog and portable runtime
 
-- R5. The public entry point remains `npx -y @zbs-gg/pulse@preview install`; the command provisions one signed Core, one project binding, one shared `~/.pulse/product-locators.json`, and one vault regardless of host count.
-- R6. Core provisioning has no dependency on any specific harness executable and completes before host adapter activation.
-- R7. The installer activates every detected compatible harness through its native adapter without invoking or requiring an absent harness.
-- R8. Claude Code, Cursor, and Codex adapters consume the same committed signed product edge, binding, locator, daemon, and vault; the locator is discovery-only, and every adapter authenticates through the existing signed project binding and client credential before validating project, store, and product-edge identity. Credential or identity mismatch fails closed, and adapters never create per-host stores or copy memory between stores.
-- R9. A detected harness that fails activation or verification remains explicit and action-required in the host matrix. Product readiness requires healthy Core plus at least one verified host; all-detected-host parity is a separate degraded/complete status so an unused broken secondary host cannot block usable memory.
+- R5. A canonical Ed25519-signed release catalog covers the complete target matrix. Target selection, artifact digests, artifact trees, formats, signing policy, release epoch, anti-rollback floor, and optional capabilities are inside the signed payload.
+- R6. Each selected target provides a complete atomic compatibility set. Common model/plugin artifacts may be reused by digest; daemon, embedder runtime, and optional native authority artifacts are target variants. Activation commits all selected artifacts together and retains last-known-good rollback.
+- R7. The Go daemon builds with `CGO_ENABLED=0` for every declared target. Secure-file and process primitives use small OS-specific implementations rather than scattered fail-open conditionals.
+- R8. The Node installer uses portable, fail-closed adapters for private state, atomic replace, locks, archive extraction, target version/libc detection, trusted executable discovery, port availability, process identity/liveness/termination, and open/reload behavior. Windows ACL semantics must never be inferred from POSIX mode bits.
 
-#### Resume, readiness, and user control
+#### Real local retrieval
 
-- R10. The durable install result and receipt expose one host-neutral activation checkpoint plus a deterministic per-host result matrix, and repair retries only unfinished hosts without reprovisioning or replacing a healthy Core or vault. Receipts persist stable reason codes and object IDs, never raw subprocess output, credentials, or private filesystem paths.
-- R11. Legacy Codex-first v1 install receipts remain readable as prior evidence, but current readiness is always reconstructed from live Core and adapter inspection before a new host-neutral receipt is written.
-- R12. Static install completion and automatic lifecycle readiness remain distinct: native trust/reload actions are shown as host-specific next actions, while doctor is the authoritative proof that automatic continuity actually ran.
-- R13. The final human and JSON output names the shared Core/vault once, then reports each detected host as activated, action-required, or incompatible with a stable reason.
+- R9. Full retrieval is the product on every supported target. The default portable managed embedder runs locally, loads only verified local artifacts, disables remote model loading, and preserves the current `bge-m3`, 1024-dimensional, CLS-pooled, normalized JSON-line protocol unless an explicit migration/reindex contract says otherwise.
+- R10. The portable baseline is built from `BAAI/bge-m3` revision `5617a9f61b028005a4858fdac845db406aefb181` as an opset-17 dense encoder with dynamic INT8 weights, executed by `@huggingface/transformers@4.2.0` and its locked `onnxruntime-node@1.24.3` runtime. Release generation records the immutable source/export/toolchain digests, tokenizer/support assets, licenses, and target-specific native runtime tree. Remote model loading is disabled. The public npm package need not contain all native/model bytes; the signed selected artifact set downloads only the current target.
+- R11. MLX remains an optional Apple accelerator behind the same runner protocol. Doctor reports the active engine. MLX cannot be required for readiness and cannot change object IDs, vector dimensions, normalization, or release quality claims.
+- R12. Portable and accelerated embedders must pass the same multilingual fixture, retrieval/ranking parity, no-network, crash/restart, and real-query quality gates. The portable release budget is: selected transfer at most 900 MiB, installed runtime/model tree at most 2 GiB, peak embedder RSS at most 4 GiB, cold engine start at most 30 seconds, warm daemon-plus-embedder readiness at most 10 seconds, and warm single-query p95 at most 2 seconds on the documented four-core native reference runner. Quality requires top-1 parity of `1.0`, NDCG@10 delta at most `0.01`, minimum cosine against the FP32 reference of `0.985`, 1024 dimensions, CLS pooling, and normalized vectors. A target missing any measurement is not release-ready; missing or synthetic embeddings may not produce a Pulse-ready verdict.
+
+#### Human authority and privacy
+
+- R13. Ordinary Personal install consent, visible-before-save, read, recall, and Memory Home use a portable authority profile. Protected binding replacement and wipe stay absent from product MCP tools and require a fresh, content-bound assertion from an enhanced user-presence adapter whose verification factor is unavailable to ordinary agent subprocesses. Loopback, CSRF, session binding, expiry, and receipts are transport/audit controls, not proof of a human. Noninteractive `--yes`, shell wrappers, and agent processes cannot authorize protected actions; when no enhanced adapter is available, those actions remain unavailable rather than weakening the boundary.
+- R14. The cross-platform enhanced adapter uses WebAuthn with `userVerification: required` and a platform authenticator or user-held security key; the signed macOS native-presence helper remains an alternative adapter. Its challenge binds the action, project, binding/vault identity, affected data, nonce, and expiry. Doctor and Memory Home always show the active profile and exactly which protected actions it can authorize.
+- R15. Raw transcript capture, old-chat import, backend model calls, cross-project retrieval, and automatic Git/team publication remain off by default on every OS. Existing shared-publication paths are disabled and untouched in this Personal milestone. Receipts never expose credentials, raw subprocess output, or private filesystem paths.
+
+#### Agent and harness parity
+
+- R16. Every supported OS/harness pair exposes the same semantic capability floor: project binding, session continuity, turn capture lease, `pulse_remember`, corroborated write receipt, bounded finalization, context/recall/resume/status/tray, doctor evidence, disconnect, and repair.
+- R17. Static plugin installation and automatic lifecycle readiness are distinct facts. The shared host capability record includes at least `detected`, `compatible`, `installed`, `mcp_ready`, `lifecycle_ready`, `reload_required`, `reason_code`, and proven semantic milestones; terminal, JSON, doctor, and Memory Home consume the same record.
+- R18. Host discovery uses bounded target-specific vendor locations, supports Windows `.exe`/`.cmd`, Linux application paths, macOS apps, `path.delimiter`, spaces and non-ASCII, and revalidates exact executable identity after consent.
+- R19. The three launchers expose identical Personal MCP tool names/schemas and stable domain results. The bound launcher fixes source host; the model cannot claim another host. Destructive tools remain absent.
+
+#### Evidence and release truth
+
+- R20. A declared target is supported only after native CI installs the exact npm tarball through `npm exec --yes --package=<exact-tarball> -- pulse install`, then proves daemon start, real local embedding, doctor, visible save receipt, restart, same-object recall, repair, disconnect, and protected-action denial. The public `npx -y @zbs-gg/pulse@preview install` command is release evidence only after those exact package bytes are published and attested.
+- R21. CI covers all six targets on native runners: GitHub-hosted where available to this repository and explicitly provisioned native self-hosted runners otherwise. It proves every vendor-supported OS/harness pair, at least one lifecycle-ready singleton host on each target, and at least one two-host shared-vault scenario per OS family where two hosts are vendor-supported. Cross-build or fixture-only evidence is not product support.
+- R22. PR verification uses unsigned fixture artifacts bound to the same schemas. Production release verification separately enforces Apple notarization, Windows Authenticode, Linux signed-manifest policy, real model quality, exact artifact attestation, and authorized publication credentials.
+- R23. Team Memory, remote shared storage, cross-machine synchronization, connectors, and role-based team retrieval do not enter this milestone.
+- R24. Installer progress is one canonical state model shared by terminal, JSON, doctor, and Memory Home: `preflight`, `awaiting_consent`, `downloading` with byte progress, `verifying`, `activating`, `starting_retrieval`, `attaching_host`, `reload_required`, `paused_offline`, `cancelled`, `resumed`, `rolled_back`, `repair_required`, and `ready`. Every nonterminal state says whether cancellation is safe, what remains active, and the one next action.
+- R25. A fresh Memory Home leads with continuity readiness and the one next action, says plainly that no memories exist, and transitions from a real user-approved save card to a receipt and fresh-session recall. A labeled simulated proof is secondary and opt-in. From `ready`, the native acceptance flow must reach one visible approved memory recalled in a fresh harness session within 60 seconds and one human confirmation. Host repair sits below the primary state; target/artifact/engine/security details are inspectable. Only Core/retrieval failure, unsafe private state, or a required authority failure interrupts the top hierarchy.
+- R26. Each continuity delivery records source-context tokens and delivered-memory tokens using a pinned estimator, plus host-reported usage when available. Memory Home labels results `measured`, `estimated`, or `collecting`; it never shows a savings percentage when either side is missing and never treats simulated evidence as user savings.
+- R27. The npm bootstrap is an explicit first-install trust root. Publication uses npm trusted publishing through GitHub OIDC with provenance bound to the reviewed commit/workflow, no long-lived publication token, and an immutable package digest in release evidence. An offline root keyring delegates bounded, short-lived channel catalog keys; custody, audit, rotation, revocation, and compromise recovery are tested without disabling anti-rollback.
 
 ### Key Flows
 
-- F1. **Singleton install**
-  - **Trigger:** A1 runs the public command with exactly one supported harness installed.
-  - **Actors:** A1, A2, A3.
-  - **Steps:** Preflight detects the single harness; consent gates product mutation; Pulse provisions Core once; the matching native adapter activates and verifies; the result reports only that host plus the shared vault.
-  - **Outcome:** Claude-only, Cursor-only, and Codex-only machines each reach the same product-level readiness contract without another harness installed.
-- F2. **Multiharness install**
-  - **Trigger:** A1 runs the command with two or three supported harnesses installed.
-  - **Actors:** A1, A2, A3.
-  - **Steps:** Core is provisioned once; adapters activate in deterministic host order; each verification result is retained; all adapters point at the same locator and store identity.
-- **Outcome:** One memory created through one harness can be offered through another without synchronization or duplication, proven by the second harness retrieving the same object ID from the shared store.
-- F3. **Partial activation and repair**
-  - **Trigger:** One detected harness fails activation after Core and another adapter succeeded.
-  - **Actors:** A1, A2, A3.
-  - **Steps:** Pulse writes an action-required receipt with the successful and failed host results; the next `pulse repair` verifies Core, skips healthy adapters, and retries the failed host.
-  - **Outcome:** The vault and successful adapters remain intact; Pulse is usable through a verified host while host parity is visibly degraded until repair succeeds.
+- F1. **Universal singleton install**
+  - A1 runs the public npm command in a project on any supported target with one harness.
+  - Read-only preflight resolves the exact target and host, verifies the signed catalog, and shows downloads, local writes, network destinations, privacy defaults, and active authority profile.
+  - After explicit consent, Pulse reports canonical byte/stage progress, activates one Core set, starts full retrieval, attaches the host, and opens/links Memory Home. Cancellation or interruption leaves either the previous set or a resumable staged set, never a half-active Core.
+  - The result is ready only after a daemon-backed retrieval query and host lifecycle proof. Fresh Home says there are no memories yet and makes continuing in the current harness the primary next action; the first real extracted capsule is shown before save, then appears with its receipt and fresh-session recall proof.
+- F2. **Cross-harness continuity**
+  - A1 saves an approved memory through host A, closes it, and opens host B in the same project.
+  - Host B resolves the same signed binding and store, receives the same object ID and provenance, and does not import, copy, or synchronize another store.
+- F3. **Target-safe upgrade and repair**
+  - A signed catalog selects a newer complete target set.
+  - Pulse downloads to private staging, validates every tree and platform signature, atomically switches the complete set, then proves health.
+  - The new active pointer and anti-rollback floor commit in one durable transaction only after post-switch health succeeds. Until then, an explicitly authorized prior-set recovery record remains valid.
+  - Failure restores the previous set, including a floor-raising failed upgrade. Repair re-inspects live facts and retries only incomplete target/host work.
+- F4. **Protected Personal action**
+  - Memory Home shows the exact binding/vault/data affected and issues a short-lived, content-bound WebAuthn/native-presence challenge.
+  - Only a direct completion with required user verification can authorize the operation. Agent/MCP/noninteractive attempts return a stable action-required receipt; a machine without an enhanced adapter shows the action as unavailable.
+- F5. **Published preview promotion**
+  - After merge and explicit release authorization, the workflow signs and uploads one production artifact set, publishes the exact npm package digest to a temporary candidate dist-tag, and runs the full native registry-command matrix.
+  - The workflow verifies commit, provenance, catalog, assets, package digest, real-model quality, and target attestations, then promotes those unchanged package bytes to `preview`. A failure leaves `preview` untouched.
 
 ### Acceptance Examples
 
-- AE1. Given only Claude Code is installed, when A1 completes the one-command wizard, then Pulse provisions full local retrieval, installs/verifies the native Claude plugin, never invokes Codex or Cursor, and reports the bound shared vault.
-- AE2. Given only Cursor.app is installed, when A1 completes the wizard, then Pulse provisions full local retrieval, installs/verifies the local Cursor plugin without requiring a Cursor CLI, never invokes Claude or Codex, and reports reload as a host-owned action when needed.
-- AE3. Given only Codex is installed, when A1 completes the wizard, then the existing exact-executable and native plugin trust path remains green with no Claude or Cursor requirement.
-- AE4. Given all three harnesses are compatible, when installation completes, then all three adapters are verified against the same product-edge digest, binding ID, locator, and store ID.
-- AE5. Given no supported harness is installed, when preflight runs, then no Pulse state is created and the result is action-required with `supported_harness_missing`.
-- AE6. Given Cursor activation fails after Claude activation succeeds, when A1 reruns `pulse repair`, then Core and Claude are inspected but not replaced, only Cursor is retried, and the final receipt contains both verified host results.
-- AE7. Given a legacy ready v1 Codex-first receipt exists, when the new installer runs, then it does not trust the old `codex_activated` step as current proof; it re-inspects live Core and adapters and emits the host-neutral receipt.
-- AE8. Given a structured memory is accepted through one verified harness, when A1 opens a second verified harness in the same bound project, then its normal continuity or recall surface retrieves the same object ID from the shared store without copying or re-ingestion.
+- AE1. On macOS arm64 or x64 with only Codex, the public command selects the exact signed Mac target, reaches real full retrieval, and never requires MLX; when MLX is available and selected, doctor labels it as acceleration.
+- AE2. On Windows x64 or arm64 with only Cursor, the command uses Windows paths and ACL/process adapters, installs the native Pulse integration, starts one daemon/embedder, and recalls the same saved object after restart without WSL, Go, or Python.
+- AE3. On Linux x64 or arm64 GNU with only Claude Code, the command uses the Linux target, passes full retrieval, and never invokes macOS or Windows tools.
+- AE4. Given Claude Code and Codex on one machine, both attach concurrently to one daemon/store; exactly one Core activation wins and both report the same binding/store identity.
+- AE5. Given a signed catalog without the current target, preflight returns `release_target_unavailable`, names the actual target, downloads nothing, and creates no Pulse state.
+- AE6. Given a Windows private-state ACL that grants another user write access, Pulse fails closed with `private_state_acl_unsafe`; it does not reinterpret meaningless mode bits as safe.
+- AE7. Given the portable embedder is missing, remote-enabled, synthetic, wrong-dimension, or fails a real query, doctor says full retrieval is unavailable and never reports Pulse ready.
+- AE8. Given a protected wipe is attempted from MCP, a shell wrapper, or `--yes`, Pulse refuses and returns the exact Memory Home action required; a human completion records a receipt without exposing the challenge secret.
+- AE9. Given one detected secondary host is reload-required, the product remains usable through a lifecycle-ready host while parity is degraded and repair targets only the incomplete host.
+- AE10. Given any supported native CI runner, `npm pack` plus `npm exec --yes --package=<exact-tarball> -- pulse install` proves install, save, restart, recall of the same object ID, and cleanup using only dependencies declared by the package and signed target set.
+- AE11. Given no enhanced authenticator is available, ordinary install/read/save/recall remains ready while protected binding replacement and wipe are visibly unavailable; loopback access alone never upgrades authority.
+- AE12. Given an upgrade raises the rollback floor and its health proof fails, the previous set starts successfully and the old committed floor remains authoritative.
+- AE13. Given a fresh project, Home shows `0 memories`, one clear next action, then the real approved card, receipt, and fresh-session same-object recall; token savings remain `collecting` until both counts exist.
+- AE14. Given production candidate bytes differ from the reviewed npm digest or any signed asset, promotion to `preview` is refused and the prior public tag remains unchanged.
 
 ### Success Criteria
 
-- The packed CLI passes isolated Claude-only, Cursor-only, and Codex-only clean-room installs with forbidden stubs proving absent harnesses were not invoked.
-- The all-host case proves a single binding, locator, runtime, product-edge digest, and store identity, then proves one behavioral cross-host recall.
-- No-host and one-host-failure cases stop honestly and leave content-free resumable evidence.
-- `npm test`, the affected clean-room/interruption suites, and `make verify` pass.
+- All six Go targets cross-build; all six native runners execute their target contract and the portable embedder protocol.
+- Native macOS, Windows, and Linux packed clean rooms prove the exact public install command, full retrieval, one vault, and truthful host lifecycle state.
+- The existing three-harness shared-Core behavior remains green and gains daemon-backed same-object cross-host recall.
+- The release catalog cannot be substituted, downgraded, target-confused, partially activated, or used to weaken signing/private-state policy.
+- First-value, resource, latency, retrieval-quality, and token-evidence thresholds are machine-readable release gates rather than prose-only claims.
+- `make verify` remains green on its supported shell, while GitHub Actions becomes the required cross-platform PR gate.
 
 ### Scope Boundaries
 
 #### Included
 
-- Host-neutral preflight, Core bootstrap, adapter activation, install receipts, readiness projection, terminal/JSON output, and clean-room parity for Claude Code, Cursor, and Codex.
-- Attaching a newly installed second harness when the user reruns `pulse install` or `pulse repair`.
-- Preservation of the existing local-only privacy, signed binding, visible-before-save, and full-retrieval honesty contracts.
+- macOS, Windows, and GNU/Linux Personal install/runtime support on x64 and arm64.
+- One signed target catalog, one portable local embedder baseline, optional MLX acceleration, portable ordinary authority plus enhanced protected-action adapters, OS-specific security/process/filesystem adapters, host discovery, lifecycle parity, packed native proofs, GitHub Actions, and a credential-gated candidate-to-preview release workflow.
+- Existing terminal, JSON, doctor, and Memory Home surfaces required to explain target, downloads, memory, token/continuity evidence, hosts, and security profile.
 
-#### Deferred to Follow-Up Work
+#### Deferred
 
-- Background discovery and automatic attachment of a harness installed after Pulse without a user rerun.
-- Linux, Windows, Intel macOS, hosted Core, remote synchronization, Team Memory transport, and new source adapters.
-- Cross-host UI polish beyond the current terminal, doctor, and Memory Home surfaces.
+- musl/Alpine, BSD, mobile OSes, containers as the primary desktop product, auto-attachment of a later-installed harness, GPU accelerators other than MLX, and OS-native enhanced presence beyond macOS.
+- Actual npm publication, production certificate use, and release upload until the PR is merged and the explicit release ceremony is authorized; the release workflow and its refusal paths are included.
 
 #### Outside This Product Contract
 
-- Per-harness Core processes, stores, vaults, or memory replication.
-- Requiring Codex as a hidden installer dependency or using one harness CLI to install another harness.
-- Bypassing native user trust, macOS presence, or Cursor reload gates.
-- Treating successful plugin file copy as proof that automatic lifecycle delivery has run.
+- A separate GUI/DMG/MSIX as the required installer, a hosted embedding default, keyword fallback presented as Pulse, per-OS or per-harness memory stores, Team infrastructure, cross-project recall, or silent source ingestion.
 
 ### Sources and Research
 
-- `pulse-app/cli/src/install-plan.js` contains the Codex-only preflight and disclosure coupling.
-- `pulse-app/cli/src/personal-install.js` contains the resumable transaction and Codex-named activation checkpoint.
-- `pulse-app/cli/src/cli.js` contains shared runtime provisioning plus existing Claude Code, Cursor, and Codex activation paths.
-- `pulse-app/cli/src/claude-plugin-install.js`, `pulse-app/cli/src/cursor-install.js`, and `pulse-app/cli/src/codex-install.js` are the native adapter seams to preserve.
-- `docs/plans/2026-07-15-001-feat-personal-pulse-one-command-onboarding-plan.md` supplies the one-command, consent, signed-release, and honest-readiness contract; its Codex-only scope is superseded only for host parity.
-- `docs/plans/2026-07-16-001-feat-personal-git-team-memory-reset-plan.md` supplies the active-harness extraction and one shared memory direction.
+- Repository evidence: `pulse-app/cli/src/install-plan.js`, `release-manifest.js`, `artifact-installer.js`, `local-supervisor.js`, `supported-hosts.js`, `personal-install.js`, `workspace-binding.js`, `pulse-app/internal/embed/local.go`, `pulse-app/internal/userpresence/`, and the Windows cross-build failures in POSIX syscall call sites.
+- ONNX Runtime officially publishes Node CPU binaries for Windows, Linux, and macOS on x64 and arm64: <https://onnxruntime.ai/docs/get-started/with-javascript/node.html>.
+- Transformers.js supports server-side Node inference, local model paths, configurable cache, and disabling remote model loading: <https://huggingface.co/docs/transformers.js/en/tutorials/node>.
+- GitHub-hosted public runners cover Linux, Windows, and macOS on x64/arm64, enabling native target proof: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>.
+- GitHub Actions matrix jobs provide deterministic OS/target fan-out: <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstrategymatrix>.
+- Microsoft SignTool provides Windows executable signing, verification, and timestamping: <https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool>.
+- Claude Code documents macOS, Linux, native Windows with Git Bash, and WSL support; Pulse treats native and WSL as different target authorities rather than mixing stores: <https://docs.anthropic.com/en/docs/claude-code/getting-started>.
 
 ---
 
@@ -134,174 +169,228 @@ This is an orchestration defect, not a request for another distribution format o
 
 ### Key Technical Decisions
 
-- KTD1. **Provision one host-neutral Core before activating adapters.** (session-settled: user-directed — chosen over per-harness Core/store installation: continuity must cross harnesses through one inspectable local memory.) Core owns release verification, runtime installation, daemon/embedder startup, binding, locator, and vault health; adapters only attach host lifecycle surfaces.
-- KTD2. **Support Claude Code, Cursor, and Codex as the minimum equal host set.** (session-settled: user-directed — chosen over a Codex-only minimum: the product must work in the team's actual harnesses.) No adapter may make another adapter's executable a prerequisite.
-- KTD3. **Keep installation plugin-like and one-command.** (session-settled: user-directed — chosen over DMG, source build, Make, and per-harness setup commands: non-technical colleagues need a best-in-class memory install experience.) Native human approvals remain visible inside the resumable wizard.
-- KTD4. **Allow any one supported host to bootstrap.** (session-settled: user-directed — chosen over requiring Codex even when only Claude Code or Cursor is installed: the latest product boundary defines hosts as peers.) Eligibility is host-set cardinality, not one preferred host.
-- KTD5. **Use a shared adapter registry and per-host results.** Detection, inspection, activation, verification, and next-action mapping use one bounded host contract; host-specific command/file mechanics remain in their existing modules.
-- KTD6. **Separate product readiness from all-host parity.** Healthy Core plus one verified host makes memory usable; every failed detected host remains explicit in a degraded parity matrix and repair targets only incomplete adapters. This honors the any-one-host product promise without silently dropping secondary activation failures.
-- KTD7. **Version the host-neutral receipt while reading legacy v1 evidence.** A new receipt records `harnesses_activated` and per-host results. Legacy `codex_activated` remains readable for migration/resume context but never replaces live inspection.
-- KTD8. **Separate adapter activation from lifecycle attestation.** Exact plugin bytes and Core health can complete the transaction; native trust/reload/lifecycle evidence can remain action-required and is surfaced per host. Doctor owns the final automatic-continuity verdict.
+- KTD1. **Universal desktop is the product target.** (session-settled: user-approved — rejected Apple-Silicon-only release: colleagues must install the same Personal memory regardless of desktop OS.) Support is release-evidence-backed for macOS, Windows, and GNU/Linux, not inferred by removing preflight checks.
+- KTD2. **One shared project-bound Personal Core serves Claude Code, Cursor, and Codex.** (session-settled: user-directed — rejected per-harness runtimes/stores: continuity must cross sessions and harnesses without synchronization or duplication.) Existing shared-Core U1-U4 work is preserved.
+- KTD3. **One npm command owns prerequisites.** (session-settled: user-directed — rejected DMG/source builds/Make/Docker/manual models/API keys/per-harness setup: non-technical onboarding must be competitive with other memory products.) Target artifacts may download after disclosure and consent.
+- KTD4. **Local full retrieval is the baseline.** (session-settled: user-directed — rejected hosted embeddings and keyword fallback marketed as the product: privacy and state-aware retrieval are core value.) The portable embedder is verified, local-only, and real-query gated.
+- KTD5. **MLX and enhanced user presence are adapters, not Core prerequisites.** (session-settled: user-approved — rejected making Apple acceleration and Touch ID the universal contract: platform hardening may improve a target but cannot define the shared product.) Ordinary memory works without either adapter; protected actions require WebAuthn/native user verification and remain unavailable when no such factor exists.
+- KTD6. **Team remains after the Personal wedge.** (session-settled: user-directed — rejected resuming remote Team infrastructure before universal Personal works: one person must be able to install and use memory now.) No Team schema or transport work belongs in U5-U11.
+- KTD7. **Use a signed multi-target catalog rather than unsigned runtime selection.** One envelope binds target choice and the entire artifact set, preserving anti-rollback and atomic activation.
+- KTD8. **Centralize portable security/process primitives.** Go build-tag files and a small Node platform service own OS differences; domain, retrieval, binding, vault, and harness code consume stable contracts.
+- KTD9. **Use an engine-neutral embedder runner contract.** Exact executable, bounded arguments, verified model tree, protocol, and identity replace Python-specific config. Portable ONNX is the baseline and MLX is a conforming alternative.
+- KTD10. **Define harness parity by semantic milestones.** Static plugin bytes do not equal automatic memory. One canonical capability record drives install, repair, doctor, JSON, and Memory Home.
+- KTD11. **Bind daemon identity through a startup nonce and authenticated health proof.** This replaces brittle `/bin/ps` command-line parsing and prevents PID-reuse confusion on every OS.
+- KTD12. **Separate PR truth from release ceremony.** Native fixture builds and packed product flows block PRs; private production signing/notarization/model inputs and npm publication run only through an authorized release job.
+- KTD13. **Test exact bytes twice, then promote unchanged.** PRs install the exact local npm tarball; the authorized release publishes the same attested digest to a candidate tag, tests the real registry/assets path natively, and only then moves `preview` without rebuilding.
 
 ### Assumptions
 
-- Claude Code CLI identity can be detected from a bounded trusted candidate set and revalidated after consent without executing inherited project-local `PATH` entries.
-- Cursor app presence plus its user plugin home is sufficient for installation; Cursor CLI availability is optional.
-- The current signed product edge contains the plugin/runtime bytes required by all three adapters, so no new release artifact kind is needed.
-- Existing adapter-specific doctors can be projected into one install-health matrix without changing daemon or storage schemas.
+- Node 20+ is available because the requested distribution surface is `npx`; Pulse does not install or manage Node itself.
+- GNU/Linux is the first Linux contract. musl is explicitly detected and unsupported rather than accidentally running incompatible native libraries.
+- The current BGE-M3 1024/CLS/normalized contract remains stable. If the portable export cannot pass quality and resource gates, the plan stops rather than silently changing the model.
+- Vendor lifecycle events differ, but each declared host can either prove the semantic floor or remain explicitly unsupported/action-required on that target.
+- Evidence that invalidates a session-settled decision must stop execution and be reported; it must not be hidden by narrowing acceptance tests.
 
 ### High-Level Technical Design
 
-The diagrams are directional: they fix trust and ownership boundaries while leaving function-level extraction and rollback details to implementation against the existing transaction code.
-
 ```mermaid
 flowchart TB
-  Command["One public install command"] --> Plan["Read-only host inventory and disclosure"]
-  Plan -->|"at least one compatible host + consent"| Core["Shared Pulse Core bootstrap"]
-  Core --> Binding["One signed project binding"]
-  Core --> Vault["One local vault and retrieval engine"]
-  Core --> Edge["One committed signed product edge"]
-  Edge --> Registry["Supported-host adapter registry"]
-  Registry --> Claude["Claude Code native plugin"]
-  Registry --> Cursor["Cursor local plugin"]
-  Registry --> Codex["Codex native plugin"]
-  Claude --> Matrix["Per-host activation and readiness matrix"]
-  Cursor --> Matrix
-  Codex --> Matrix
-  Matrix --> Receipt["Host-neutral result and resumable receipt"]
+  Command["One public npm command"] --> Inventory["Read-only target and host inventory"]
+  Inventory --> Catalog["Signed multi-target release catalog"]
+  Catalog --> Selected["Exact target compatibility set"]
+  Selected --> Portable["Shared portable Core"]
+  Portable --> Daemon["Go daemon and pure-Go SQLite"]
+  Portable --> Embedder["Local portable embedder"]
+  Portable --> Vault["One project-bound vault"]
+  Portable --> Authority["Ordinary portable authority"]
+  Embedder -. optional .-> MLX["Apple MLX accelerator"]
+  Authority -. protected actions .-> NativePresence["WebAuthn or native enhanced presence"]
+  Portable --> Hosts["Shared harness capability registry"]
+  Hosts --> Claude["Claude Code adapter"]
+  Hosts --> Cursor["Cursor adapter"]
+  Hosts --> Codex["Codex adapter"]
+  Claude --> Evidence["One doctor/Home evidence model"]
+  Cursor --> Evidence
+  Codex --> Evidence
 ```
 
 ```mermaid
 sequenceDiagram
   participant U as User
   participant I as Installer
-  participant C as Pulse Core
-  participant A as Detected adapters
-  participant D as Doctor/readiness
-  U->>I: Run one command
-  I->>I: Detect hosts without mutation
-  I-->>U: Show exact disclosure
-  U->>I: Consent and native approvals
-  I->>I: Revalidate exact CLI-host identities
-  I->>C: Provision or verify once
-  C-->>I: Core, binding, edge, store identity
-  loop Each detected compatible host
-    I->>A: Inspect, activate if needed, verify
-    A-->>I: Stable host result and next action
+  participant R as Signed Catalog
+  participant C as Shared Core
+  participant H as Harness Adapter
+  participant D as Doctor/Home
+  U->>I: npx ... install
+  I->>I: Detect target, libc, hosts, private-state capability
+  I->>R: Verify delegated signature, epoch, exact target set
+  I-->>U: Show downloads, writes, network, authority profile
+  U->>I: Explicit consent
+  I->>C: Stage and atomically activate exact set
+  C->>C: Start daemon + real local embedder
+  C-->>I: Authenticated startup nonce and retrieval proof
+  loop Each compatible host
+    I->>H: Install, launch MCP, prove lifecycle milestones
+    H-->>I: Canonical capability record
   end
-  I->>D: Project Core plus host results
-  D-->>U: Ready or exact action-required state
-```
-
-```mermaid
-stateDiagram-v2
-  [*] --> Preflight
-  Preflight --> NoHost: no compatible supported host
-  Preflight --> Consent: one or more compatible hosts
-  Consent --> CoreReady: disclosure and native approvals complete
-  CoreReady --> Activating: shared Core verified
-  Activating --> Ready: every detected compatible host verified
-  Activating --> ReadyWithActions: at least one host verified and another incomplete
-  Activating --> ActionRequired: no host verified
-  ReadyWithActions --> Activating: install or repair rerun
-  ActionRequired --> Activating: install or repair rerun
-  Ready --> Activating: a newly installed host is attached on rerun
+  I->>D: Persist target/Core/host evidence
+  D-->>U: Ready or exact action required
 ```
 
 ### System-Wide Impact
 
-- **Trust:** Pre-consent detection remains non-mutating; exact executable identity checks stay limited to CLI hosts. No adapter receives vault-selection authority.
-- **Authorization:** Host locators discover the Core but confer no access. The existing signed binding and client credential authenticate each adapter request, and project/store/edge identity must match before memory is exposed.
-- **State:** Core/vault identity remains global to the bound project. The install receipt changes shape, but memory/store schemas do not.
-- **Lifecycle parity:** Each adapter must expose the same capability floor—session context delivery, turn capture, write receipts, and finalize/pre-compact handling—even when native event names differ.
-- **Operations:** Doctor and install output gain a per-host matrix. Existing host-specific doctor commands remain available for detailed repair.
-- **Packaging:** Any new shared detection/adapter module must be included in `pulse-app/cli/package.json` and the packed-package contract.
+- **Trust:** The release root, target choice, artifact trees, model, and platform signing policy remain signed and anti-rollback protected. OS adapters strengthen local-state proof without weakening shared validation.
+- **State:** Personal databases and object schemas do not fork. Install/activation/authority receipts gain target and capability identities; legacy v1 evidence is read only as historical context and revalidated live.
+- **Process model:** One daemon owns one embedder helper and exposes a startup nonce through authenticated loopback health. Concurrent harness activation shares a portable single-writer install/runtime lock.
+- **Packaging:** The npm package carries CLI/MCP logic and a signed catalog. Large/native model/runtime bytes remain exact target artifacts selected after consent.
+- **Operations:** GitHub Actions becomes the native OS/architecture support ledger. A release cannot claim a target absent its attestation.
+- **UX:** The command stays one line. Progress never looks hung: every installer state carries bytes/stage, cancellation safety, and the next action. Home leads with continuity/readiness and first memory value; platform details stay inspectable unless they block ordinary memory.
 
 ### Risks and Mitigations
 
-- **Core extraction regression:** Codex and Claude connect paths currently duplicate runtime transaction and rollback logic. Start with a thin registry over existing seams and extract only the smallest Core step required by failing singleton-host tests; retain adapter-specific snapshots/rollback and do not rewrite unrelated lifecycle behavior.
-- **Unsafe executable discovery:** Reusing inherited `PATH` before consent could execute a repository-local shim. Use bounded absolute candidates and post-consent identity revalidation for CLI hosts.
-- **Cursor false positive:** App presence may not imply it will reload a newly installed plugin. Treat exact plugin installation as static activation and surface reload/lifecycle as a host-owned next action until doctor observes it.
-- **Receipt ambiguity:** Old and new step names can be confused during resume. Parse schemas explicitly, re-inspect live state, and write only the new canonical shape.
-- **Partial multihost activation:** A later adapter may fail after an earlier one succeeds. Preserve successful adapters and Core, write the complete matrix, and let repair retry only failed hosts.
+- **Scope explosion:** Preserve U1-U4 and keep platform code behind bounded interfaces. Do not rewrite retrieval, storage, Team, or host domain behavior.
+- **Windows trust regression:** Never reuse POSIX uid/mode checks on Windows. Test unsafe DACLs, junction escapes, path case, locked files, and PID reuse on native Windows.
+- **Model size/startup:** Download only the selected target/model tree, support resumable verified downloads, enforce R12's byte/RSS/start/latency/quality thresholds, and stop rather than silently ship a weaker model.
+- **Embedding drift:** Bind vector contract and model revision in receipts; compare portable/MLX retrieval outcomes to the reference gate before release; require reindex for incompatible future changes.
+- **Host vendor drift:** Keep target-specific discovery bounded and capability/version tested. One broken adapter cannot mutate Core or lower readiness claims.
+- **Archive/signature confusion:** Use one portable safe archive library, normalized paths and tree manifests, plus platform-specific signature verification before activation.
+- **False CI confidence:** Use native runners and the packed artifact/public command. Synthetic fixtures validate failure branches but cannot establish product support.
+- **Human-presence confusion:** Treat loopback, cookies, and CSRF only as request integrity. Protected actions require content-bound WebAuthn/native user verification and fail unavailable when that factor cannot be produced.
+- **Supply-chain compromise:** Treat npm as the bootstrap trust root, use OIDC trusted publishing and provenance, delegate channel signing from an offline root, and test rotation/revocation plus candidate-to-preview promotion of unchanged bytes.
 
 ### Sequencing
 
-U1 defines the host inventory contract. U2 makes Core bootstrap host-neutral and exposes the adapter registry. U3 consumes both to produce resumable activation/readiness results. U4 proves the product across singleton and multihost clean rooms. U1 must land before U2; U2 before U3; U4 depends on all prior units.
+The landed U1-U4 foundation stays intact. U5 defines target/release authority. U6 makes Core primitives compile and behave safely across OSes. U7 replaces the Apple-only embedder prerequisite. U8 separates ordinary authority from enhanced protected-action presence. U9 builds and activates real target artifacts. U10 finishes host/lifecycle parity and first-value/product evidence. U11 makes PR and candidate-to-preview flows mandatory release truth. Dependencies are strict: U5 -> U6 -> U7/U8 -> U9 -> U10 -> U11.
 
 ---
 
+## Landed Foundation (U1-U4, Preserve)
+
+- U1. Supported-host inventory replaced Codex-gated preflight.
+- U2. Shared Core bootstrap and native adapter registry attach Claude Code, Cursor, and Codex to one product edge/store.
+- U3. Host-neutral install receipts, repair, readiness, and lifecycle evidence replaced the Codex-only checkpoint.
+- U4. Packed singleton/multiharness fixture coverage exists, but its own evidence correctly says it is not yet public-command, daemon-backed, cross-platform production proof. U10 replaces that limitation rather than relabeling it.
+
 ## Implementation Units
 
-### U1. Replace Codex-gated preflight with a supported-host inventory
+### U5. Introduce the signed desktop target catalog
 
-- **Goal:** Make install eligibility depend on at least one compatible supported host and disclose every host independently.
-- **Requirements:** R1-R4, R13; AE3, AE5; KTD2-KTD4.
+- **Goal:** Put universal target selection and exact compatibility sets inside signed release authority.
+- **Requirements:** R2, R5-R6, R22; AE5; KTD7, KTD12.
 - **Files:**
-  - Create `pulse-app/cli/src/supported-hosts.js`
-  - Create `pulse-app/cli/src/supported-hosts.test.js`
+  - Create `pulse-app/cli/src/desktop-target.js`
+  - Create `pulse-app/cli/src/desktop-target.test.js`
+  - Modify `pulse-app/cli/src/release-manifest.js`
+  - Modify `pulse-app/cli/src/release-manifest.test.js`
+  - Modify `pulse-app/cli/release/personal-preview-manifest.schema.json`
+  - Modify `pulse-app/cli/src/personal-runtime-installer.js`
+  - Modify `pulse-app/cli/src/personal-runtime-installer.test.js`
   - Modify `pulse-app/cli/src/install-plan.js`
   - Modify `pulse-app/cli/src/install-plan.test.js`
-  - Modify `pulse-app/cli/package.json`
-- **Approach:** Extract bounded, injectable host detectors. Preserve Codex exact identity behavior, add equivalent safe Claude CLI identity, detect Cursor without a CLI requirement, and return a stable ordered host inventory. Replace `target_host: codex` and `codex_missing` gating with the inventory and one no-host reason. Update disclosure, local writes, approvals, network effects, and rollback descriptions so they name only applicable detected hosts while keeping the full supported set visible.
-- **Test scenarios:** Claude-only eligible; Cursor-only eligible without CLI; Codex-only eligible; all three eligible in stable order; no-host action-required; incompatible-only action-required with `supported_harness_incompatible`; incompatible Claude plus healthy Cursor eligible with explicit Claude state; project-local `PATH` shim never executed; detection produces no files.
-- **Verification:** `cd pulse-app/cli && node --test src/supported-hosts.test.js src/install-plan.test.js`.
-- **Done when:** The immutable plan is ready to install for each singleton host and no longer contains a hidden Codex prerequisite.
+- **Approach:** Version the payload to a canonical target catalog with common artifacts plus exact target variants/capabilities. Normalize six target IDs, include libc/minimum-runtime policy, choose one target before disclosure, and project a v1-compatible verified selected set into existing activation code. Make enhanced-presence helpers optional target capabilities. Pin an offline-root keyring in the npm bootstrap; channel catalogs use bounded delegated keys with explicit epoch ranges, expiry, revocation, and rotation metadata. Preserve signature verification, release epoch, anti-rollback, origin allowlist, exact digests, model data-only policy, and atomic set identity.
+- **Test scenarios:** all six targets select exactly; wrong arch/platform/libc/minimum OS fail closed; missing target zero mutation; target-confusion signature tamper fails; common artifact digest reuse is canonical; optional capability cannot become required outside signed policy; expired/revoked/out-of-range delegated keys fail; compromise recovery rejects a revoked key's higher-epoch catalog without lowering anti-rollback; v1 Mac envelope reads for repair context but never authorizes a universal-ready claim.
+- **Verification:** `cd pulse-app/cli && node --test src/desktop-target.test.js src/release-manifest.test.js src/personal-runtime-installer.test.js src/install-plan.test.js`.
+- **Done when:** One signed envelope deterministically yields one complete target set and the disclosure names only its exact downloads/capabilities.
 
-### U2. Extract host-neutral Core bootstrap and native adapter operations
+### U6. Add portable Core security and process primitives
 
-- **Goal:** Provision and verify the signed runtime, daemon, embedder, locator, binding, and vault once, then let native adapters attach independently.
-- **Requirements:** R5-R9; AE1-AE4; KTD1-KTD5.
-- **Dependencies:** U1.
+- **Goal:** Compile and run the unchanged Personal Core safely on every declared target.
+- **Requirements:** R3, R7-R8, R15; AE6; KTD2, KTD8, KTD11.
+- **Dependencies:** U5.
 - **Files:**
-  - Create `pulse-app/cli/src/personal-host-adapters.js`
-  - Create `pulse-app/cli/src/personal-host-adapters.test.js`
-  - Modify `pulse-app/cli/src/cli.js`
-  - Modify `pulse-app/cli/src/cli.test.js`
-  - Modify `pulse-app/cli/package.json`
-- **Approach:** Build a thin fixed registry that wraps the existing Claude Code, Cursor, and Codex activation seams. Immediately after consent, revalidate every detected CLI-host path, owner/type, symlink resolution, digest, and compatibility before Core mutation; a mismatch exits with zero product writes. Extract only the Core bootstrap work that `personalInstallDependencies()` must run without Codex, returning a verified context with the committed edge, authenticated binding/client, runtime/store identity, and rollback handle. Adapter inspection treats the locator as discovery-only, authenticates against Core, and validates project/store/edge identity. Modify host-specific installer modules only if a failing singleton test proves their current seam cannot consume that context. Cursor activation must work from app/plugin-home detection alone.
-- **Test scenarios:** Core provisions once for each singleton host; post-consent CLI identity drift causes zero mutation; no absent adapter command runs; all-host activation consumes one authenticated edge and store; locator-only or mismatched binding/client identity fails closed; repeat activation is idempotent; second host attaches later without changing store/binding; Core failure invokes no adapter; adapter rollback cannot remove Core or another healthy adapter.
-- **Verification:** `cd pulse-app/cli && node --test src/personal-host-adapters.test.js src/claude-plugin-install.test.js src/cursor-install.test.js src/codex-install.test.js src/cli.test.js`.
-- **Done when:** None of the three adapter paths needs another harness to start or locate the shared product.
+  - Create OS-specific files under `pulse-app/internal/platform/`
+  - Modify POSIX syscall call sites in `pulse-app/internal/config/`, `internal/unassigned/`, `internal/server/`, and `cmd/pulse/`
+  - Create `pulse-app/cli/src/platform-services.js` plus OS-specific implementations/tests
+  - Modify `pulse-app/cli/src/install-journal.js`
+  - Modify `pulse-app/cli/src/artifact-installer.js`
+  - Modify `pulse-app/cli/src/local-supervisor.js`
+  - Modify Personal-path callers in `workspace-binding.js`, `personal-principal.js`, `personal-install.js`, `codex-runtime.js`, `cursor-hooks.js`, and `unassigned-inbox.js`
+- **Approach:** Replace raw Go POSIX syscalls with build-tagged secure-open/stat/liveness primitives. In Node, centralize private directories/files, DACL-or-mode proof, atomic durable replace, portable lock, Git/executable discovery, port probe, OS/libc version, and process lifecycle. Bind runtime receipt to a random startup nonce returned by authenticated `/health`; use exact executable digest plus nonce instead of `/bin/ps` command parsing. Leave Team-only clients untouched unless a shared primitive is directly reused.
+- **Test scenarios:** six-target Go cross-build; POSIX symlink/hardlink/mode attacks; Windows permissive DACL/junction/case attacks; concurrent lock contention; PID reuse/stale nonce; path with spaces/non-ASCII; interrupted atomic replace; daemon stop/restart/rollback; no shell/system utility prerequisite.
+- **Verification:** Go native tests plus `GOOS/GOARCH` cross-build matrix, affected CLI unit tests, and native Windows/Linux/macOS platform-service tests.
+- **Done when:** Windows builds, every target can safely persist private state and supervise one daemon, and no Personal path assumes `/usr/bin`, `/bin/ps`, Unix signals, uid, or mode bits outside the platform layer.
 
-### U3. Make install receipts and readiness host-neutral and resumable
+### U7. Ship a universal local managed embedder
 
-- **Goal:** Replace the Codex-only checkpoint and health projection with one shared-Core plus per-host activation contract.
-- **Requirements:** R9-R13; F1-F3; AE6-AE7; KTD6-KTD8.
-- **Dependencies:** U2.
+- **Goal:** Make real local BGE-M3 retrieval available without Python/MLX or a backend key.
+- **Requirements:** R1, R9-R12; AE7; KTD4, KTD5, KTD9.
+- **Dependencies:** U6.
 - **Files:**
-  - Modify `pulse-app/cli/src/personal-install.js`
-  - Modify `pulse-app/cli/src/personal-install.test.js`
-  - Modify `pulse-app/cli/src/personal-install-command.js`
-  - Modify `pulse-app/cli/src/personal-install-command.test.js`
-  - Modify `pulse-app/cli/src/personal-live-readiness.js`
-  - Modify `pulse-app/cli/src/personal-live-readiness.test.js`
-  - Modify `pulse-app/cli/src/cursor-hooks.js`
-  - Modify `pulse-app/cli/src/cursor-hooks.test.js`
-  - Modify `pulse-app/cli/src/cli.js`
-- **Approach:** Rename the transaction checkpoint to `harnesses_activated`, persist an ordered bounded host result matrix, and introduce an explicit receipt version with legacy v1 read compatibility. Update dependency injection from `inspectActivation/activateCodex` to host-neutral Core and adapter operations. Aggregate Core health with each detected host; one verified host yields product readiness, while incomplete secondary hosts yield degraded parity and host-qualified next actions. Project Cursor's existing session-start, turn-context, trusted receipt, and finalization hooks into a bounded lifecycle-readiness receipt so doctor can distinguish exact plugin installation from observed automatic continuity. Repair re-inspects everything and skips verified Core/adapters rather than trusting prior step labels.
-- **Test scenarios:** Full singleton success for each host; all-host success; detected secondary adapter failure leaves product ready with degraded parity; no verified adapter remains action-required; repair retries only failed host; old v1 receipt is revalidated and upgraded; malformed/unknown host result fails closed; static activation with pending Cursor reload or Codex trust is reported without claiming automatic continuity; one fixture-controlled Cursor lifecycle writes and verifies readiness; JSON and human output agree; receipts exclude subprocess output, credentials, and private paths.
-- **Verification:** `cd pulse-app/cli && node --test src/personal-install.test.js src/personal-install-command.test.js src/personal-live-readiness.test.js src/cli.test.js`.
-- **Done when:** Install/repair and doctor tell the same truthful story for Core and every detected host, with no Codex-named product checkpoint.
+  - Modify `pulse-app/internal/embed/local.go` and tests
+  - Modify `pulse-app/cli/src/local-supervisor.js` and tests
+  - Create a portable helper/runtime under `pulse-app/cli/runtime/embedder-portable/`
+  - Create `pulse-app/cli/scripts/build-portable-embedder-runtime.mjs`
+  - Modify `pulse-app/cli/src/managed-embedder-release.js` and tests
+  - Modify model artifact/tree handling in `personal-runtime-installer.js` and `artifact-installer.js`
+  - Extend `pulse-app/cli/runtime/embedder/quality_gate.py` or add an engine-neutral equivalent
+- **Approach:** Generalize managed config to exact runner executable + bounded args + verified model/support tree + protocol identity. Build from `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` as an opset-17 dense encoder with dynamic INT8 weights; the helper performs CLS pooling and L2 normalization. Lock `@huggingface/transformers@4.2.0` and `onnxruntime-node@1.24.3`. Each signed target tree contains the helper, lockfile-derived target runtime, `model_int8.onnx`, `tokenizer.json`, tokenizer/config/special-token files, `pulse-model-contract.json`, licenses, and source/export/toolchain provenance; no remote model lookup is possible. Keep the daemon JSON-line protocol stable. Register MLX as an optional conforming accelerator. Bind model/runtime revision and vector contract into activation/readiness receipts.
+- **Test scenarios:** portable startup/embedding on all native target runners; no network after artifact download; wrong runner/model/tree/dimension/pooling/normalization fails; helper crash/restart; multilingual fixture; retrieval/ranking comparison to FP32 reference and MLX; resumable large download; warm restart; exact R12 byte/RSS/start/latency/quality budget failures; incompatible vector contract requires reindex.
+- **Verification:** embedder protocol tests, portable real-model quality gate, existing MLX gate as optional accelerator proof, and one real daemon retrieval query per native target.
+- **Done when:** every supported target reports `full_retrieval=true` with a real local query and no Python, MLX, model/API configuration, or hidden network dependency.
 
-### U4. Prove one-command installation in singleton and multihost clean rooms
+### U8. Separate ordinary Personal authority from enhanced user presence
 
-- **Goal:** Turn host parity into release evidence against the packed CLI rather than mocks alone.
-- **Requirements:** R1-R13; F1-F3; AE1-AE8; KTD1-KTD8.
-- **Dependencies:** U1-U3.
+- **Goal:** Remove the mandatory Mac helper while keeping protected actions behind a factor unavailable to ordinary agent subprocesses.
+- **Requirements:** R13-R15; AE8; KTD5.
+- **Dependencies:** U6.
 - **Files:**
-  - Modify `pulse-app/cli/scripts/personal-preview-clean-room.mjs`
-  - Modify `pulse-app/cli/scripts/personal-preview-interruption-e2e.mjs`
-  - Create `pulse-app/cli/scripts/personal-preview-multiharness-e2e.mjs`
-  - Modify `pulse-app/cli/package.json`
-  - Modify `Makefile`
-  - Modify `README.md`
-  - Modify `docs/INSTALL_WITH_AGENT.md`
-  - Modify `AGENTS.md`
-- **Approach:** Run the packed package in isolated homes with explicit host fixtures and forbidden executables for absent hosts. Cover each singleton, all three, no-host, incompatible-only, partial failure/repair, second-host attachment, and shared store identity. Exercise one real fixture-controlled lifecycle per host, then accept a memory through one harness and retrieve the same object ID through another. Keep native human trust/reload as explicit fixture-controlled gates. Update public instructions only after the packed evidence passes and retain the audit-before-install contract.
-- **Test scenarios:** Claude-only packed install and doctor; Cursor-only packed install without CLI plus observed lifecycle receipt; Codex-only regression; all-host shared locator/store and behavioral cross-host recall; no-host and incompatible-only zero mutation; one secondary-host failure with usable primary and degraded parity; interruption between adapters and successful repair; later second-host attachment; absence of Go/Python/Make/API key requirements; fallback retrieval never labeled ready.
-- **Verification:** `cd pulse-app/cli && npm test && npm run test:personal-clean-room && npm run test:personal-interruption && npm run test:personal-multiharness`, followed by `make verify`.
-- **Done when:** A colleague can install Pulse with one command on any of the three singleton-host machines and the packed evidence proves one shared product rather than three integrations.
+  - Create a versioned authority profile in Go and CLI modules
+  - Modify `pulse-app/cli/src/personal-install.js`, `cli.js`, `workspace-binding.js`, and `trust-helper.js`
+  - Modify `pulse-app/internal/userpresence/` and Memory Home authorization routes/UI
+  - Modify doctor/readiness receipt projections and tests
+- **Approach:** Replace unconditional `presence_ready` with a versioned capability profile. The portable profile supports initial consent and ordinary Personal operations. Binding replacement and wipe require a WebAuthn assertion with `userVerification: required` or the signed macOS helper; the challenge binds exact action/project/binding/vault/data/nonce/expiry. Loopback, CSRF, and session binding protect transport only. MCP and noninteractive CLI never receive the protected capability. Shared publication remains disabled and untouched. U8 tests the authority behavior against a fixture Core; U10 owns real install/read/save integration.
+- **Test scenarios:** fixture-backed install/read/save authorization on all targets without native helper; MCP/`--yes`/loopback-only/replayed/expired/wrong-project protected challenges denied; direct WebAuthn or Mac enhanced assertion succeeds once; missing enhanced adapter does not block ordinary readiness but makes protected actions unavailable; receipt contains no secret. Browser coverage includes keyboard-only completion, deterministic focus entry/restoration, semantic affected-data labels, non-color warnings, screen-reader announcements for expiry/error/success, accessible countdown behavior, narrow widths, and zoom.
+- **Verification:** Go user-presence/Home tests, CLI authority/doctor tests, and browser tests for the challenge/card/history flow.
+- **Done when:** the authority profile behaves consistently against the fixture Core, ordinary operations need no native helper, and protected actions cannot be authorized through agent-accessible loopback/session material alone.
+
+### U9. Build, verify, and atomically activate cross-platform artifacts
+
+- **Goal:** Produce installable target sets with portable extraction and platform-appropriate release policy.
+- **Requirements:** R5-R8, R22; F3; KTD7, KTD12.
+- **Dependencies:** U5-U8.
+- **Files:**
+  - Refactor `pulse-app/cli/scripts/build-personal-release.mjs` into shared and target builders
+  - Modify `pulse-app/cli/src/artifact-installer.js` and tests
+  - Modify `pulse-app/cli/src/managed-embedder-release.js`
+  - Modify `pulse-app/cli/scripts/prepare-preview-vendor.mjs`
+  - Modify `pulse-app/cli/scripts/personal-preview-release-attestation.mjs`
+  - Modify `pulse-app/cli/package.json` and lockfile for the portable safe archive dependency
+- **Approach:** Use normalized safe archives with tree manifests and no required system `tar`/DMG materializer. Build static Go daemon variants and portable embedder variants. Enforce Apple Developer ID/notarization for production Mac artifacts, Authenticode+timestamp for Windows executables, and signed-catalog/tree policy for Linux. Keep production credentials outside PR builds; fixture builds exercise the same descriptors and activation code. Stage and health-prove a complete set before one durable transaction advances both active-set pointer and anti-rollback floor; retain an authorized prior-set recovery record until commit.
+- **Test scenarios:** traversal/symlink/hardlink/special-file archives; wrong signature/target; partial set; interrupted download/activation; last-known-good rollback; failed floor-raising upgrade restores the prior set and floor; Windows locked file; duplicate/common artifacts; exact selected download disclosure; production policy refuses unsigned Mac/Windows inputs.
+- **Verification:** target fixture builds on all native runners, artifact installer security suite, release schema tests, and authorized platform attestation scripts in dry-run/fixture mode.
+- **Done when:** each target runner builds and installs its own exact fixture set with no external archive/build utility, while production gates remain impossible to bypass.
+
+### U10. Finish OS-aware host parity and first-value product evidence
+
+- **Goal:** Prove the same usable memory through every vendor-supported Claude Code, Cursor, and Codex target, then show the non-technical user that continuity works and what it saved.
+- **Requirements:** R4, R16-R21, R24-R26; F1-F2; AE1-AE4, AE9-AE10, AE13; KTD2, KTD3, KTD10.
+- **Dependencies:** U9.
+- **Files:**
+  - Modify `pulse-app/cli/src/supported-hosts.js` and tests
+  - Modify `pulse-app/cli/src/personal-host-adapters.js`, `cli.js`, readiness/doctor/Home projections
+  - Modify native plugin launchers/manifests/hooks under `plugins/pulse/`
+  - Fix exact Claude `pulse-product` tool matcher and bind source host in `mcp/src/index.ts`
+  - Replace synthetic limits in `personal-preview-multiharness-e2e.mjs`
+  - Add native packed product scripts/fixtures for macOS, Windows, and Linux
+- **Approach:** Add bounded per-target host candidates and config locations; preserve post-consent digest revalidation. Make host capability aggregation lifecycle-aware. Use one canonical MCP schema/policy renderer and exact launcher-bound host identity. Define the shared installer state machine and Home hierarchy once. Fresh Home leads with continuity/readiness, then one next action and the real first memory card/receipt/fresh-session recall; host repair follows, while target/artifact/engine/security details are inspectable. Record deterministic estimated token counts and host-reported counts when available, with explicit evidence status. Run the exact packed-tarball command against native fixtures, start the real daemon/embedder, save through host A, restart, recall the same object ID through host B, and exercise concurrent first launch/repair.
+- **Test scenarios:** every vendor-supported singleton host pair and one two-host flow per OS family; absent/incompatible/reload-required/partial repair; every canonical progress/recovery state and next action; fresh empty Home to first real card/receipt/fresh-session recall within the R25 budget; measured/estimated/collecting token labels and no unsupported percentage; exact tool-name/schema parity; same object ID/receipt semantics; source host cannot be forged; two-host concurrent activation; revoked/wrong-project binding; spaces/non-ASCII/case/junction/symlink paths; no destructive MCP tools.
+- **Verification:** MCP/adapter unit tests plus native packed install/doctor/save/restart/cross-host-recall/repair scripts.
+- **Done when:** every vendor-supported OS/harness pair has calibrated native evidence for the semantic floor, each target has one ready singleton proof, each OS family has a supported two-host shared-store proof, and Home visibly proves first continuity value without sync/copy or invented savings.
+
+### U11. Make native universal proof a required GitHub gate
+
+- **Goal:** Prevent a green Mac build or synthetic fixture from being labeled universal product support.
+- **Requirements:** R20-R23, R27; F5; AE10, AE14; KTD12-KTD13.
+- **Dependencies:** U10.
+- **Files:**
+  - Create `.github/workflows/verify.yml`
+  - Create reusable target-matrix scripts/config under `pulse-app/cli/scripts/`
+  - Modify `Makefile`, `pulse-app/cli/package.json`, `README.md`, `docs/INSTALL_WITH_AGENT.md`, `AGENTS.md`, and release docs
+- **Approach:** Add a six-target native matrix using GitHub-hosted runners where this repository has them and labeled native self-hosted runners otherwise. Run Go build/tests, Node CLI/MCP tests, fixture target build, `npm pack`, `npm exec --yes --package=<exact-tarball> -- pulse install`, full retrieval, calibrated real-harness conformance, host scenarios, and uploaded evidence summaries. Add a protected release workflow that uses npm OIDC trusted publishing/provenance, production signing/model attestations, immutable digests, a temporary candidate tag, the same native registry-command matrix, and atomic promotion of unchanged package bytes to `preview`. Document only target/harness pairs whose required evidence is green.
+- **Test scenarios:** matrix fan-out includes all six native targets with no allowed failure; each fixture is version-calibrated against a real supported vendor harness installation per OS family; packed exact tarball is installed; evidence binds commit/package/target/catalog/artifacts/store/host milestones and performance/first-value/token proof; one failed target blocks the check; release refuses long-lived npm tokens, missing OIDC provenance, key revocation/rotation recovery, credentials, attestations, digest drift, or candidate smoke; docs cannot claim a target absent the support ledger.
+- **Verification:** workflow syntax validation, local matrix-script contract tests, and a green PR check suite on all six native runners.
+- **Done when:** GitHub exposes one required universal PR gate and one protected candidate-to-preview workflow; no target claim or public tag can advance without evidence for the exact package and production artifact bytes.
 
 ---
 
@@ -309,25 +398,33 @@ U1 defines the host inventory contract. U2 makes Core bootstrap host-neutral and
 
 | Gate | Applies to | Observable pass condition |
 |---|---|---|
-| `cd pulse-app/cli && npm test` | U1-U3 | Host inventory, Core extraction, adapter, receipt, readiness, and CLI regression tests pass |
-| `cd pulse-app/cli && npm run test:personal-clean-room` | U4 | Packed singleton install reaches full local retrieval without build tools or model keys |
-| `cd pulse-app/cli && npm run test:personal-interruption` | U3-U4 | Interrupted Core/adapter work resumes from live facts without replacing the vault |
-| `cd pulse-app/cli && npm run test:personal-multiharness` | U2-U4 | Claude-only, Cursor-only, Codex-only, all-host, no-host, incompatible-only, degraded parity/repair, second-host attachment, and behavioral cross-host recall cases pass |
-| `cd pulse-app/cli && npm run test:claude-product && npm run test:codex-product` | U2-U4 | Existing lifecycle products remain green against the shared Core |
-| `make verify` | U1-U4 | Repository-wide Go, MCP, CLI, packaging, deployment, and honesty gates pass |
+| Go six-target build/test matrix | U6-U11 | Every declared target compiles; native jobs run security/process tests |
+| `cd pulse-app/cli && npm test` | U5-U10 | Target, release, platform, authority, runtime, adapter, receipt, and CLI regressions pass |
+| Portable real-model quality gate | U7-U11 | Pinned local-only BGE-M3 export satisfies R12 quality and resource thresholds |
+| Packed native product matrix | U9-U11 | Exact npm tarball command installs one target set and proves daemon-backed full retrieval |
+| Cross-host continuity matrix | U10-U11 | Host B recalls host A's same object ID/store after restart without import/copy |
+| Authority/browser suite | U8-U11 | Ordinary cards work; protected action requires content-bound enhanced user verification; loopback/replay/agent attempts fail |
+| Artifact/release security suite | U5, U9, U11 | Target confusion, tamper, downgrade, traversal, partial set, and unsigned production inputs fail closed |
+| First-value and savings suite | U10-U11 | Fresh Home reaches one real recalled memory inside budget and labels token evidence without invented savings |
+| `make verify` | all | Existing repository Go/MCP/CLI/Team regression gates remain green on the canonical POSIX development path |
+| Required GitHub universal check | U11 | All six native jobs and evidence aggregation are green with no allowed failure |
+| Candidate-to-preview release gate | U11 | OIDC-published candidate, signed production assets, provenance, native registry smoke, and unchanged digest promotion pass |
 
-Behavioral release evidence must include the exact detected host set, one shared binding/store identity, adapter results, full-retrieval status, and proof that absent harness executables were forbidden. Benchmark or token-savings claims are outside this change; the existing ledger must not regress.
+Support truth is target- and harness-specific. A platform build, copied plugin, keyword fallback, synthetic embedder, or fixture-only retrieval is never sufficient evidence for `Pulse Local Preview ready.`
 
 ---
 
 ## Definition of Done
 
-- [ ] `npx -y @zbs-gg/pulse@preview install` has no preferred bootstrap host and requires only one of Claude Code, Cursor, or Codex.
-- [ ] Claude-only, Cursor-only, and Codex-only packed clean rooms pass with full local retrieval and no absent-host invocation.
-- [ ] Multiple detected harnesses attach to one binding, locator, product edge, daemon, and store.
-- [ ] No-host, incompatible-only, and zero-verified-host states stop honestly; a failed secondary host produces usable product readiness plus explicit degraded parity.
-- [ ] Install receipts, repair, doctor, terminal output, and JSON use the host-neutral Core-plus-host-matrix contract and safely read legacy v1 receipts.
-- [ ] Existing Claude Code and Codex product E2Es remain green; Cursor lifecycle/plugin coverage reaches the same capability floor.
-- [ ] User-facing install docs name the one command, supported singleton hosts, local writes, network effects, human gates, removal boundary, and honest readiness distinction.
-- [ ] `make verify` passes and abandoned compatibility branches, duplicate Core paths, debug output, and dead experimental code are removed from the diff.
-- [ ] The implementation is committed, pushed, reviewed in a PR, and CI is green; npm publication remains a separate explicit action.
+- [ ] One npm command installs the same project-bound Pulse Personal contract on supported macOS, Windows, and GNU/Linux x64/arm64 targets.
+- [ ] No supported path requires user-installed Go, Python, Make, Docker, model, embedding API key, MLX, DMG, or another harness.
+- [ ] The signed catalog selects and atomically activates one exact target set with anti-rollback and last-known-good recovery.
+- [ ] Windows, Linux, and both Mac architectures compile and pass native private-state/process/runtime tests without weakened trust checks.
+- [ ] Every supported target passes a real local BGE-M3 retrieval query; MLX is optional and visibly labeled as acceleration.
+- [ ] Ordinary Personal use works under the portable authority profile; binding replacement and wipe require content-bound enhanced user verification or remain unavailable. Shared publication is untouched and disabled.
+- [ ] Every vendor-supported Claude Code, Cursor, and Codex target exposes one semantic memory floor, one MCP/domain result contract, and one shared store; lifecycle readiness is proven separately from plugin installation.
+- [ ] Native packed clean rooms prove install, save, restart, same-object recall, repair, and cleanup through the exact npm tarball command.
+- [ ] Fresh Memory Home shows readiness, `0 memories`, one next action, the first real approved memory/receipt/fresh-session recall, and measured/estimated/collecting token evidence without unsupported savings claims.
+- [ ] GitHub Actions blocks merge on any missing target/product proof and provides a protected OIDC candidate-to-preview workflow that promotes only unchanged, natively proven package bytes.
+- [ ] Team Memory, cross-machine sync, connectors, and per-host/per-OS stores have not entered the diff.
+- [ ] The implementation is simplified, reviewed, browser-tested, committed, pushed, and opened as a PR; invoking the production release workflow remains a separate explicit post-merge action.
