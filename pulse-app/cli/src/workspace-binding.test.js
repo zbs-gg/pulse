@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync,
   mkdirSync,
@@ -8,6 +8,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -121,6 +122,13 @@ test('canonical workspace collapses nested paths and symlinks, survives rename, 
   const root = mkdtempSync(join(tmpdir(), 'pulse-binding-workspace.'));
   const repository = makeRepository(root);
   const nested = canonicalizeWorkspace(join(repository, 'nested'));
+  const legacyID = (label, path, prefix) => {
+    const info = statSync(path, { bigint: true });
+    const value = createHash('sha256').update(label).update('\0').update(`${info.dev}:${info.ino}`).digest('hex');
+    return `${prefix}_${value.slice(0, 32)}`;
+  };
+  assert.equal(nested.workspace_id, legacyID('pulse-workspace-v1', repository, 'workspace'));
+  assert.equal(nested.repository_id, legacyID('pulse-repository-v1', join(repository, '.git'), 'repository'));
   const symlink = join(root, 'project-link');
   symlinkSync(repository, symlink);
   assert.equal(canonicalizeWorkspace(symlink).workspace_id, nested.workspace_id);

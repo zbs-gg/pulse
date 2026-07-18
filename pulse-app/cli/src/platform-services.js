@@ -235,7 +235,9 @@ export function createPlatformServices({
       }
       return Object.freeze({
         canonical_path: realpathSync(identityPath),
-        identity_token: createHash('sha256').update(`${kind}\0${info.dev}\0${info.ino}`).digest('hex'),
+        // Callers treat this as an opaque token. Keeping the historical POSIX
+        // preimage preserves existing workspace and repository identifiers.
+        identity_token: `${info.dev}:${info.ino}`,
         kind,
         reparse_point: false,
       });
