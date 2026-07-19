@@ -87,7 +87,7 @@ function fixture() {
       origin: 'https://releases.zbs.gg', platform: 'darwin', sha256: digest(carrier),
       signing: executable ? {
         gatekeeper: true, identifier: `gg.zbs.pulse.${kind}`, notarized: true,
-        scheme: 'apple-developer-id', stapled: true, team_id: '44N4NZ86S5',
+        scheme: 'apple-developer-id', stapled: false, team_id: '44N4NZ86S5',
       } : {
         gatekeeper: false, identifier: null, notarized: false,
         scheme: 'release-manifest', stapled: false, team_id: null,
@@ -117,7 +117,7 @@ function fixture() {
         },
         capabilities: ['presence-helper'], libc: null, platform: 'darwin',
         verification_profile: {
-          gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5',
+          gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5',
         },
       },
     },
@@ -168,7 +168,8 @@ function legacyEnvelope(value) {
     const { tree_digest: _treeDigest, ...legacy } = artifact;
     if (kind !== 'model') {
       return [kind, legacy.executable ? {
-        ...legacy, format: 'dmg', url: `https://releases.zbs.gg/pulse/0.7.0/${kind}.dmg`,
+        ...legacy, format: 'dmg', signing: { ...legacy.signing, stapled: true },
+        url: `https://releases.zbs.gg/pulse/0.7.0/${kind}.dmg`,
       } : legacy];
     }
     const bytes = Buffer.from('\u0010\u0000\u0000\u0000\u0000\u0000\u0000\u0000{"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}\u0000');
@@ -204,7 +205,7 @@ function resignCatalog(value) {
   ).toString('base64');
 }
 
-test('empty Personal install downloads the signed compatibility set and publishes one atomic activation', async () => {
+test('empty Personal install stages a complete candidate then publishes one atomic generation after health', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime.'));
   const manifestPath = join(root, 'manifest.json');
   const dataDir = join(root, 'data');
@@ -243,16 +244,18 @@ test('empty Personal install downloads the signed compatibility set and publishe
     assert.equal(installed.release.schema, 'pulse.verified_release_manifest.v2');
     assert.deepEqual(installed.release.artifacts.model.model_policy.required_files, PORTABLE_MODEL_REQUIRED_FILES);
     assert.deepEqual(Object.keys(installed.activationSet.activations).sort(), Object.keys(value.files).sort());
-    assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'install-journal.json'), 'utf8')).phase, 'activated');
+		assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'install-journal.json'), 'utf8')).phase, 'candidate_staged');
 		assert.equal(existsSync(join(dataDir, 'runtime', 'minimum-release-epoch.json')), false,
 			'artifact provisioning alone must not commit the anti-rollback floor');
 		assert.throws(
 			() => commitPersonalRuntimeRelease(installed.release, { dataDir: 'relative-data' }),
 			/personal_runtime_configuration_invalid/,
 		);
-		assert.equal(commitPersonalRuntimeRelease(installed.release, { dataDir }), 7);
+    assert.equal(commitPersonalRuntimeRelease(installed.release, { dataDir }), 7);
     assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'minimum-release-epoch.json'), 'utf8')).epoch, 7);
     assert.equal(readActivatedArtifactSet(installed.release, { installRoot: join(dataDir, 'artifacts') }).record.epoch, 7);
+
+		writeFileSync(join(dataDir, 'runtime', 'minimum-release-epoch.json'), 'corrupt derived cache\n', { mode: 0o600 });
 
     const inspection = inspectPersonalRuntime({
       architecture: 'arm64', dataDir, manifestPath,

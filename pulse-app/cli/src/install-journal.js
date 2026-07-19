@@ -9,7 +9,7 @@ const FIELDS = Object.freeze([
 ]);
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const PHASES = new Set(['planned', 'downloading', 'artifacts_staged', 'activating', 'activated']);
+const PHASES = new Set(['planned', 'downloading', 'artifacts_staged', 'activating', 'candidate_staged', 'activated']);
 
 export class InstallJournalError extends Error {
   constructor(code) {

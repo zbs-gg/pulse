@@ -22,6 +22,8 @@ const INSTALLED_METADATA = 'activation.json';
 const DOWNLOAD_SCHEMA = 'pulse.artifact_download.v1';
 const ACTIVE_SET_SCHEMA = 'pulse.artifact_activation_set.v1';
 const ACTIVE_SET_FILE = 'active-release.json';
+const GENERATION_AUTHORITY_SCHEMA = 'pulse.artifact_generation_authority.v1';
+const GENERATION_AUTHORITY_FILE = 'artifact-generation-authority.json';
 const CARRIER_TREE_FILE = 'pulse-artifact-tree.json';
 const OPTIONAL_CARRIER_CONTROL_FILES = new Set(['internal-manifest.json']);
 const SAFE_DTYPES = new Set(['F16', 'BF16', 'F32', 'F64', 'I8', 'I16', 'I32', 'I64', 'U8', 'U16', 'U32', 'U64', 'BOOL']);
@@ -988,6 +990,12 @@ export function readActivatedArtifact(artifactID, {
   installRoot, expectedKind, expectedSha256, platformServices = defaultPlatformServices,
 } = {}) {
   if (!SAFE_ID.test(artifactID ?? '') || typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
+  const authority = readGenerationAuthorityIfPresent(resolve(installRoot), platformServices);
+  if (authority) {
+    const pointer = Object.values(authority.active.activations).find((entry) => entry.artifact_id === artifactID);
+    if (!pointer) fail('artifact_activation_identity_mismatch');
+    return validateActivationPointer(artifactID, pointer, { installRoot, expectedKind, expectedSha256, platformServices });
+  }
   const artifactRoot = join(resolve(installRoot), artifactID);
   const pointer = readPointer(join(artifactRoot, 'current.json'), platformServices);
   return validateActivationPointer(artifactID, pointer, { installRoot, expectedKind, expectedSha256, platformServices });
@@ -1020,6 +1028,21 @@ function validateVerifiedRelease(release) {
   return kinds;
 }
 
+function validateActivationSetRecord(value) {
+  if (!value || Array.isArray(value) ||
+      Object.keys(value).sort().join('\0') !== 'activations\0epoch\0manifest_digest\0schema\0version' ||
+      value.schema !== ACTIVE_SET_SCHEMA || typeof value.manifest_digest !== 'string' || !SHA256.test(value.manifest_digest) ||
+      typeof value.version !== 'string' || !Number.isSafeInteger(value.epoch) || value.epoch < 1 ||
+      !value.activations || Array.isArray(value.activations) || typeof value.activations !== 'object') {
+    fail('artifact_activation_set_invalid');
+  }
+  const kinds = Object.keys(value.activations);
+  if (kinds.length < 1 || kinds.length > 16 || kinds.some((kind) => !SAFE_ID.test(kind))) {
+    fail('artifact_activation_set_invalid');
+  }
+  return value;
+}
+
 function readActivationSetRecord(path, platformServices = defaultPlatformServices) {
   let bytes;
   let value;
@@ -1027,41 +1050,85 @@ function readActivationSetRecord(path, platformServices = defaultPlatformService
     bytes = platformServices.readPrivateFile(resolve(path), { maxBytes: 64 * 1024 });
   } catch { fail('artifact_activation_set_unsafe'); }
   try { value = JSON.parse(bytes); } catch { fail('artifact_activation_set_invalid'); }
-  if (bytes !== `${canonical(value)}\n` || !value || Array.isArray(value) ||
-      Object.keys(value).sort().join('\0') !== 'activations\0epoch\0manifest_digest\0schema\0version' ||
-      value.schema !== ACTIVE_SET_SCHEMA || typeof value.manifest_digest !== 'string' || !SHA256.test(value.manifest_digest) ||
-      typeof value.version !== 'string' || !Number.isSafeInteger(value.epoch) || value.epoch < 1 ||
-      !value.activations || Array.isArray(value.activations) || typeof value.activations !== 'object') {
-    fail('artifact_activation_set_invalid');
+  if (bytes !== `${canonical(value)}\n`) fail('artifact_activation_set_invalid');
+  return validateActivationSetRecord(value);
+}
+
+function validateGenerationAuthority(value) {
+  if (!value || Array.isArray(value) ||
+      Object.keys(value).sort().join('\0') !== 'active\0anti_rollback_floor\0previous\0schema' ||
+      value.schema !== GENERATION_AUTHORITY_SCHEMA || !Number.isSafeInteger(value.anti_rollback_floor) ||
+      value.anti_rollback_floor < 1) fail('artifact_release_authority_invalid');
+  validateActivationSetRecord(value.active);
+  if (value.anti_rollback_floor < value.active.epoch) fail('artifact_release_authority_invalid');
+  if (value.previous !== null) {
+    validateActivationSetRecord(value.previous);
+    if (value.previous.manifest_digest === value.active.manifest_digest ||
+        value.previous.epoch > value.anti_rollback_floor) fail('artifact_release_authority_invalid');
   }
   return value;
 }
 
-export function readActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
-  const kinds = validateVerifiedRelease(release);
+function readGenerationAuthorityIfPresent(installRoot, platformServices = defaultPlatformServices) {
+  let bytes;
+  try {
+    bytes = platformServices.readPrivateFile(join(resolve(installRoot), GENERATION_AUTHORITY_FILE), {
+      missing: true, maxBytes: 128 * 1024,
+    });
+  } catch { fail('artifact_release_authority_unsafe'); }
+  if (bytes === null) return null;
+  let value;
+  try { value = JSON.parse(bytes); } catch { fail('artifact_release_authority_invalid'); }
+  if (bytes !== `${canonical(value)}\n`) fail('artifact_release_authority_invalid');
+  return validateGenerationAuthority(value);
+}
+
+export function readArtifactGenerationAuthority({ installRoot, platformServices = defaultPlatformServices } = {}) {
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
-  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
-  if (record.manifest_digest !== release.manifest_digest || record.version !== release.version || record.epoch !== release.epoch ||
-      Object.keys(record.activations).sort().join('\0') !== kinds.join('\0')) {
-    fail('artifact_activation_set_identity_mismatch');
+  const authority = readGenerationAuthorityIfPresent(resolve(installRoot), platformServices);
+  if (!authority) fail('artifact_release_authority_unavailable');
+  return Object.freeze(authority);
+}
+
+export function readArtifactGenerationFloor({ installRoot, platformServices = defaultPlatformServices } = {}) {
+  if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
+  return readGenerationAuthorityIfPresent(resolve(installRoot), platformServices)?.anti_rollback_floor ?? 0;
+}
+
+function validateGeneration(record, { installRoot, release, platformServices = defaultPlatformServices } = {}) {
+  validateActivationSetRecord(record);
+  const kinds = Object.keys(record.activations).sort();
+  if (release) {
+    const releaseKinds = validateVerifiedRelease(release);
+    if (record.manifest_digest !== release.manifest_digest || record.version !== release.version ||
+        record.epoch !== release.epoch || kinds.join('\0') !== releaseKinds.join('\0')) {
+      fail('artifact_activation_set_identity_mismatch');
+    }
   }
   const activations = {};
   for (const kind of kinds) {
-    const artifact = release.artifacts[kind];
-    if (!artifact || typeof artifact.id !== 'string' || artifact.kind !== kind || artifact.version !== release.version ||
-        artifact.epoch !== release.epoch || typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256)) {
-      fail('artifact_release_invalid');
+    const pointer = record.activations[kind];
+    const artifact = release?.artifacts[kind];
+    if (!pointer || typeof pointer.artifact_id !== 'string' || !SAFE_ID.test(pointer.artifact_id)) {
+      fail('artifact_activation_set_invalid');
     }
-    const activation = validateActivationPointer(artifact.id, record.activations[kind], {
-      installRoot, expectedKind: kind, expectedSha256: artifact.sha256, platformServices,
+    if (artifact && (artifact.id !== pointer.artifact_id || artifact.kind !== kind ||
+        artifact.version !== release.version || artifact.epoch !== release.epoch)) fail('artifact_release_invalid');
+    const activation = validateActivationPointer(pointer.artifact_id, pointer, {
+      installRoot, expectedKind: kind, expectedSha256: artifact?.sha256, platformServices,
     });
-    if (activation.version !== release.version || activation.epoch !== release.epoch) {
-      fail('artifact_activation_set_identity_mismatch');
-    }
-    if (activation.tree_digest !== artifact.tree_digest) fail('artifact_activation_set_identity_mismatch');
+    if (activation.version !== record.version || activation.epoch !== record.epoch ||
+        (artifact && activation.tree_digest !== artifact.tree_digest)) fail('artifact_activation_set_identity_mismatch');
     activations[kind] = activation;
   }
   return Object.freeze({ activations: Object.freeze(activations), record: Object.freeze(record) });
+}
+
+export function readActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
+  if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
+  const authority = readGenerationAuthorityIfPresent(resolve(installRoot), platformServices);
+  const record = authority?.active ?? readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
+  return validateGeneration(record, { installRoot, release, platformServices });
 }
 
 // Resolve the last atomically committed compatibility set without consulting
@@ -1069,51 +1136,110 @@ export function readActivatedArtifactSet(release, { installRoot, platformService
 // while a newer install may still be switching individual artifacts.
 export function readCommittedArtifactSet({ installRoot, platformServices = defaultPlatformServices } = {}) {
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
-  const record = readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
-  const kinds = Object.keys(record.activations).sort();
-  if (kinds.length < 1 || kinds.length > 16 || kinds.some((kind) => !SAFE_ID.test(kind))) {
-    fail('artifact_activation_set_invalid');
-  }
-  const activations = {};
-  for (const kind of kinds) {
-    const pointer = record.activations[kind];
-    if (!pointer || typeof pointer.artifact_id !== 'string' || !SAFE_ID.test(pointer.artifact_id)) {
-      fail('artifact_activation_set_invalid');
-    }
-    const activation = validateActivationPointer(pointer.artifact_id, pointer, {
-      installRoot, expectedKind: kind, platformServices,
-    });
-    if (activation.version !== record.version || activation.epoch !== record.epoch) {
-      fail('artifact_activation_set_identity_mismatch');
-    }
-    activations[kind] = activation;
-  }
-  return Object.freeze({ activations: Object.freeze(activations), record: Object.freeze(record) });
+  const authority = readGenerationAuthorityIfPresent(resolve(installRoot), platformServices);
+  const record = authority?.active ?? readActivationSetRecord(join(resolve(installRoot), ACTIVE_SET_FILE), platformServices);
+  return validateGeneration(record, { installRoot, platformServices });
 }
 
-export function writeActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
+function installedActivationFor(artifact, { installRoot, platformServices = defaultPlatformServices } = {}) {
+  validateDescriptor(artifact);
+  const versionPath = join(resolve(installRoot), artifact.id, 'versions', createHash('sha256').update(canonical({
+    epoch: artifact.epoch, sha256: artifact.sha256, version: artifact.version,
+  })).digest('hex'));
+  const metadata = readInstalledMetadata(join(versionPath, INSTALLED_METADATA), platformServices);
+  const pointer = {
+    schema: POINTER_SCHEMA, activation_digest: metadata.digest, artifact_id: artifact.id,
+    epoch: artifact.epoch, sha256: artifact.sha256, version: artifact.version, version_path: versionPath,
+  };
+  return validateActivationPointer(artifact.id, pointer, {
+    installRoot, expectedKind: artifact.kind, expectedSha256: artifact.sha256, platformServices,
+  });
+}
+
+export function readStagedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
   const kinds = validateVerifiedRelease(release);
   if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
   const activations = {};
   for (const kind of kinds) {
     const artifact = release.artifacts[kind];
-    const activation = readActivatedArtifact(artifact.id, {
-      installRoot, expectedKind: kind, expectedSha256: artifact.sha256, platformServices,
-    });
-    if (activation.version !== release.version || activation.epoch !== release.epoch) {
-      fail('artifact_activation_set_identity_mismatch');
-    }
+    const activation = installedActivationFor(artifact, { installRoot, platformServices });
     if (activation.tree_digest !== artifact.tree_digest) fail('artifact_activation_set_identity_mismatch');
     activations[kind] = activationPointerRecord(activation);
   }
-  atomicJSON(join(resolve(installRoot), ACTIVE_SET_FILE), {
-    activations,
-    epoch: release.epoch,
-    manifest_digest: release.manifest_digest,
-    schema: ACTIVE_SET_SCHEMA,
-    version: release.version,
-  }, platformServices);
-  return readActivatedArtifactSet(release, { installRoot, platformServices });
+  const record = {
+    activations, epoch: release.epoch, manifest_digest: release.manifest_digest,
+    schema: ACTIVE_SET_SCHEMA, version: release.version,
+  };
+  return validateGeneration(record, { installRoot, release, platformServices });
+}
+
+function refreshDerivedActivationCaches(authority, installRoot, platformServices) {
+  atomicJSON(join(installRoot, ACTIVE_SET_FILE), authority.active, platformServices);
+  for (const [kind, pointer] of Object.entries(authority.active.activations)) {
+    const artifactRoot = join(installRoot, pointer.artifact_id);
+    ensurePrivateDirectory(artifactRoot, platformServices);
+    const previous = authority.previous?.activations[kind];
+    if (previous?.artifact_id === pointer.artifact_id) atomicJSON(join(artifactRoot, 'previous.json'), previous, platformServices);
+    atomicJSON(join(artifactRoot, 'current.json'), pointer, platformServices);
+  }
+}
+
+export function commitArtifactGeneration(release, {
+  installRoot, minimumAcceptedEpoch = 0, platformServices = defaultPlatformServices,
+} = {}) {
+  if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
+  if (!Number.isSafeInteger(minimumAcceptedEpoch) || minimumAcceptedEpoch < 0) fail('artifact_generation_floor_invalid');
+  const root = resolve(installRoot);
+  const candidate = readStagedArtifactSet(release, { installRoot: root, platformServices }).record;
+  const existingAuthority = readGenerationAuthorityIfPresent(root, platformServices);
+  let current = existingAuthority;
+  const floor = Math.max(current?.anti_rollback_floor ?? 0, minimumAcceptedEpoch);
+  if (release.epoch < floor) fail('artifact_generation_rollback');
+  if (!current && existsSync(join(root, ACTIVE_SET_FILE))) {
+    const legacyActive = readActivationSetRecord(join(root, ACTIVE_SET_FILE), platformServices);
+    validateGeneration(legacyActive, { installRoot: root, platformServices });
+    current = {
+      active: legacyActive, anti_rollback_floor: Math.max(minimumAcceptedEpoch, legacyActive.epoch),
+      previous: null, schema: GENERATION_AUTHORITY_SCHEMA,
+    };
+  }
+  if (existingAuthority?.active.manifest_digest === candidate.manifest_digest) {
+    try { refreshDerivedActivationCaches(existingAuthority, root, platformServices); } catch { /* repair is best-effort */ }
+    return validateGeneration(existingAuthority.active, { installRoot: root, release, platformServices });
+  }
+  ensurePrivateDirectory(root, platformServices);
+  const authority = {
+    active: candidate,
+    anti_rollback_floor: Math.max(floor, release.epoch),
+    previous: current?.active.manifest_digest === candidate.manifest_digest ? null : (current?.active ?? null),
+    schema: GENERATION_AUTHORITY_SCHEMA,
+  };
+  validateGenerationAuthority(authority);
+  atomicJSON(join(root, GENERATION_AUTHORITY_FILE), authority, platformServices);
+  try { refreshDerivedActivationCaches(authority, root, platformServices); } catch { /* caches never outrank authority */ }
+  return validateGeneration(authority.active, { installRoot: root, release, platformServices });
+}
+
+export function recoverCommittedArtifactGeneration({ installRoot, platformServices = defaultPlatformServices } = {}) {
+  if (typeof installRoot !== 'string') fail('artifact_activation_configuration_invalid');
+  const root = resolve(installRoot);
+  const current = readGenerationAuthorityIfPresent(root, platformServices);
+  if (!current?.previous) fail('artifact_generation_recovery_unavailable');
+  const authority = {
+    active: current.previous,
+    anti_rollback_floor: current.anti_rollback_floor,
+    previous: current.active,
+    schema: GENERATION_AUTHORITY_SCHEMA,
+  };
+  validateGeneration(authority.active, { installRoot: root, platformServices });
+  validateGenerationAuthority(authority);
+  atomicJSON(join(root, GENERATION_AUTHORITY_FILE), authority, platformServices);
+  try { refreshDerivedActivationCaches(authority, root, platformServices); } catch { /* caches never outrank authority */ }
+  return validateGeneration(authority.active, { installRoot: root, platformServices });
+}
+
+export function writeActivatedArtifactSet(release, { installRoot, platformServices = defaultPlatformServices } = {}) {
+  return commitArtifactGeneration(release, { installRoot, platformServices });
 }
 
 function defaultMaterializerFor(artifact) {
@@ -1125,6 +1251,7 @@ function defaultMaterializerFor(artifact) {
 
 export async function activateArtifactVersion(artifact, stagedPath, {
   installRoot, materialize, treeManifest, testOnlyMaterializer = false,
+  publishDerivedPointers = true,
   availableBytes = defaultAvailableBytes, minimumFreeBytes = 256 * 1024 * 1024,
   platformServices = defaultPlatformServices,
 } = {}) {
@@ -1142,7 +1269,7 @@ export async function activateArtifactVersion(artifact, stagedPath, {
   const previousPath = pointerPath(artifactRoot, 'previous.json');
   let current = null;
   let currentPointer = null;
-  if (existsSync(currentPath)) {
+  if (publishDerivedPointers && existsSync(currentPath)) {
     try {
       currentPointer = readPointer(currentPath, platformServices);
       current = validateActivationPointer(artifact.id, currentPointer, {
@@ -1197,14 +1324,16 @@ export async function activateArtifactVersion(artifact, stagedPath, {
     }, { platformServices });
     validateDataOnlyModel(target, artifact, activationTree, platformServices);
   }
-  if (currentPointer) atomicJSON(previousPath, currentPointer, platformServices);
   const activationDigest = sha256File(join(target, INSTALLED_METADATA), platformServices).digest;
   const next = {
     schema: POINTER_SCHEMA, artifact_id: artifact.id, epoch: artifact.epoch,
     sha256: artifact.sha256, version: artifact.version,
     version_path: target, activation_digest: activationDigest,
   };
-  atomicJSON(currentPath, next, platformServices);
+  if (publishDerivedPointers) {
+    if (currentPointer) atomicJSON(previousPath, currentPointer, platformServices);
+    atomicJSON(currentPath, next, platformServices);
+  }
   return next;
 }
 

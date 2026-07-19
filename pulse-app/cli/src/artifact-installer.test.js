@@ -14,6 +14,7 @@ import {
   activateArtifactVersion,
   canonicalArtifactJSON,
   codesignIdentityMatches,
+  commitArtifactGeneration,
   downloadVerifiedArtifact,
   materializeVerifiedCarrierDirectory,
   materializeVerifiedPortableArchive,
@@ -21,11 +22,14 @@ import {
   parseCodesignIdentity,
   readActivatedArtifact,
   readCommittedArtifactSet,
+  readArtifactGenerationAuthority,
   recoverArtifactActivation,
+  recoverCommittedArtifactGeneration,
   validateArtifactTree,
   validateSafetensorsFile,
   writeActivatedArtifactSet,
 } from './artifact-installer.js';
+import { defaultPlatformServices } from './platform-services.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -444,7 +448,10 @@ test('committed set survives a partial pointer switch and reused carriers still 
       installRoot, materialize, testOnlyMaterializer: true,
       treeManifest: treeManifest([{ path: 'bin/pulse', bytes: secondBytes, mode: 0o700, executable: true }]),
     });
-    assert.equal(readActivatedArtifact('pulse-daemon', { installRoot }).sha256, second.sha256);
+    assert.equal(JSON.parse(readFileSync(join(installRoot, 'pulse-daemon', 'current.json'), 'utf8')).sha256, second.sha256,
+      'legacy pointer cache may move while a candidate is being staged');
+    assert.equal(readActivatedArtifact('pulse-daemon', { installRoot }).sha256, first.sha256,
+      'artifact reads resolve the committed generation rather than a partial pointer switch');
     assert.equal(readCommittedArtifactSet({ installRoot }).activations.daemon.sha256, first.sha256);
 
     writeFileSync(source, firstBytes, { mode: 0o600 });
@@ -452,6 +459,76 @@ test('committed set survives a partial pointer switch and reused carriers still 
       installRoot, materialize, testOnlyMaterializer: true, treeManifest: firstTree,
       availableBytes: () => firstBytes.length - 1, minimumFreeBytes: 0,
     }), /artifact_disk_insufficient/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('one generation transaction owns active set and floor while pointer files remain derived caches', async () => {
+  const root = sandbox();
+  const installRoot = join(root, 'installed');
+  const source = join(root, 'daemon.tar.gz');
+  const materialize = async (carrier, target) => {
+    const bytes = readFileSync(carrier);
+    mkdirSync(join(target, 'bin'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(target, 'bin', 'pulse'), bytes, { mode: 0o700 });
+  };
+  const stage = async (bytes, version, epoch) => {
+    writeFileSync(source, bytes, { mode: 0o600 });
+    const descriptor = artifact(bytes, { format: 'tar.gz', version, epoch });
+    const manifest = treeManifest([{ path: 'bin/pulse', bytes, mode: 0o700, executable: true }]);
+    descriptor.tree_digest = digest(Buffer.from(canonicalArtifactJSON(manifest)));
+    await activateArtifactVersion(descriptor, source, {
+      installRoot, materialize, testOnlyMaterializer: true, treeManifest: manifest,
+      publishDerivedPointers: false,
+    });
+    return {
+      schema: 'pulse.verified_release_manifest.v2', manifest_digest: digest(Buffer.from(`${version}:${epoch}`)),
+      version, epoch, artifacts: { daemon: descriptor },
+    };
+  };
+  try {
+    const first = await stage(Buffer.from('first committed generation'), '0.8.0', 7);
+    commitArtifactGeneration(first, { installRoot });
+    const firstPointer = readFileSync(join(installRoot, 'pulse-daemon', 'current.json'), 'utf8');
+
+    const second = await stage(Buffer.from('second healthy generation'), '0.8.1', 8);
+    assert.equal(readCommittedArtifactSet({ installRoot }).record.manifest_digest, first.manifest_digest,
+      'staging a floor-raising candidate must not advance active authority');
+    assert.equal(readFileSync(join(installRoot, 'pulse-daemon', 'current.json'), 'utf8'), firstPointer,
+      'candidate staging does not touch the derived current cache');
+
+    let authorityWriteObserved = false;
+    const crashAfterAuthority = {
+      ...defaultPlatformServices,
+      atomicWritePrivateFile(path, bytes, options) {
+        defaultPlatformServices.atomicWritePrivateFile(path, bytes, options);
+        if (path.endsWith('/artifact-generation-authority.json')) {
+          authorityWriteObserved = true;
+          throw new Error('simulated_process_loss_after_atomic_replace');
+        }
+      },
+    };
+    assert.throws(() => commitArtifactGeneration(second, {
+      installRoot, platformServices: crashAfterAuthority,
+    }), /artifact_metadata_write_failed/);
+    assert.equal(authorityWriteObserved, true);
+
+    const committed = readCommittedArtifactSet({ installRoot });
+    const authority = readArtifactGenerationAuthority({ installRoot });
+    assert.equal(committed.record.manifest_digest, second.manifest_digest,
+      'authority remains a complete new generation after process loss');
+    assert.equal(authority.anti_rollback_floor, 8,
+      'floor advances inside the same atomic authority record');
+    assert.equal(authority.previous.manifest_digest, first.manifest_digest,
+      'the prior authorized generation is retained for exact recovery');
+    assert.equal(readFileSync(join(installRoot, 'pulse-daemon', 'current.json'), 'utf8'), firstPointer,
+      'a stale pointer cache cannot override generation authority');
+    assert.equal(readActivatedArtifact('pulse-daemon', { installRoot }).epoch, 8,
+      'artifact reads resolve authoritative generation before pointer caches');
+
+    const recovered = recoverCommittedArtifactGeneration({ installRoot });
+    assert.equal(recovered.record.manifest_digest, first.manifest_digest);
+    assert.equal(readArtifactGenerationAuthority({ installRoot }).anti_rollback_floor, 8,
+      'authorized previous recovery never lowers the anti-rollback floor');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

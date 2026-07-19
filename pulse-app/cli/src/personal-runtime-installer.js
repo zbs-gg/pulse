@@ -6,11 +6,13 @@ import { fileURLToPath } from 'node:url';
 
 import {
   activateArtifactVersion,
+  commitArtifactGeneration,
   downloadVerifiedArtifact,
   materializeVerifiedTree,
   readActivatedArtifactSet,
+  readArtifactGenerationFloor,
+  readStagedArtifactSet,
   recoverArtifactActivation,
-  writeActivatedArtifactSet,
 } from './artifact-installer.js';
 import { acquireInstallLock, writeInstallJournal } from './install-journal.js';
 import {
@@ -157,11 +159,18 @@ function recoverInvalidCurrent(artifact, installRoot, platformServices) {
   }
 }
 
-function readVerifiedPersonalRelease(manifestPath, epochPath, verification) {
+function readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, verification) {
+  const authorityPlatformServices = typeof verification.platformServices?.readPrivateFile === 'function'
+    ? verification.platformServices
+    : createPlatformServices({ platform: verification.platform, architecture: verification.architecture });
+  const authorityFloor = readArtifactGenerationFloor({
+    installRoot, platformServices: authorityPlatformServices,
+  });
+  const minimumAcceptedEpoch = authorityFloor > 0 ? authorityFloor : readMinimumReleaseEpoch(epochPath);
   return verifyReleaseManifestEnvelope(readCanonicalEnvelope(manifestPath), {
     architecture: verification.architecture,
     libc: verification.libc,
-    minimumAcceptedEpoch: readMinimumReleaseEpoch(epochPath),
+    minimumAcceptedEpoch,
     now: verification.now,
     osVersion: verification.osVersion,
     packageVersion: verification.packageVersion,
@@ -200,17 +209,19 @@ export async function provisionPersonalRuntime({
     const existingLock = acquireInstallLock(lockPath, { platformServices });
     existingLock();
   }
-  const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, {
-        architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+  const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
+        architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
+        platform, platformServices, trustedKeys,
   });
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
   const releaseLock = acquireInstallLock(lockPath, { platformServices });
   try {
-    const release = readVerifiedPersonalRelease(manifestPath, epochPath, {
-      architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys,
+    const release = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
+      architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
+      platform, platformServices, trustedKeys,
     });
     if (release.historical_only) fail('release_manifest_legacy');
-    const activeSetPath = join(installRoot, 'active-release.json');
+    const activeSetPath = join(installRoot, 'artifact-generation-authority.json');
     const previous = previousActivationDigest(activeSetPath);
     try {
       const activationSet = readActivatedArtifactSet(release, { installRoot, platformServices });
@@ -232,7 +243,7 @@ export async function provisionPersonalRuntime({
       const artifact = release.artifacts[kind];
       const fixture = materializers?.[kind];
       const options = {
-        installRoot, platformServices,
+        installRoot, platformServices, publishDerivedPointers: false,
         ...(fixture ? {
           materialize: fixture.materialize,
           testOnlyMaterializer: true,
@@ -247,8 +258,8 @@ export async function provisionPersonalRuntime({
         await activateArtifactVersion(artifact, staged[kind].path, options);
       }
     }
-    const activationSet = writeActivatedArtifactSet(release, { installRoot, platformServices });
-    writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'), { platformServices });
+    const activationSet = readStagedArtifactSet(release, { installRoot, platformServices });
+    writeInstallJournal(journalPath, journalRecord(release, previous, 'candidate_staged'), { platformServices });
     return { activationSet, release };
   } finally {
     releaseLock();
@@ -276,7 +287,9 @@ export function inspectPersonalRuntime({
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    join(root, 'artifacts'),
+    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
+      platform, platformServices, trustedKeys },
   );
   if (release.historical_only) {
     return Object.freeze({
@@ -331,7 +344,9 @@ export function inspectPersonalRelease({
   const release = readVerifiedPersonalRelease(
     manifestPath,
     join(root, 'runtime', 'minimum-release-epoch.json'),
-    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion, platform, trustedKeys },
+    join(root, 'artifacts'),
+    { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
+      platform, platformServices, trustedKeys },
   );
   return Object.freeze({
     ready: !release.historical_only,
@@ -343,7 +358,9 @@ export function inspectPersonalRelease({
 // Raise the anti-rollback floor only after managed retrieval and host
 // activation have succeeded. A valid but unhealthy candidate must not strand
 // the last-known-good release.
-export function commitPersonalRuntimeRelease(release, { dataDir } = {}) {
+export function commitPersonalRuntimeRelease(release, {
+  dataDir, platformServices = createPlatformServices(),
+} = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
@@ -353,8 +370,13 @@ export function commitPersonalRuntimeRelease(release, { dataDir } = {}) {
   const runtimeRoot = join(root, 'runtime');
   const releaseLock = acquireInstallLock(join(runtimeRoot, 'install.lock'));
   try {
-    readActivatedArtifactSet(release, { installRoot });
-    return advanceMinimumReleaseEpoch(join(runtimeRoot, 'minimum-release-epoch.json'), release.epoch);
+    const authorityFloor = readArtifactGenerationFloor({ installRoot, platformServices });
+    const legacyFloor = authorityFloor > 0 ? 0 : readMinimumReleaseEpoch(join(runtimeRoot, 'minimum-release-epoch.json'));
+    commitArtifactGeneration(release, { installRoot, minimumAcceptedEpoch: legacyFloor, platformServices });
+    try { advanceMinimumReleaseEpoch(join(runtimeRoot, 'minimum-release-epoch.json'), release.epoch); } catch {
+      // Compatibility cache only. The atomic release authority remains the floor source.
+    }
+    return release.epoch;
   } finally {
     releaseLock();
   }
