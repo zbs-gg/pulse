@@ -37,6 +37,12 @@ test('binding transaction recovery runs only at the SessionStart trust boundary'
   }
 });
 
+test('synthetic worker diagnostics expose only stable content-free error codes', () => {
+  assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic({ code: 'capture_state_unsafe' }), 'capture_state_unsafe');
+  assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic(new Error('pulse_response_invalid')), 'pulse_response_invalid');
+  assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic(new Error('/private/path leaked')), 'hook_failure_unclassified');
+});
+
 test('product hook entrypoint rejects an unknown host before authority or runtime work', async () => {
   let recovered = false;
   await assert.rejects(

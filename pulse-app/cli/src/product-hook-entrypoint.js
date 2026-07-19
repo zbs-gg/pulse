@@ -63,6 +63,13 @@ function productHookWitnessPaths(resolved, environment = process.env) {
   ].filter((path) => typeof path === 'string' && existsSync(path));
 }
 
+function syntheticHookDiagnostic(error) {
+  const value = typeof error?.code === 'string' ? error.code : error?.message;
+  return typeof value === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(value)
+    ? value
+    : 'hook_failure_unclassified';
+}
+
 export async function runProductHookWorker(host, environment = process.env, dependencies = {}) {
   const runtimeResolver = createHookWorkerRuntimeResolver({
     host,
@@ -84,6 +91,7 @@ export async function runProductHookWorker(host, environment = process.env, depe
         input,
         resolveRuntime: runtimeResolver.resolve,
         writeOutput: async (serialized) => { output += serialized; },
+        ...(environment.PULSE_TRUST_MODE === 'test' ? { degradedReason: syntheticHookDiagnostic } : {}),
       });
       return output;
     },
@@ -94,6 +102,7 @@ export const __productHookEntrypointTest = Object.freeze({
   productHookWitnessPaths,
   recoverProductBindingAuthority,
   requiresProductBindingRecovery,
+  syntheticHookDiagnostic,
 });
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) &&

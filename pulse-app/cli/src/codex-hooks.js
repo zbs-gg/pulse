@@ -402,24 +402,31 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       return healthy({});
     }
     throw new Error('unsupported_codex_hook');
-  } catch {
+  } catch (error) {
+    const degradedReason = dependencies.degradedReason?.(error);
+    const degradedDiagnostic = typeof degradedReason === 'string'
+      ? { pulseTestDiagnostic: degradedReason }
+      : {};
     if (eventName === 'Stop' && event.stop_hook_active) {
       const receipt = hookFailureReceipt(event, 'finalize_failed', now);
       recordFailure(resolved, receipt);
       return {
         continue: true,
         systemMessage: `Pulse finalize_failed receipt: ${receipt.receipt_id}`,
+        ...degradedDiagnostic,
       };
     }
     if (eventName === 'Stop') {
       return {
         decision: 'block',
         reason: 'Pulse did not finalize this turn. Retry finalization once before stopping.',
+        ...degradedDiagnostic,
       };
     }
     return {
       continue: true,
       systemMessage: `Pulse ${eventName} degraded: bound memory context is unavailable.`,
+      ...degradedDiagnostic,
     };
   }
 }

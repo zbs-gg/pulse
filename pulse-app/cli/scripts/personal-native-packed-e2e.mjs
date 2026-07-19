@@ -494,7 +494,11 @@ try {
     extra: { source: 'startup' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstSession.continue, true);
-  assert.match(firstSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
+  assert.match(
+    firstSession.hookSpecificOutput?.additionalContext,
+    /pulse\.context\.v1/,
+    `native packed SessionStart degraded: ${JSON.stringify(firstSession)}`,
+  );
   markFirstValueStage('session_start');
 
   const firstPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
