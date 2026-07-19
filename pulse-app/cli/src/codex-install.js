@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { migrateLegacyPulseHookConfig } from './host-adapter.js';
+import { defaultPlatformServices } from './platform-services.js';
 
 const RUNTIME_MANIFEST = 'runtime-manifest.json';
 const MARKETPLACE_SNAPSHOT_MANIFEST = 'snapshot.json';
@@ -135,12 +136,18 @@ export function codexMarketplaceDoctorCheck({ exact, marketplace, snapshot }) {
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ARTIFACT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
-function ownerControlledTreeDigest(root, label, { excludeRootFiles = [] } = {}) {
+function ownerControlledTreeDigest(root, label, {
+	excludeRootFiles = [], platformServices = defaultPlatformServices,
+} = {}) {
 	const base = resolve(root);
 	const excluded = new Set(excludeRootFiles);
+	const windows = platformServices.platform === 'win32';
 	const rootInfo = lstatSync(base);
 	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : rootInfo.uid;
-	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== currentUID || (rootInfo.mode & 0o022) !== 0) {
+	if (windows) {
+		try { platformServices.assertPrivateState(base, { kind: 'directory' }); } catch { throw new Error(`${label}_unsafe`); }
+	} else if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== currentUID ||
+		(rootInfo.mode & 0o022) !== 0) {
 		throw new Error(`${label}_unsafe`);
 	}
 	const hash = createHash('sha256');
@@ -150,16 +157,25 @@ function ownerControlledTreeDigest(root, label, { excludeRootFiles = [] } = {}) 
 			const path = join(directory, name);
 			const relative = prefix ? `${prefix}/${name}` : name;
 			const info = lstatSync(path);
-			if (info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o022) !== 0 ||
-				(info.isFile() && info.nlink !== 1)) {
-				throw new Error(`${label}_unsafe`);
-			}
+			if (info.isSymbolicLink() || (!windows && (info.uid !== currentUID || (info.mode & 0o022) !== 0 ||
+				(info.isFile() && info.nlink !== 1)))) throw new Error(`${label}_unsafe`);
 			if (info.isDirectory()) {
+				if (windows) {
+					try { platformServices.assertPrivateState(path, { kind: 'directory' }); } catch { throw new Error(`${label}_unsafe`); }
+				}
 				visit(path, relative);
 			} else if (info.isFile()) {
+				let bytes = readFileSync(path);
+				if (windows) {
+					try {
+						bytes = platformServices.readPrivateFile(path, {
+							encoding: null, minBytes: 0, maxBytes: 64 * 1024 * 1024,
+						});
+					} catch { throw new Error(`${label}_unsafe`); }
+				}
 				hash.update(relative);
 				hash.update('\x00');
-				hash.update(readFileSync(path));
+				hash.update(bytes);
 				hash.update('\x00');
 			} else {
 				throw new Error(`${label}_unsafe`);
@@ -172,10 +188,12 @@ function ownerControlledTreeDigest(root, label, { excludeRootFiles = [] } = {}) 
 
 function requireProductEdgeFile(root, relative, label) {
 	const path = join(root, relative);
-	let info;
-	try { info = lstatSync(path); } catch { throw new Error(`${label}_missing`); }
-	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o022) !== 0) {
+	if (!existsSync(path)) throw new Error(`${label}_missing`);
+	try {
+		defaultPlatformServices.readIntegrityFile(path, {
+			owner: 'root-or-current', encoding: null, maxBytes: 64 * 1024 * 1024,
+		});
+	} catch {
 		throw new Error(`${label}_unsafe`);
 	}
 	return path;
@@ -302,11 +320,21 @@ export function normalizePrivateTree(root) {
 		if (info.isSymbolicLink()) throw new Error('codex_marketplace_snapshot_unsafe');
 		if (info.isDirectory()) {
 			chmodSync(path, 0o700);
+			if (defaultPlatformServices.platform === 'win32') {
+				try { defaultPlatformServices.assertPrivateState(path, { kind: 'directory' }); } catch {
+					throw new Error('codex_marketplace_snapshot_unsafe');
+				}
+			}
 			for (const name of readdirSync(path)) visit(join(path, name));
 			return;
 		}
 		if (!info.isFile()) throw new Error('codex_marketplace_snapshot_unsafe');
 		chmodSync(path, (info.mode & 0o111) !== 0 ? 0o700 : 0o600);
+		if (defaultPlatformServices.platform === 'win32') {
+			try { defaultPlatformServices.assertPrivateState(path, { kind: 'file' }); } catch {
+				throw new Error('codex_marketplace_snapshot_unsafe');
+			}
+		}
 	};
 	visit(root);
 }
