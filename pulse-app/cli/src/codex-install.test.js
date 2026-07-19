@@ -197,6 +197,7 @@ function writeSignedProductEdgeFixture(root, { releaseVersion = '0.7.0', pluginV
 	}));
 	writeFileSync(join(pluginRoot, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
 	writeFileSync(join(pluginRoot, 'hooks', 'pulse-hook.mjs'), 'export {}\n');
+	writeFileSync(join(pluginRoot, 'hook-worker-client.mjs'), 'export {}\n');
 	writeFileSync(join(pluginRoot, 'runtime-locator.mjs'), 'export {}\n');
 	writeFileSync(join(pluginRoot, 'windows-platform-adapter.mjs'), 'export {}\n');
 	writeFileSync(join(pluginRoot, 'mcp', 'server.mjs'), 'export {}\n');

@@ -251,6 +251,7 @@ export function resolveSignedCodexProductEdge({
 	);
 	for (const [relative, label] of [
 		['.mcp.json', 'codex_plugin_mcp'],
+		['hook-worker-client.mjs', 'codex_plugin_hook_worker_client'],
 		['hooks/hooks.json', 'codex_plugin_hooks'],
 		['hooks/pulse-hook.mjs', 'codex_plugin_hook_launcher'],
 		['runtime-locator.mjs', 'codex_plugin_runtime_locator'],

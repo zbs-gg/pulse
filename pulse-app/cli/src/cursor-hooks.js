@@ -7,6 +7,7 @@ import {
   extractPulseReceiptRefs,
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
+  isPulseRuntimeAuthorityMutation,
   isGuardedCodexTool,
   isTrustedPulseProductTool,
   normalizeCursorHook,
@@ -181,7 +182,8 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
 
   if (eventName === 'preToolUse' &&
       (isDestructivePulseTool(rawInput.tool_name) ||
-       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input))) {
+       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
+       isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
     return denied('Pulse deletion is user-controlled and is never agent-callable.');
   }
 

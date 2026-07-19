@@ -23,6 +23,7 @@ import {
   gitTeamMemoryCardMarkers,
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
+  isPulseRuntimeAuthorityMutation,
   isGuardedCodexTool,
   isTrustedPulseProductTool,
   normalizeCodexHook,
@@ -264,7 +265,8 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
 
   if (eventName === 'PreToolUse') {
     if (isDestructivePulseTool(rawInput.tool_name) ||
-        isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input)) {
+        isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
+        isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input)) {
       return healthy(preToolDenied(
         'Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.',
       ));

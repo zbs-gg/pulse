@@ -10,6 +10,7 @@ import {
   extractPulseReceiptRefs,
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
+  isPulseRuntimeAuthorityMutation,
   isGuardedCodexTool,
   normalizeClaudeHook,
   renderAdditionalContext,
@@ -182,7 +183,8 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
 
   if (eventName === 'PreToolUse' &&
       (isDestructivePulseTool(rawInput.tool_name) ||
-       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input))) {
+       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
+       isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
     return preToolDenied('Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.');
   }
 

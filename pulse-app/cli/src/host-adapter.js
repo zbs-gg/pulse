@@ -450,6 +450,19 @@ export function isDestructivePulseShellInvocation(toolName, toolInput) {
     /(?:^|[\s'"=])(?:~\/\.pulse|\$HOME\/\.pulse|\/[^\s'";|]+\/\.pulse)\/secret\.key(?:[\s'";|]|$)/i.test(command);
 }
 
+export function isPulseRuntimeAuthorityMutation(toolName, toolInput) {
+  if (typeof toolName !== 'string' || !toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    return false;
+  }
+  const authorityPath = /(?:^|[\\/])\.pulse[\\/]runtime[\\/]hook-workers(?:[\\/]|$)/i;
+  if (/^(?:Bash|Shell)$/i.test(toolName) && typeof toolInput.command === 'string') {
+    return authorityPath.test(toolInput.command);
+  }
+  if (!/^(?:Write|Edit|apply_patch)$/i.test(toolName)) return false;
+  return ['file_path', 'path', 'target_path'].some((field) =>
+    typeof toolInput[field] === 'string' && authorityPath.test(toolInput[field]));
+}
+
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
     /^mcp__pulse-product__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish|sync))$/i.test(toolName);
@@ -463,7 +476,7 @@ export function codexHookExecutionDigest(pluginRoot, runtimePath) {
 	const hash = createHash('sha256');
 	for (const relative of [
 		'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'windows-platform-adapter.mjs',
-		'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+		'hook-worker-client.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
 	]) {
     hash.update(relative);
     hash.update('\x00');

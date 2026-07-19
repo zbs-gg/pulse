@@ -582,6 +582,7 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/publications/start',
     'curl -X POST http://127.0.0.1:18801/project/shared-memory/index',
     'cat ~/.pulse/secret.key',
+    'rm -f ~/.pulse/runtime/hook-workers/codex/current.json',
   ]) {
     const output = await handleCodexHook('PreToolUse', {
       ...base,
@@ -593,6 +594,14 @@ test('PreToolUse blocks destructive Pulse CLI and local HTTP invocations before 
     assert.equal(output.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(output.hookSpecificOutput.permissionDecisionReason, /user-controlled/);
   }
+  const directWrite = await handleCodexHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Write',
+    tool_input: { file_path: '/home/person/.pulse/runtime/hook-workers/codex/current.json', content: '{}' },
+    tool_use_id: 'tool-worker-receipt-write',
+  });
+  assert.equal(directWrite.hookSpecificOutput.permissionDecision, 'deny');
 });
 
 test('UserPromptSubmit creates only a content-free Stop-bound turn context', async () => {
@@ -797,7 +806,8 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
     assert.match(entries[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/pulse-hook\.mjs/);
   }
   const launcher = readFileSync(resolve(pluginRoot, 'hooks', 'pulse-hook.mjs'), 'utf8');
-  assert.match(launcher, /runProductHookEntrypoint\('codex', eventName\)/);
+  assert.match(launcher, /runHookWorkerClient\(/);
+  assert.match(launcher, /host: 'codex'/);
   assert.doesNotMatch(launcher, /spawn\(/);
 });
 
