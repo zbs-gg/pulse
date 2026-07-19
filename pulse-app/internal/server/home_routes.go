@@ -158,7 +158,8 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := renderMemoryHomeHTML(memoryHomePage{
 		Data: data, Pending: cards,
-		UnassignedEnabled: s.cfg.UnassignedInboxPath != "", UnassignedUnavailable: unassignedUnavailable,
+		EnhancedPresenceProfile: s.cfg.EnhancedPresenceAuthorizer.Profile(),
+		UnassignedEnabled:       s.cfg.UnassignedInboxPath != "", UnassignedUnavailable: unassignedUnavailable,
 		Unassigned: memoryHomeUnassignedCards(unassignedSnapshot.Cards),
 		UnassignedActivity: memoryHomeUnassignedActivities(
 			unassignedSnapshot.Activity, data.Boundary.BindingDigest,

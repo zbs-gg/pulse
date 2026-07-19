@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  PERSONAL_AUTHORITY_PROFILE_SCHEMA,
   PERSONAL_INSTALL_STEPS,
   PersonalInstallError,
   runPersonalInstall,
@@ -33,7 +34,6 @@ function supportedPlan(overrides = {}) {
 function harness(overrides = {}) {
   const state = {
     runtime: false,
-    presence: false,
     principal: null,
     binding: null,
     core: false,
@@ -48,11 +48,6 @@ function harness(overrides = {}) {
       mutations.push('runtime');
       state.runtime = true;
       return { manifest_digest: 'a'.repeat(64), release_epoch: 1 };
-    },
-    inspectPresence: async () => ({ ready: state.presence, status: state.presence ? 'ready' : 'not_installed' }),
-    installPresence: async () => {
-      mutations.push('presence');
-      state.presence = true;
     },
     inspectPrincipal: async () => state.principal,
     createPrincipal: async () => {
@@ -147,8 +142,24 @@ test('new install rechecks every durable fact and executes the security ordering
 
   assert.equal(result.outcome, 'ready');
   assert.equal(result.reason_code, 'installed');
-  assert.deepEqual(run.mutations, ['runtime', 'presence', 'principal', 'binding', 'core', 'activation']);
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
   assert.deepEqual(result.completed_steps, PERSONAL_INSTALL_STEPS);
+  assert.equal(PERSONAL_INSTALL_STEPS[1], 'authority_profile_ready');
+  assert.deepEqual(result.authority_profile, {
+    schema: PERSONAL_AUTHORITY_PROFILE_SCHEMA,
+    version: 1,
+    kind: 'portable',
+    ordinary_ready: true,
+    enhanced_presence: {
+      schema: 'pulse.enhanced_presence.profile.v1',
+      version: 1,
+      kind: 'unavailable',
+      available: false,
+      protected_actions: [],
+      reason_code: 'enhanced_presence_unavailable',
+    },
+  });
+  assert.deepEqual(run.receipts.at(-1).authority_profile, result.authority_profile);
   assert.equal(result.preserved_data, true);
   assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
   assert.match(result.next_action, /Run pulse home/);
@@ -220,7 +231,6 @@ test('a host rollback failure blocks readiness even when another host is verifie
 test('already healthy install is idempotent and finishes with an already-installed receipt', async () => {
   const run = harness();
   run.state.runtime = true;
-  run.state.presence = true;
   run.state.principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
   run.state.binding = { binding_id: 'binding_test', principal_ref: run.state.principal.principal_id };
   run.state.core = true;
@@ -244,7 +254,6 @@ test('already healthy install is idempotent and finishes with an already-install
 test('reused prerequisites do not label a fresh install as resumed', async () => {
   const run = harness();
   run.state.runtime = true;
-  run.state.presence = true;
   const result = await runPersonalInstall({
     plan: supportedPlan(),
     consent: true,
@@ -260,7 +269,6 @@ test('reused prerequisites do not label a fresh install as resumed', async () =>
 test('resume label requires explicit durable resume evidence and still rechecks facts', async () => {
   const run = harness();
   run.state.runtime = true;
-  run.state.presence = true;
   const result = await runPersonalInstall({
     plan: supportedPlan(),
     consent: true,
@@ -285,15 +293,13 @@ test('a fresh process resumes from durable inspected facts without repeating the
     const statePath = process.env.PULSE_STATE_PATH;
     const receiptPath = process.env.PULSE_RECEIPT_PATH;
     const interrupted = process.env.PULSE_INTERRUPT === '1';
-    const initial = { runtime: false, presence: false, principal: null, binding: null, core: false, activation: false, health: false, runtime_mutations: 0, core_mutations: 0 };
+    const initial = { runtime: false, principal: null, binding: null, core: false, activation: false, health: false, runtime_mutations: 0, core_mutations: 0 };
     const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : initial;
     const save = () => fs.writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
     const plan = { schema: 'pulse.personal_install_plan.v2', contract_version: 2, outcome: 'ready_to_install', reason_codes: [], detected: { workspace: { workspace_id: 'workspace_test', repository_id: 'repository_test', canonical_path: '/private/project' } } };
     const dependencies = {
       inspectRuntime: async () => ({ ready: state.runtime }),
       provisionRuntime: async () => { state.runtime = true; state.runtime_mutations += 1; save(); },
-      inspectPresence: async () => ({ ready: state.presence }),
-      installPresence: async () => { state.presence = true; save(); },
       inspectPrincipal: async () => state.principal,
       createPrincipal: async () => { state.principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' }; save(); return state.principal; },
       inspectBinding: async () => state.binding ? { ready: true, binding: state.binding } : { ready: false, status: 'missing' },
@@ -365,7 +371,7 @@ test('terminal result exposes a safe writer reference and rejects path-like refe
   assert.equal(pathResult.receipt_ref, 'pulse://receipts/install/latest');
 });
 
-test('presence cancellation stops before identity or binding mutation', async () => {
+test('legacy presence-helper callbacks are never invoked by an ordinary Personal install', async () => {
   const run = harness({
     installPresence: async () => {
       run.mutations.push('presence_attempt');
@@ -378,11 +384,11 @@ test('presence cancellation stops before identity or binding mutation', async ()
     dependencies: run.dependencies,
   });
 
-  assert.equal(result.outcome, 'action_required');
-  assert.equal(result.reason_code, 'presence_denied');
-  assert.deepEqual(run.mutations, ['runtime', 'presence_attempt']);
-  assert.deepEqual(result.completed_steps, ['artifacts_staged']);
-  assert.equal(run.receipts.at(-1).outcome, 'action_required');
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'installed');
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.equal(result.authority_profile.enhanced_presence.available, false);
+  assert.deepEqual(result.authority_profile.enhanced_presence.protected_actions, []);
 });
 
 test('healthy retrieval with incomplete activation reports the exact activation reason', async () => {
@@ -452,7 +458,7 @@ test('unsafe bindings stop on an existing read-only review action without replac
     assert.equal(result.reason_code, `binding_${status}`);
     assert.match(result.next_action, /pulse install-plan --json/);
     assert.doesNotMatch(result.next_action, /pulse repair/);
-    assert.deepEqual(run.mutations, ['runtime', 'presence', 'principal']);
+    assert.deepEqual(run.mutations, ['runtime', 'principal']);
     assert.equal(run.mutations.includes('activation'), false);
   }
 });
@@ -490,8 +496,7 @@ test('verification failure after mutation returns a stable blocked result and du
 
 test('generic failure after a completed step is sanitized and writes one terminal partial receipt', async () => {
   const run = harness({
-    installPresence: async () => {
-      run.mutations.push('presence_attempt');
+    inspectAuthorityProfile: async () => {
       throw new Error('secret path: /Users/person/private');
     },
   });

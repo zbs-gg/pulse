@@ -1,3 +1,5 @@
+import { normalizePersonalAuthorityProfile } from './personal-authority-profile.js';
+
 const SCHEMA = 'pulse.personal_live_readiness.v1';
 const SUPPORTED_HOST_SCHEMA = 'pulse.supported_host_live_readiness.v1';
 const SUPPORTED_HOSTS = new Set(['claude-code', 'codex', 'cursor']);
@@ -69,7 +71,6 @@ function failed(checks, name) {
 }
 
 function reasonFromChecks(checks) {
-  if (failed(checks, 'presence_trust')) return 'presence_required';
   if (failed(checks, 'authority') || failed(checks, 'binding')) return 'binding_repair_required';
   if (['codex', 'plugin', 'marketplace', 'plugin_mcp', 'mcp_shadow', 'legacy_hooks'].some((name) => failed(checks, name))) {
     return 'codex_plugin_unavailable';
@@ -101,7 +102,6 @@ export function projectPersonalLiveReadiness(checks, checkedAt = new Date()) {
 }
 
 function supportedHostReasonFromChecks(checks) {
-  if (failed(checks, 'presence_trust')) return 'presence_required';
   if (failed(checks, 'authority') || failed(checks, 'binding')) return 'binding_repair_required';
   const core = new Set([
     'presence_trust', 'authority', 'binding', 'runtime', 'activation', 'capture', 'hooks', 'vault', 'retrieval',
@@ -147,6 +147,10 @@ export function personalInstallHealthFromReadiness(snapshot) {
     outcome: snapshot.outcome,
     reason_code: snapshot.reason_code,
   };
+}
+
+export function projectPersonalAuthorityProfile(checks) {
+  return normalizePersonalAuthorityProfile(checks?.authority_profile);
 }
 
 export const PERSONAL_LIVE_READINESS_SCHEMA = SCHEMA;

@@ -1,12 +1,16 @@
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { isCanonicalRepositoryID } from './host-adapter.js';
+import {
+  normalizePersonalAuthorityProfile,
+  PERSONAL_AUTHORITY_PROFILE_SCHEMA,
+} from './personal-authority-profile.js';
 import { defaultPlatformServices } from './platform-services.js';
 import { SUPPORTED_HOST_IDS } from './supported-hosts.js';
 
 const STEP = Object.freeze({
   artifacts: 'artifacts_staged',
-  presence: 'presence_ready',
+  authority: 'authority_profile_ready',
   principal: 'principal_ready',
   binding: 'binding_ready',
   core: 'core_ready',
@@ -64,7 +68,6 @@ function fail(code) {
 function exactDependencies(dependencies) {
   const required = [
     'inspectRuntime', 'provisionRuntime',
-    'inspectPresence', 'installPresence',
     'inspectPrincipal', 'createPrincipal',
     'inspectBinding', 'createBinding',
     'inspectCore', 'activateCore',
@@ -72,6 +75,10 @@ function exactDependencies(dependencies) {
     'inspectHealth', 'writeReceipt',
   ];
   if (!dependencies || required.some((name) => typeof dependencies[name] !== 'function')) {
+    fail('dependencies_invalid');
+  }
+  if (dependencies.inspectAuthorityProfile !== undefined &&
+      typeof dependencies.inspectAuthorityProfile !== 'function') {
     fail('dependencies_invalid');
   }
   return dependencies;
@@ -131,6 +138,7 @@ function nextAction(reasonCode) {
 }
 
 function terminalResult(plan, {
+  authorityProfile,
   completedSteps = [],
   hostStatus,
   outcome,
@@ -140,6 +148,7 @@ function terminalResult(plan, {
   const normalizedHostStatus = normalizePersonalInstallHostStatus(hostStatus);
   return {
     schema: 'pulse.personal_install_result.v2',
+    authority_profile: normalizePersonalAuthorityProfile(authorityProfile),
     outcome,
     reason_code: reasonCode,
     completed_steps: [...completedSteps],
@@ -187,6 +196,7 @@ export function normalizePersonalInstallHostStatus(value) {
 function receiptFor(result) {
   return {
     schema: 'pulse.personal_install_receipt.v2',
+    authority_profile: normalizePersonalAuthorityProfile(result.authority_profile),
     outcome: result.outcome,
     reason_code: result.reason_code,
     completed_steps: [...result.completed_steps],
@@ -206,6 +216,8 @@ export function writePersonalInstallReceipt(receipt, {
   now = new Date(),
   platformServices = defaultPlatformServices,
 } = {}) {
+  let authorityProfile;
+  try { authorityProfile = normalizePersonalAuthorityProfile(receipt?.authority_profile); } catch { fail('install_receipt_invalid'); }
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
       !receipt || receipt.schema !== 'pulse.personal_install_receipt.v2' ||
       !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome) ||
@@ -224,6 +236,7 @@ export function writePersonalInstallReceipt(receipt, {
   requirePrivateDirectory(dirname(directory), platformServices);
   requirePrivateDirectory(directory, platformServices);
   const record = {
+    authority_profile: authorityProfile,
     completed_steps: [...receipt.completed_steps],
     created_at: now.toISOString(),
     outcome: receipt.outcome,
@@ -251,9 +264,10 @@ async function emitTerminal(dependencies, result) {
   return { ...result, receipt_ref: stableReceiptReference(written) };
 }
 
-async function emitCheckpoint(dependencies, plan, completedSteps) {
+async function emitCheckpoint(dependencies, plan, completedSteps, authorityProfile) {
   const step = completedSteps.at(-1);
   const checkpoint = terminalResult(plan, {
+    authorityProfile,
     completedSteps,
     outcome: 'partial',
     reasonCode: `checkpoint_${step}`,
@@ -286,9 +300,10 @@ function failureReason(error) {
   return 'install_failed';
 }
 
-function failureResult(plan, completedSteps, error) {
+function failureResult(plan, completedSteps, error, authorityProfile) {
   const reasonCode = failureReason(error);
   return terminalResult(plan, {
+    authorityProfile,
     completedSteps,
     outcome: ACTION_REQUIRED_CODES.has(reasonCode)
       ? 'action_required'
@@ -343,6 +358,7 @@ export async function runPersonalInstall({
 
   const deps = exactDependencies(dependencies);
   const completedSteps = [];
+  let authorityProfile = normalizePersonalAuthorityProfile();
   let mutated = false;
   let lastHostStatus;
   try {
@@ -354,17 +370,15 @@ export async function runPersonalInstall({
       verificationCode: 'runtime_verification_failed',
     });
     mutated ||= runtime.mutated;
-    await emitCheckpoint(deps, exact, completedSteps);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
-    const presence = await verifiedStep({
-      inspect: deps.inspectPresence,
-      mutate: deps.installPresence,
-      completedSteps,
-      step: STEP.presence,
-      verificationCode: 'presence_verification_failed',
-    });
-    mutated ||= presence.mutated;
-    await emitCheckpoint(deps, exact, completedSteps);
+    authorityProfile = normalizePersonalAuthorityProfile(
+      deps.inspectAuthorityProfile
+        ? await deps.inspectAuthorityProfile({ plan: exact })
+        : undefined,
+    );
+    completedSteps.push(STEP.authority);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
     let principal = await deps.inspectPrincipal();
     if (!principal) {
@@ -377,7 +391,7 @@ export async function runPersonalInstall({
       mutated = true;
     }
     completedSteps.push(STEP.principal);
-    await emitCheckpoint(deps, exact, completedSteps);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
     let bindingStatus = await deps.inspectBinding({ principal, plan: exact });
     if (bindingStatus?.status === 'conflict' || bindingStatus?.status === 'legacy' ||
@@ -385,6 +399,7 @@ export async function runPersonalInstall({
       const expectedCode = `binding_${bindingStatus.status}`;
       const code = bindingStatus.reason_code === expectedCode ? bindingStatus.reason_code : expectedCode;
       return await emitTerminal(deps, terminalResult(exact, {
+        authorityProfile,
         completedSteps,
         outcome: 'action_required',
         reasonCode: code,
@@ -397,7 +412,7 @@ export async function runPersonalInstall({
       mutated = true;
     }
     completedSteps.push(STEP.binding);
-    await emitCheckpoint(deps, exact, completedSteps);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
     const core = await verifiedStep({
       inspect: () => deps.inspectCore({ binding: bindingStatus.binding, plan: exact }),
@@ -407,7 +422,7 @@ export async function runPersonalInstall({
       verificationCode: 'core_activation_verification_failed',
     });
     mutated ||= core.mutated;
-    await emitCheckpoint(deps, exact, completedSteps);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
     let activation = await deps.inspectActivation({
       binding: bindingStatus.binding, core: core.value, plan: exact,
@@ -432,6 +447,7 @@ export async function runPersonalInstall({
     const rollbackFailure = lastHostStatus?.hosts.find((host) => host.reason_code.endsWith('_rollback_failed'));
     if (rollbackFailure) {
       return await emitTerminal(deps, terminalResult(exact, {
+        authorityProfile,
         completedSteps,
         hostStatus: lastHostStatus,
         outcome: 'action_required',
@@ -441,6 +457,7 @@ export async function runPersonalInstall({
     if (!activationReady) {
       const reasonCode = lastHostStatus?.hosts[0]?.reason_code ?? 'supported_harness_activation_failed';
       return await emitTerminal(deps, terminalResult(exact, {
+        authorityProfile,
         completedSteps,
         hostStatus: lastHostStatus,
         outcome: 'action_required',
@@ -451,7 +468,7 @@ export async function runPersonalInstall({
       ? lastHostStatus
       : { product_ready: true, parity: 'complete', hosts: [] };
     completedSteps.push(STEP.harnesses);
-    await emitCheckpoint(deps, exact, completedSteps);
+    await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
     const health = await deps.inspectHealth({
       binding: bindingStatus.binding,
@@ -472,6 +489,7 @@ export async function runPersonalInstall({
       const outcome = health?.outcome ?? (health?.warming ? 'warming' : 'action_required');
       if (!['warming', 'action_required'].includes(outcome)) fail('health_status_invalid');
       return await emitTerminal(deps, terminalResult(exact, {
+        authorityProfile,
         completedSteps,
         hostStatus,
         outcome,
@@ -484,19 +502,22 @@ export async function runPersonalInstall({
     if (!mutated) reasonCode = 'already_installed';
     else if (resumeEvidence) reasonCode = 'resumed';
     return await emitTerminal(deps, terminalResult(exact, {
+      authorityProfile,
       completedSteps,
       hostStatus,
       outcome: 'ready',
       reasonCode,
     }));
   } catch (error) {
-    const result = failureResult(exact, completedSteps, error);
+    const result = failureResult(exact, completedSteps, error, authorityProfile);
     if (result.reason_code === 'install_receipt_write_failed') return result;
     try {
       return await emitTerminal(deps, result);
     } catch (receiptError) {
       if (failureReason(receiptError) !== 'install_receipt_write_failed') throw receiptError;
-      return failureResult(exact, completedSteps, receiptError);
+      return failureResult(exact, completedSteps, receiptError, authorityProfile);
     }
   }
 }
+
+export { PERSONAL_AUTHORITY_PROFILE_SCHEMA };

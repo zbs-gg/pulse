@@ -44,6 +44,7 @@
     "src/install-plan.js",
     "src/personal-install-command.js",
     "src/personal-install.js",
+    "src/personal-authority-profile.js",
     "src/personal-host-adapters.js",
     "src/personal-live-readiness.js",
     "src/personal-principal.js",

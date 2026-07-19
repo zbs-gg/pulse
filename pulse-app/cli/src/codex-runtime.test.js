@@ -21,7 +21,6 @@ import {
 } from './codex-runtime.js';
 import { readUnassignedInbox, unassignedInboxPath } from './unassigned-inbox.js';
 import { activateArtifactVersion, readActivatedArtifact, writeActivatedArtifactSet } from './artifact-installer.js';
-import { resolveManagedRuntime } from './local-supervisor.js';
 
 function artifactDescriptor(id, kind, sha256) {
 	return {
@@ -90,15 +89,22 @@ async function managedActivationFixture(dataDir) {
 		descriptor.kind,
 		readActivatedArtifact(descriptor.id, { installRoot, expectedKind: descriptor.kind }),
 	]));
-	const vault = { data_dir: join(dataDir, 'vault') };
-	const managed = resolveManagedRuntime(vault, {
-		installRoot,
-		verifiedActivations: {
-			 daemon: activations.daemon,
-			 embedderRuntime: activations['embedder-runtime'],
-			 model: activations.model,
-		},
+	const identity = (activation) => ({
+		activation_digest: activation.activation_digest,
+		artifact_id: activation.artifact_id,
+		artifact_sha256: activation.sha256,
+		tree_digest: activation.tree_digest,
 	});
+	const daemonPath = join(activations.daemon.version_path, 'bin', 'pulse');
+	const managed = {
+		daemon: {
+			...identity(activations.daemon),
+			digest: createHash('sha256').update(readFileSync(daemonPath)).digest('hex'),
+			path: daemonPath,
+		},
+		embedder_runtime: identity(activations['embedder-runtime']),
+		model: identity(activations.model),
+	};
 	return { activations, managed, release };
 }
 

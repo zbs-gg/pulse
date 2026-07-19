@@ -75,6 +75,10 @@ type Config struct {
 	// HomePresence is optional. It may support separately routed protected
 	// actions, but it is neither a constructor nor ordinary Home prerequisite.
 	HomePresence HomePresence
+	// EnhancedPresenceAuthorizer is the exact protected-action capability
+	// exposed by Memory Home. Nil means unavailable; it never blocks ordinary
+	// install, read, recall, save, or Home use.
+	EnhancedPresenceAuthorizer userpresence.EnhancedPresenceAuthorizer
 	// UnassignedInboxPath is the owner-only, non-retrievable queue shared by
 	// installed harnesses before a user chooses an exact project. Empty hides
 	// the queue without changing canonical memory behavior.
@@ -117,6 +121,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
 		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
+	}
+	if cfg.EnhancedPresenceAuthorizer == nil {
+		cfg.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
 	}
 	server := &Server{
 		cfg: cfg, started: time.Now(),

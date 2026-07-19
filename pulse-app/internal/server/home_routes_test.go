@@ -18,6 +18,7 @@ import (
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 type homeBindingVerifierStub struct {
@@ -33,6 +34,80 @@ func (value *homeBindingVerifierStub) Verify(_ context.Context, _, _ string) err
 type warmingProductTestEmbedder struct{ productTestEmbedder }
 
 func (warmingProductTestEmbedder) Ready() bool { return false }
+
+type homeEnhancedPresenceAuthorizerStub struct {
+	profile userpresence.EnhancedPresenceProfile
+}
+
+func (stub homeEnhancedPresenceAuthorizerStub) Profile() userpresence.EnhancedPresenceProfile {
+	return stub.profile
+}
+
+func (homeEnhancedPresenceAuthorizerStub) Begin(context.Context, userpresence.ProtectedActionTargetV1) (userpresence.EnhancedPresenceCeremonyV1, error) {
+	return userpresence.EnhancedPresenceCeremonyV1{}, userpresence.ErrEnhancedActionUnavailable
+}
+
+func (homeEnhancedPresenceAuthorizerStub) Complete(context.Context, userpresence.EnhancedPresenceCompletionV1) (userpresence.EnhancedPresenceAssertionV1, error) {
+	return userpresence.EnhancedPresenceAssertionV1{}, userpresence.ErrEnhancedActionUnavailable
+}
+
+func TestMemoryHomeReportsExactEnhancedPresenceProfileWithoutGrantingAuthority(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaultPage := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(defaultPage, homePageRequest(srv, session))
+	if defaultPage.Code != http.StatusOK {
+		t.Fatalf("default Home status=%d body=%s", defaultPage.Code, defaultPage.Body.String())
+	}
+	for _, want := range []string{
+		"pulse.enhanced_presence.profile.v1", "unavailable", "enhanced_presence_unavailable",
+		"No protected actions can be authorized on this machine.",
+	} {
+		if !strings.Contains(defaultPage.Body.String(), want) {
+			t.Fatalf("default Home profile missing %q: %s", want, defaultPage.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"<code>binding.change</code>", "<code>vault.wipe</code>"} {
+		if strings.Contains(defaultPage.Body.String(), forbidden) {
+			t.Fatalf("unavailable profile advertised %q", forbidden)
+		}
+	}
+
+	srv.cfg.EnhancedPresenceAuthorizer = homeEnhancedPresenceAuthorizerStub{profile: userpresence.EnhancedPresenceProfile{
+		Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+		Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+		ProtectedActions: []userpresence.Action{userpresence.ActionBindingChange, userpresence.ActionVaultWipe},
+	}}
+	availablePage := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(availablePage, homePageRequest(srv, session))
+	if availablePage.Code != http.StatusOK {
+		t.Fatalf("available Home status=%d body=%s", availablePage.Code, availablePage.Body.String())
+	}
+	for _, want := range []string{
+		"macos_native", "<code>binding.change</code>", "<code>vault.wipe</code>",
+	} {
+		if !strings.Contains(availablePage.Body.String(), want) {
+			t.Fatalf("available Home profile missing %q: %s", want, availablePage.Body.String())
+		}
+	}
+	if strings.Contains(availablePage.Body.String(), "No protected actions can be authorized on this machine.") {
+		t.Fatal("available profile rendered the unavailable claim")
+	}
+
+	for _, path := range []string{"wipe", "binding/replace", "protected/authorize"} {
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, homeMutationRequest(srv, session, path, url.Values{
+			viewerSessionCSRFFormField: {session.CSRFToken},
+		}))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("reported capability accidentally registered protected route %q: status=%d", path, response.Code)
+		}
+	}
+}
 
 func TestMemoryHomeOrdinarySessionNeedsNoNativePresenceAndGrantsNoProtectedRoute(t *testing.T) {
 	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_home_presence_required")

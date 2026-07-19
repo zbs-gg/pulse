@@ -12,6 +12,7 @@ import (
 
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/unassigned"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 func (s *Server) buildMemoryHome(
@@ -140,13 +141,14 @@ type memoryHomeUnassignedActivity struct {
 }
 
 type memoryHomePage struct {
-	Data                  store.MemoryHomeData
-	Pending               []memoryHomePendingCard
-	UnassignedEnabled     bool
-	UnassignedUnavailable bool
-	Unassigned            []memoryHomeUnassignedCard
-	UnassignedActivity    []memoryHomeUnassignedActivity
-	CSRFToken             string
+	Data                    store.MemoryHomeData
+	Pending                 []memoryHomePendingCard
+	EnhancedPresenceProfile userpresence.EnhancedPresenceProfile
+	UnassignedEnabled       bool
+	UnassignedUnavailable   bool
+	Unassigned              []memoryHomeUnassignedCard
+	UnassignedActivity      []memoryHomeUnassignedActivity
+	CSRFToken               string
 }
 
 type memoryHomeTemplateData struct {
@@ -166,11 +168,15 @@ type memoryHomeTemplateData struct {
 	HasUnassignedActivity bool
 	HasAttempts           bool
 	HasContext            bool
+	HasProtectedActions   bool
 	EstimatedPercent      string
 	Attempts              []store.MemoryHomeAttempt
 }
 
 func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
+	if page.EnhancedPresenceProfile.Schema == "" {
+		page.EnhancedPresenceProfile = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable").Profile()
+	}
 	attempts := memoryHomeBoundedAttempts(page.Data.Receipts.Attempts)
 	view := memoryHomeTemplateData{
 		memoryHomePage:        page,
@@ -183,6 +189,7 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		HasUnassignedActivity: len(page.UnassignedActivity) > 0,
 		HasAttempts:           len(attempts) > 0,
 		HasContext:            page.Data.Context.LatestDelivery != nil,
+		HasProtectedActions:   len(page.EnhancedPresenceProfile.ProtectedActions) > 0,
 		Attempts:              attempts,
 	}
 	view.StatusTitle, view.StatusDetail, view.StatusTone = memoryHomeReadinessCopy(page.Data.Readiness)
@@ -415,6 +422,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .controls { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; } button { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:999px; background:white; color:var(--ink); cursor:pointer; } button.primary { background:var(--ink); color:white; border-color:var(--ink); }
     .memory-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } .memory { min-height:150px; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--paper); } .memory .meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; color:var(--muted); font-size:12px; }
     .preview { padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; }
+    .authority-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
     .empty { padding:24px; border:1px dashed #c9c8c1; border-radius:16px; color:var(--muted); }
     .receipt { margin-top:14px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
     .logout { margin:0; } .logout button { background:transparent; }
@@ -452,6 +460,14 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{else}}Waiting for a fresh task{{end}}</small></div>
     <div class="metric"><span>Token economy</span><span class="value">{{.EconomyValue}}</span><small>{{.EconomyDetail}}{{if .EstimatedPercent}} · {{.EstimatedPercent}}{{end}}</small></div>
   </div>
+
+  <section id="authority-profile">
+    <div class="section-head"><div><div class="eyebrow">Security boundary</div><h2>Protected actions</h2></div><p>Ordinary memory and Memory Home do not require enhanced verification. This profile controls only destructive vault and binding actions.</p></div>
+    <div class="preview">
+      <p>Profile <code>{{.EnhancedPresenceProfile.Schema}}</code> · version {{.EnhancedPresenceProfile.Version}} · adapter <code>{{.EnhancedPresenceProfile.Kind}}</code> · {{if .EnhancedPresenceProfile.Available}}available{{else}}unavailable{{end}}{{if .EnhancedPresenceProfile.ReasonCode}} · reason <code>{{.EnhancedPresenceProfile.ReasonCode}}</code>{{end}}</p>
+      {{if .HasProtectedActions}}<div class="authority-actions" aria-label="Protected actions this profile can authorize">{{range .EnhancedPresenceProfile.ProtectedActions}}<span class="pill"><code>{{.}}</code></span>{{end}}</div>{{else}}<div class="empty" style="margin-top:14px">No protected actions can be authorized on this machine.</div>{{end}}
+    </div>
+  </section>
 
   {{if .UnassignedEnabled}}
   <section id="unassigned-inbox">
