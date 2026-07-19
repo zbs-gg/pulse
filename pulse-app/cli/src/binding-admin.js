@@ -1,8 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, renameSync, rmSync,
-  readFileSync, statSync, writeFileSync,
+  existsSync, mkdirSync, rmSync, readFileSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -79,15 +78,19 @@ function exactCommonsResource(value) {
   return url.toString();
 }
 
-function secureTrustFile(path, { executable = false, root = false } = {}) {
-  const link = lstatSync(path);
-  const info = statSync(path);
-  const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-  if (link.isSymbolicLink() || !info.isFile() || (info.mode & 0o022) !== 0 ||
-      (root ? info.uid !== 0 : ![0, uid].includes(info.uid)) || (executable && (info.mode & 0o111) === 0)) {
+function secureTrustFile(path, {
+  executable = false, root = false, platformServices = defaultPlatformServices,
+} = {}) {
+  const absolute = resolve(path);
+  try {
+    platformServices.readIntegrityFile(absolute, {
+      owner: root ? 'root' : 'root-or-current', encoding: null, maxBytes: 64 * 1024 * 1024,
+    });
+    if (executable && !platformServices.inspectExecutable(absolute)) fail('trust_unavailable');
+  } catch {
     fail('trust_unavailable');
   }
-  return resolve(path);
+  return absolute;
 }
 
 export function signBindingRegistryWithPresence(payloadBytes, {
@@ -116,11 +119,11 @@ export function signBindingRegistryWithPresence(payloadBytes, {
   }
 }
 
-function existingPayload(registryPath, publicKeyPath, rootPublicKey) {
+function existingPayload(registryPath, publicKeyPath, rootPublicKey, platformServices = defaultPlatformServices) {
   if (!existsSync(registryPath)) {
     return { schema: 'pulse.workspace-binding-registry.v1', epoch: 0, bindings: [] };
   }
-  return verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey });
+  return verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey, platformServices });
 }
 
 function exactAnchorBytes(registryBytes, epoch) {
@@ -131,31 +134,14 @@ function transactionPath(registryPath) {
   return `${registryPath}.transaction.json`;
 }
 
-function fsyncDirectory(path) {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+function durableReplace(path, bytes, platformServices = defaultPlatformServices) {
+  platformServices.atomicWritePrivateFile(resolve(path), bytes, {
+    ensureParent: true, maxBytes: 64 * 1024 * 1024,
+  });
 }
 
-function durableReplace(path, bytes, mode = 0o600) {
-  const directory = dirname(path);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}.new`;
-  try {
-    writeFileSync(temporary, bytes, { mode, flag: 'wx' });
-    chmodSync(temporary, mode);
-    const descriptor = openSync(temporary, 'r');
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    renameSync(temporary, path);
-    fsyncDirectory(directory);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-}
-
-function durableRemove(path) {
-  if (!existsSync(path)) return;
-  rmSync(path);
-  fsyncDirectory(dirname(path));
+function durableRemove(path, platformServices = defaultPlatformServices) {
+  platformServices.removePrivateFile(resolve(path), { missing: true });
 }
 
 function transactionBlob(bytes) {
@@ -179,7 +165,9 @@ function decodeTransactionBlob(value) {
   return bytes;
 }
 
-function verifyTransactionRegistryState(state, { publicKeyPath, rootPublicKey, registryPath }) {
+function verifyTransactionRegistryState(state, {
+  publicKeyPath, rootPublicKey, registryPath, platformServices = defaultPlatformServices,
+}) {
   if (!state || typeof state !== 'object' || Array.isArray(state) ||
       Object.keys(state).sort().join('\0') !== 'anchor\0epoch\0registry' ||
       !Number.isSafeInteger(state.epoch) || state.epoch < 1) {
@@ -190,27 +178,28 @@ function verifyTransactionRegistryState(state, { publicKeyPath, rootPublicKey, r
   if (!anchorBytes.equals(exactAnchorBytes(registryBytes, state.epoch))) fail('transaction_invalid');
   const temporary = `${registryPath}.verify.${process.pid}.${randomBytes(8).toString('hex')}`;
   try {
-    writeFileSync(temporary, registryBytes, { mode: 0o600, flag: 'wx' });
-    chmodSync(temporary, 0o600);
+    platformServices.atomicWritePrivateFile(resolve(temporary), registryBytes, {
+      ensureParent: true, maxBytes: 64 * 1024 * 1024,
+    });
     const payload = verifyBindingRegistry({
-      registryPath: temporary, publicKeyPath, rootPublicKey,
+      registryPath: temporary, publicKeyPath, rootPublicKey, platformServices,
     });
     if (payload.epoch !== state.epoch) fail('transaction_invalid');
   } catch (error) {
     if (error?.message?.startsWith('binding_admin_')) throw error;
     fail('transaction_invalid');
   } finally {
-    rmSync(temporary, { force: true });
+    platformServices.removePrivateFile(resolve(temporary), { missing: true });
   }
   return { registryBytes, anchorBytes, epoch: state.epoch };
 }
 
 function readBindingTransaction(path, options) {
   try {
-    const safePath = secureTrustFile(path);
-    const info = statSync(safePath);
-    if ((info.mode & 0o077) !== 0) fail('transaction_invalid');
-    const bytes = readFileSync(safePath);
+    const platformServices = options.platformServices ?? defaultPlatformServices;
+    const bytes = platformServices.readPrivateFile(resolve(path), {
+      encoding: null, minBytes: 1, maxBytes: 64 * 1024 * 1024,
+    });
     let journal;
     try { journal = JSON.parse(bytes); } catch { fail('transaction_invalid'); }
     if (!journal || typeof journal !== 'object' || Array.isArray(journal) ||
@@ -231,8 +220,13 @@ function readBindingTransaction(path, options) {
   }
 }
 
-function currentBytes(path) {
-  return existsSync(path) ? readFileSync(path) : null;
+function currentBytes(path, {
+  root = false, platformServices = defaultPlatformServices,
+} = {}) {
+  if (!existsSync(path)) return null;
+  return platformServices.readIntegrityFile(resolve(path), {
+    owner: root ? 'root' : 'root-or-current', encoding: null, maxBytes: 64 * 1024 * 1024,
+  });
 }
 
 function bytesEqual(left, right) {
@@ -241,42 +235,43 @@ function bytesEqual(left, right) {
 
 function recoverBindingTransactionLocked({
   registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor,
+  platformServices = defaultPlatformServices,
 }) {
   const journalPath = transactionPath(registryPath);
   if (!existsSync(journalPath)) return { status: 'none' };
   const transaction = readBindingTransaction(journalPath, {
-    publicKeyPath, rootPublicKey, registryPath,
+    publicKeyPath, rootPublicKey, registryPath, platformServices,
   });
-  if (existsSync(registryPath)) secureTrustFile(registryPath);
-  if (existsSync(anchorPath)) secureTrustFile(anchorPath, { root: rootAnchor });
-  const registryBytes = currentBytes(registryPath);
-  const anchorBytes = currentBytes(anchorPath);
+  if (existsSync(registryPath)) secureTrustFile(registryPath, { platformServices });
+  if (existsSync(anchorPath)) secureTrustFile(anchorPath, { root: rootAnchor, platformServices });
+  const registryBytes = currentBytes(registryPath, { platformServices });
+  const anchorBytes = currentBytes(anchorPath, { root: rootAnchor, platformServices });
   const allowedRegistry = [transaction.candidate.registryBytes, transaction.previous?.registryBytes ?? null];
   if (!allowedRegistry.some((value) => bytesEqual(registryBytes, value))) fail('transaction_state_invalid');
 
   let status;
   if (bytesEqual(anchorBytes, transaction.candidate.anchorBytes)) {
-    durableReplace(registryPath, transaction.candidate.registryBytes);
+    durableReplace(registryPath, transaction.candidate.registryBytes, platformServices);
     status = 'completed';
   } else if (transaction.previous && bytesEqual(anchorBytes, transaction.previous.anchorBytes)) {
-    durableReplace(registryPath, transaction.previous.registryBytes);
+    durableReplace(registryPath, transaction.previous.registryBytes, platformServices);
     status = 'rolled_back';
   } else if (!transaction.previous && anchorBytes === null) {
-    durableRemove(registryPath);
+    durableRemove(registryPath, platformServices);
     status = 'rolled_back';
   } else {
     fail('transaction_state_invalid');
   }
 
   if (status === 'completed' || transaction.previous) {
-    const payload = verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey });
+    const payload = verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey, platformServices });
     verifyBindingRegistryAnchor({
-      registryPath, anchorPath, registryEpoch: payload.epoch, rootAnchor,
+      registryPath, anchorPath, registryEpoch: payload.epoch, rootAnchor, platformServices,
     });
   } else if (existsSync(registryPath) || existsSync(anchorPath)) {
     fail('transaction_state_invalid');
   }
-  durableRemove(journalPath);
+  durableRemove(journalPath, platformServices);
   return { status };
 }
 
@@ -411,9 +406,9 @@ export async function recoverWorkspaceBindingTransaction({
   if (!isAbsolute(home) || typeof rootPublicKey !== 'boolean' || typeof rootAnchor !== 'boolean') {
     fail('request_invalid');
   }
-  secureTrustFile(publicKeyPath, { root: rootPublicKey });
+  secureTrustFile(publicKeyPath, { root: rootPublicKey, platformServices });
   return withRegistryLock(registryPath, () => recoverBindingTransactionLocked({
-    registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor,
+    registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor, platformServices,
   }), { platformServices, timeoutSeconds: lockTimeoutSeconds });
 }
 
@@ -453,19 +448,19 @@ export async function createWorkspaceBinding({
     commonsResource = exactCommonsResource(commonsResource);
   }
   if (typeof rootPublicKey !== 'boolean' || typeof rootAnchor !== 'boolean') fail('request_invalid');
-  secureTrustFile(publicKeyPath, { root: rootPublicKey });
-  const workspace = canonicalizeWorkspace(cwd);
+  secureTrustFile(publicKeyPath, { root: rootPublicKey, platformServices });
+  const workspace = canonicalizeWorkspace(cwd, { platformServices });
   return withRegistryLock(registryPath, async () => {
     recoverBindingTransactionLocked({
-      registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor,
+      registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor, platformServices,
     });
     const hadRegistry = existsSync(registryPath);
     const hadAnchor = existsSync(anchorPath);
     if (hadRegistry !== hadAnchor) fail('anchor_state_inconsistent');
-    const previous = existingPayload(registryPath, publicKeyPath, rootPublicKey);
+    const previous = existingPayload(registryPath, publicKeyPath, rootPublicKey, platformServices);
     if (hadRegistry) {
       verifyBindingRegistryAnchor({
-        registryPath, anchorPath, registryEpoch: previous.epoch, rootAnchor,
+        registryPath, anchorPath, registryEpoch: previous.epoch, rootAnchor, platformServices,
       });
     }
     if (mode === 'team' && previous.bindings.some((binding) =>
@@ -498,15 +493,14 @@ export async function createWorkspaceBinding({
     const previousAnchorBytes = hadAnchor ? readFileSync(anchorPath) : undefined;
     try {
       const registryBytes = Buffer.from(`${JSON.stringify(envelope)}\n`);
-      writeFileSync(temporary, registryBytes, { mode: 0o600, flag: 'wx' });
-      chmodSync(temporary, 0o600);
-      const descriptor = openSync(temporary, 'r');
-      try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+      platformServices.atomicWritePrivateFile(resolve(temporary), registryBytes, {
+        ensureParent: true, maxBytes: 64 * 1024 * 1024,
+      });
 
       // Verify the exact candidate before the atomic replacement. A denied or
       // malformed presence proof must never destroy the last trusted registry.
       const candidate = verifyBindingRegistry({
-        registryPath: temporary, publicKeyPath, rootPublicKey,
+        registryPath: temporary, publicKeyPath, rootPublicKey, platformServices,
       });
       const candidateResult = candidate.bindings.find(
         (binding) => binding.binding_id === replacement.binding_id,
@@ -529,30 +523,32 @@ export async function createWorkspaceBinding({
       durableReplace(
         transactionPath(registryPath),
         Buffer.from(`${canonicalJSONStringify(journal)}\n`),
+        platformServices,
       );
       await onTransitionPhase('journal_prepared');
       await anchorInstaller(anchorBytes, { anchorPath, epoch });
       verifyBindingRegistryAnchor({
-        registryPath: temporary, anchorPath, registryEpoch: epoch, rootAnchor,
+        registryPath: temporary, anchorPath, registryEpoch: epoch, rootAnchor, platformServices,
       });
       await onTransitionPhase('anchor_installed');
-      renameSync(temporary, registryPath);
-      fsyncDirectory(dirname(registryPath));
+      durableReplace(registryPath, registryBytes, platformServices);
       verifyBindingRegistryAnchor({
-        registryPath, anchorPath, registryEpoch: epoch, rootAnchor,
+        registryPath, anchorPath, registryEpoch: epoch, rootAnchor, platformServices,
       });
       await onTransitionPhase('registry_replaced');
-      durableRemove(transactionPath(registryPath));
+      durableRemove(transactionPath(registryPath), platformServices);
     } catch (error) {
       if (existsSync(transactionPath(registryPath))) recoverBindingTransactionLocked({
-        registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor,
+        registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor, platformServices,
       });
       throw error;
     } finally {
-      rmSync(temporary, { force: true });
+      platformServices.removePrivateFile(resolve(temporary), { missing: true });
     }
-    const verified = verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey });
-    verifyBindingRegistryAnchor({ registryPath, anchorPath, registryEpoch: verified.epoch, rootAnchor });
+    const verified = verifyBindingRegistry({ registryPath, publicKeyPath, rootPublicKey, platformServices });
+    verifyBindingRegistryAnchor({
+      registryPath, anchorPath, registryEpoch: verified.epoch, rootAnchor, platformServices,
+    });
     const result = verified.bindings.find((binding) => binding.binding_id === replacement.binding_id);
     if (!result) fail('write_verification_failed');
     return result;

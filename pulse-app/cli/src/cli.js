@@ -611,11 +611,13 @@ async function createPersonalBindingForInstall(principal, plan) {
             algorithm: 'es256', signature: cryptoSign('sha256', bytes, fixturePrivateKey).toString('base64'),
           }),
           anchorInstaller: async (bytes, { anchorPath }) => {
-            mkdirSync(dirname(anchorPath), { recursive: true, mode: 0o700 });
-            writeFileSync(anchorPath, bytes, { flag: 'wx', mode: 0o600 });
-            chmodSync(anchorPath, 0o600);
+            defaultPlatformServices.atomicWritePrivateFile(anchorPath, bytes, {
+              ensureParent: true, maxBytes: 4096,
+            });
           },
-          anchorRemover: async ({ anchorPath }) => rmSync(anchorPath, { force: true }),
+          anchorRemover: async ({ anchorPath }) => {
+            defaultPlatformServices.removePrivateFile(anchorPath, { missing: true });
+          },
         } : {}),
       } : {}),
     });
