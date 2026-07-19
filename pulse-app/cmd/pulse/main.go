@@ -272,6 +272,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	homeOrigin := ""
 	unassignedInboxPath := ""
 	var homePresence server.HomePresence
+	var enhancedPresenceAuthorizer userpresence.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
 	if kind != "" {
 		homeOrigin = "http://" + addr
 		userHome, homeErr := os.UserHomeDir()
@@ -284,6 +285,11 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 			return fmt.Errorf("configure Memory Home OS presence: %w", err)
 		}
 		homePresence = presenceGate
+		inspectionCtx, cancelInspection := context.WithTimeout(context.Background(), 5*time.Second)
+		enhancedPresenceAuthorizer = userpresence.NewPlatformEnhancedAuthorizer(
+			inspectionCtx, time.Now, rand.Reader,
+		)
+		cancelInspection()
 	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,
@@ -300,13 +306,14 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 			RawCaptureEnabled: rawCaptureEnabled,
 			StoragePath:       cfg.DBPath,
 		},
-		Retrieval:           retrievalEngine,
-		ContextQuery:        contextQuery,
-		Health:              healthProvider,
-		HomeOrigin:          homeOrigin,
-		HomePresence:        homePresence,
-		UnassignedInboxPath: unassignedInboxPath,
-		HomeBindingVerifier: homeBindingVerifier,
+		Retrieval:                  retrievalEngine,
+		ContextQuery:               contextQuery,
+		Health:                     healthProvider,
+		HomeOrigin:                 homeOrigin,
+		HomePresence:               homePresence,
+		EnhancedPresenceAuthorizer: enhancedPresenceAuthorizer,
+		UnassignedInboxPath:        unassignedInboxPath,
+		HomeBindingVerifier:        homeBindingVerifier,
 	})
 	if err != nil {
 		return err

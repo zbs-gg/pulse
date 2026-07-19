@@ -92,7 +92,7 @@ func (p *DarwinProver) Prove(ctx context.Context, challenge Challenge) error {
 		return ErrPresenceDenied
 	}
 	publicKeyPEM, err := os.ReadFile(p.PublicKeyPath)
-	if err != nil || len(publicKeyPEM) > 4096 {
+	if err != nil || len(publicKeyPEM) == 0 || len(publicKeyPEM) > maximumPresencePublicKeyBytes {
 		return ErrPresenceDenied
 	}
 	if err := verifyHelperProof(payload, stdout.Bytes(), publicKeyPEM); err != nil {
@@ -152,21 +152,13 @@ func verifyHelperProof(payload, encodedProof, publicKeyPEM []byte) error {
 	if proof.Algorithm != "es256" || !hexDigestPattern.MatchString(proof.KeyID) {
 		return errors.New("presence helper returned an invalid proof contract")
 	}
-	block, rest := pem.Decode(publicKeyPEM)
-	if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {
-		return errors.New("presence public key is invalid")
-	}
-	keyID := sha256.Sum256(block.Bytes)
-	if hex.EncodeToString(keyID[:]) != proof.KeyID {
-		return errors.New("presence key ID mismatch")
-	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	publicKey, publicKeyDER, err := decodePresencePublicKey(publicKeyPEM)
 	if err != nil {
 		return err
 	}
-	publicKey, ok := parsed.(*ecdsa.PublicKey)
-	if !ok || publicKey.Curve.Params().Name != "P-256" {
-		return errors.New("presence public key must be P-256")
+	keyID := sha256.Sum256(publicKeyDER)
+	if hex.EncodeToString(keyID[:]) != proof.KeyID {
+		return errors.New("presence key ID mismatch")
 	}
 	signature, err := base64.StdEncoding.Strict().DecodeString(proof.Signature)
 	if err != nil || len(signature) == 0 || len(signature) > 80 {
@@ -177,4 +169,20 @@ func verifyHelperProof(payload, encodedProof, publicKeyPEM []byte) error {
 		return errors.New("presence signature does not verify")
 	}
 	return nil
+}
+
+func decodePresencePublicKey(publicKeyPEM []byte) (*ecdsa.PublicKey, []byte, error) {
+	block, rest := pem.Decode(publicKeyPEM)
+	if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, nil, errors.New("presence public key is invalid")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	publicKey, ok := parsed.(*ecdsa.PublicKey)
+	if !ok || publicKey.Curve.Params().Name != "P-256" {
+		return nil, nil, errors.New("presence public key must be P-256")
+	}
+	return publicKey, block.Bytes, nil
 }
