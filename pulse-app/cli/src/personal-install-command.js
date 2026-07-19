@@ -1,10 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
 
 import { acquireInstallLock } from './install-journal.js';
-import { formatPersonalInstallPlan } from './install-plan.js';
+import { canonicalInstallPlanJSON, formatPersonalInstallPlan } from './install-plan.js';
+import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 import { runPersonalInstall } from './personal-install.js';
 
 function writeLine(stream, value = '') {
@@ -38,17 +40,58 @@ export function installPlanApprovalDigest(plan) {
     .digest('hex');
 }
 
+export function nativePackedFixtureApprovalDigest(plan) {
+  if (!plan || plan.schema !== 'pulse.personal_install_plan.v2' || plan.contract_version !== 2) {
+    throw new TypeError('personal_install_approval_plan_invalid');
+  }
+  const stablePlan = {
+    schema: plan.schema,
+    contract_version: plan.contract_version,
+    outcome: plan.outcome,
+    reason_codes: plan.reason_codes ?? null,
+    current_state: plan.current_state ?? null,
+    detected: plan.detected ?? null,
+    release: plan.release ?? null,
+    local_writes: plan.local_writes ?? null,
+    privacy: plan.privacy ?? null,
+    authority_profile: plan.authority_profile ?? null,
+    protected_actions: plan.protected_actions ?? null,
+    required_human_approvals: plan.required_human_approvals ?? null,
+    rollback: plan.rollback ?? null,
+    resources: {
+      minimum_memory_bytes: plan.resources?.minimum_memory_bytes ?? null,
+      required_disk_bytes: plan.resources?.required_disk_bytes ?? null,
+    },
+  };
+  return createHash('sha256')
+    .update('pulse-native-packed-fixture-approval-v1\x1f')
+    .update(canonicalInstallPlanJSON(stablePlan))
+    .digest('hex');
+}
+
 function appleScriptString(value) {
   return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
 export async function requestConsent({
+  cwd,
+  dataDir,
+  env = process.env,
+  home = homedir(),
   input,
   output,
   plan,
   platform = process.platform,
   runDialog = spawnSync,
 }) {
+  const fixture = nativePackedFixtureAttestation({
+    cwd: cwd ?? plan?.detected?.workspace?.canonical_path,
+    dataDir: dataDir ?? env.PULSE_DATA_DIR,
+    env,
+    home,
+    plan,
+  });
+  if (fixture && env.PULSE_NATIVE_PACKED_FIXTURE_APPROVAL === nativePackedFixtureApprovalDigest(plan)) return true;
   if (!input.isTTY || !output.isTTY) {
     if (platform !== 'darwin') return false;
     const digest = installPlanApprovalDigest(plan);

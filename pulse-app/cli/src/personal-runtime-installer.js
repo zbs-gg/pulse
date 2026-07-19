@@ -168,6 +168,7 @@ function readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, verif
   });
   const minimumAcceptedEpoch = authorityFloor > 0 ? authorityFloor : readMinimumReleaseEpoch(epochPath);
   return verifyReleaseManifestEnvelope(readCanonicalEnvelope(manifestPath), {
+    allowFixtureVerification: verification.testMode === true,
     architecture: verification.architecture,
     libc: verification.libc,
     minimumAcceptedEpoch,
@@ -211,14 +212,14 @@ export async function provisionPersonalRuntime({
   }
   const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
         architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-        platform, platformServices, trustedKeys,
+        platform, platformServices, testMode, trustedKeys,
   });
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
   const releaseLock = acquireInstallLock(lockPath, { platformServices });
   try {
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
       architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, trustedKeys,
+      platform, platformServices, testMode, trustedKeys,
     });
     if (release.historical_only) fail('release_manifest_legacy');
     const activeSetPath = join(installRoot, 'artifact-generation-authority.json');
@@ -276,6 +277,7 @@ export function inspectPersonalRuntime({
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
   platformServices = createPlatformServices({ platform, architecture }),
+  testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
@@ -289,7 +291,7 @@ export function inspectPersonalRuntime({
     join(root, 'runtime', 'minimum-release-epoch.json'),
     join(root, 'artifacts'),
     { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, trustedKeys },
+      platform, platformServices, testMode, trustedKeys },
   );
   if (release.historical_only) {
     return Object.freeze({
@@ -309,13 +311,25 @@ export function inspectPersonalRuntime({
       reason_code: 'runtime_staged',
       release,
     });
-  } catch (error) {
-    return Object.freeze({
-      activationSet: null,
-      ready: false,
-      reason_code: typeof error?.code === 'string' ? error.code : 'runtime_not_staged',
-      release,
-    });
+  } catch (activeError) {
+    try {
+      const activationSet = readStagedArtifactSet(release, {
+        installRoot: join(root, 'artifacts'), platformServices,
+      });
+      return Object.freeze({
+        activationSet,
+        ready: true,
+        reason_code: 'runtime_candidate_staged',
+        release,
+      });
+    } catch {
+      return Object.freeze({
+        activationSet: null,
+        ready: false,
+        reason_code: typeof activeError?.code === 'string' ? activeError.code : 'runtime_not_staged',
+        release,
+      });
+    }
   }
 }
 
@@ -333,6 +347,7 @@ export function inspectPersonalRelease({
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
   platformServices = createPlatformServices({ platform, architecture }),
+  testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
@@ -346,7 +361,7 @@ export function inspectPersonalRelease({
     join(root, 'runtime', 'minimum-release-epoch.json'),
     join(root, 'artifacts'),
     { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, trustedKeys },
+      platform, platformServices, testMode, trustedKeys },
   );
   return Object.freeze({
     ready: !release.historical_only,

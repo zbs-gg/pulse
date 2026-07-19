@@ -129,8 +129,11 @@ async function packFixture(root, outputRoot, kind) {
 
 export async function buildAndInstallTargetFixture({
   buildDaemon = buildDaemonTarget,
+  buildEmbedder,
+  buildPluginRuntime,
   epoch = 1,
   nativeTargetID = currentTargetID(),
+  now = new Date('2026-07-01T00:00:00.000Z'),
   outputRoot,
   targetID,
   version = packageVersion,
@@ -150,8 +153,22 @@ export async function buildAndInstallTargetFixture({
   buildPortableEmbedderRuntime({
     fixture: true, outputRoot: roots['embedder-runtime'], platform: target.platform, sourceRoot: embedderSourceRoot,
   });
+  if (buildEmbedder !== undefined) {
+    if (typeof buildEmbedder !== 'function') fail('target_fixture_configuration_invalid');
+    buildEmbedder({
+      appRoot,
+      outputRoot: roots['embedder-runtime'],
+      runnerName: target.platform === 'win32' ? 'pulse-embedder.exe' : 'pulse-embedder',
+      targetID,
+    });
+  }
   writeModelFixture(roots.model);
-  writePrivate(join(roots['plugin-runtime'], 'runtime', 'index.js'), 'export const fixture = true;\n');
+  if (buildPluginRuntime === undefined) {
+    writePrivate(join(roots['plugin-runtime'], 'runtime', 'index.js'), 'export const fixture = true;\n');
+  } else {
+    if (typeof buildPluginRuntime !== 'function') fail('target_fixture_configuration_invalid');
+    buildPluginRuntime({ outputRoot: roots['plugin-runtime'], targetID });
+  }
   if (roots['presence-helper']) {
     writePrivate(join(roots['presence-helper'], 'bin', 'pulse-presence-helper'), '#!/bin/sh\nexit 0\n', 0o700);
   }
@@ -163,12 +180,15 @@ export async function buildAndInstallTargetFixture({
   )]));
   const rootKey = keyPair();
   const channelKey = keyPair();
-  const issued = new Date('2026-06-30T00:00:00.000Z');
+  if (!(now instanceof Date) || Number.isNaN(now.valueOf())) fail('target_fixture_configuration_invalid');
+  const issued = new Date(now.valueOf() - 24 * 60 * 60 * 1000);
+  const releaseExpires = new Date(now.valueOf() + 24 * 60 * 60 * 1000).toISOString();
+  const authorityExpires = new Date(now.valueOf() + 2 * 24 * 60 * 60 * 1000).toISOString();
   const payload = {
     allowed_origins: [ORIGIN],
     common_artifacts: { model: descriptors.model, 'plugin-runtime': descriptors['plugin-runtime'] },
     release: {
-      channel: 'preview', epoch, expires_at: '2026-07-02T00:00:00.000Z', issued_at: issued.toISOString(),
+      channel: 'preview', epoch, expires_at: releaseExpires, issued_at: issued.toISOString(),
       key_id: channelKey.keyID, package: '@zbs-gg/pulse', version,
     },
     schema: 'pulse.personal_preview.release_catalog.v2',
@@ -188,7 +208,7 @@ export async function buildAndInstallTargetFixture({
     },
   };
   const authorityPayload = {
-    channel: 'preview', epoch, expires_at: '2026-07-03T00:00:00.000Z', issued_at: issued.toISOString(),
+    channel: 'preview', epoch, expires_at: authorityExpires, issued_at: issued.toISOString(),
     keys: [{
       key_id: channelKey.keyID, public_key_pem: channelKey.publicKey,
       valid_from_epoch: epoch, valid_through_epoch: epoch,
@@ -207,7 +227,7 @@ export async function buildAndInstallTargetFixture({
     allowFixtureVerification: true,
     architecture: target.architecture,
     libc: target.libc,
-    now: new Date('2026-07-01T00:00:00.000Z'),
+    now,
     osVersion: target.platform === 'darwin' ? '14.0' : '0.0',
     packageVersion: version,
     platform: target.platform,
@@ -233,7 +253,17 @@ export async function buildAndInstallTargetFixture({
     target_id: targetID,
   };
   writeFileSync(join(outputRoot, 'fixture-install-receipt.json'), `${canonicalReleaseJSON(receipt)}\n`, { mode: 0o600 });
-  return Object.freeze({ receipt: Object.freeze(receipt), release });
+  const installerRoot = join(outputRoot, 'installer');
+  mkdirSync(installerRoot, { mode: 0o700 });
+  const manifestPath = join(installerRoot, 'personal-preview-manifest.json');
+  const rootKeyPath = join(installerRoot, 'pulse-release-root.pem');
+  writePrivate(manifestPath, `${canonicalReleaseJSON(envelope)}\n`);
+  writePrivate(rootKeyPath, rootKey.publicKey);
+  return Object.freeze({
+    installer: Object.freeze({ asset_root: join(outputRoot, 'carriers'), manifest_path: manifestPath, root_key_path: rootKeyPath }),
+    receipt: Object.freeze(receipt),
+    release,
+  });
 }
 
 function parseCLI(argv) {

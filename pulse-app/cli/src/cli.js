@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync, spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createPrivateKey, randomBytes, sign as cryptoSign } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import {
   appendFileSync,
@@ -146,6 +146,7 @@ import {
 	packagedPersonalRuntimeOptions,
 	provisionPersonalRuntime,
 } from './personal-runtime-installer.js';
+import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -341,6 +342,25 @@ function personalInstallUsesSyntheticOverrides() {
     PERSONAL_INSTALL_TEST_OVERRIDE_NAMES.some((name) => Boolean(process.env[name]));
 }
 
+function currentNativePackedFixtureAttestation(workspace, release) {
+  if (!workspace || !release) return null;
+  return nativePackedFixtureAttestation({
+    cwd: workspace.canonical_path,
+    dataDir: DATA_DIR,
+    env: process.env,
+    home: homedir(),
+    plan: {
+      schema: 'pulse.personal_install_plan.v2',
+      contract_version: 2,
+      detected: { workspace: { canonical_path: workspace.canonical_path } },
+      release: {
+        catalog_schema: release.catalog_schema,
+        verification_profile: release.verification_profile,
+      },
+    },
+  });
+}
+
 function currentPersonalInstallPlan() {
   let releaseInspection;
   let releaseReasonCode;
@@ -359,7 +379,7 @@ function currentPersonalInstallPlan() {
     dataDir: DATA_DIR,
     release: releaseInspection?.release,
     releaseReasonCode,
-    currentState: inspectPersonalPreflightState(workspace),
+    currentState: inspectPersonalPreflightState(workspace, releaseInspection?.release),
     detectWorkspace: () => {
       if (workspaceError) throw workspaceError;
       return workspace;
@@ -437,7 +457,7 @@ function personalInstallReceiptStatus(workspace) {
   }
 }
 
-function inspectPersonalPreflightState(workspace) {
+function inspectPersonalPreflightState(workspace, release) {
   let principal;
   let principalStatus = 'missing';
   try {
@@ -448,7 +468,9 @@ function inspectPersonalPreflightState(workspace) {
   }
   let presence = 'not_installed';
   if (personalInstallUsesSyntheticOverrides()) {
-    presence = 'synthetic_test_authority';
+    presence = currentNativePackedFixtureAttestation(workspace, release)
+      ? 'not_installed'
+      : 'synthetic_test_authority';
   } else {
     try {
       presence = inspectPresenceTrust({ probePublicKey: false, probeCapabilities: false }).status;
@@ -540,11 +562,46 @@ function existingPersonalBinding(principal, plan) {
 async function createPersonalBindingForInstall(principal, plan) {
   const paths = personalBindingPaths();
   try {
+    const fixture = nativePackedFixtureAttestation({
+      cwd: plan.detected.workspace.canonical_path,
+      dataDir: DATA_DIR,
+      env: process.env,
+      home: homedir(),
+      plan,
+    });
+    const fixtureKeyPath = process.env.PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH;
+    let fixturePrivateKey;
+    if (fixture) {
+      const info = lstatSync(fixtureKeyPath);
+      const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
+          (info.mode & 0o077) !== 0 || info.size < 1 || info.size > 16 * 1024) {
+        throw new PersonalInstallError('synthetic_authority_forbidden');
+      }
+      fixturePrivateKey = createPrivateKey(readFileSync(fixtureKeyPath));
+      if (fixturePrivateKey.asymmetricKeyType !== 'ec' || fixturePrivateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+        throw new PersonalInstallError('synthetic_authority_forbidden');
+      }
+    }
     return await createWorkspaceBinding({
       cwd: plan.detected.workspace.canonical_path,
       mode: 'personal',
+      ...(fixture ? { port: fixture.port } : {}),
       principalID: principal.principal_id,
-      ...(process.env.PULSE_TRUST_MODE === 'test' ? paths : {}),
+      ...(process.env.PULSE_TRUST_MODE === 'test' ? {
+        ...paths,
+        ...(fixture ? {
+          signer: (bytes) => ({
+            algorithm: 'es256', signature: cryptoSign('sha256', bytes, fixturePrivateKey).toString('base64'),
+          }),
+          anchorInstaller: async (bytes, { anchorPath }) => {
+            mkdirSync(dirname(anchorPath), { recursive: true, mode: 0o700 });
+            writeFileSync(anchorPath, bytes, { flag: 'wx', mode: 0o600 });
+            chmodSync(anchorPath, 0o600);
+          },
+          anchorRemover: async ({ anchorPath }) => rmSync(anchorPath, { force: true }),
+        } : {}),
+      } : {}),
     });
   } catch (error) {
     if (/presence_denied|presence_invalid/i.test(error?.message ?? '')) {
@@ -642,6 +699,11 @@ async function activatePersonalInstallCoreTransaction(binding) {
 		finalizeCodexRuntimeInstall(DATA_DIR);
 		commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
       } catch (error) {
+        if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+          const diagnostic = [error?.code, error?.message]
+            .find((value) => typeof value === 'string' && /^[a-z0-9_]{1,128}$/i.test(value));
+          process.stderr.write(`[pulse-native-fixture] core activation failed: ${diagnostic ?? 'activation_failed'}\n`);
+        }
         const failures = [];
         if (runtimeInstalled) {
           try {
@@ -857,7 +919,14 @@ function personalInstallCoreHealth(core, activation) {
 }
 
 function personalInstallDependencies(plan) {
-  if (personalInstallUsesSyntheticOverrides()) {
+  const nativeFixture = nativePackedFixtureAttestation({
+    cwd: plan?.detected?.workspace?.canonical_path,
+    dataDir: DATA_DIR,
+    env: process.env,
+    home: homedir(),
+    plan,
+  });
+  if (personalInstallUsesSyntheticOverrides() && !nativeFixture) {
     throw new PersonalInstallError('synthetic_authority_forbidden');
   }
   const hosts = plan?.detected?.hosts;

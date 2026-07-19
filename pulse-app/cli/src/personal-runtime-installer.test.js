@@ -205,6 +205,40 @@ function resignCatalog(value) {
   ).toString('base64');
 }
 
+test('fixture release verification is available only through explicit test mode', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-fixture-release.'));
+  const manifestPath = join(root, 'manifest.json');
+  const dataDir = join(root, 'data');
+  const value = fixture();
+  const target = value.envelope.payload.targets['darwin-arm64'];
+  target.verification_profile = { fixture_id: 'native-darwin-arm64', kind: 'fixture', production: false };
+  for (const artifact of Object.values(target.artifacts)) {
+    artifact.signing = {
+      gatekeeper: false, identifier: null, notarized: false,
+      scheme: 'fixture', stapled: false, team_id: null,
+    };
+  }
+  resignCatalog(value);
+  mkdirSync(join(dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(value.envelope)}\n`, { mode: 0o600 });
+  const options = {
+    architecture: 'arm64', dataDir, manifestPath,
+    now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+    packageVersion: '0.7.0', platform: 'darwin',
+    trustedKeys: [{
+      key_id: value.keyID, public_key_pem: value.publicKey,
+      valid_from_epoch: 1, valid_through_epoch: 20,
+    }],
+  };
+  try {
+    assert.throws(() => inspectPersonalRelease(options), (error) => error?.code === 'release_fixture_verification_forbidden');
+    const inspected = inspectPersonalRelease({ ...options, testMode: true });
+    assert.equal(inspected.release.verification_profile.production, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('empty Personal install stages a complete candidate then publishes one atomic generation after health', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime.'));
   const manifestPath = join(root, 'manifest.json');
@@ -247,6 +281,20 @@ test('empty Personal install stages a complete candidate then publishes one atom
 		assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'install-journal.json'), 'utf8')).phase, 'candidate_staged');
 		assert.equal(existsSync(join(dataDir, 'runtime', 'minimum-release-epoch.json')), false,
 			'artifact provisioning alone must not commit the anti-rollback floor');
+		const stagedInspection = inspectPersonalRuntime({
+			architecture: 'arm64', dataDir, manifestPath,
+			now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+			packageVersion: '0.7.0', platform: 'darwin', testMode: true,
+			platformServices,
+			trustedKeys: [{
+				key_id: value.keyID, public_key_pem: value.publicKey,
+				valid_from_epoch: 1, valid_through_epoch: 20,
+			}],
+		});
+		assert.equal(stagedInspection.ready, true);
+		assert.equal(stagedInspection.reason_code, 'runtime_candidate_staged');
+		assert.equal(existsSync(join(dataDir, 'artifacts', 'artifact-generation-authority.json')), false,
+			'candidate inspection must not promote release authority');
 		assert.throws(
 			() => commitPersonalRuntimeRelease(installed.release, { dataDir: 'relative-data' }),
 			/personal_runtime_configuration_invalid/,

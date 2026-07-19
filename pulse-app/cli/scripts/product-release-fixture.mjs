@@ -53,7 +53,7 @@ function pruneEmptyDirectories(root) {
 	visit(root, true);
 }
 
-function writeProductEdgeFixture(target) {
+export function writeProductEdgeFixture(target) {
 	mkdirSync(join(target, 'marketplace', '.agents', 'plugins'), { recursive: true, mode: 0o700 });
 	mkdirSync(join(target, 'marketplace', '.claude-plugin'), { recursive: true, mode: 0o700 });
 	cpSync(join(repoRoot, '.agents', 'plugins', 'marketplace.json'),

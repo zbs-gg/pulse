@@ -107,3 +107,19 @@ test('large sparse payloads are digested and packed without a whole-file buffer 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('normalized artifact trees preserve declared empty files while carriers remain non-empty', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-release-empty-file.'));
+  try {
+    const artifact = join(root, 'artifact');
+    mkdirSync(artifact, { mode: 0o700 });
+    writeFileSync(join(artifact, 'empty-module.js'), '', { mode: 0o600 });
+    const prepared = prepareNormalizedArtifact(artifact);
+    assert.equal(prepared.tree.files[0].path, 'empty-module.js');
+    assert.equal(prepared.tree.files[0].bytes, 0);
+    const packed = await packNormalizedArtifact(artifact, join(root, 'artifact.tar.gz'));
+    assert.ok(packed.bytes > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

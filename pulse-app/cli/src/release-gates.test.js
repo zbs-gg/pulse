@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
+test('published package includes every production CLI module', () => {
+  const cliRoot = join(root, 'pulse-app', 'cli');
+  const packageJSON = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
+  const productionModules = readdirSync(join(cliRoot, 'src'))
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.test.js'))
+    .map((name) => `src/${name}`)
+    .sort();
+  assert.deepEqual(productionModules.filter((path) => !packageJSON.files.includes(path)), []);
+});
 
 test('release verification includes packed Personal clean-room, interruption, physical attestation, real MLX, Team race, and portable deployment gates', () => {
   const makefile = readFileSync(join(root, 'Makefile'), 'utf8');

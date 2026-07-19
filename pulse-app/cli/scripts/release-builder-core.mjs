@@ -49,12 +49,12 @@ function canonical(value) {
   fail('release_canonical_value_invalid');
 }
 
-function digestFile(path, maximum = 64 * 1024 * 1024 * 1024) {
+function digestFile(path, maximum = 64 * 1024 * 1024 * 1024, minimum = 1) {
   let descriptor;
   try {
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = fstatSync(descriptor);
-    if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > maximum) {
+    if (!before.isFile() || before.nlink !== 1 || before.size < minimum || before.size > maximum) {
       fail('release_tree_file_invalid');
     }
     const hash = createHash('sha256');
@@ -94,7 +94,7 @@ function walkArtifact(root, directory, files) {
     const executable = (stat.mode & 0o111) !== 0;
     const mode = executable ? 0o700 : 0o600;
     chmodSync(path, mode);
-    const digest = digestFile(path, 4 * 1024 * 1024 * 1024);
+    const digest = digestFile(path, 4 * 1024 * 1024 * 1024, 0);
     files.push(Object.freeze({
       bytes: digest.bytes,
       executable,
@@ -151,7 +151,7 @@ export async function packNormalizedArtifact(root, outputPath) {
       size: entry.bytes, type: 'file', uid: 0, uname: '',
     });
     await pipeline(createReadStream(entry.source), output);
-    const packed = digestFile(entry.source);
+    const packed = digestFile(entry.source, 4 * 1024 * 1024 * 1024, 0);
     if (packed.bytes !== entry.bytes || (entry.sha256 !== undefined && packed.sha256 !== entry.sha256)) {
       fail('release_tree_file_changed');
     }

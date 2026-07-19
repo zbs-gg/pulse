@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -34,6 +34,9 @@ test('all six target fixture sets pass the signed fixture catalog and production
       assert.equal(result.receipt.native_runner_match, false);
       assert.equal(result.receipt.production_ready, false);
       assert.equal(result.receipt.support_proven, false);
+      assert.equal(existsSync(result.installer.manifest_path), true);
+      assert.equal(existsSync(result.installer.root_key_path), true);
+      assert.equal(existsSync(result.installer.asset_root), true);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -199,6 +199,11 @@ test('signed Codex product edge accepts only the exact release-owned plugin and 
 		assert.match(edge.plugin_tree_digest, /^[a-f0-9]{64}$/);
 		assert.match(edge.marketplace_tree_digest, /^[a-f0-9]{64}$/);
 		assert.match(edge.runtime_tree_digest, /^[a-f0-9]{64}$/);
+		const catalogEdge = resolveSignedCodexProductEdge({
+			release: { ...fixture.release, schema: 'pulse.verified_release_manifest.v2' },
+			activation: fixture.activation,
+		});
+		assert.equal(catalogEdge.release_manifest_digest, edge.release_manifest_digest);
 
 		const installedPlugin = join(root, 'installed-plugin');
 		cpSync(fixture.pluginRoot, installedPlugin, { recursive: true });
