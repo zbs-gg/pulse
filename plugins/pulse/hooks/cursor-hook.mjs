@@ -3,7 +3,9 @@ import { existsSync } from 'node:fs';
 import { resolveProductEnvironment } from '../runtime-locator.mjs';
 
 const eventName = process.argv[2];
-const productEnvironment = resolveProductEnvironment({ host: 'cursor' });
+const productEnvironment = resolveProductEnvironment({
+  host: 'cursor', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
+});
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted runtime is missing; reconnect Pulse to Cursor.');

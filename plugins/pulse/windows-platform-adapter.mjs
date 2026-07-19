@@ -166,5 +166,14 @@ export function loadPluginWindowsAdapter({
     inspectExecutable(path) {
       return batched([{ operation: 'inspect_executable', payload: { path } }])[0];
     },
+    atomicWritePrivateFile(path, data, { ensureParent = false, maxBytes = 1024 * 1024 } = {}) {
+      const result = call('atomic_write_private_file', {
+        bytes_base64: Buffer.from(data).toString('base64'), ensure_parent: ensureParent,
+        maximum_bytes: maxBytes, path,
+      });
+      if (!exactObject(result, ['written']) || result.written !== true) {
+        fail('pulse_windows_plugin_adapter_protocol_invalid');
+      }
+    },
   });
 }

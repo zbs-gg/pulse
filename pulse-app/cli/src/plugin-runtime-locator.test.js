@@ -86,8 +86,19 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
               reparse_point: false,
             };
           }
+          if (operation === 'inspect_private_state') {
+            return {
+              canonical_path: payload.path, kind: payload.kind, owner_only: true,
+              reparse_point: false,
+            };
+          }
           throw new Error(`unexpected batch operation: ${operation}`);
         });
+      },
+      atomicWritePrivateFile(path, data, { ensureParent }) {
+        calls.push(['write', path]);
+        if (ensureParent) mkdirSync(resolve(path, '..'), { recursive: true });
+        writeFileSync(path, data);
       },
     };
     const trust = __runtimeLocatorTest.createTrustServices({ platform: 'win32', windowsAdapter: adapter });
@@ -141,6 +152,19 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.equal(environmentProof.daemonPath, file);
     assert.equal(environmentProof.runtimeDigest, treeDigest);
     assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch', 'batch', 'batch', 'batch']);
+    trust.writeProductEnvironmentCache(environmentProof, 'codex');
+    const cachedEnvironmentProof = trust.productEnvironmentCacheProof({
+      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+    });
+    assert.equal(cachedEnvironmentProof.integrityCacheHit, true);
+    assert.equal(cachedEnvironmentProof.runtimeDigest, environmentProof.runtimeDigest);
+    assert.equal(cachedEnvironmentProof.pluginDigest, environmentProof.pluginDigest);
+    assert.equal(cachedEnvironmentProof.daemonDigest, environmentProof.daemonDigest);
+    assert.deepEqual(calls.slice(9).map(([operation]) => operation), ['write', 'batch']);
+    writeFileSync(productActivationPath, `${JSON.stringify({ daemon_path: file, changed: true })}\n`);
+    assert.equal(trust.productEnvironmentCacheProof({
+      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+    }), undefined, 'activation drift must invalidate the bounded integrity receipt');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -216,6 +240,7 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
           };
           throw new Error(`unexpected nested operation: ${nested}`);
         }) };
+        if (operation === 'atomic_write_private_file') return { written: true };
         throw new Error(`unexpected operation: ${operation}`);
       },
     });
@@ -231,8 +256,11 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
     assert.deepEqual(adapter.batch([
       { operation: 'read_private_file', payload: { maximum_bytes: 1024, minimum_bytes: 1, path: 'C:\\private.json' } },
     ]), [{ bytes_base64: Buffer.from('private').toString('base64') }]);
+    adapter.atomicWritePrivateFile('C:\\cache.json', Buffer.from('cache'), {
+      ensureParent: true, maxBytes: 1024,
+    });
     assert.deepEqual(calls.map(({ operation }) => operation), [
-      'batch', 'batch', 'batch', 'batch',
+      'batch', 'batch', 'batch', 'batch', 'atomic_write_private_file',
     ]);
     assert.equal(calls[0].payload.requests[1].request.path, 'C:\\private.json');
   } finally {

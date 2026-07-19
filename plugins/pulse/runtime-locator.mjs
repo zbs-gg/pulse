@@ -11,6 +11,12 @@ const PRIVATE_JSON_LIMIT = 1024 * 1024;
 const TREE_MAX_ENTRIES = 100_000;
 const TREE_MAX_DEPTH = 128;
 const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+// Windows process startup and ACL walks are expensive. A SessionStart still
+// proves every signed tree; this bounded receipt only reuses those digests
+// while native reads prove that locator, activation, host access, manifest,
+// workspace identity, and protected paths are unchanged.
+const WINDOWS_INTEGRITY_CACHE_TTL_MS = 2 * 60 * 1000;
+const WINDOWS_INTEGRITY_CACHE_SCHEMA = 'pulse.windows_product_integrity_cache.v1';
 
 function exactObject(value, keys) {
   return value && !Array.isArray(value) && typeof value === 'object' &&
@@ -58,6 +64,77 @@ function nativeExecutableDigest(proof) {
     throw new Error('Pulse product executable native proof is invalid');
   }
   return proof.sha256;
+}
+
+function nativePrivateState(proof, kind) {
+  if (!exactObject(proof, ['canonical_path', 'kind', 'owner_only', 'reparse_point']) ||
+      proof.kind !== kind || proof.owner_only !== true || proof.reparse_point !== false ||
+      typeof proof.canonical_path !== 'string' || !isAbsolute(proof.canonical_path)) {
+    throw new Error('Pulse product private state native proof is invalid');
+  }
+  return proof.canonical_path;
+}
+
+function bytesDigest(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function windowsIntegrityCachePath(productHome, locatorKey, host) {
+  return join(productHome, 'integrity-cache', locatorKey, `${host}.json`);
+}
+
+function windowsIntegrityCacheRecord(proof, host, nowMs = Date.now()) {
+  return {
+    schema: WINDOWS_INTEGRITY_CACHE_SCHEMA,
+    created_at_ms: nowMs,
+    expires_at_ms: nowMs + WINDOWS_INTEGRITY_CACHE_TTL_MS,
+    host,
+    locator_key: proof.locatorKey,
+    workspace_identity: proof.workspaceIdentity,
+    data_dir: proof.dataDir,
+    activation_path: proof.activationPath,
+    host_access_path: proof.hostAccessPath,
+    runtime_manifest_path: proof.runtimeManifestPath,
+    runtime_root: proof.runtimeRoot,
+    plugin_root: proof.pluginRoot,
+    daemon_path: proof.daemonPath,
+    expected_runtime_path: proof.expectedRuntimePath,
+    locator_digest: bytesDigest(proof.locatorBytes),
+    host_access_digest: bytesDigest(proof.hostAccessBytes),
+    activation_digest: bytesDigest(proof.activationBytes),
+    runtime_manifest_digest: bytesDigest(proof.runtimeManifestBytes),
+    runtime_digest: proof.runtimeDigest,
+    plugin_digest: proof.pluginDigest,
+    daemon_digest: proof.daemonDigest,
+  };
+}
+
+function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
+  const keys = [
+    'schema', 'created_at_ms', 'expires_at_ms', 'host', 'locator_key', 'workspace_identity',
+    'data_dir', 'activation_path', 'host_access_path', 'runtime_manifest_path', 'runtime_root',
+    'plugin_root', 'daemon_path', 'expected_runtime_path', 'locator_digest', 'host_access_digest',
+    'activation_digest', 'runtime_manifest_digest', 'runtime_digest', 'plugin_digest', 'daemon_digest',
+  ];
+  if (!exactObject(cache, keys) || cache.schema !== WINDOWS_INTEGRITY_CACHE_SCHEMA ||
+      !Number.isSafeInteger(cache.created_at_ms) || !Number.isSafeInteger(cache.expires_at_ms) ||
+      cache.created_at_ms > nowMs || cache.expires_at_ms <= nowMs ||
+      cache.expires_at_ms - cache.created_at_ms !== WINDOWS_INTEGRITY_CACHE_TTL_MS ||
+      cache.host !== expected.host || cache.locator_key !== expected.locatorKey ||
+      cache.workspace_identity !== expected.workspaceIdentity ||
+      cache.data_dir !== expected.dataDir || cache.activation_path !== expected.activationPath ||
+      cache.host_access_path !== expected.hostAccessPath ||
+      cache.runtime_manifest_path !== expected.runtimeManifestPath || cache.runtime_root !== expected.runtimeRoot ||
+      cache.plugin_root !== expected.pluginRoot || cache.daemon_path !== expected.daemonPath ||
+      cache.expected_runtime_path !== expected.expectedRuntimePath ||
+      cache.locator_digest !== bytesDigest(expected.locatorBytes) ||
+      cache.host_access_digest !== bytesDigest(expected.hostAccessBytes) ||
+      cache.activation_digest !== bytesDigest(expected.activationBytes) ||
+      cache.runtime_manifest_digest !== bytesDigest(expected.runtimeManifestBytes) ||
+      ![cache.runtime_digest, cache.plugin_digest, cache.daemon_digest].every((value) => SHA256.test(value ?? ''))) {
+    return false;
+  }
+  return true;
 }
 
 function preliminaryPrivateJSON(path) {
@@ -162,6 +239,81 @@ function createTrustServices({
           workspaceIdentity: nativeWorkspaceIdentity(results[1]),
         });
       },
+      productEnvironmentCacheProof({ locatorPath, workspacePath, productHome, host, pluginRoot }) {
+        try {
+          const preliminaryLocator = preliminaryPrivateJSON(locatorPath);
+          const locatorKey = workspaceDigest(workspacePath);
+          const entry = preliminaryLocator?.entries?.[locatorKey];
+          if (!entry || entry.workspace_digest !== locatorKey ||
+              typeof entry.workspace_path !== 'string' || workspaceDigest(entry.workspace_path) !== locatorKey ||
+              typeof entry.data_dir !== 'string' || !isAbsolute(entry.data_dir)) {
+            return undefined;
+          }
+          const dataDir = resolve(entry.data_dir);
+          const hostAccessPath = join(productHome, 'product-host-access', locatorKey, `${host}.json`);
+          const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+          const expectedRuntimePath = join(dataDir, 'runtime', 'codex', 'current', 'src', 'cli.js');
+          const runtimeRoot = resolve(expectedRuntimePath, '..', '..');
+          const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
+          const daemonPath = preliminaryDaemonPath(activationPath);
+          const cachePath = windowsIntegrityCachePath(productHome, locatorKey, host);
+          if (!existsSync(cachePath)) return undefined;
+          const results = adapter.batch([
+            {
+              operation: 'read_private_file',
+              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: locatorPath },
+            },
+            { operation: 'inspect_path_identity', payload: { kind: 'directory', path: workspacePath } },
+            {
+              operation: 'read_private_file',
+              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: hostAccessPath },
+            },
+            {
+              operation: 'read_private_file',
+              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: activationPath },
+            },
+            {
+              operation: 'read_private_file',
+              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: runtimeManifestPath },
+            },
+            {
+              operation: 'read_private_file',
+              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: cachePath },
+            },
+            { operation: 'inspect_private_state', payload: { kind: 'directory', path: runtimeRoot } },
+            { operation: 'inspect_private_state', payload: { kind: 'directory', path: pluginRoot } },
+            { operation: 'inspect_private_state', payload: { kind: 'file', path: daemonPath } },
+            { operation: 'inspect_private_state', payload: { kind: 'file', path: expectedRuntimePath } },
+          ]);
+          const locatorBytes = nativePrivateBytes(results[0]);
+          const workspaceIdentity = nativeWorkspaceIdentity(results[1]);
+          const hostAccessBytes = nativePrivateBytes(results[2]);
+          const activationBytes = nativePrivateBytes(results[3]);
+          const runtimeManifestBytes = nativePrivateBytes(results[4]);
+          const cacheBytes = nativePrivateBytes(results[5]);
+          nativePrivateState(results[6], 'directory');
+          nativePrivateState(results[7], 'directory');
+          nativePrivateState(results[8], 'file');
+          nativePrivateState(results[9], 'file');
+          const expected = {
+            activationBytes, activationPath, daemonPath, dataDir, expectedRuntimePath,
+            host, hostAccessBytes, hostAccessPath, locatorBytes, locatorKey, pluginRoot,
+            runtimeManifestBytes, runtimeManifestPath, runtimeRoot, workspaceIdentity,
+          };
+          const cache = parsePrivateJSON(cacheBytes);
+          if (!validWindowsIntegrityCache(cache, expected)) return undefined;
+          return Object.freeze({
+            ...expected,
+            cachePath,
+            daemonDigest: cache.daemon_digest,
+            integrityCacheHit: true,
+            pluginDigest: cache.plugin_digest,
+            runtimeDigest: cache.runtime_digest,
+          });
+        } catch {
+          return undefined;
+        }
+      },
       productEnvironmentProof({ locatorPath, workspacePath, productHome, host, pluginRoot }) {
         const preliminaryLocator = preliminaryPrivateJSON(locatorPath);
         const locatorKey = workspaceDigest(workspacePath);
@@ -215,6 +367,7 @@ function createTrustServices({
         return Object.freeze({
           activationBytes: nativePrivateBytes(results[3]),
           activationPath,
+          cachePath: windowsIntegrityCachePath(productHome, locatorKey, host),
           daemonDigest: nativeExecutableDigest(results[7]),
           daemonPath,
           dataDir,
@@ -223,12 +376,21 @@ function createTrustServices({
           hostAccessPath,
           locatorBytes: nativePrivateBytes(results[0]),
           locatorKey,
+          integrityCacheHit: false,
           pluginDigest: nativeTreeDigest(results[6]),
+          pluginRoot,
           runtimeDigest: nativeTreeDigest(results[4]),
           runtimeManifestBytes: nativePrivateBytes(results[5]),
           runtimeManifestPath,
           runtimeRoot,
           workspaceIdentity: nativeWorkspaceIdentity(results[1]),
+        });
+      },
+      writeProductEnvironmentCache(proof, host) {
+        const record = windowsIntegrityCacheRecord(proof, host);
+        const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
+        adapter.atomicWritePrivateFile(proof.cachePath, bytes, {
+          ensureParent: true, maxBytes: PRIVATE_JSON_LIMIT,
         });
       },
       treeDigest(path, excludeRootFile) {
@@ -472,12 +634,16 @@ export function resolveProductEnvironment({
   cwd = process.cwd(),
   env = process.env,
   host,
+  integrity = 'refresh',
   platform = process.platform,
   architecture = process.arch,
   windowsAdapter,
 } = {}) {
   if (!['claude-code', 'codex', 'cursor'].includes(host)) {
     throw new Error('Pulse product host identity is missing or invalid.');
+  }
+  if (!['refresh', 'reuse'].includes(integrity)) {
+    throw new Error('Pulse product integrity mode is missing or invalid.');
   }
   const trust = createTrustServices({ platform, architecture, windowsAdapter });
   const productHome = resolve(env.PULSE_HOME || join(homedir(), '.pulse'));
@@ -487,11 +653,16 @@ export function resolveProductEnvironment({
   const locatorPath = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
   const canonical = canonicalWorkspace(cwd);
   const pluginRoot = dirname(fileURLToPath(import.meta.url));
-  const environmentProof = typeof trust.productEnvironmentProof === 'function'
-    ? trust.productEnvironmentProof({
+  const proofInput = {
       host, locatorPath, pluginRoot, productHome, workspacePath: canonical,
-    })
+  };
+  const cachedEnvironmentProof = integrity === 'reuse' &&
+    typeof trust.productEnvironmentCacheProof === 'function'
+    ? trust.productEnvironmentCacheProof(proofInput)
     : undefined;
+  const environmentProof = cachedEnvironmentProof ?? (typeof trust.productEnvironmentProof === 'function'
+    ? trust.productEnvironmentProof(proofInput)
+    : undefined);
   const locatorProof = environmentProof ?? (typeof trust.workspaceLocatorProof === 'function'
     ? trust.workspaceLocatorProof(locatorPath, canonical)
     : undefined);
@@ -639,6 +810,10 @@ export function resolveProductEnvironment({
     productEnvironment.PULSE_BINDING_REGISTRY_PATH = entry.registry_path;
     productEnvironment.PULSE_BINDING_PUBLIC_KEY_PATH = entry.public_key_path;
     productEnvironment.PULSE_BINDING_ANCHOR_PATH = entry.anchor_path;
+  }
+  if (environmentProof && environmentProof.integrityCacheHit === false &&
+      typeof trust.writeProductEnvironmentCache === 'function') {
+    trust.writeProductEnvironmentCache(environmentProof, host);
   }
   return productEnvironment;
 }
