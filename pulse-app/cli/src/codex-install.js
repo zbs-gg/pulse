@@ -786,8 +786,9 @@ export function includeRuntimePath(sourceRoot, sourcePath) {
   if (nativeRelative === '..' || nativeRelative.startsWith(`..${sep}`) || isAbsolute(nativeRelative)) return false;
   const normalized = nativeRelative.split(sep).join('/');
   const top = normalized.split('/')[0];
-  if (!new Set(['src', 'vendor', 'node_modules', 'package.json', 'LICENSE']).has(top)) return false;
+  if (!new Set(['src', 'vendor', 'runtime', 'node_modules', 'package.json', 'LICENSE']).has(top)) return false;
   if (top === 'vendor' && normalized !== 'vendor' && !normalized.startsWith('vendor/pulse-mcp-dist')) return false;
+  if (top === 'runtime' && normalized !== 'runtime' && !normalized.startsWith('runtime/windows-bootstrap')) return false;
   return !normalized.endsWith('.test.js') && !normalized.endsWith('.map') && !normalized.endsWith('.d.ts');
 }
 

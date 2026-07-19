@@ -168,6 +168,10 @@ test('the signed product plugin snapshot carries the Windows trust adapter besid
     assert.equal(existsSync(join(adapterRoot, 'catalog.json')), true);
     assert.equal(existsSync(join(adapterRoot, 'win32-arm64', 'pulse-platform-adapter.exe')), true);
     assert.equal(existsSync(join(adapterRoot, 'win32-x64', 'pulse-platform-adapter.exe')), true);
+    const runtimeAdapterRoot = join(root, 'runtime', 'runtime', 'windows-bootstrap');
+    assert.equal(existsSync(join(runtimeAdapterRoot, 'catalog.json')), true);
+    assert.equal(existsSync(join(runtimeAdapterRoot, 'win32-arm64', 'pulse-platform-adapter.exe')), true);
+    assert.equal(existsSync(join(runtimeAdapterRoot, 'win32-x64', 'pulse-platform-adapter.exe')), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
