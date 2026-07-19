@@ -58,6 +58,12 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(productE2E, /PULSE_PERSONAL_PACKED_TARBALL/);
 	assert.match(productE2E, /packed_tarball_sha256/);
 	assert.match(productE2E, /package_version/);
+	const cli = readFileSync(join(root, 'pulse-app', 'cli', 'src', 'cli.js'), 'utf8');
+	assert.match(cli, /PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION/);
+	assert.match(cli, /core activation detail/);
+	assert.match(cli, /<windows-path>/);
+	assert.match(cli, /defaultPlatformServices\.inspectExecutable\(resolve\(managedRuntime\.daemon\.path\)\)/);
+	assert.match(cli, /executableProof\.sha256 !== managedRuntime\.daemon\.digest/);
 	for (const script of [
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',

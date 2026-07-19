@@ -648,6 +648,19 @@ function personalCoreContext(resolved, edge, liveStatus) {
   });
 }
 
+function nativeFixtureActivationDetail(error) {
+  const code = typeof error?.code === 'string' && /^[a-z0-9_]{1,128}$/i.test(error.code)
+    ? error.code : null;
+  const name = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+    ? error.name : 'Error';
+  const message = String(error?.message ?? 'activation failed')
+    .replace(/[A-Za-z]:\\[^\s;"']*/g, '<windows-path>')
+    .replace(/\/(?:[^\s;]+\/?)+/g, '<path>')
+    .replace(/[^\x20-\x7e]/g, '?')
+    .slice(0, 512);
+  return JSON.stringify({ code, message, name });
+}
+
 async function inspectPersonalInstallCore(binding) {
   try {
     const resolved = exactPersonalCore(binding);
@@ -731,6 +744,7 @@ async function activatePersonalInstallCoreTransaction(binding) {
           const diagnostic = [error?.code, error?.message]
             .find((value) => typeof value === 'string' && /^[a-z0-9_]{1,128}$/i.test(value));
           process.stderr.write(`[pulse-native-fixture] core activation failed: ${diagnostic ?? 'activation_failed'}\n`);
+          process.stderr.write(`[pulse-native-fixture] core activation detail: ${nativeFixtureActivationDetail(error)}\n`);
         }
         const failures = [];
         if (runtimeInstalled) {
@@ -2683,13 +2697,15 @@ function writeProductDaemonActivation(managedRuntime, runtime) {
 		productEdge.release_epoch !== managedRuntime.verified_release?.epoch) {
 		throw new Error('Pulse signed Codex product edge is invalid');
 	}
-	const executable = realpathSync(resolve(managedRuntime.daemon.path));
-	const info = lstatSync(executable);
-	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-	if (!info.isFile() || info.isSymbolicLink() || info.uid !== currentUID ||
-		(info.mode & 0o077) !== 0 || (info.mode & 0o111) === 0) {
+	let executableProof;
+	try {
+		executableProof = defaultPlatformServices.inspectExecutable(resolve(managedRuntime.daemon.path));
+	} catch { executableProof = null; }
+	if (!executableProof?.executable || executableProof.owner_only !== true ||
+		executableProof.sha256 !== managedRuntime.daemon.digest) {
 		throw new Error('Pulse product daemon activation executable is unsafe');
 	}
+	const executable = executableProof.canonical_path;
 	if (!runtime?.ok || !isAbsolute(runtime.path) || !/^[a-f0-9]{64}$/.test(runtime.digest ?? '')) {
 		throw new Error('Pulse product runtime activation is invalid');
 	}
