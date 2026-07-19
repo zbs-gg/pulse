@@ -155,7 +155,14 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     const dataDir = join(root, 'data');
     const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
     mkdirSync(join(runtimeRoot, 'src'), { recursive: true });
+    mkdirSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist'), { recursive: true });
+    mkdirSync(join(runtimeRoot, 'node_modules', 'dependency'), { recursive: true });
     writeFileSync(join(runtimeRoot, 'src', 'cli.js'), 'export const ready = true;\n');
+    writeFileSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist', 'index.js'), 'export const mcp = true;\n');
+    writeFileSync(join(runtimeRoot, 'package.json'), '{"name":"@zbs-gg/pulse"}\n');
+    const dependencyPath = join(runtimeRoot, 'node_modules', 'dependency', 'index.js');
+    const dependencyBytes = Buffer.from('export const dependency = true;\n');
+    writeFileSync(dependencyPath, dependencyBytes);
     writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), '{}\n');
     const productPluginRoot = join(root, 'product-plugin');
     mkdirSync(productPluginRoot);
@@ -193,6 +200,18 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     trust.writeProductEnvironmentCache(environmentProof, 'codex');
     assert.equal(calls.filter(([operation]) => operation === 'write').length, 1,
       'a still-valid receipt must not spawn a second Windows writer');
+    writeFileSync(dependencyPath, Buffer.concat([dependencyBytes, Buffer.from('// drift\n')]));
+    const callsBeforeLeasedDependencyRead = calls.length;
+    assert.equal(trust.productEnvironmentCacheProof({
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    })?.runtimeDigest, environmentProof.runtimeDigest,
+    'the bounded lease must avoid walking the large third-party tree on every event');
+    assert.equal(calls.length, callsBeforeLeasedDependencyRead);
+    assert.notEqual(trust.productEnvironmentProof({
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    }).runtimeDigest, environmentProof.runtimeDigest,
+    'the next full native proof must detect third-party tree drift');
+    writeFileSync(dependencyPath, dependencyBytes);
     const runtimeEntrypoint = join(runtimeRoot, 'src', 'cli.js');
     const runtimeEntrypointBytes = readFileSync(runtimeEntrypoint);
     writeFileSync(runtimeEntrypoint, Buffer.concat([runtimeEntrypointBytes, Buffer.from('// drift\n')]));

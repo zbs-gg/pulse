@@ -13,9 +13,11 @@ const TREE_MAX_DEPTH = 128;
 const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 // Windows process startup and ACL walks are expensive. A SessionStart still
 // proves every signed tree and writes this owner-private bounded receipt.
-// Events inside its short window avoid another native process but still bind
-// the workspace witness and rehash locator, activation, host access, manifest,
-// runtime, plugin, and daemon bytes. Any drift falls back to the native proof.
+// Events inside its short window avoid another native process, bind the exact
+// workspace and authority files, and rehash the executable Pulse edge: our
+// source, MCP distribution, plugin, and daemon. The large third-party
+// node_modules tree remains covered by the short lease established by the full
+// native proof. Any edge/authority drift or lease expiry falls back to it.
 const WINDOWS_INTEGRITY_CACHE_TTL_MS = 2 * 60 * 1000;
 const WINDOWS_INTEGRITY_CACHE_SCHEMA = 'pulse.windows_product_integrity_cache.v1';
 
@@ -107,6 +109,30 @@ function windowsBoundedTreeTrust() {
   });
 }
 
+function windowsRuntimeEdgeDigest(runtimeRoot, trust = windowsBoundedTreeTrust()) {
+  const parts = [
+    ['src', join(runtimeRoot, 'src')],
+    ['mcp', join(runtimeRoot, 'vendor', 'pulse-mcp-dist')],
+  ];
+  const hash = createHash('sha256');
+  for (const [label, root] of parts) {
+    const digest = trustedTreeDigest(root, {
+      label: `Pulse trusted runtime ${label}`,
+      trust,
+    });
+    hash.update(label);
+    hash.update('\x00');
+    hash.update(digest);
+    hash.update('\x00');
+  }
+  const packageBytes = preliminaryPrivateBytes(join(runtimeRoot, 'package.json'));
+  hash.update('package.json');
+  hash.update('\x00');
+  hash.update(packageBytes);
+  hash.update('\x00');
+  return hash.digest('hex');
+}
+
 function windowsIntegrityCachePath(productHome, locatorKey, host) {
   return join(productHome, 'integrity-cache', locatorKey, `${host}.json`);
 }
@@ -132,6 +158,7 @@ function windowsIntegrityCacheRecord(proof, host, nowMs = Date.now()) {
     host_access_digest: bytesDigest(proof.hostAccessBytes),
     activation_digest: bytesDigest(proof.activationBytes),
     runtime_manifest_digest: bytesDigest(proof.runtimeManifestBytes),
+    runtime_edge_digest: proof.runtimeEdgeDigest ?? windowsRuntimeEdgeDigest(proof.runtimeRoot),
     runtime_digest: proof.runtimeDigest,
     plugin_digest: proof.pluginDigest,
     daemon_digest: proof.daemonDigest,
@@ -143,7 +170,7 @@ function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
     'schema', 'created_at_ms', 'expires_at_ms', 'host', 'locator_key', 'workspace_identity', 'workspace_witness',
     'data_dir', 'activation_path', 'host_access_path', 'runtime_manifest_path', 'runtime_root',
     'plugin_root', 'daemon_path', 'expected_runtime_path', 'locator_digest', 'host_access_digest',
-    'activation_digest', 'runtime_manifest_digest', 'runtime_digest', 'plugin_digest', 'daemon_digest',
+    'activation_digest', 'runtime_manifest_digest', 'runtime_edge_digest', 'runtime_digest', 'plugin_digest', 'daemon_digest',
   ];
   if (!exactObject(cache, keys) || cache.schema !== WINDOWS_INTEGRITY_CACHE_SCHEMA ||
       !Number.isSafeInteger(cache.created_at_ms) || !Number.isSafeInteger(cache.expires_at_ms) ||
@@ -161,7 +188,9 @@ function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
       cache.host_access_digest !== bytesDigest(expected.hostAccessBytes) ||
       cache.activation_digest !== bytesDigest(expected.activationBytes) ||
       cache.runtime_manifest_digest !== bytesDigest(expected.runtimeManifestBytes) ||
-      ![cache.runtime_digest, cache.plugin_digest, cache.daemon_digest].every((value) => SHA256.test(value ?? ''))) {
+      cache.runtime_edge_digest !== expected.runtimeEdgeDigest ||
+      ![cache.runtime_edge_digest, cache.runtime_digest, cache.plugin_digest, cache.daemon_digest]
+        .every((value) => SHA256.test(value ?? ''))) {
     return false;
   }
   return true;
@@ -298,18 +327,18 @@ function createTrustServices({
           const runtimeManifestBytes = preliminaryPrivateBytes(runtimeManifestPath);
           const cacheBytes = preliminaryPrivateBytes(cachePath);
           const workspaceWitness = windowsWorkspaceWitness(workspacePath);
+          const boundedTrust = windowsBoundedTreeTrust();
           const expected = {
             activationBytes, activationPath, daemonPath, dataDir, expectedRuntimePath,
             host, hostAccessBytes, hostAccessPath, locatorBytes, locatorKey, pluginRoot,
             runtimeManifestBytes, runtimeManifestPath, runtimeRoot, workspaceWitness,
+            runtimeEdgeDigest: windowsRuntimeEdgeDigest(runtimeRoot, boundedTrust),
           };
           const cache = parsePrivateJSON(cacheBytes);
           if (!validWindowsIntegrityCache(cache, expected)) return undefined;
-          const boundedTrust = windowsBoundedTreeTrust();
-          const runtimeDigest = runtimeTreeDigest(runtimeRoot, boundedTrust);
           const pluginDigest = pluginTreeDigest(pluginRoot, boundedTrust);
           const daemonDigest = bytesDigest(preliminaryPrivateBytes(daemonPath, 512 * 1024 * 1024));
-          if (runtimeDigest !== cache.runtime_digest || pluginDigest !== cache.plugin_digest ||
+          if (pluginDigest !== cache.plugin_digest ||
               daemonDigest !== cache.daemon_digest) return undefined;
           return Object.freeze({
             ...expected,
@@ -317,7 +346,7 @@ function createTrustServices({
             daemonDigest,
             integrityCacheHit: true,
             pluginDigest,
-            runtimeDigest,
+            runtimeDigest: cache.runtime_digest,
             workspaceIdentity: cache.workspace_identity,
           });
         } catch {
@@ -400,12 +429,16 @@ function createTrustServices({
       },
       writeProductEnvironmentCache(proof, host) {
         const nowMs = Date.now();
+        const proofWithEdge = {
+          ...proof,
+          runtimeEdgeDigest: windowsRuntimeEdgeDigest(proof.runtimeRoot),
+        };
         const existing = preliminaryPrivateJSON(proof.cachePath);
-        if (validWindowsIntegrityCache(existing, { ...proof, host }, nowMs) &&
+        if (validWindowsIntegrityCache(existing, { ...proofWithEdge, host }, nowMs) &&
             existing.expires_at_ms - nowMs > 30_000) {
           return;
         }
-        const record = windowsIntegrityCacheRecord(proof, host, nowMs);
+        const record = windowsIntegrityCacheRecord(proofWithEdge, host, nowMs);
         const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
         nativeAdapter().atomicWritePrivateFile(proof.cachePath, bytes, {
           ensureParent: true, maxBytes: PRIVATE_JSON_LIMIT,
