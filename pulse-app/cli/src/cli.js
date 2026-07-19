@@ -405,14 +405,17 @@ function currentPersonalInstallPlan() {
 function privateStateFileStatus(path) {
   if (!existsSync(path)) return 'missing';
   try {
-    const info = lstatSync(path);
-    const uid = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-    return info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.uid === uid && (info.mode & 0o077) === 0
-      ? 'present_unverified'
-      : 'invalid';
+    defaultPlatformServices.assertPrivateState(resolve(path), { kind: 'file' });
+    return 'present_unverified';
   } catch {
     return 'invalid';
   }
+}
+
+function readPrivateStateJSON(path) {
+  return JSON.parse(defaultPlatformServices.readPrivateFile(resolve(path), {
+    encoding: 'utf8', minBytes: 2, maxBytes: 1024 * 1024,
+  }));
 }
 
 function writeProductLocators(options) {
@@ -440,7 +443,7 @@ function personalInstallReceiptStatus(workspace) {
   let resumableJournal = false;
   if (journalStatus === 'present_unverified') {
     try {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      const journal = readPrivateStateJSON(journalPath);
       resumableJournal = journal?.schema === 'pulse.personal_install_journal.v1' &&
         ['planned', 'downloading', 'artifacts_staged', 'activating', 'candidate_staged', 'activated'].includes(journal.phase) &&
         typeof journal.manifest_digest === 'string' && /^[a-f0-9]{64}$/.test(journal.manifest_digest);
@@ -457,7 +460,7 @@ function personalInstallReceiptStatus(workspace) {
   if (fileStatus === 'missing') return resumableJournal ? 'resumable' : 'missing';
   if (fileStatus !== 'present_unverified') return fileStatus;
   try {
-    const receipt = JSON.parse(readFileSync(path, 'utf8'));
+    const receipt = readPrivateStateJSON(path);
     if (!['pulse.personal_install_receipt.v1', 'pulse.personal_install_receipt.v2'].includes(receipt?.schema) ||
         receipt.workspace_id !== workspace.workspace_id || receipt.repository_id !== workspace.repository_id ||
         !['ready', 'warming', 'action_required', 'partial', 'blocked'].includes(receipt.outcome) ||
