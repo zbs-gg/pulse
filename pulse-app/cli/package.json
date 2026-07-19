@@ -51,6 +51,7 @@
     "src/personal-principal.js",
     "src/personal-runtime-installer.js",
     "src/product-hook-entrypoint.js",
+    "src/product-hook-entrypoint.bundle.js",
     "src/release-attestation.js",
     "src/target-release-attestation.js",
     "src/release-manifest.js",
@@ -90,11 +91,12 @@
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
+    "build:product-hook-bundle": "node scripts/build-product-hook-bundle.mjs",
     "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
     "fixture:target-release": "node scripts/target-release-fixture.mjs",
     "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
-    "prepack": "node scripts/prepare-preview-vendor.mjs",
+    "prepack": "node scripts/build-product-hook-bundle.mjs && node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"
   },
   "engines": {
@@ -132,5 +134,8 @@
   "homepage": "https://github.com/zbs-gg/pulse#readme",
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
   }
 }

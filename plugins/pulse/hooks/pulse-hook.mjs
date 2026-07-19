@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { resolveProductEnvironment } from '../runtime-locator.mjs';
+import { enableProductCompileCache, resolveProductEnvironment } from '../runtime-locator.mjs';
 
 const eventName = process.argv[2];
 const hookRoot = dirname(fileURLToPath(import.meta.url));
@@ -38,7 +38,8 @@ Object.assign(process.env, productEnvironment, {
   PULSE_PLUGIN_DATA: process.env.PLUGIN_DATA ?? '',
   PULSE_HOOK_BUNDLE_DIGEST: hooksDigest,
 });
-const entrypointPath = join(runtimeRoot, 'src', 'product-hook-entrypoint.js');
+enableProductCompileCache(productEnvironment);
+const entrypointPath = join(runtimeRoot, 'src', 'product-hook-entrypoint.bundle.js');
 if (!existsSync(entrypointPath)) {
   throw new Error('Pulse trusted Codex hook runtime is missing; run `pulse connect codex` again.');
 }

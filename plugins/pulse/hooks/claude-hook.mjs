@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { resolveProductEnvironment } from '../runtime-locator.mjs';
+import { enableProductCompileCache, resolveProductEnvironment } from '../runtime-locator.mjs';
 
 const eventName = process.argv[2];
 const productEnvironment = resolveProductEnvironment({
@@ -15,7 +15,8 @@ if (!existsSync(cliPath)) {
 Object.assign(process.env, productEnvironment, {
   PULSE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA ?? '',
 });
-const entrypointPath = join(resolve(cliPath, '..', '..'), 'src', 'product-hook-entrypoint.js');
+enableProductCompileCache(productEnvironment);
+const entrypointPath = join(resolve(cliPath, '..', '..'), 'src', 'product-hook-entrypoint.bundle.js');
 if (!existsSync(entrypointPath)) {
   throw new Error('Pulse trusted Claude Code hook runtime is missing; reconnect Pulse to Claude Code.');
 }

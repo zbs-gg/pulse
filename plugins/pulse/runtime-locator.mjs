@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import * as nodeModule from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,23 @@ const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 // native proof. Any edge/authority drift or lease expiry falls back to it.
 const WINDOWS_INTEGRITY_CACHE_TTL_MS = 2 * 60 * 1000;
 const WINDOWS_INTEGRITY_CACHE_SCHEMA = 'pulse.windows_product_integrity_cache.v1';
+
+export function enableProductCompileCache(environment, moduleServices = nodeModule) {
+  if (typeof moduleServices.enableCompileCache !== 'function') return false;
+  const dataDir = environment?.PULSE_DATA_DIR;
+  const runtimeDigest = environment?.PULSE_RUNTIME_DIGEST;
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || !SHA256.test(runtimeDigest ?? '')) return false;
+  const cachePath = join(resolve(dataDir), 'runtime', 'node-compile-cache', runtimeDigest);
+  try {
+    mkdirSync(cachePath, { recursive: true, mode: 0o700 });
+    const info = lstatSync(cachePath);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    const result = moduleServices.enableCompileCache(cachePath);
+    return result && typeof result === 'object' && result.status !== moduleServices.constants?.compileCacheStatus?.FAILED;
+  } catch {
+    return false;
+  }
+}
 
 function exactObject(value, keys) {
   return value && !Array.isArray(value) && typeof value === 'object' &&

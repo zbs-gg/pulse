@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { __runtimeLocatorTest } from '../../../plugins/pulse/runtime-locator.mjs';
+import { __runtimeLocatorTest, enableProductCompileCache } from '../../../plugins/pulse/runtime-locator.mjs';
 import { loadPluginWindowsAdapter } from '../../../plugins/pulse/windows-platform-adapter.mjs';
 import { writeProductEdgeFixture } from '../scripts/product-release-fixture.mjs';
 
@@ -42,6 +42,24 @@ test('plugin runtime locator finds the checkout root without invoking a platform
     const nested = join(root, 'with spaces', 'nested');
     mkdirSync(nested, { recursive: true });
     assert.equal(__runtimeLocatorTest.canonicalWorkspace(nested), realpathSync(resolve(root)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('product hook compile cache is release-bound and safely optional', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-product-compile-cache-'));
+  try {
+    const calls = [];
+    const services = {
+      constants: { compileCacheStatus: { FAILED: 2 } },
+      enableCompileCache: (path) => { calls.push(path); return { status: 1 }; },
+    };
+    const digest = 'a'.repeat(64);
+    assert.equal(enableProductCompileCache({ PULSE_DATA_DIR: root, PULSE_RUNTIME_DIGEST: digest }, services), true);
+    assert.deepEqual(calls, [join(root, 'runtime', 'node-compile-cache', digest)]);
+    assert.equal(enableProductCompileCache({ PULSE_DATA_DIR: root, PULSE_RUNTIME_DIGEST: 'unsafe' }, services), false);
+    assert.equal(enableProductCompileCache({ PULSE_DATA_DIR: root, PULSE_RUNTIME_DIGEST: digest }, {}), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
