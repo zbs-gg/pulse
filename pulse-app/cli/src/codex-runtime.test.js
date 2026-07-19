@@ -49,7 +49,7 @@ function tinySafetensors() {
 	return Buffer.concat([prefix, header, Buffer.alloc(4)]);
 }
 
-async function managedActivationFixture(dataDir) {
+async function managedActivationFixture(dataDir, { presenceHelper = true } = {}) {
 	const installRoot = join(dataDir, 'artifacts');
 	const fixtures = [
 		[artifactDescriptor('pulse-daemon', 'daemon', '1'.repeat(64)), [['bin/pulse', Buffer.from('#!/bin/sh\n'), 0o700]]],
@@ -67,7 +67,7 @@ async function managedActivationFixture(dataDir) {
 		[artifactDescriptor('pulse-presence-helper', 'presence-helper', '5'.repeat(64)), [
 			['bin/gg.zbs.pulse.presence-helper', Buffer.from('#!/bin/sh\n'), 0o700],
 		]],
-	];
+	].filter(([descriptor]) => presenceHelper || descriptor.kind !== 'presence-helper');
 	for (const [descriptor, files] of fixtures) {
 		const manifest = artifactTree(files);
 		descriptor.tree_digest = createHash('sha256').update(canonicalArtifactJSON(manifest)).digest('hex');
@@ -365,7 +365,7 @@ test('legacy v3 product activation is explicitly non-ready because it omits the 
 	);
 });
 
-test('v4 product activation binds the complete signed release and rejects plugin-runtime drift', async () => {
+test('v4 product activation accepts a host-neutral release without optional presence and rejects plugin-runtime drift', async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-product-activation-v4.'));
 	const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
 	const runtimePath = join(runtimeRoot, 'src', 'cli.js');
@@ -375,7 +375,7 @@ test('v4 product activation binds the complete signed release and rejects plugin
 	const runtimeDigest = createHash('sha256')
 		.update('src/cli.js').update('\x00').update(runtimeBytes).update('\x00').digest('hex');
 	const pluginTreeDigest = 'b'.repeat(64);
-	const { activations, managed, release } = await managedActivationFixture(dataDir);
+	const { activations, managed, release } = await managedActivationFixture(dataDir, { presenceHelper: false });
 	const pluginRuntime = activations['plugin-runtime'];
 	writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify({
 		schema: 'pulse.codex_runtime.v2', tree_digest: runtimeDigest, entrypoint: 'src/cli.js',

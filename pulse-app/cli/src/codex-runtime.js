@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import { readCommittedArtifactSet } from './artifact-installer.js';
 import { inspectCodexRuntimeAt } from './codex-install.js';
-import { RELEASE_ARTIFACT_KINDS } from './release-manifest.js';
+import { RELEASE_ARTIFACT_KINDS, RELEASE_REQUIRED_ARTIFACT_KINDS } from './release-manifest.js';
 import { inspectWorkspaceBinding, resolveWorkspaceBinding } from './workspace-binding.js';
 import { stageUnassignedCapsule } from './unassigned-inbox.js';
 import {
@@ -138,8 +138,10 @@ export function readProductActivationBundle(
 	const model = committed.model;
 	const pluginRuntime = committed['plugin-runtime'];
 	const presenceHelper = committed['presence-helper'];
-	if (Object.keys(committed).sort().join('\0') !== [...RELEASE_ARTIFACT_KINDS].sort().join('\0') ||
-			!daemon || !embedderRuntime || !model || !pluginRuntime || !presenceHelper ||
+	const committedKinds = Object.keys(committed);
+	if (RELEASE_REQUIRED_ARTIFACT_KINDS.some((kind) => !committedKinds.includes(kind)) ||
+			committedKinds.some((kind) => !RELEASE_ARTIFACT_KINDS.includes(kind)) ||
+			!daemon || !embedderRuntime || !model || !pluginRuntime ||
 			committedSet.record.manifest_digest !== activation.release_manifest_digest ||
 			committedSet.record.version !== activation.release_version ||
 			committedSet.record.epoch !== activation.release_epoch ||

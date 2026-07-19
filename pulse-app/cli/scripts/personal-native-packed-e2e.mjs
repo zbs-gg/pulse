@@ -367,9 +367,9 @@ try {
     cwd: workspace, env: baseEnv, timeout: 180_000,
   });
   const plan = json(planResult.stdout, 'native packed plan is invalid');
-  assert.equal(plan.outcome, 'ready_to_install', JSON.stringify({
+  assert.equal(plan.outcome, 'ready_to_install', `${JSON.stringify({
     current_state: plan.current_state, reason_codes: plan.reason_codes, resources: plan.resources,
-  }));
+  })}\n${planResult.stderr}`);
   assert.equal(plan.release.target_id, selectedTarget);
   assert.equal(plan.release.verification_profile.production, false);
   const env = {
