@@ -372,8 +372,12 @@ test('product locators are exact and workspace removal preserves other connectio
 	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-locators-'));
 	try {
 		const codexHome = join(root, 'codex');
-		const bindingA = { workspace: { canonical_path: join(root, 'workspace-a') } };
-		const bindingB = { workspace: { canonical_path: join(root, 'workspace-b') } };
+		const bindingA = { workspace: {
+			canonical_path: join(root, 'workspace-a'), workspace_id: `workspace_${'a'.repeat(32)}`,
+		} };
+		const bindingB = { workspace: {
+			canonical_path: join(root, 'workspace-b'), workspace_id: `workspace_${'b'.repeat(32)}`,
+		} };
 		const locatorArgs = (binding, suffix) => ({
 			codexHome, binding, dataDir: join(root, `data-${suffix}`),
 			registryPath: join(root, `registry-${suffix}.json`), publicKeyPath: join(root, `key-${suffix}.pem`),
@@ -402,7 +406,9 @@ test('host-neutral product locator carries one workspace authority across all ha
 	const root = mkdtempSync(join(tmpdir(), 'pulse-product-locators-'));
 	try {
 		const productHome = join(root, '.pulse');
-		const binding = { workspace: { canonical_path: join(root, 'workspace') } };
+		const binding = { workspace: {
+			canonical_path: join(root, 'workspace'), workspace_id: `workspace_${'a'.repeat(32)}`,
+		} };
 		const path = writeProductLocator({
 			productHome, binding, dataDir: join(root, 'data'),
 			registryPath: join(root, 'registry.json'), publicKeyPath: join(root, 'key.pem'),
@@ -410,6 +416,8 @@ test('host-neutral product locator carries one workspace authority across all ha
 		});
 		assert.equal(path, join(productHome, 'product-locators.json'));
 		assert.equal(readProductLocator({ productHome, binding }).entry.data_dir, join(root, 'data'));
+		assert.equal(readProductLocator({ productHome, binding }).entry.workspace_id, binding.workspace.workspace_id);
+		assert.equal(readProductLocator({ productHome, binding }).entry.workspace_path, binding.workspace.canonical_path);
 		assert.equal(JSON.parse(readFileSync(path, 'utf8')).schema, 'pulse.product_locators.v1');
 		assert.equal(removeProductLocator({ productHome, binding }).remaining, 0);
 		assert.equal(existsSync(path), false);

@@ -148,6 +148,7 @@ export function codexMarketplaceDoctorCheck({ exact, marketplace, snapshot }) {
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ARTIFACT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const WORKSPACE_ID = /^workspace_[a-f0-9]{32}$/;
 
 function ownerControlledTreeDigest(root, label, {
 	excludeRootFiles = [], platformServices = defaultPlatformServices,
@@ -493,7 +494,9 @@ function codexProductWorkspaceDigest(canonicalPath) {
 }
 
 export function readProductLocator({ productHome = join(homedir(), '.pulse'), binding }) {
-	if (!binding?.workspace?.canonical_path) throw new Error('Product locator binding is invalid');
+	if (!binding?.workspace?.canonical_path || !WORKSPACE_ID.test(binding.workspace.workspace_id ?? '')) {
+		throw new Error('Product locator binding is invalid');
+	}
 	const path = join(resolve(productHome), 'product-locators.json');
 	const info = lstatSync(path);
 	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
@@ -509,12 +512,16 @@ export function readProductLocator({ productHome = join(homedir(), '.pulse'), bi
 		throw new Error('Product locator is invalid');
 	}
 	const entry = locator.entries[workspaceDigest];
-	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	const allowed = [
+		'anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode',
+		'workspace_digest', 'workspace_id', 'workspace_path',
+	];
 	if (!entry) throw new Error('Product locator is missing for this workspace');
 	if (entry.workspace_digest !== workspaceDigest ||
+		entry.workspace_id !== binding.workspace.workspace_id || entry.workspace_path !== binding.workspace.canonical_path ||
 		Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
 		!['production', 'test'].includes(entry.trust_mode) ||
-		![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
+		![entry.workspace_path, entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
 			.every((value) => typeof value === 'string' && isAbsolute(value))) {
 		throw new Error('Product locator is invalid for this workspace');
 	}
@@ -525,7 +532,8 @@ export function writeProductLocator({
 	productHome = join(homedir(), '.pulse'), binding, dataDir, registryPath, publicKeyPath, anchorPath,
 	trustMode = 'production',
 }) {
-	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode) ||
+	if (!binding?.workspace?.canonical_path || !WORKSPACE_ID.test(binding.workspace.workspace_id ?? '') ||
+		!['production', 'test'].includes(trustMode) ||
 		![dataDir, registryPath, publicKeyPath, anchorPath]
 			.every((value) => typeof value === 'string' && isAbsolute(value))) {
 		throw new Error('Product locator input is invalid');
@@ -545,8 +553,13 @@ export function writeProductLocator({
 		}
 	}
 	const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+	for (const [key, entry] of Object.entries(current.entries)) {
+		if (entry?.workspace_id === binding.workspace.workspace_id && key !== workspaceDigest) delete current.entries[key];
+	}
 	current.entries[workspaceDigest] = {
 		workspace_digest: workspaceDigest,
+		workspace_id: binding.workspace.workspace_id,
+		workspace_path: binding.workspace.canonical_path,
 		data_dir: resolve(dataDir),
 		registry_path: resolve(registryPath),
 		public_key_path: resolve(publicKeyPath),
@@ -672,7 +685,9 @@ export function removeProductHostAccess({
 }
 
 export function readCodexProductLocator({ codexHome, binding }) {
-	if (!binding?.workspace?.canonical_path) throw new Error('Codex product locator binding is invalid');
+	if (!binding?.workspace?.canonical_path || !WORKSPACE_ID.test(binding.workspace.workspace_id ?? '')) {
+		throw new Error('Codex product locator binding is invalid');
+	}
 	const path = join(resolve(codexHome), 'pulse', 'product-locators.json');
 	const info = lstatSync(path);
 	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
@@ -688,12 +703,16 @@ export function readCodexProductLocator({ codexHome, binding }) {
 		throw new Error('Codex product locator is invalid');
 	}
 	const entry = locator.entries[workspaceDigest];
-	const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
+	const allowed = [
+		'anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode',
+		'workspace_digest', 'workspace_id', 'workspace_path',
+	];
 	if (!entry) throw new Error('Codex product locator is missing for this workspace');
 	if (entry.workspace_digest !== workspaceDigest ||
+		entry.workspace_id !== binding.workspace.workspace_id || entry.workspace_path !== binding.workspace.canonical_path ||
 		Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
 		!['production', 'test'].includes(entry.trust_mode) ||
-		![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
+		![entry.workspace_path, entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
 			.every((value) => typeof value === 'string' && isAbsolute(value))) {
 		throw new Error('Codex product locator is invalid for this workspace');
 	}
@@ -703,7 +722,8 @@ export function readCodexProductLocator({ codexHome, binding }) {
 export function writeCodexProductLocator({
 	codexHome, binding, dataDir, registryPath, publicKeyPath, anchorPath, trustMode = 'production',
 }) {
-	if (!binding?.workspace?.canonical_path || !['production', 'test'].includes(trustMode) ||
+	if (!binding?.workspace?.canonical_path || !WORKSPACE_ID.test(binding.workspace.workspace_id ?? '') ||
+		!['production', 'test'].includes(trustMode) ||
 		![dataDir, registryPath, publicKeyPath, anchorPath].every((value) => typeof value === 'string' && isAbsolute(value))) {
     throw new Error('Codex product locator input is invalid');
   }
@@ -723,8 +743,13 @@ export function writeCodexProductLocator({
     }
   }
   const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+  for (const [key, entry] of Object.entries(current.entries)) {
+    if (entry?.workspace_id === binding.workspace.workspace_id && key !== workspaceDigest) delete current.entries[key];
+  }
   current.entries[workspaceDigest] = {
     workspace_digest: workspaceDigest,
+    workspace_id: binding.workspace.workspace_id,
+    workspace_path: binding.workspace.canonical_path,
     data_dir: resolve(dataDir),
 		registry_path: resolve(registryPath),
 		public_key_path: resolve(publicKeyPath),

@@ -24,6 +24,30 @@ function workspaceDigest(canonicalPath) {
     .digest('hex');
 }
 
+function workspaceID(identity) {
+  if (typeof identity !== 'string' || identity.length < 1 || identity.length > 1024) {
+    throw new Error('Pulse workspace identity proof is invalid');
+  }
+  return `workspace_${createHash('sha256')
+    .update('pulse-workspace-v1')
+    .update('\x00')
+    .update(identity)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+function selectLocatorEntry(locator, canonical, trust) {
+  const currentWorkspaceID = workspaceID(trust.workspaceIdentity(canonical));
+  const matches = Object.entries(locator?.entries ?? {}).filter(([key, entry]) =>
+    entry?.workspace_id === currentWorkspaceID && entry.workspace_digest === key &&
+    typeof entry.workspace_path === 'string' && workspaceDigest(entry.workspace_path) === key);
+  if (matches.length !== 1) {
+    throw new Error('Pulse product locator workspace identity is missing or ambiguous');
+  }
+  const [key, entry] = matches[0];
+  return { entry, key };
+}
+
 function canonicalWorkspace(cwd) {
   let current = realpathSync(resolve(cwd));
   if (!lstatSync(current).isDirectory()) current = dirname(current);
@@ -53,6 +77,17 @@ function createTrustServices({
     const adapter = windowsAdapter ?? loadPluginWindowsAdapter({ architecture });
     return Object.freeze({
       platform,
+      workspaceIdentity(path) {
+        const proof = adapter.inspectPathIdentity(path, { kind: 'directory' });
+        if (!exactObject(proof, ['canonical_path', 'identity_token', 'kind', 'reparse_point']) ||
+            proof.kind !== 'directory' || proof.reparse_point !== false ||
+            typeof proof.canonical_path !== 'string' || !isAbsolute(proof.canonical_path) ||
+            typeof proof.identity_token !== 'string' || proof.identity_token.length < 1 ||
+            proof.identity_token.length > 1024) {
+          throw new Error('Pulse workspace identity native proof is invalid');
+        }
+        return proof.identity_token;
+      },
       readPrivateFile(path, maxBytes = PRIVATE_JSON_LIMIT) {
         const bytes = adapter.readPrivateFile(path, { minBytes: 1, maxBytes });
         if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > maxBytes) {
@@ -92,6 +127,13 @@ function createTrustServices({
   }
   return Object.freeze({
     platform,
+    workspaceIdentity(path) {
+      const info = lstatSync(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) {
+        throw new Error('Pulse workspace identity proof is invalid');
+      }
+      return `${info.dev}:${info.ino}`;
+    },
     readPrivateFile(path, maxBytes = PRIVATE_JSON_LIMIT) {
       const info = lstatSync(path);
       const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
@@ -210,16 +252,22 @@ export function resolveProductEnvironment({
   const locatorPath = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
   const locator = readPrivateJSON(trust, locatorPath);
   const canonical = canonicalWorkspace(cwd);
-  const key = workspaceDigest(canonical);
   const validLocatorSchema = locatorPath === sharedPath
     ? locator?.schema === 'pulse.product_locators.v1'
     : locator?.schema === 'pulse.codex_product_locators.v1';
-  const entry = validLocatorSchema ? locator.entries?.[key] : undefined;
-  const allowed = ['anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode', 'workspace_digest'];
-  if (!entry || entry.workspace_digest !== key ||
+  let selected;
+  try { selected = validLocatorSchema ? selectLocatorEntry(locator, canonical, trust) : undefined; } catch {}
+  const entry = selected?.entry;
+  const key = selected?.key;
+  const allowed = [
+    'anchor_path', 'data_dir', 'registry_path', 'public_key_path', 'trust_mode',
+    'workspace_digest', 'workspace_id', 'workspace_path',
+  ];
+  if (!entry || entry.workspace_digest !== key || workspaceDigest(entry.workspace_path) !== key ||
       Object.keys(entry).length !== allowed.length || Object.keys(entry).some((name) => !allowed.includes(name)) ||
       !['production', 'test'].includes(entry.trust_mode) ||
-      ![entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
+      !/^workspace_[a-f0-9]{32}$/.test(entry.workspace_id ?? '') ||
+      ![entry.workspace_path, entry.data_dir, entry.registry_path, entry.public_key_path, entry.anchor_path]
         .every((value) => typeof value === 'string' && isAbsolute(value))) {
     throw new Error('Pulse product locator is missing or invalid for this workspace; run `pulse install` again.');
   }
@@ -314,5 +362,8 @@ export function resolveProductEnvironment({
 export const __runtimeLocatorTest = Object.freeze({
   canonicalWorkspace,
   createTrustServices,
+  selectLocatorEntry,
   trustedTreeDigest,
+  workspaceDigest,
+  workspaceID,
 });

@@ -119,6 +119,7 @@ export function loadPluginWindowsAdapter({
         maximum_total_bytes: maximumTotalBytes, path,
       });
     },
+    inspectPathIdentity(path, { kind }) { return call('inspect_path_identity', { kind, path }); },
     inspectExecutable(path) { return call('inspect_executable', { path }); },
   });
 }

@@ -39,6 +39,13 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     writeFileSync(join(root, 'runtime-manifest.json'), '{}\n');
     const calls = [];
     const adapter = {
+      inspectPathIdentity(path, options) {
+        calls.push(['identity', path, options]);
+        return {
+          canonical_path: path, identity_token: 'volume:file', kind: options.kind,
+          reparse_point: false,
+        };
+      },
       readPrivateFile(path, options) {
         calls.push(['read', path, options]);
         return readFileSync(path);
@@ -59,18 +66,50 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
       },
     };
     const trust = __runtimeLocatorTest.createTrustServices({ platform: 'win32', windowsAdapter: adapter });
+    assert.equal(trust.workspaceIdentity(root), 'volume:file');
     assert.deepEqual(trust.readPrivateFile(file, 1024), bytes);
     assert.equal(__runtimeLocatorTest.trustedTreeDigest(root, {
       excludeRootFile: 'runtime-manifest.json', label: 'Pulse test runtime', trust,
     }), createHash('sha256').update('runtime.mjs').update('\0').update(bytes).update('\0').digest('hex'));
     assert.equal(trust.executableDigest(file), createHash('sha256').update(bytes).digest('hex'));
-    assert.deepEqual(calls.map(([operation]) => operation), ['read', 'tree', 'executable']);
-    assert.deepEqual(calls[1][2].entries.map((entry) => entry.path), [
+    assert.deepEqual(calls.map(([operation]) => operation), ['identity', 'read', 'tree', 'executable']);
+    assert.deepEqual(calls[2][2].entries.map((entry) => entry.path), [
       'runtime-manifest.json', 'runtime.mjs',
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('plugin runtime locator resolves Windows short and long workspace aliases by native identity', () => {
+  const installedPath = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\pulse-native\\workspace';
+  const invokedPath = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\pulse-native\\workspace';
+  const identity = 'volume-7:file-42';
+  const workspaceID = __runtimeLocatorTest.workspaceID(identity);
+  const key = __runtimeLocatorTest.workspaceDigest(installedPath);
+  const entry = {
+    anchor_path: 'C:\\pulse\\anchor.json',
+    data_dir: 'C:\\pulse\\data',
+    public_key_path: 'C:\\pulse\\key.pem',
+    registry_path: 'C:\\pulse\\registry.json',
+    trust_mode: 'test',
+    workspace_digest: key,
+    workspace_id: workspaceID,
+    workspace_path: installedPath,
+  };
+  const locator = { entries: { [key]: entry } };
+  const trust = { workspaceIdentity: () => identity };
+
+  assert.deepEqual(
+    __runtimeLocatorTest.selectLocatorEntry(locator, invokedPath, trust),
+    { entry, key },
+  );
+  assert.throws(
+    () => __runtimeLocatorTest.selectLocatorEntry(locator, invokedPath, {
+      workspaceIdentity: () => 'different-volume:different-file',
+    }),
+    /workspace identity/,
+  );
 });
 
 test('plugin Windows adapter verifies its signed catalog and exact native protocol', () => {
@@ -100,11 +139,21 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
           schema: 'pulse.windows_bootstrap_adapter.contract.v1', target, version: 1,
         };
         if (operation === 'read_private_file') return { bytes_base64: Buffer.from('private').toString('base64') };
+        if (operation === 'inspect_path_identity') return {
+          canonical_path: payload.path, identity_token: 'volume:file', kind: payload.kind,
+          reparse_point: false,
+        };
         throw new Error(`unexpected operation: ${operation}`);
       },
     });
     assert.deepEqual(adapter.readPrivateFile('C:\\private.json'), Buffer.from('private'));
-    assert.deepEqual(calls.map(({ operation }) => operation), ['contract', 'read_private_file']);
+    assert.deepEqual(adapter.inspectPathIdentity('C:\\workspace', { kind: 'directory' }), {
+      canonical_path: 'C:\\workspace', identity_token: 'volume:file', kind: 'directory',
+      reparse_point: false,
+    });
+    assert.deepEqual(calls.map(({ operation }) => operation), [
+      'contract', 'read_private_file', 'inspect_path_identity',
+    ]);
     assert.equal(calls[1].payload.path, 'C:\\private.json');
   } finally {
     rmSync(root, { recursive: true, force: true });
