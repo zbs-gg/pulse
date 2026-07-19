@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkkmnk/pulse/internal/platform"
@@ -147,16 +148,26 @@ func dispatch(operation string, value request) (any, error) {
 		if len(value.Requests) < 1 || len(value.Requests) > 16 {
 			return nil, fmt.Errorf("%w: batch_size", platform.ErrUnsafe)
 		}
-		results := make([]any, 0, len(value.Requests))
 		for _, item := range value.Requests {
 			if !batchOperations[item.Operation] || item.Request.Schema != "" || len(item.Request.Requests) != 0 {
 				return nil, fmt.Errorf("%w: batch_operation", platform.ErrUnsafe)
 			}
-			result, err := dispatch(item.Operation, item.Request)
+		}
+		results := make([]any, len(value.Requests))
+		errors := make([]error, len(value.Requests))
+		var wait sync.WaitGroup
+		for index, item := range value.Requests {
+			wait.Add(1)
+			go func(index int, item batchOperation) {
+				defer wait.Done()
+				results[index], errors[index] = dispatch(item.Operation, item.Request)
+			}(index, item)
+		}
+		wait.Wait()
+		for _, err := range errors {
 			if err != nil {
 				return nil, err
 			}
-			results = append(results, result)
 		}
 		return map[string]any{"results": results}, nil
 	case "digest_private_tree":
