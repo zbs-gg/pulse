@@ -133,7 +133,7 @@
             "gatekeeper": { "type": "boolean" },
             "identifier": { "type": ["string", "null"] },
             "notarized": { "type": "boolean" },
-            "scheme": { "enum": ["apple-developer-id", "release-manifest"] },
+            "scheme": { "enum": ["apple-developer-id", "release-manifest", "windows-authenticode"] },
             "stapled": { "type": "boolean" },
             "team_id": { "type": ["string", "null"] }
           }
@@ -162,7 +162,7 @@
             "gatekeeper": { "const": true },
             "kind": { "const": "apple" },
             "notarized": { "const": true },
-            "stapled": { "const": true },
+            "stapled": { "const": false },
             "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
           }
         },

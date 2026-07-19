@@ -151,7 +151,7 @@ function portableModelPolicy() {
 
 function verificationProfile(platform) {
   if (platform === 'darwin') {
-    return { gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5' };
+    return { gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5' };
   }
   if (platform === 'win32') {
     return {
@@ -166,14 +166,19 @@ function verificationProfile(platform) {
 
 function targetArtifact(kind, targetID, overrides = {}) {
   const [platform, architecture, libc = null] = targetID.split('-');
-  const darwinExecutable = platform === 'darwin' && ['daemon', 'embedder-runtime', 'presence-helper'].includes(kind);
+  const nativeExecutable = ['daemon', 'embedder-runtime', 'presence-helper'].includes(kind);
+  const signing = nativeExecutable && platform === 'darwin'
+    ? { ...artifact(kind).signing, stapled: false }
+    : nativeExecutable && platform === 'win32'
+      ? { ...portableSigning(), scheme: 'windows-authenticode' }
+      : portableSigning();
   return artifact(kind, {
     architecture,
     format: 'tar.gz',
     minimum_os: platform === 'darwin' ? '13.0' : '0.0',
     model_policy: kind === 'model' ? portableModelPolicy() : null,
     platform,
-    signing: darwinExecutable ? artifact(kind).signing : portableSigning(),
+    signing,
     tree_digest: 'b'.repeat(64),
     url: `https://releases.zbs.gg/pulse/0.8.0/${targetID}/${kind}.tar.gz`,
     ...overrides,

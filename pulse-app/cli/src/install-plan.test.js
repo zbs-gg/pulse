@@ -55,7 +55,7 @@ function verifiedRelease({
     historical_only: historical,
     target_id: targetID,
     verification_profile: historical ? null : targetID.startsWith('darwin-')
-      ? { gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5' }
+      ? { gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5' }
       : targetID.startsWith('win32-')
         ? { kind: 'windows', publisher: 'CN=ZBS GG Inc.', timestamp_url: 'https://timestamp.digicert.com', timestamped: true }
         : { kind: 'linux', policy: 'signed-catalog-tree-v1' },
@@ -128,7 +128,7 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     assert.equal(plan.release.total_download_bytes, 150);
     assert.equal(plan.release.artifacts.length, 5);
     assert.deepEqual(plan.release.verification_profile, {
-      gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5',
+      gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5',
     });
     assert.deepEqual(plan.release.origins, ['https://models.zbs.gg', 'https://releases.zbs.gg']);
     assert.equal(plan.resources.disk_free_bytes, ampleResources.disk_free_bytes);

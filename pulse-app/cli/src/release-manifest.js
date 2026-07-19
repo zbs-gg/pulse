@@ -156,6 +156,23 @@ function validateSigning(signing, executable, platform = 'darwin') {
       signing.identifier !== null || signing.team_id !== null) fail('artifact_signing_invalid');
 }
 
+function validateCatalogSigning(signing, executable, platform) {
+  exactKeys(signing, ['gatekeeper', 'identifier', 'notarized', 'scheme', 'stapled', 'team_id'], 'artifact_signing_fields_invalid');
+  if (executable && platform === 'darwin') {
+    if (signing.scheme !== 'apple-developer-id' || signing.notarized !== true || signing.gatekeeper !== true ||
+        signing.stapled !== false || typeof signing.identifier !== 'string' || !SAFE_ID.test(signing.identifier) ||
+        typeof signing.team_id !== 'string' || !TEAM_ID.test(signing.team_id)) fail('artifact_signing_invalid');
+    return;
+  }
+  if (executable && platform === 'win32') {
+    if (signing.scheme !== 'windows-authenticode' || signing.notarized !== false || signing.gatekeeper !== false ||
+        signing.stapled !== false || signing.identifier !== null || signing.team_id !== null) fail('artifact_signing_invalid');
+    return;
+  }
+  if (signing.scheme !== 'release-manifest' || signing.notarized !== false || signing.gatekeeper !== false ||
+      signing.stapled !== false || signing.identifier !== null || signing.team_id !== null) fail('artifact_signing_invalid');
+}
+
 function validateArtifact(name, artifact, release, allowedOrigins, options) {
   exactKeys(artifact, [
     'architecture', 'bytes', 'epoch', 'executable', 'format', 'id', 'kind', 'minimum_os', 'model_policy', 'origin',
@@ -287,7 +304,7 @@ function validateCatalogArtifact(name, artifact, release, allowedOrigins, expect
   if (!url.pathname.endsWith(`.${artifact.format}`)) fail('artifact_format_invalid');
   const executable = NATIVE_EXECUTABLES.has(name);
   if (artifact.executable !== executable) fail('artifact_executable_invalid');
-  validateSigning(artifact.signing, executable, expected.platform);
+  validateCatalogSigning(artifact.signing, executable, expected.platform);
 }
 
 // This profile is signed release-policy metadata. Platform attestation still
@@ -305,7 +322,7 @@ function validateVerificationProfile(profile, definition, artifacts, options) {
   }
   if (profile.kind === 'apple') {
     exactKeys(profile, ['gatekeeper', 'kind', 'notarized', 'stapled', 'team_id'], 'release_verification_profile_invalid');
-    if (definition.platform !== 'darwin' || profile.gatekeeper !== true || profile.notarized !== true || profile.stapled !== true ||
+    if (definition.platform !== 'darwin' || profile.gatekeeper !== true || profile.notarized !== true || profile.stapled !== false ||
         typeof profile.team_id !== 'string' || !TEAM_ID.test(profile.team_id) ||
         Object.values(artifacts).filter((artifact) => artifact.executable).some((artifact) => artifact.signing.team_id !== profile.team_id)) {
       fail('release_verification_profile_invalid');
