@@ -17,6 +17,38 @@ function exactObject(value, keys) {
     Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
 }
 
+function nativePrivateBytes(proof, maxBytes = PRIVATE_JSON_LIMIT) {
+  if (!exactObject(proof, ['bytes_base64']) || typeof proof.bytes_base64 !== 'string') {
+    throw new Error('Pulse product private state is unsafe');
+  }
+  const bytes = Buffer.from(proof.bytes_base64, 'base64');
+  if (bytes.length < 1 || bytes.length > maxBytes) {
+    throw new Error('Pulse product private state is unsafe');
+  }
+  return bytes;
+}
+
+function nativeTreeDigest(proof) {
+  if (!exactObject(proof, ['bytes', 'files', 'tree_digest']) ||
+      !Number.isSafeInteger(proof.bytes) || proof.bytes < 1 || proof.bytes > TREE_MAX_BYTES ||
+      !Number.isSafeInteger(proof.files) || proof.files < 1 || proof.files > TREE_MAX_ENTRIES ||
+      !SHA256.test(proof.tree_digest ?? '')) {
+    throw new Error('Pulse trusted tree native digest proof is invalid');
+  }
+  return proof.tree_digest;
+}
+
+function nativeExecutableDigest(proof) {
+  if (!exactObject(proof, [
+    'canonical_path', 'executable', 'owner_only', 'regular_file', 'reparse_point', 'sha256',
+  ]) || proof.executable !== true || proof.owner_only !== true || proof.regular_file !== true ||
+      proof.reparse_point !== false || typeof proof.canonical_path !== 'string' ||
+      !isAbsolute(proof.canonical_path) || !SHA256.test(proof.sha256 ?? '')) {
+    throw new Error('Pulse product executable native proof is invalid');
+  }
+  return proof.sha256;
+}
+
 function workspaceDigest(canonicalPath) {
   return createHash('sha256')
     .update('pulse-codex-product-locator-v1\x00')
@@ -93,13 +125,7 @@ function createTrustServices({
           excludeRootFile, maximumDepth: TREE_MAX_DEPTH, maximumEntries: TREE_MAX_ENTRIES,
           maximumTotalBytes: TREE_MAX_BYTES,
         });
-        if (!exactObject(proof, ['bytes', 'files', 'tree_digest']) ||
-            !Number.isSafeInteger(proof.bytes) || proof.bytes < 1 || proof.bytes > TREE_MAX_BYTES ||
-            !Number.isSafeInteger(proof.files) || proof.files < 1 || proof.files > TREE_MAX_ENTRIES ||
-            !SHA256.test(proof.tree_digest ?? '')) {
-          throw new Error('Pulse trusted tree native digest proof is invalid');
-        }
-        return proof.tree_digest;
+        return nativeTreeDigest(proof);
       },
       readPrivateFile(path, maxBytes = PRIVATE_JSON_LIMIT) {
         const bytes = adapter.readPrivateFile(path, { minBytes: 1, maxBytes });
@@ -126,15 +152,45 @@ function createTrustServices({
         }
       },
       executableDigest(path) {
-        const proof = adapter.inspectExecutable(path);
-        if (!exactObject(proof, [
-          'canonical_path', 'executable', 'owner_only', 'regular_file', 'reparse_point', 'sha256',
-        ]) || proof.executable !== true || proof.owner_only !== true || proof.regular_file !== true ||
-            proof.reparse_point !== false || typeof proof.canonical_path !== 'string' ||
-            !isAbsolute(proof.canonical_path) || !SHA256.test(proof.sha256 ?? '')) {
-          throw new Error('Pulse product executable native proof is invalid');
-        }
-        return proof.sha256;
+        return nativeExecutableDigest(adapter.inspectExecutable(path));
+      },
+      readPrivateFiles(requests) {
+        const results = adapter.batch(requests.map(({ path, maxBytes = PRIVATE_JSON_LIMIT }) => ({
+          operation: 'read_private_file',
+          payload: { encoding: '', maximum_bytes: maxBytes, minimum_bytes: 1, path },
+        })));
+        return results.map((proof, index) => nativePrivateBytes(
+          proof, requests[index].maxBytes ?? PRIVATE_JSON_LIMIT,
+        ));
+      },
+      productEdgeProof({ runtimeRoot, runtimeManifestPath, pluginRoot, daemonPath }) {
+        const results = adapter.batch([
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: 'runtime-manifest.json', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: runtimeRoot,
+            },
+          },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: runtimeManifestPath },
+          },
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: '', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: pluginRoot,
+            },
+          },
+          { operation: 'inspect_executable', payload: { path: daemonPath } },
+        ]);
+        return Object.freeze({
+          daemonDigest: nativeExecutableDigest(results[3]),
+          pluginDigest: nativeTreeDigest(results[2]),
+          runtimeDigest: nativeTreeDigest(results[0]),
+          runtimeManifestBytes: nativePrivateBytes(results[1]),
+        });
       },
     });
   }
@@ -183,6 +239,15 @@ function createTrustServices({
 function readPrivateJSON(trust, path, maxBytes = PRIVATE_JSON_LIMIT) {
   try {
     return JSON.parse(trust.readPrivateFile(path, maxBytes).toString('utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('Pulse product private JSON is invalid');
+    throw error;
+  }
+}
+
+function parsePrivateJSON(bytes) {
+  try {
+    return JSON.parse(bytes.toString('utf8'));
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error('Pulse product private JSON is invalid');
     throw error;
@@ -292,14 +357,18 @@ export function resolveProductEnvironment({
     throw new Error('Pulse host trust mode does not match the production product locator.');
   }
   const hostAccessPath = join(productHome, 'product-host-access', key, `${host}.json`);
-  const hostAccess = readPrivateJSON(trust, hostAccessPath);
+  const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
+  const [hostAccess, activation] = typeof trust.readPrivateFiles === 'function'
+    ? trust.readPrivateFiles([
+      { path: hostAccessPath, maxBytes: PRIVATE_JSON_LIMIT },
+      { path: activationPath, maxBytes: PRIVATE_JSON_LIMIT },
+    ]).map(parsePrivateJSON)
+    : [readPrivateJSON(trust, hostAccessPath), readPrivateJSON(trust, activationPath)];
   if (hostAccess?.schema !== 'pulse.product_host_access.v1' || hostAccess.host !== host ||
       hostAccess.workspace_digest !== key ||
       Object.keys(hostAccess).sort().join('\0') !== ['host', 'schema', 'workspace_digest'].sort().join('\0')) {
     throw new Error(`Pulse ${host} integration is disconnected; run pulse install or pulse repair.`);
   }
-  const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
-  const activation = readPrivateJSON(trust, activationPath);
   const activationKeys = [
     'activated_at',
     'daemon_activation_digest', 'daemon_artifact_id', 'daemon_artifact_sha256', 'daemon_digest', 'daemon_path', 'daemon_tree_digest',
@@ -334,8 +403,17 @@ export function resolveProductEnvironment({
     throw new Error('Pulse product activation runtime does not match the shared runtime root.');
   }
   const runtimeRoot = resolve(activation.runtime_path, '..', '..');
-  const actualRuntimeDigest = runtimeTreeDigest(runtimeRoot, trust);
-  const runtimeManifest = readPrivateJSON(trust, join(runtimeRoot, 'runtime-manifest.json'));
+  const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
+  const pluginRoot = dirname(fileURLToPath(import.meta.url));
+  const edgeProof = typeof trust.productEdgeProof === 'function'
+    ? trust.productEdgeProof({
+      daemonPath: resolve(activation.daemon_path), pluginRoot, runtimeManifestPath, runtimeRoot,
+    })
+    : undefined;
+  const actualRuntimeDigest = edgeProof?.runtimeDigest ?? runtimeTreeDigest(runtimeRoot, trust);
+  const runtimeManifest = edgeProof
+    ? parsePrivateJSON(edgeProof.runtimeManifestBytes)
+    : readPrivateJSON(trust, runtimeManifestPath);
   if (runtimeManifest?.schema !== 'pulse.codex_runtime.v2' ||
       runtimeManifest.entrypoint !== 'src/cli.js' ||
       runtimeManifest.tree_digest !== activation.runtime_tree_digest ||
@@ -350,11 +428,12 @@ export function resolveProductEnvironment({
       actualRuntimeDigest !== activation.runtime_tree_digest) {
     throw new Error('Pulse product runtime and activation are out of sync; retry after activation completes.');
   }
-  const pluginRoot = dirname(fileURLToPath(import.meta.url));
-  if (pluginTreeDigest(pluginRoot, trust) !== activation.plugin_tree_digest) {
+  const actualPluginDigest = edgeProof?.pluginDigest ?? pluginTreeDigest(pluginRoot, trust);
+  if (actualPluginDigest !== activation.plugin_tree_digest) {
     throw new Error('Pulse installed plugin does not match the signed product activation.');
   }
-  if (trust.executableDigest(resolve(activation.daemon_path)) !== activation.daemon_digest) {
+  const actualDaemonDigest = edgeProof?.daemonDigest ?? trust.executableDigest(resolve(activation.daemon_path));
+  if (actualDaemonDigest !== activation.daemon_digest) {
     throw new Error('Pulse product daemon activation failed integrity validation.');
   }
   const productEnvironment = {

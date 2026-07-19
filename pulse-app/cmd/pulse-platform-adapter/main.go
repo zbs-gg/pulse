@@ -33,6 +33,7 @@ const (
 
 var operations = []string{
 	"acquire_private_lock", "atomic_write_private_file", "ensure_private_directory",
+	"batch",
 	"digest_private_tree", "inspect_executable", "inspect_path_identity", "inspect_private_state", "inspect_private_tree", "inspect_process",
 	"read_integrity_file", "read_private_file", "release_private_lock", "remove_private_file",
 	"terminate_process",
@@ -70,6 +71,23 @@ type request struct {
 	MaximumEntries    int                `json:"maximum_entries,omitempty"`
 	MaximumTotalBytes int64              `json:"maximum_total_bytes,omitempty"`
 	ExcludeRootFile   string             `json:"exclude_root_file,omitempty"`
+	Requests          []batchOperation   `json:"requests,omitempty"`
+}
+
+type batchOperation struct {
+	Operation string  `json:"operation"`
+	Request   request `json:"request"`
+}
+
+var batchOperations = map[string]bool{
+	"digest_private_tree":   true,
+	"inspect_executable":    true,
+	"inspect_path_identity": true,
+	"inspect_private_state": true,
+	"inspect_private_tree":  true,
+	"inspect_process":       true,
+	"read_integrity_file":   true,
+	"read_private_file":     true,
 }
 
 type privateTreeEntry struct {
@@ -125,6 +143,22 @@ func main() {
 
 func dispatch(operation string, value request) (any, error) {
 	switch operation {
+	case "batch":
+		if len(value.Requests) < 1 || len(value.Requests) > 16 {
+			return nil, fmt.Errorf("%w: batch_size", platform.ErrUnsafe)
+		}
+		results := make([]any, 0, len(value.Requests))
+		for _, item := range value.Requests {
+			if !batchOperations[item.Operation] || item.Request.Schema != "" || len(item.Request.Requests) != 0 {
+				return nil, fmt.Errorf("%w: batch_operation", platform.ErrUnsafe)
+			}
+			result, err := dispatch(item.Operation, item.Request)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, result)
+		}
+		return map[string]any{"results": results}, nil
 	case "digest_private_tree":
 		return digestPrivateTree(value)
 	case "inspect_executable":

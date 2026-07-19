@@ -90,3 +90,38 @@ func TestDigestPrivateTreeReturnsTheCanonicalSignedTreeDigest(t *testing.T) {
 		t.Fatalf("unexpected tree digest proof: %#v", result)
 	}
 }
+
+func TestBatchRunsOnlyBoundedReadOnlyProofs(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "batch")
+	if err := platform.EnsurePrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("trusted state")
+	path := filepath.Join(root, "state.json")
+	if err := platform.AtomicWritePrivateFile(path, payload); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := dispatch("batch", request{Requests: []batchOperation{
+		{Operation: "read_private_file", Request: request{
+			Path: path, MinimumBytes: 1, MaximumBytes: 1024,
+		}},
+		{Operation: "digest_private_tree", Request: request{
+			Path: root, MaximumDepth: 4, MaximumEntries: 4, MaximumTotalBytes: 1024,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := proof.(map[string]any)["results"].([]any)
+	if len(results) != 2 || string(results[0].(map[string]any)["bytes_base64"].([]byte)) != string(payload) {
+		t.Fatalf("unexpected batch proof: %#v", proof)
+	}
+	if _, err := dispatch("batch", request{Requests: []batchOperation{{
+		Operation: "remove_private_file", Request: request{Path: path},
+	}}}); err == nil {
+		t.Fatal("mutating operation was accepted in a read-only batch")
+	}
+	if _, err := dispatch("batch", request{}); err == nil {
+		t.Fatal("empty batch was accepted")
+	}
+}

@@ -13,6 +13,7 @@ import { writeProductEdgeFixture } from '../scripts/product-release-fixture.mjs'
 
 const WINDOWS_ADAPTER_OPERATIONS = [
   'acquire_private_lock', 'atomic_write_private_file', 'ensure_private_directory',
+  'batch',
   'digest_private_tree', 'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_private_tree', 'inspect_process',
   'read_integrity_file', 'read_private_file', 'release_private_lock', 'remove_private_file',
   'terminate_process',
@@ -62,6 +63,24 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
           reparse_point: false, sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
         };
       },
+      batch(requests) {
+        calls.push(['batch', requests]);
+        return requests.map(({ operation, payload }) => {
+          if (operation === 'read_private_file') {
+            return { bytes_base64: readFileSync(payload.path).toString('base64') };
+          }
+          if (operation === 'digest_private_tree') {
+            return { bytes: bytes.length + 3, files: 2, tree_digest: treeDigest };
+          }
+          if (operation === 'inspect_executable') {
+            return {
+              canonical_path: payload.path, executable: true, owner_only: true, regular_file: true,
+              reparse_point: false, sha256: createHash('sha256').update(readFileSync(payload.path)).digest('hex'),
+            };
+          }
+          throw new Error(`unexpected batch operation: ${operation}`);
+        });
+      },
     };
     const trust = __runtimeLocatorTest.createTrustServices({ platform: 'win32', windowsAdapter: adapter });
     assert.equal(trust.workspaceIdentity(root), 'volume:file');
@@ -72,6 +91,15 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.equal(trust.executableDigest(file), createHash('sha256').update(bytes).digest('hex'));
     assert.deepEqual(calls.map(([operation]) => operation), ['identity', 'read', 'digest', 'executable']);
     assert.equal(calls[2][2].excludeRootFile, 'runtime-manifest.json');
+    assert.deepEqual(trust.readPrivateFiles([{ path: file, maxBytes: 1024 }]), [bytes]);
+    const edge = trust.productEdgeProof({
+      daemonPath: file, pluginRoot: root, runtimeManifestPath: join(root, 'runtime-manifest.json'), runtimeRoot: root,
+    });
+    assert.equal(edge.runtimeDigest, treeDigest);
+    assert.equal(edge.pluginDigest, treeDigest);
+    assert.equal(edge.daemonDigest, createHash('sha256').update(bytes).digest('hex'));
+    assert.deepEqual(edge.runtimeManifestBytes, Buffer.from('{}\n'));
+    assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -142,6 +170,7 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
         if (operation === 'digest_private_tree') return {
           bytes: 7, files: 1, tree_digest: 'a'.repeat(64),
         };
+        if (operation === 'batch') return { results: payload.requests.map(() => ({ bytes: 7 })) };
         throw new Error(`unexpected operation: ${operation}`);
       },
     });
@@ -154,8 +183,11 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
       excludeRootFile: 'runtime-manifest.json', maximumDepth: 128,
       maximumEntries: 100000, maximumTotalBytes: 1024,
     }), { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) });
+    assert.deepEqual(adapter.batch([
+      { operation: 'read_private_file', payload: { maximum_bytes: 1024, minimum_bytes: 1, path: 'C:\\private.json' } },
+    ]), [{ bytes: 7 }]);
     assert.deepEqual(calls.map(({ operation }) => operation), [
-      'contract', 'read_private_file', 'inspect_path_identity', 'digest_private_tree',
+      'contract', 'read_private_file', 'inspect_path_identity', 'digest_private_tree', 'batch',
     ]);
     assert.equal(calls[1].payload.path, 'C:\\private.json');
   } finally {

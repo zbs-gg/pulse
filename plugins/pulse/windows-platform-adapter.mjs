@@ -11,9 +11,14 @@ const RESPONSE_SCHEMA = 'pulse.windows_bootstrap_adapter.response.v1';
 const SHA256 = /^[a-f0-9]{64}$/;
 const EXPECTED_OPERATIONS = Object.freeze([
   'acquire_private_lock', 'atomic_write_private_file', 'ensure_private_directory',
+  'batch',
   'digest_private_tree', 'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_private_tree', 'inspect_process',
   'read_integrity_file', 'read_private_file', 'release_private_lock', 'remove_private_file',
   'terminate_process',
+]);
+const BATCH_OPERATIONS = new Set([
+  'digest_private_tree', 'inspect_executable', 'inspect_path_identity', 'inspect_private_state',
+  'inspect_private_tree', 'inspect_process', 'read_integrity_file', 'read_private_file',
 ]);
 const defaultCatalogRoot = resolve(dirname(fileURLToPath(import.meta.url)), 'native', 'windows-bootstrap');
 
@@ -26,6 +31,10 @@ function fail(code) {
 function exactObject(value, keys) {
   return value && !Array.isArray(value) && typeof value === 'object' &&
     Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+}
+
+function object(value) {
+  return value !== null && !Array.isArray(value) && typeof value === 'object';
 }
 
 function canonical(value) {
@@ -104,6 +113,21 @@ export function loadPluginWindowsAdapter({
     fail('pulse_windows_plugin_adapter_contract_invalid');
   }
   return Object.freeze({
+    batch(requests) {
+      if (!Array.isArray(requests) || requests.length < 1 || requests.length > 16 ||
+          requests.some((item) => !exactObject(item, ['operation', 'payload']) ||
+            !BATCH_OPERATIONS.has(item.operation) || !object(item.payload))) {
+        fail('pulse_windows_plugin_adapter_batch_invalid');
+      }
+      const result = call('batch', {
+        requests: requests.map(({ operation, payload }) => ({ operation, request: payload })),
+      });
+      if (!exactObject(result, ['results']) || !Array.isArray(result.results) ||
+          result.results.length !== requests.length) {
+        fail('pulse_windows_plugin_adapter_protocol_invalid');
+      }
+      return result.results;
+    },
     digestPrivateTree(path, { excludeRootFile, maximumDepth, maximumEntries, maximumTotalBytes }) {
       return call('digest_private_tree', {
         exclude_root_file: excludeRootFile ?? '', maximum_depth: maximumDepth,

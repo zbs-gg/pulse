@@ -20,6 +20,7 @@ const operations = Object.freeze([
   'acquire_private_lock',
   'atomic_write_private_file',
   'ensure_private_directory',
+  'batch',
   'digest_private_tree',
   'inspect_executable',
   'inspect_path_identity',
@@ -89,6 +90,12 @@ test('bundled selector verifies the exact digest and exposes the complete native
     if (operation === 'digest_private_tree') {
       return { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) };
     }
+    if (operation === 'batch') {
+      return { results: payload.requests.map(({ operation: nested }) =>
+        nested === 'read_private_file'
+          ? { bytes_base64: Buffer.from('trusted').toString('base64') }
+          : { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) }) };
+    }
     if (operation === 'inspect_process') {
       return { command: 'node.exe', identity_token: 'process-identity', pid: payload.pid, running: true };
     }
@@ -117,10 +124,22 @@ test('bundled selector verifies the exact digest and exposes the complete native
     excludeRootFile: 'runtime-manifest.json', maximumDepth: 32,
     maximumEntries: 8192, maximumTotalBytes: 4096,
   }), { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) });
+  assert.deepEqual(adapter.batch([
+    { operation: 'read_private_file', payload: { maximum_bytes: 1024, minimum_bytes: 1, path: `${path}\\state.json` } },
+    { operation: 'digest_private_tree', payload: { maximum_depth: 32, path: `${path}\\runtime` } },
+  ]), [
+    { bytes_base64: Buffer.from('trusted').toString('base64') },
+    { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) },
+  ]);
+  assert.throws(
+    () => adapter.batch([{ operation: 'remove_private_file', payload: { path: `${path}\\state.json` } }]),
+    (error) => error instanceof WindowsBootstrapAdapterError &&
+      error.code === 'windows_bootstrap_adapter_batch_invalid',
+  );
   const release = adapter.acquirePrivateLock(`${path}\\install.lock`, { staleAfterMs: 1000, timeoutMs: 0 });
   release();
   assert.deepEqual(calls.map(({ operation }) => operation), [
-    'contract', 'inspect_private_state', 'read_integrity_file', 'inspect_private_tree', 'digest_private_tree',
+    'contract', 'inspect_private_state', 'read_integrity_file', 'inspect_private_tree', 'digest_private_tree', 'batch',
     'inspect_process', 'acquire_private_lock', 'release_private_lock',
   ]);
 });
