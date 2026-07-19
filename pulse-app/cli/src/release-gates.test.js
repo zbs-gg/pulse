@@ -71,6 +71,9 @@ test('release verification includes packed Personal clean-room, interruption, ph
 		join(root, 'pulse-app', 'cli', 'scripts', 'personal-native-packed-e2e.mjs'), 'utf8',
 	);
 	assert.match(nativePacked, /process\.platform === 'win32' \? 180_000 : 15 \* 60_000/);
+	assert.match(nativePacked, /taskkill\.exe/);
+	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
+	assert.match(nativePacked, /await packedPulse\(tarball, \['install', '--json'\]/);
 	for (const script of [
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',

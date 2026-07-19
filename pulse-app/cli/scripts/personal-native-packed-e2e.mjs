@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
@@ -35,6 +35,79 @@ function run(command, args, { cwd, env, input, statuses = [0], timeout = 120_000
     ].filter(Boolean).join('\n'));
   }
   return result;
+}
+
+function terminateCommandTree(child) {
+  if (!Number.isSafeInteger(child.pid) || child.pid < 2) return;
+  if (process.platform === 'win32') {
+    const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    const result = spawnSync(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, windowsHide: true,
+    });
+    if (result.status === 0) return;
+    try { child.kill('SIGKILL'); } catch { /* process already exited */ }
+    return;
+  }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch {
+    try { child.kill('SIGKILL'); } catch { /* process already exited */ }
+  }
+}
+
+function runCommandTree(command, args, {
+  cwd, env, input, statuses = [0], timeout = 120_000, maxBuffer = 32 * 1024 * 1024,
+} = {}) {
+  return new Promise((accept, reject) => {
+    const child = spawn(command, args, {
+      cwd, env, detached: process.platform !== 'win32', windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let outputBytes = 0;
+    let timedOut = false;
+    let overflow = false;
+    let settled = false;
+    let timer;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else accept(value);
+    };
+    const capture = (stream) => (chunk) => {
+      const text = String(chunk);
+      outputBytes += Buffer.byteLength(text);
+      if (outputBytes > maxBuffer) {
+        overflow = true;
+        terminateCommandTree(child);
+        return;
+      }
+      if (stream === 'stdout') stdout += text;
+      else stderr += text;
+    };
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', capture('stdout'));
+    child.stderr.on('data', capture('stderr'));
+    child.once('error', (error) => finish(error));
+    child.once('close', (status, signal) => {
+      if (timedOut || overflow || !statuses.includes(status)) {
+        finish(new Error([
+          `${command} ${args.join(' ')} ${timedOut ? 'timed out' : overflow ? 'exceeded output limit' : `exited ${status ?? signal}`}`,
+          stdout, stderr,
+        ].filter(Boolean).join('\n')));
+        return;
+      }
+      finish(null, { status, stdout, stderr });
+    });
+    timer = setTimeout(() => {
+      timedOut = true;
+      terminateCommandTree(child);
+    }, timeout);
+    if (input === undefined) child.stdin.end();
+    else child.stdin.end(input);
+  });
 }
 
 function targetID() {
@@ -95,7 +168,7 @@ function pack(root) {
 }
 
 function packedPulse(tarball, args, options = {}) {
-  return run(process.execPath, [npmCLI(), ...exactTarballPulseInvocation(tarball.path, args)], options);
+  return runCommandTree(process.execPath, [npmCLI(), ...exactTarballPulseInvocation(tarball.path, args)], options);
 }
 
 function json(stdout, code) {
@@ -363,7 +436,7 @@ try {
     PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: codexExecutable,
     PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
   };
-  const planResult = packedPulse(tarball, ['install-plan', '--json'], {
+  const planResult = await packedPulse(tarball, ['install-plan', '--json'], {
     cwd: workspace, env: baseEnv, timeout: 180_000,
   });
   const plan = json(planResult.stdout, 'native packed plan is invalid');
@@ -376,7 +449,7 @@ try {
     ...baseEnv,
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
-  const installed = packedPulse(tarball, ['install', '--json'], {
+  const installed = await packedPulse(tarball, ['install', '--json'], {
     cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
@@ -518,7 +591,7 @@ try {
   assert.equal(Number.isInteger(economy.pulse_tokens) && economy.pulse_tokens > 0, true);
   assert.equal('savings_percentage' in economy, false);
 
-  const repairPlanResult = packedPulse(tarball, ['install-plan', '--json'], {
+  const repairPlanResult = await packedPulse(tarball, ['install-plan', '--json'], {
     cwd: workspace, env: baseEnv, timeout: 180_000,
   });
   const repairPlan = json(repairPlanResult.stdout, 'native packed repair plan is invalid');
@@ -527,7 +600,7 @@ try {
     ...baseEnv,
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(repairPlan),
   };
-  const repaired = packedPulse(tarball, ['repair', '--json'], {
+  const repaired = await packedPulse(tarball, ['repair', '--json'], {
     cwd: workspace, env: repairEnv, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
   });
   const repairResult = json(repaired.stdout, 'native packed repair result is invalid');
