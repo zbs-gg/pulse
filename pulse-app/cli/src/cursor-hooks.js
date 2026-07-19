@@ -20,7 +20,12 @@ import {
   writeHostToolLease,
   writeHostTurnContext,
 } from './codex-runtime.js';
-import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
+import {
+  composeBoundResumeEvidence,
+  observePendingContinuityDelivery,
+  persistContinuityDelivery,
+  recordContinuityObservationTicket,
+} from './product-compositor.js';
 import { defaultPlatformServices } from './platform-services.js';
 
 const HOST = 'cursor';
@@ -196,6 +201,12 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       }, resolved, event, context.manifest);
     }
     if (eventName === 'beforeSubmitPrompt') {
+      try {
+        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, nativeEvent, {
+          request: dependencies.deliveryRequest ?? request,
+          platformServices: dependencies.platformServices,
+        });
+      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
       recordLifecycle('turn_capture');
       return { continue: true };
@@ -204,7 +215,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       if (!isGuardedCodexTool(rawInput.tool_name)) return { permission: 'allow' };
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (/^mcp__(?:pulse-product|pulse)__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
+      if (/^mcp__pulse-product__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
         (dependencies.writeToolLease ?? writeHostToolLease)(
           resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -288,11 +299,18 @@ function writeCursorOutput(serialized, stream = process.stdout) {
 }
 
 export async function flushCursorHookOutput(input, output, dependencies = {}) {
-  await persistContinuityDelivery(output, output?.additional_context, {
+  const delivery = await persistContinuityDelivery(output, output?.additional_context, {
     recordDelivery: dependencies.recordDelivery,
     request: dependencies.deliveryRequest ?? activatedBoundPulseRequest,
   });
   await (dependencies.writeOutput ?? writeCursorOutput)(`${JSON.stringify(output)}\n`);
+  if (delivery?.receipt && delivery.offer.purpose === 'session_start') {
+    try {
+      await (dependencies.recordObservationTicket ?? recordContinuityObservationTicket)(delivery, {
+        platformServices: dependencies.platformServices,
+      });
+    } catch { /* a missing ticket keeps readiness pending without breaking the host */ }
+  }
 }
 
 export async function runCursorHookCLI(eventName, dependencies = {}) {

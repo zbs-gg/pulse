@@ -89,15 +89,27 @@ export function detectCursorInstallation({
   for (const candidate of candidates) {
     try {
       const proof = platformServices.inspectApplication(candidate);
-      if (proof) return { available: true, app_path: proof.canonical_path, reason_code: null };
+      if (proof) return {
+        available: true,
+        app_path: proof.canonical_path,
+        executable_path: proof.executable_path,
+        executable_sha256: proof.executable_sha256,
+        reason_code: null,
+      };
     } catch (error) {
       if (error instanceof PlatformServicesError && error.code === 'platform_native_adapter_unavailable') {
-        return { available: false, app_path: null, reason_code: `cursor_${error.code}` };
+        return {
+          available: false, app_path: null, executable_path: null, executable_sha256: null,
+          reason_code: `cursor_${error.code}`,
+        };
       }
       if (!(error instanceof PlatformServicesError)) throw error;
     }
   }
-  return { available: false, app_path: null, reason_code: 'cursor_missing' };
+  return {
+    available: false, app_path: null, executable_path: null, executable_sha256: null,
+    reason_code: 'cursor_missing',
+  };
 }
 
 function hostRecord(host, result) {

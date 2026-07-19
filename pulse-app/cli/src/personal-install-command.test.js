@@ -81,8 +81,9 @@ function readyActivation() {
     product_ready: true,
     parity: 'complete',
     hosts: [{
-      host: 'codex', activated: true, verified: true,
-      lifecycle_ready: true, reason_code: 'codex_verified',
+      host: 'codex', detected: true, compatible: true, installed: true, mcp_ready: true,
+      activated: true, verified: true, lifecycle_ready: true, reload_required: false,
+      milestones: ['prompt_context', 'session_context', 'write_receipt'], reason_code: 'codex_verified',
     }],
   };
 }

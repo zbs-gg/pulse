@@ -610,14 +610,16 @@ test('UserPromptSubmit creates only a content-free Stop-bound turn context', asy
   assert.doesNotMatch(JSON.stringify(written), /raw prompt|transcript/);
 });
 
-test('Codex UserPromptSubmit never mints host_observed from hook execution alone', async () => {
+test('Codex UserPromptSubmit attempts only a correlated pending-offer observation', async () => {
   let deliveries = 0;
+  let observations = 0;
   const input = {
     ...base, hook_event_name: 'UserPromptSubmit', prompt: 'raw prompt must remain private',
   };
   const output = await handleCodexHook('UserPromptSubmit', input, {
     resolveRuntime: () => resolved,
     writeTurnContext: () => {},
+    observeDelivery: async () => { observations++; },
   });
   await codexHooks.flushCodexHookOutput('UserPromptSubmit', input, output, {
     writeOutput: async () => {},
@@ -626,6 +628,7 @@ test('Codex UserPromptSubmit never mints host_observed from hook execution alone
     recordReadiness: () => {},
   });
   assert.equal(deliveries, 0);
+  assert.equal(observations, 1);
 });
 
 test('PostToolUse trusts only the plugin-owned product receipt namespace', async () => {
@@ -666,6 +669,12 @@ test('PostToolUse trusts only the plugin-owned product receipt namespace', async
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/memory/receipts/receipt_01');
   assert.doesNotMatch(JSON.stringify(calls), /private input/);
+  const legacy = await handleCodexHook('PostToolUse', {
+    ...base, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse__pulse_remember',
+    tool_response: { receipts: [{ receipt_id: 'legacy_forged' }] },
+  }, { resolveRuntime: () => resolved });
+  assert.deepEqual(legacy, {});
+  assert.equal(calls.length, 1);
 });
 
 test('PostToolUse does not announce an uncorroborated receipt forged in tool output', async () => {
@@ -965,7 +974,7 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 		evidence_ids: ['pulse:pulse:memory_01'], status: 'created', memory_kind: 'decision',
 		content_digest: 'c'.repeat(64),
 		conversation_scope: 'current_turn', binding_digest: 'a'.repeat(64),
-		repository_id: 'repository-pulse', host: 'codex', session_ref: opaque('session', 'session-a'),
+		repository_id: 'repository-pulse', host: 'claude-code', session_ref: opaque('session', 'session-a'),
 		created_at: '2026-07-16T01:00:00Z', active: true,
 	};
 	const terminalSessionRef = terminal.session_ref;
@@ -1026,6 +1035,9 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 	}]).state, 'host_observation_pending');
 	assert.equal(projectReadinessLifecycleInputs([terminal], [offered, {
 		...observed, session_ref: opaque('session', 'session-other'),
+	}]).state, 'host_observation_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], [offered, {
+		...observed, host: 'cursor',
 	}]).state, 'host_observation_pending');
 	const ready = projectReadinessLifecycleInputs([terminal], [offered, observed]);
 	assert.equal(ready.schema, 'pulse.readiness_lifecycle_inputs.v1');

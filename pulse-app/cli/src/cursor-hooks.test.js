@@ -77,15 +77,18 @@ test('Cursor sessionStart injects the same bound continuity contract without a s
 
 test('Cursor beforeSubmitPrompt binds the turn without persisting prompt content', async () => {
   const written = [];
+  let observations = 0;
   const output = await handleCursorHook('beforeSubmitPrompt', {
     ...base, prompt: 'private prompt that must not persist',
   }, {
     resolveRuntime: () => resolved,
     writeTurnContext: (_runtime, event, host) => written.push({ event, host }),
+    observeDelivery: async () => { observations++; },
   });
   assert.deepEqual(output, { continue: true });
   assert.equal(written[0].host, 'cursor');
   assert.equal(written[0].event.source_event_key, stopEvent().source_event_key);
+  assert.equal(observations, 1);
   assert.doesNotMatch(JSON.stringify(written), /private prompt/);
 });
 
@@ -109,6 +112,16 @@ test('Cursor preToolUse mints an exact governed lease and blocks destructive Pul
   assert.deepEqual(allowed, { permission: 'allow' });
   assert.equal(leases[0][2], 'cursor');
   assert.equal(leases[0][4], toolInput);
+  await handleCursorHook('preToolUse', {
+    ...base, tool_name: 'mcp__pulse__pulse_remember', tool_input: toolInput,
+    tool_use_id: 'tool-legacy-memory',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...args) => leases.push(args),
+  });
+  assert.equal(leases.length, 1);
 });
 
 test('Cursor postToolUse injects only a daemon-corroborated Memory Tray receipt', async () => {

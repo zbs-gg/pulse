@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { continuityDeliveryAnnotation, isStableHostID } from './host-adapter.js';
+import { defaultPlatformServices } from './platform-services.js';
 import { callTeamRemoteTool, TeamRemoteClientError } from './team-remote-client.js';
 
 const RESUME_SECTIONS = Object.freeze([
@@ -118,14 +120,161 @@ export async function persistContinuityDelivery(output, payload, {
   const measurement = createContinuityDeliveryOffer(source.resolved, source.event, payload, source.manifest);
   const persist = recordDelivery ?? (async (offer, resolved, idempotencyKey) => {
     if (typeof request !== 'function') throw new Error('continuity_delivery_request_missing');
-    await request(resolved, '/continuity/delivery/offers', {
+    return request(resolved, '/continuity/delivery/offers', {
       body: offer,
       idempotencyKey,
       timeoutMs: 1200,
     });
   });
-  await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
-  return Object.freeze({ resolved: source.resolved, ...measurement });
+  const receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  return Object.freeze({ resolved: source.resolved, receipt, ...measurement });
+}
+
+function continuitySessionRef(sessionID) {
+  if (!isStableHostID(sessionID)) throw new Error('continuity_observation_event_invalid');
+  return `session:${createHash('sha256').update(`session\x1f${sessionID}`).digest('hex')}`;
+}
+
+function continuityObservationDirectory(resolved) {
+  const dataDir = resolved?.runtime?.data_dir;
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || resolve(dataDir) !== dataDir ||
+      !/^[a-f0-9]{64}$/.test(resolved?.binding?.binding_digest ?? '') ||
+      !isStableHostID(resolved?.binding?.workspace?.repository_id)) {
+    throw new Error('continuity_observation_runtime_invalid');
+  }
+  return join(dataDir, 'runtime', 'continuity-observations');
+}
+
+function continuityObservationTicketPath(resolved, host, sessionRef) {
+  if (!['codex', 'claude-code', 'cursor'].includes(host) ||
+      !/^session:[a-f0-9]{64}$/.test(sessionRef ?? '')) {
+    throw new Error('continuity_observation_identity_invalid');
+  }
+  return join(continuityObservationDirectory(resolved), `${host}-${sessionRef.slice('session:'.length)}.json`);
+}
+
+function observationTicket(delivery) {
+  const { resolved, offer, receipt } = delivery ?? {};
+  if (offer?.purpose !== 'session_start' || receipt?.schema !== 'pulse.continuity_delivery_receipt.v1' ||
+      receipt.state !== 'offered_to_host' || receipt.context_id !== offer.context_id ||
+      receipt.purpose !== offer.purpose || receipt.binding_digest !== offer.binding_digest ||
+      receipt.repository_id !== offer.repository_id || receipt.host !== offer.host ||
+      receipt.session_ref !== offer.session_ref || receipt.payload_digest !== offer.payload_digest ||
+      receipt.source_event_digest !== offer.source_event_digest || !isStableHostID(receipt.receipt_id) ||
+      typeof receipt.created_at !== 'string' || Number.isNaN(Date.parse(receipt.created_at)) ||
+      receipt.binding_digest !== resolved?.binding?.binding_digest ||
+      receipt.repository_id !== resolved?.binding?.workspace?.repository_id) {
+    throw new Error('continuity_observation_offer_receipt_invalid');
+  }
+  return Object.freeze({
+    schema: 'pulse.continuity_observation_ticket.v1',
+    offer_receipt_id: receipt.receipt_id,
+    context_id: receipt.context_id,
+    binding_digest: receipt.binding_digest,
+    repository_id: receipt.repository_id,
+    host: receipt.host,
+    session_ref: receipt.session_ref,
+    offer_source_event_digest: receipt.source_event_digest,
+    expires_at: new Date(Date.parse(receipt.created_at) + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+}
+
+export function recordContinuityObservationTicket(delivery, {
+  platformServices = defaultPlatformServices,
+} = {}) {
+  const ticket = observationTicket(delivery);
+  const directory = continuityObservationDirectory(delivery.resolved);
+  platformServices.ensurePrivateDirectory(resolve(delivery.resolved.runtime.data_dir));
+  platformServices.ensurePrivateDirectory(join(resolve(delivery.resolved.runtime.data_dir), 'runtime'));
+  platformServices.ensurePrivateDirectory(directory);
+  platformServices.atomicWritePrivateFile(
+    continuityObservationTicketPath(delivery.resolved, ticket.host, ticket.session_ref),
+    `${JSON.stringify(ticket)}\n`,
+    { ensureParent: false, maxBytes: 4096 },
+  );
+  return ticket;
+}
+
+function readObservationTicket(resolved, event, platformServices) {
+  const sessionRef = continuitySessionRef(event?.session_id);
+  const path = continuityObservationTicketPath(resolved, event?.host, sessionRef);
+  const bytes = platformServices.readPrivateFile(path, { missing: true, minBytes: 1, maxBytes: 4096 });
+  if (bytes === null) return undefined;
+  let ticket;
+  try { ticket = JSON.parse(bytes); } catch { throw new Error('continuity_observation_ticket_invalid'); }
+  const ticketFields = [
+    'binding_digest', 'context_id', 'expires_at', 'host', 'offer_receipt_id',
+    'offer_source_event_digest', 'repository_id', 'schema', 'session_ref',
+  ];
+  if (!ticket || typeof ticket !== 'object' || Array.isArray(ticket) ||
+      Object.keys(ticket).sort().join('\0') !== ticketFields.join('\0') ||
+      ticket.schema !== 'pulse.continuity_observation_ticket.v1' ||
+      !isStableHostID(ticket.offer_receipt_id) || !isStableHostID(ticket.context_id) ||
+      ticket.binding_digest !== resolved.binding.binding_digest ||
+      ticket.repository_id !== resolved.binding.workspace.repository_id ||
+      ticket.host !== event.host || ticket.session_ref !== sessionRef ||
+      !/^[a-f0-9]{64}$/.test(ticket.offer_source_event_digest ?? '') ||
+      typeof ticket.expires_at !== 'string' || Number.isNaN(Date.parse(ticket.expires_at)) ||
+      Date.parse(ticket.expires_at) <= Date.now()) {
+    throw new Error('continuity_observation_ticket_invalid');
+  }
+  return { path, ticket };
+}
+
+export function createContinuityDeliveryObservation(ticket, event) {
+  if (event?.event !== 'turn_start' || event?.native_event !== 'UserPromptSubmit' ||
+      event?.source !== 'prompt_submitted' || !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '') ||
+      event.host !== ticket?.host || continuitySessionRef(event.session_id) !== ticket?.session_ref) {
+    throw new Error('continuity_observation_event_invalid');
+  }
+  const sourceEventDigest = event.source_event_key.slice('event_'.length);
+  if (sourceEventDigest === ticket.offer_source_event_digest) throw new Error('continuity_observation_event_replayed');
+  const body = Object.freeze({
+    schema: 'pulse.continuity_delivery_observation.v1',
+    context_id: ticket.context_id,
+    binding_digest: ticket.binding_digest,
+    repository_id: ticket.repository_id,
+    host: ticket.host,
+    session_ref: ticket.session_ref,
+    source_event_digest: sourceEventDigest,
+  });
+  return Object.freeze({
+    body,
+    idempotencyKey: `continuity-observation:${createHash('sha256').update([
+      body.schema, body.context_id, body.binding_digest, body.repository_id,
+      body.host, body.session_ref, body.source_event_digest,
+    ].join('\x1f')).digest('hex')}`,
+  });
+}
+
+export async function observePendingContinuityDelivery(resolved, event, {
+  request,
+  platformServices = defaultPlatformServices,
+} = {}) {
+  if (typeof request !== 'function') throw new Error('continuity_observation_request_missing');
+  const sessionRef = continuitySessionRef(event?.session_id);
+  const ticketPath = continuityObservationTicketPath(resolved, event?.host, sessionRef);
+  const release = platformServices.acquirePrivateLock(`${ticketPath}.lock`, {
+    staleAfterMs: 15_000, timeoutMs: 250,
+  });
+  try {
+    const pending = readObservationTicket(resolved, event, platformServices);
+    if (!pending) return undefined;
+    const observation = createContinuityDeliveryObservation(pending.ticket, event);
+    const receipt = await request(resolved, '/continuity/delivery/observations', {
+      body: observation.body, idempotencyKey: observation.idempotencyKey, timeoutMs: 1200,
+    });
+    if (receipt?.schema !== 'pulse.continuity_delivery_receipt.v1' || receipt.state !== 'host_observed' ||
+        receipt.context_id !== pending.ticket.context_id || receipt.parent_receipt_id !== pending.ticket.offer_receipt_id ||
+        receipt.binding_digest !== pending.ticket.binding_digest || receipt.repository_id !== pending.ticket.repository_id ||
+        receipt.host !== pending.ticket.host || receipt.session_ref !== pending.ticket.session_ref) {
+      throw new Error('continuity_observation_receipt_invalid');
+    }
+    platformServices.removePrivateFile(pending.path, { missing: false });
+    return receipt;
+  } finally {
+    release();
+  }
 }
 
 function localEvidence(binding, result) {

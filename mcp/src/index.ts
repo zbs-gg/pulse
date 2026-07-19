@@ -531,6 +531,18 @@ async function consumeProductTurnContext(toolInput: unknown): Promise<HostTurnCo
   );
 }
 
+function assertProductRememberSourceHost(toolInput: unknown): void {
+  if (!PRODUCT_HOST) return;
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+  const source = (toolInput as Record<string, unknown>).source;
+  if (!source || typeof source !== 'object' || Array.isArray(source) ||
+      (source as Record<string, unknown>).host !== PRODUCT_HOST) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+}
+
 function productFinalizeBody(capsule: MemoryCapsule, context: HostTurnContext): Record<string, unknown> {
   const timestamp = new Date().toISOString();
   return {
@@ -1159,8 +1171,9 @@ export function createPulseMcpServer(
     let productTools = PRODUCT_UNASSIGNED_REASON
       ? localTools.filter((tool) => tool.name === 'pulse_remember')
       : localTools;
-    if (PRODUCT_UNASSIGNED_REASON && PRODUCT_HOST) {
+    if (PRODUCT_HOST) {
       productTools = productTools.map((tool) => {
+        if (tool.name !== 'pulse_remember') return tool;
         const descriptor = JSON.parse(JSON.stringify(tool)) as typeof tool;
         const source = descriptor.inputSchema.properties?.source;
         const host = source?.properties?.host;
@@ -1334,6 +1347,7 @@ function resolveStandaloneStore(): StandaloneStore {
 async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
     if (PRODUCT_HOST_ADAPTER) {
+      assertProductRememberSourceHost(args);
       if (PRODUCT_UNASSIGNED_REASON) {
         if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
         const runtime = await productRuntimeModule();

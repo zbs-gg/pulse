@@ -177,16 +177,27 @@ export function normalizePersonalInstallHostStatus(value) {
   const seen = new Set();
   const hosts = value.hosts.map((host) => {
     if (!host || typeof host !== 'object' || !SUPPORTED_HOST_IDS.includes(host.host) || seen.has(host.host) ||
+        typeof host.detected !== 'boolean' || typeof host.compatible !== 'boolean' ||
+        typeof host.installed !== 'boolean' || typeof host.mcp_ready !== 'boolean' ||
         typeof host.activated !== 'boolean' || typeof host.verified !== 'boolean' ||
-        typeof host.lifecycle_ready !== 'boolean' || !SAFE_REASON_CODE.test(host.reason_code ?? '')) {
+        typeof host.lifecycle_ready !== 'boolean' || typeof host.reload_required !== 'boolean' ||
+        !Array.isArray(host.milestones) || host.milestones.some((value) => !SAFE_REASON_CODE.test(value)) ||
+        !SAFE_REASON_CODE.test(host.reason_code ?? '') || host.verified !== (host.mcp_ready && host.lifecycle_ready) ||
+        host.reload_required !== (host.mcp_ready && !host.lifecycle_ready)) {
       fail('host_status_invalid');
     }
     seen.add(host.host);
     return {
       host: host.host,
+      detected: host.detected,
+      compatible: host.compatible,
+      installed: host.installed,
+      mcp_ready: host.mcp_ready,
       activated: host.activated,
       verified: host.verified,
       lifecycle_ready: host.lifecycle_ready,
+      reload_required: host.reload_required,
+      milestones: [...new Set(host.milestones)].sort(),
       reason_code: host.reason_code,
     };
   });

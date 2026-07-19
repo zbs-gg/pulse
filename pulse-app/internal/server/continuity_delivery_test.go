@@ -68,6 +68,14 @@ func continuityDeliveryOfferKey(body map[string]any) string {
 	}, "\x1f"))
 }
 
+func continuityDeliveryObservationKey(body map[string]any) string {
+	return "continuity-observation:" + continuityDeliveryHash(strings.Join([]string{
+		body["schema"].(string), body["context_id"].(string), body["binding_digest"].(string),
+		body["repository_id"].(string), body["host"].(string), body["session_ref"].(string),
+		body["source_event_digest"].(string),
+	}, "\x1f"))
+}
+
 func TestContinuityDeliveryOfferRouteAcceptsOnlyCompleteComparableBaseline(t *testing.T) {
 	_, ts, binding, repository := continuityDeliveryServerFixture(t)
 	body := continuityDeliveryOfferBodyFixture(binding, repository)
@@ -123,6 +131,64 @@ func TestContinuityDeliveryOfferRouteRecordsExactIdempotentContentFreeReceipt(t 
 	if first.ReceiptID == "" || second.ReceiptID != first.ReceiptID || first.State != store.ContinuityDeliveryOfferedToHost ||
 		first.SessionRef != body["session_ref"] || first.PayloadDigest != body["payload_digest"] {
 		t.Fatalf("offer receipt mismatch: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestContinuityDeliveryObservationRoutePromotesOnlyTheExactLaterHostSession(t *testing.T) {
+	_, ts, binding, repository := continuityDeliveryServerFixture(t)
+	offerBody := continuityDeliveryOfferBodyFixture(binding, repository)
+	offer := decodeContinuityDeliveryReceipt(t, pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/offers", offerBody, continuityDeliveryOfferKey(offerBody),
+	))
+	observation := map[string]any{
+		"schema": "pulse.continuity_delivery_observation.v1", "context_id": offer.ContextID,
+		"binding_digest": binding, "repository_id": repository, "host": offer.Host,
+		"session_ref": offer.SessionRef, "source_event_digest": continuityDeliveryHash("later-prompt-event"),
+	}
+	key := continuityDeliveryObservationKey(observation)
+	first := decodeContinuityDeliveryReceipt(t, pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/observations", observation, key,
+	))
+	second := decodeContinuityDeliveryReceipt(t, pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/observations", observation, key,
+	))
+	if first.State != store.ContinuityDeliveryHostObserved || first.ParentReceiptID != offer.ReceiptID ||
+		first.ContextID != offer.ContextID || first.Host != offer.Host || first.SessionRef != offer.SessionRef ||
+		second.ReceiptID != first.ReceiptID {
+		t.Fatalf("observation receipt mismatch: offer=%#v first=%#v second=%#v", offer, first, second)
+	}
+}
+
+func TestContinuityDeliveryObservationRouteRejectsForgedOrContentShapedFacts(t *testing.T) {
+	vault, ts, binding, repository := continuityDeliveryServerFixture(t)
+	offerBody := continuityDeliveryOfferBodyFixture(binding, repository)
+	offer := decodeContinuityDeliveryReceipt(t, pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/offers", offerBody, continuityDeliveryOfferKey(offerBody),
+	))
+	observation := map[string]any{
+		"schema": "pulse.continuity_delivery_observation.v1", "context_id": offer.ContextID,
+		"binding_digest": binding, "repository_id": repository, "host": "cursor",
+		"session_ref": offer.SessionRef, "source_event_digest": continuityDeliveryHash("later-prompt-event"),
+	}
+	response := pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/observations", observation, continuityDeliveryObservationKey(observation),
+	)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("forged host status=%d", response.StatusCode)
+	}
+	observation["host"] = offer.Host
+	observation["prompt"] = "must never enter the continuity ledger"
+	response = pulseJSONWithIdempotency(
+		t, ts, http.MethodPost, "/continuity/delivery/observations", observation, continuityDeliveryObservationKey(observation),
+	)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("content-shaped observation status=%d", response.StatusCode)
+	}
+	var observed int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM continuity_delivery_receipts WHERE receipt_state='host_observed'`).Scan(&observed); err != nil || observed != 0 {
+		t.Fatalf("rejected observations mutated ledger: count=%d err=%v", observed, err)
 	}
 }
 

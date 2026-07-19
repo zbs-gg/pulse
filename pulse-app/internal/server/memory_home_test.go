@@ -77,7 +77,7 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 			},
 			Memories: store.MemoryHomeMemories{ActiveCount: 3, LatestActive: []store.MemoryHomeActiveMemory{{
 				ObjectID: "object_saved", Kind: "decision", RedactedSummary: "Use receipt-backed continuity.",
-				Host: "codex", SessionRef: "session_fresh", CreatedAt: "2026-07-16T10:00:00Z",
+				Host: "claude-code", SessionRef: "session_fresh", CreatedAt: "2026-07-16T10:00:00Z",
 				TerminalReceiptID: "receipt_saved", PresentationReceiptID: "presentation_saved",
 			}}},
 			Receipts: store.MemoryHomeReceipts{Attempts: []store.MemoryHomeAttempt{{
@@ -87,6 +87,7 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 			}}},
 			Context: store.MemoryHomeContext{Selection: "last_task", LatestDelivery: &store.MemoryHomeDeliverySummary{
 				ContextID: "context_01", OfferReceiptID: "offer_01", Acknowledgement: store.MemoryHomeDeliveryOfferedToHost,
+				Host: "codex",
 			}},
 			Economy: store.MemoryHomeEconomy{
 				State: store.MemoryHomeEconomyEstimated, EstimatedAvoidedTokens: &estimated,
@@ -109,11 +110,11 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Pulse is remembering, but Codex has not confirmed receipt yet",
-		"3", "840", "72.4%", "Context offered", "Continue the fresh task",
+		"Pulse is remembering, but the harness has not confirmed receipt yet",
+		"3", "840", "72.4%", "Context offered", "codex", "Continue the fresh task",
 		"Current project", "repository_pulse",
 		"Show this before saving.", "Use receipt-backed continuity.",
-		"object_saved", "codex", "session_fresh", "receipt_saved", "presentation_saved",
+		"object_saved", "claude-code", "codex", "session_fresh", "receipt_saved", "presentation_saved",
 		"Recent save attempts", "Save canceled before canonical memory.", "receipt_attempt", "canceled",
 		"What the next task receives", "Continue from the verified delivery receipt.",
 	} {
@@ -132,6 +133,18 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 	}
 	if strings.Contains(html, "key=") || strings.Contains(html, "X-Pulse-Key") || strings.Contains(html, "Authorization") {
 		t.Fatal("Home HTML exposed daemon authority")
+	}
+}
+
+func TestMemoryHomeMeasuredEconomyNeverLabelsAnEstimatedPercentageAsMeasured(t *testing.T) {
+	measured := 320
+	estimatedPercent := 72.4
+	value, detail, percent := memoryHomeEconomyCopy(store.MemoryHomeEconomy{
+		State: store.MemoryHomeEconomyMeasured, MeasuredAvoidedTokens: &measured,
+		EstimatedReductionPercent: &estimatedPercent,
+	})
+	if value != "320" || detail != "Measured avoided input tokens" || percent != "" {
+		t.Fatalf("measured copy mixed estimated percentage: value=%q detail=%q percent=%q", value, detail, percent)
 	}
 }
 

@@ -493,7 +493,7 @@ try {
   const sessionCommands = settings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command));
   assert.equal(sessionCommands.includes('echo keep-session'), true);
   assert.equal(sessionCommands.includes('pulse hook session-start'), false);
-  assert.equal(settings.hooks.PostToolUse[0].matcher, 'mcp__pulse__pulse_remember');
+  assert.equal(settings.hooks.PostToolUse[0].matcher, 'mcp__pulse-product__pulse_remember');
 
   const nestedWorkspace = join(workspace, 'nested', 'feature');
   mkdirSync(nestedWorkspace, { recursive: true });
@@ -531,7 +531,7 @@ try {
     raw_input_included: false,
   };
   const preTool = runHook(settings, 'PreToolUse', {
-    ...promptPayload, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse__pulse_remember',
+    ...promptPayload, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
   }, workspace, env);
   assert.deepEqual(preTool, {});
@@ -547,7 +547,7 @@ try {
   assert.equal(claudeRemember.receipts[0].safe_provenance.host, 'claude-code');
   assert.equal(claudeRemember.receipts[0].status, 'pending');
   const claudePost = runHook(settings, 'PostToolUse', {
-    ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse__pulse_remember',
+    ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
     tool_response: claudeMessages.find((message) => message.id === 3).result,
   }, workspace, env);

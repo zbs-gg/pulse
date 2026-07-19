@@ -41,7 +41,12 @@ import {
 } from './codex-runtime.js';
 import { ensureBoundPortableProjectID } from './project-source.js';
 import { syncCommittedGitTeamMemory } from './git-team-memory.js';
-import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
+import {
+  composeBoundResumeEvidence,
+  observePendingContinuityDelivery,
+  persistContinuityDelivery,
+  recordContinuityObservationTicket,
+} from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
 
@@ -307,6 +312,12 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       }), resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {
+      try {
+        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
+          request: dependencies.deliveryRequest ?? request,
+          platformServices: dependencies.platformServices,
+        });
+      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
       let approval;
@@ -445,6 +456,13 @@ export async function flushCodexHookOutput(eventName, input, result, dependencie
     },
   );
   await (dependencies.writeOutput ?? writeCodexOutput)(serialized);
+  if (delivery?.receipt && delivery.offer.purpose === 'session_start') {
+    try {
+      await (dependencies.recordObservationTicket ?? recordContinuityObservationTicket)(delivery, {
+        platformServices: dependencies.platformServices,
+      });
+    } catch { /* a missing ticket keeps readiness pending without breaking the host */ }
+  }
   if (result?.[HEALTHY] === true && delivery?.offer.purpose !== 'subagent_start') {
     try {
       const resolved = delivery?.resolved ??
@@ -802,11 +820,11 @@ function matchingContextReadinessFact(fact, terminal, after, acknowledgement, of
 		fact?.purpose !== 'session_start' ||
 		!readinessID(fact.context_id) || !readinessDigest(fact.payload_digest) ||
 		fact.binding_digest !== terminal.binding_digest || fact.repository_id !== terminal.repository_id ||
-		fact.host !== terminal.host || !readinessSessionRef(fact.session_ref) ||
+		!readinessID(fact.host) || !readinessSessionRef(fact.session_ref) ||
 		fact.session_ref === terminal.session_ref || !readinessIDs(fact.object_ids) ||
 		!readinessIDs(fact.evidence_ids) || !contextReferencesTerminal(fact, terminal)) return undefined;
 	if (offered && (fact.context_id !== offered.context_id || fact.payload_digest !== offered.payload_digest ||
-		fact.purpose !== offered.purpose || fact.session_ref !== offered.session_ref ||
+		fact.purpose !== offered.purpose || fact.host !== offered.host || fact.session_ref !== offered.session_ref ||
 		!sameReadinessIDs(fact.object_ids, offered.object_ids) ||
 		!sameReadinessIDs(fact.evidence_ids, offered.evidence_ids))) return undefined;
 	return { fact: structuredClone(fact), at };

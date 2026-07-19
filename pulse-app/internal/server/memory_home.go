@@ -159,6 +159,7 @@ type memoryHomeTemplateData struct {
 	StatusTone            string
 	MemoryCount           string
 	ContextState          string
+	ContextHost           string
 	EconomyValue          string
 	EconomyDetail         string
 	HasLatestMemory       bool
@@ -196,6 +197,9 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 	}
 	view.StatusTitle, view.StatusDetail, view.StatusTone = memoryHomeReadinessCopy(page.Data.Readiness)
 	view.ContextState = memoryHomeContextCopy(page.Data.Context)
+	if page.Data.Context.LatestDelivery != nil {
+		view.ContextHost = page.Data.Context.LatestDelivery.Host
+	}
 	view.EconomyValue, view.EconomyDetail, view.EstimatedPercent = memoryHomeEconomyCopy(page.Data.Economy)
 	var output bytes.Buffer
 	if err := memoryHomeTemplate.Execute(&output, view); err != nil {
@@ -241,7 +245,7 @@ func memoryHomeReadinessCopy(readiness store.MemoryHomeReadinessSnapshot) (title
 	case "memory_continuity_ready":
 		return "Pulse is remembering across tasks", "Canonical memory was offered to a fresh task and the host confirmed receipt.", "ready"
 	case "host_observation_required":
-		return "Pulse is remembering, but Codex has not confirmed receipt yet", "The context offer is recorded. Pulse will not call this fully ready without trustworthy host evidence.", "partial"
+		return "Pulse is remembering, but the harness has not confirmed receipt yet", "The context offer is recorded. Pulse will not call this fully ready without trustworthy host evidence.", "partial"
 	case "full_retrieval_unavailable":
 		return "Full retrieval is not enabled", "The local private store is available with fallback keyword recall. Pulse retrieval is not being claimed.", "partial"
 	case "local_embedder_warming":
@@ -295,7 +299,7 @@ func memoryHomeEconomyCopy(economy store.MemoryHomeEconomy) (value, detail, perc
 	switch economy.State {
 	case store.MemoryHomeEconomyMeasured:
 		if economy.MeasuredAvoidedTokens != nil {
-			return fmt.Sprintf("%d", *economy.MeasuredAvoidedTokens), "Measured avoided input tokens", memoryHomePercent(economy.EstimatedReductionPercent)
+			return fmt.Sprintf("%d", *economy.MeasuredAvoidedTokens), "Measured avoided input tokens", ""
 		}
 	case store.MemoryHomeEconomyEstimated:
 		if economy.EstimatedAvoidedTokens != nil {
@@ -469,7 +473,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
 
   <div class="metrics" aria-label="Memory proof">
     <div class="metric"><span>Saved memories</span><span class="value">{{.MemoryCount}}</span><small>Canonical, active, private records</small></div>
-    <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{else}}Waiting for a fresh task{{end}}</small></div>
+    <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{if .ContextHost}} via {{.ContextHost}}{{end}}{{else}}Waiting for a fresh task{{end}}</small></div>
     <div class="metric"><span>Token economy</span><span class="value">{{.EconomyValue}}</span><small>{{.EconomyDetail}}{{if .EstimatedPercent}} · {{.EstimatedPercent}}{{end}}</small></div>
   </div>
 

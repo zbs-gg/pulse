@@ -230,7 +230,9 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
 		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+			r.Get("/memory/lifecycle-readiness", s.handleSupportedHostLifecycleReadiness)
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
+			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)
 			r.Post("/project/sources/register", s.handleProjectSourceRegister)
 			r.Post("/project/sources/status", s.handleProjectSourceStatus)
 			r.Post("/project/shared-memory/review/stage", s.handleGitTeamMemoryStage)

@@ -135,14 +135,14 @@ func firstMatchingContextFact(
 		if !validTime || !at.After(after) || fact.Acknowledgement != acknowledgement ||
 			!validReadinessScalar(fact.ContextID) || !readinessDigest(fact.PayloadDigest) ||
 			fact.BindingDigest != terminal.BindingDigest || fact.RepositoryID != terminal.RepositoryID ||
-			fact.Host != terminal.Host || fact.Purpose != "session_start" || !validReadinessSessionRef(fact.SessionRef) ||
+			!validReadinessScalar(fact.Host) || fact.Purpose != "session_start" || !validReadinessSessionRef(fact.SessionRef) ||
 			fact.SessionRef == terminal.SessionRef ||
 			!validReadinessIDs(fact.ObjectIDs) || !validReadinessIDs(fact.EvidenceIDs) ||
 			!contextFactReferencesTerminal(fact, terminal) {
 			continue
 		}
 		if offered != nil && (fact.ContextID != offered.ContextID || fact.PayloadDigest != offered.PayloadDigest ||
-			fact.Purpose != offered.Purpose || fact.SessionRef != offered.SessionRef || !sameReadinessIDs(fact.ObjectIDs, offered.ObjectIDs) ||
+			fact.Purpose != offered.Purpose || fact.Host != offered.Host || fact.SessionRef != offered.SessionRef || !sameReadinessIDs(fact.ObjectIDs, offered.ObjectIDs) ||
 			!sameReadinessIDs(fact.EvidenceIDs, offered.EvidenceIDs)) {
 			continue
 		}

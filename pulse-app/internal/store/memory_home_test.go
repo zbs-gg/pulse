@@ -369,7 +369,7 @@ func TestProjectMemoryHomeDataKeepsEmptyVaultHonestAndActionable(t *testing.T) {
 func TestProjectMemoryHomeDataRequiresExactFreshTaskOfferAndObservationForReady(t *testing.T) {
 	active := MemoryHomeActiveMemory{
 		ObjectID: "object_01", Kind: "decision", RedactedSummary: "Use receipt-backed continuity.",
-		Host: "codex", SessionRef: "session_ref_memory", CreatedAt: "2026-07-16T08:00:00Z",
+		Host: "claude-code", SessionRef: "session_ref_memory", CreatedAt: "2026-07-16T08:00:00Z",
 		TerminalReceiptID: "memory_receipt_01", PresentationReceiptID: "presentation_receipt_01",
 	}
 	delivery := memoryHomeComparablePair("01", MemoryHomeCountMethodUTF8BytesDiv4Ceil, "1", 200, 800, "2026-07-16T09:00:00Z")
@@ -401,12 +401,14 @@ func TestProjectMemoryHomeDataRequiresExactFreshTaskOfferAndObservationForReady(
 	if got.Readiness.Proof.TerminalReceiptID != active.TerminalReceiptID ||
 		got.Readiness.Proof.PresentationReceiptID != active.PresentationReceiptID ||
 		got.Readiness.Proof.ContextOfferReceiptID != delivery[0].ReceiptID ||
-		got.Readiness.Proof.ContextAckReceiptID != delivery[1].ReceiptID {
+		got.Readiness.Proof.ContextAckReceiptID != delivery[1].ReceiptID ||
+		got.Readiness.Proof.MemoryHost != "claude-code" || got.Readiness.Proof.DeliveryHost != "codex" {
 		t.Fatalf("readiness proof lost immutable receipt chain: %#v", got.Readiness.Proof)
 	}
 	if got.Context.Selection != "current_task" || got.Context.LatestDelivery == nil ||
 		got.Context.LatestDelivery.Acknowledgement != MemoryHomeDeliveryHostObserved ||
-		got.Context.LatestDelivery.AckReceiptID != delivery[1].ReceiptID {
+		got.Context.LatestDelivery.AckReceiptID != delivery[1].ReceiptID ||
+		got.Context.LatestDelivery.Host != "codex" {
 		t.Fatalf("current delivery=%#v", got.Context)
 	}
 	if got.NextTaskPreview == preview || got.NextTaskPreview == nil || got.NextTaskPreview.Status != "preview_only" {

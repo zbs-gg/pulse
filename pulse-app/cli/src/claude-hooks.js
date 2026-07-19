@@ -11,7 +11,6 @@ import {
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
   isGuardedCodexTool,
-  isTrustedPulseProductTool,
   normalizeClaudeHook,
   renderAdditionalContext,
 } from './host-adapter.js';
@@ -23,10 +22,19 @@ import {
   writeHostToolLease,
   writeHostTurnContext,
 } from './codex-runtime.js';
-import { composeBoundResumeEvidence, persistContinuityDelivery } from './product-compositor.js';
+import {
+  composeBoundResumeEvidence,
+  observePendingContinuityDelivery,
+  persistContinuityDelivery,
+  recordContinuityObservationTicket,
+} from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
 const HOST = 'claude-code';
+
+function isClaudeProductRememberTool(toolName) {
+  return typeof toolName === 'string' && /^mcp__pulse-product__pulse_remember$/i.test(toolName);
+}
 
 export function claudeHookContractDigest(runtimeDigest) {
 	if (!/^[a-f0-9]{64}$/.test(runtimeDigest ?? '')) return undefined;
@@ -197,6 +205,12 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       }, resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {
+      try {
+        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, nativeEvent, {
+          request: dependencies.deliveryRequest ?? request,
+          platformServices: dependencies.platformServices,
+        });
+      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
       return {
         continue: true,
@@ -210,7 +224,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       if (!isGuardedCodexTool(rawInput.tool_name)) return {};
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (/^mcp__pulse__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
+      if (isClaudeProductRememberTool(rawInput.tool_name)) {
         (dependencies.writeToolLease ?? writeHostToolLease)(
           resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -218,7 +232,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       return {};
     }
     if (eventName === 'PostToolUse') {
-      if (!isTrustedPulseProductTool(rawInput.tool_name)) return {};
+      if (!isClaudeProductRememberTool(rawInput.tool_name)) return {};
       const refs = extractPulseReceiptRefs(rawInput.tool_response);
       if (refs.length === 0) return {};
       const marker = (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
@@ -346,6 +360,13 @@ export async function flushClaudeHookOutput(eventName, input, output, dependenci
     },
   );
   await (dependencies.writeOutput ?? writeClaudeOutput)(`${serialized}\n`);
+  if (delivery?.receipt && delivery.offer.purpose === 'session_start') {
+    try {
+      await (dependencies.recordObservationTicket ?? recordContinuityObservationTicket)(delivery, {
+        platformServices: dependencies.platformServices,
+      });
+    } catch { /* a missing ticket keeps readiness pending without breaking the host */ }
+  }
   if (delivery?.offer.purpose !== 'subagent_start' &&
       !/degraded|finalize_failed|pulse_authority_unavailable/.test(serialized)) {
     try {
@@ -374,7 +395,7 @@ export function claudeWorkspaceDigest(canonicalPath) {
 function readinessMilestone(eventName, options) {
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
-  if (eventName === 'PostToolUse' && isTrustedPulseProductTool(options.input?.tool_name) &&
+  if (eventName === 'PostToolUse' && isClaudeProductRememberTool(options.input?.tool_name) &&
       /^Pulse Memory Tray receipt:/.test(options.output?.systemMessage ?? '')) return 'write_receipt';
   if (eventName === 'Stop' && options.output?.decision !== 'block' &&
       options.output?.continue !== true) return 'turn_finalize';

@@ -353,7 +353,7 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 		ContentDigest: strings.Repeat("c", 64),
 		MemoryKind:    "decision", ConversationScope: "current_turn",
 		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository-pulse",
-		Host: "codex", SessionRef: "session:" + strings.Repeat("d", 64), CreatedAt: "2026-07-16T01:00:00Z",
+		Host: "claude-code", SessionRef: "session:" + strings.Repeat("d", 64), CreatedAt: "2026-07-16T01:00:00Z",
 		Active: true,
 	}
 	offered := ContextDeliveryReadinessFact{
@@ -443,6 +443,11 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 		{name: "different context observation", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered, func() ContextDeliveryReadinessFact {
 			wrong := observed
 			wrong.ContextID = "context_other"
+			return wrong
+		}()}, wantState: "host_observation_pending"},
+		{name: "observation from a different delivery host", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered, func() ContextDeliveryReadinessFact {
+			wrong := observed
+			wrong.Host = "cursor"
 			return wrong
 		}()}, wantState: "host_observation_pending"},
 		{name: "matching observed fact", memories: []TerminalMemoryReadinessFact{terminal}, delivery: []ContextDeliveryReadinessFact{offered, observed}, wantState: "ready"},

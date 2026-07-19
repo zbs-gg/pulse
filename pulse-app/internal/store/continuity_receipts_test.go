@@ -356,12 +356,14 @@ func TestRecordContinuityOfferPersistsExactContentFreeFactAndOpaqueSession(t *te
 }
 
 func testContinuityObservationRequest(offer ContinuityDeliveryOfferRequest) ContinuityDeliveryObservationRequest {
-	return ContinuityDeliveryObservationRequest{
-		ContextID: offer.ContextID, IdempotencyKey: "delivery_observed_01",
+	request := ContinuityDeliveryObservationRequest{
+		ContextID:     offer.ContextID,
 		BindingDigest: offer.BindingDigest, RepositoryID: offer.RepositoryID,
 		Host: offer.Host, SessionRef: offer.SessionRef,
 		SourceEventDigest: testContinuityDeliveryDigest("later-trusted-lifecycle-event"),
 	}
+	request.IdempotencyKey = continuityDeliveryObservationIdempotencyKey(request)
+	return request
 }
 
 func TestContinuityObservationCopiesExactOfferAndTransitionsOnce(t *testing.T) {
@@ -462,6 +464,7 @@ func TestContinuityObservationRequiresASeparateLaterLifecycleEvent(t *testing.T)
 	}
 	observation := testContinuityObservationRequest(offerRequest)
 	observation.SourceEventDigest = offerRequest.SourceEventDigest
+	observation.IdempotencyKey = continuityDeliveryObservationIdempotencyKey(observation)
 	if _, err := s.RecordContinuityHostObserved(
 		context.Background(), observation, time.Now().Add(time.Second),
 	); !errors.Is(err, ErrContinuityDeliveryTransition) {

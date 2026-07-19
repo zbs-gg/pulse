@@ -67,6 +67,8 @@ type MemoryHomeReadinessSnapshot struct {
 
 type MemoryHomeReadinessProof struct {
 	LiveOutcome           string `json:"live_outcome"`
+	MemoryHost            string `json:"memory_host,omitempty"`
+	DeliveryHost          string `json:"delivery_host,omitempty"`
 	TerminalReceiptID     string `json:"terminal_receipt_id,omitempty"`
 	PresentationReceiptID string `json:"presentation_receipt_id,omitempty"`
 	ContextOfferReceiptID string `json:"context_offer_receipt_id,omitempty"`
@@ -111,6 +113,7 @@ type MemoryHomeContext struct {
 
 type MemoryHomeDeliverySummary struct {
 	ContextID       string   `json:"context_id"`
+	Host            string   `json:"host"`
 	OfferReceiptID  string   `json:"offer_receipt_id"`
 	AckReceiptID    string   `json:"ack_receipt_id,omitempty"`
 	Acknowledgement string   `json:"acknowledgement"`
@@ -412,7 +415,7 @@ func projectMemoryHomeContext(facts []MemoryHomeDeliveryFact, currentSessionRef 
 		result.Selection = "current_task"
 	}
 	result.LatestDelivery = &MemoryHomeDeliverySummary{
-		ContextID: latest.ContextID, OfferReceiptID: latest.ReceiptID,
+		ContextID: latest.ContextID, Host: latest.Host, OfferReceiptID: latest.ReceiptID,
 		Acknowledgement: MemoryHomeDeliveryOfferedToHost, PayloadDigest: latest.PayloadDigest,
 		ObjectIDs: append([]string(nil), latest.ObjectIDs...), EvidenceIDs: append([]string(nil), latest.EvidenceIDs...),
 		OfferedAt: latest.CreatedAt,
@@ -452,7 +455,7 @@ func projectMemoryHomeReadiness(
 			offer := &input.Deliveries[index]
 			if offer.Acknowledgement != MemoryHomeDeliveryOfferedToHost || offer.Purpose != MemoryHomeDeliveryPurposeSessionStart ||
 				!memoryHomeTimeAfter(offer.CreatedAt, memory.CreatedAt) || offer.BindingDigest != input.Boundary.BindingDigest ||
-				offer.RepositoryID != input.Boundary.RepositoryID || offer.Host != memory.Host ||
+				offer.RepositoryID != input.Boundary.RepositoryID ||
 				offer.SessionRef == "" || offer.SessionRef == memory.SessionRef || !slices.Contains(offer.ObjectIDs, memory.ObjectID) {
 				continue
 			}
@@ -469,11 +472,13 @@ func projectMemoryHomeReadiness(
 		}
 		result.Outcome = MemoryHomeReadinessActionRequired
 		result.ReasonCode = "fresh_task_required"
-		result.NextAction = MemoryHomeNextAction{Code: "open_fresh_task", Label: "Open a fresh Codex task"}
+		result.NextAction = MemoryHomeNextAction{Code: "open_fresh_task", Label: "Open a fresh agent task"}
 		return result
 	}
 	result.Proof.TerminalReceiptID = matchingMemory.TerminalReceiptID
 	result.Proof.PresentationReceiptID = matchingMemory.PresentationReceiptID
+	result.Proof.MemoryHost = matchingMemory.Host
+	result.Proof.DeliveryHost = matchingOffer.Host
 	result.Proof.ContextOfferReceiptID = matchingOffer.ReceiptID
 	observed, ok := matchingMemoryHomeObservation(*matchingOffer, input.Deliveries)
 	if !ok {

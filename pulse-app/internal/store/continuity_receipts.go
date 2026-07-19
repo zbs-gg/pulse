@@ -201,6 +201,15 @@ func continuityDeliveryOfferIdempotencyKey(req ContinuityDeliveryOfferRequest) s
 	return "continuity-offer:" + hex.EncodeToString(digest[:])
 }
 
+func continuityDeliveryObservationIdempotencyKey(req ContinuityDeliveryObservationRequest) string {
+	canonical := strings.Join([]string{
+		"pulse.continuity_delivery_observation.v1", req.ContextID, req.BindingDigest, req.RepositoryID,
+		req.Host, req.SessionRef, req.SourceEventDigest,
+	}, "\x1f")
+	digest := sha256.Sum256([]byte(canonical))
+	return "continuity-observation:" + hex.EncodeToString(digest[:])
+}
+
 func validContinuityDeliveryBaseline(kind string, source *int, counted, total int) bool {
 	if kind == "" && source == nil && counted == 0 && total == 0 {
 		return true
@@ -230,6 +239,7 @@ func validateContinuityOffer(req ContinuityDeliveryOfferRequest) error {
 
 func validateContinuityObservation(req ContinuityDeliveryObservationRequest) error {
 	if !validTrayIdentifier(req.ContextID) || !validTrayIdentifier(req.IdempotencyKey) ||
+		req.IdempotencyKey != continuityDeliveryObservationIdempotencyKey(req) ||
 		!trayBindingDigestPattern.MatchString(req.BindingDigest) || !validTrayIdentifier(req.RepositoryID) ||
 		!validContinuityDeliveryHost(req.Host) || !continuitySessionRefPattern.MatchString(req.SessionRef) ||
 		!trayBindingDigestPattern.MatchString(req.SourceEventDigest) {
@@ -645,8 +655,11 @@ func (s *Store) RecordContinuityHostObserved(
 	if req.SourceEventDigest == offer.SourceEventDigest {
 		return ContinuityDeliveryReceipt{}, ErrContinuityDeliveryTransition
 	}
-	if _, err := loadContinuityDeliveryReceiptByContextTx(tx, req.ContextID, ContinuityDeliveryHostObserved); err == nil {
-		return ContinuityDeliveryReceipt{}, ErrContinuityDeliveryTransition
+	if existing, err := loadContinuityDeliveryReceiptByContextTx(tx, req.ContextID, ContinuityDeliveryHostObserved); err == nil {
+		if err := hydrateContinuityDeliveryRefsTx(tx, &existing); err != nil {
+			return ContinuityDeliveryReceipt{}, err
+		}
+		return existing, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return ContinuityDeliveryReceipt{}, err
 	}

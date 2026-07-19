@@ -77,12 +77,24 @@ test('Cursor detection accepts the trusted app surface without a Cursor CLI', ()
   const root = mkdtempSync(join(tmpdir(), 'pulse-cursor-detect.'));
   try {
     const app = join(root, 'Cursor.app');
-    mkdirSync(app);
+    const executable = join(app, 'Contents', 'MacOS', 'Cursor');
+    mkdirSync(join(app, 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const first = detectCursorInstallation({ appCandidates: [app] });
+    const firstDigest = first.executable_sha256;
     assert.deepEqual(detectCursorInstallation({ appCandidates: [app] }), {
       available: true,
       app_path: realpathSync(app),
+      executable_path: realpathSync(executable),
+      executable_sha256: firstDigest,
       reason_code: null,
     });
+    writeFileSync(executable, '#!/bin/sh\nexit 7\n', { mode: 0o700 });
+    const changed = detectCursorInstallation({ appCandidates: [app] });
+    assert.notEqual(changed.executable_sha256, firstDigest);
+    const emptyApp = join(root, 'Empty.app');
+    mkdirSync(emptyApp);
+    assert.equal(detectCursorInstallation({ appCandidates: [emptyApp] }).available, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

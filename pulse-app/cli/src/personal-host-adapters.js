@@ -11,7 +11,8 @@ function exactTargets(hosts, registry, context) {
   const targets = [];
   for (const host of hosts) {
     if (!host || typeof host !== 'object' || !SUPPORTED_HOST_IDS.includes(host.host) || seen.has(host.host) ||
-        typeof host.compatible !== 'boolean' || typeof host.activation_target !== 'boolean') {
+        typeof host.detected !== 'boolean' || typeof host.compatible !== 'boolean' ||
+        typeof host.activation_target !== 'boolean') {
       throw new TypeError('personal_host_inventory_invalid');
     }
     seen.add(host.host);
@@ -21,7 +22,7 @@ function exactTargets(hosts, registry, context) {
     if (!adapter || typeof adapter.inspect !== 'function' || typeof adapter.activate !== 'function') {
       throw new TypeError('personal_host_registry_invalid');
     }
-    targets.push({ host: host.host, adapter });
+    targets.push({ host: host.host, detected: host.detected, compatible: host.compatible, adapter });
   }
   if (targets.length === 0) throw new TypeError('personal_host_inventory_invalid');
   return targets;
@@ -33,14 +34,32 @@ function stableReason(host, value, fallback) {
   return `${host.replaceAll('-', '_')}_${fallback}`;
 }
 
-function hostResult(host, status, { activated = false } = {}) {
-  const verified = status?.ready === true;
+function hostResult(target, status, { activated = false } = {}) {
+  const installed = status?.installed === true || status?.ready === true;
+  const mcpReady = status?.mcp_ready === true || status?.ready === true;
+  const lifecycleReady = status?.lifecycle_ready === true;
+  const verified = mcpReady && lifecycleReady;
+  const milestones = Array.isArray(status?.milestones) &&
+    status.milestones.every((milestone) => typeof milestone === 'string' && SAFE_REASON.test(milestone))
+    ? Object.freeze([...new Set(status.milestones)].sort())
+    : Object.freeze([]);
+  const reloadRequired = mcpReady && !lifecycleReady;
+  const fallback = verified ? 'verified' : reloadRequired ? 'lifecycle_required' : 'activation_required';
+  const reasonCode = reloadRequired && !/_lifecycle_required$/.test(status?.reason_code ?? '')
+    ? `${target.host.replaceAll('-', '_')}_lifecycle_required`
+    : stableReason(target.host, status, fallback);
   return Object.freeze({
-    host,
-    activated: activated || verified,
+    host: target.host,
+    detected: target.detected,
+    compatible: target.compatible,
+    installed,
+    mcp_ready: mcpReady,
+    activated: activated || installed,
     verified,
-    lifecycle_ready: status?.lifecycle_ready === true,
-    reason_code: stableReason(host, status, verified ? 'verified' : 'activation_required'),
+    lifecycle_ready: lifecycleReady,
+    reload_required: reloadRequired,
+    milestones,
+    reason_code: reasonCode,
   });
 }
 
@@ -63,8 +82,12 @@ function priorHostResults(prior, targets) {
   const results = new Map();
   for (const host of prior.hosts) {
     if (!host || !targetIDs.has(host.host) || results.has(host.host) ||
+        typeof host.detected !== 'boolean' || typeof host.compatible !== 'boolean' ||
+        typeof host.installed !== 'boolean' || typeof host.mcp_ready !== 'boolean' ||
         typeof host.activated !== 'boolean' || typeof host.verified !== 'boolean' ||
-        typeof host.lifecycle_ready !== 'boolean' || !SAFE_REASON.test(host.reason_code ?? '')) {
+        typeof host.lifecycle_ready !== 'boolean' || typeof host.reload_required !== 'boolean' ||
+        !Array.isArray(host.milestones) || host.milestones.some((value) => !SAFE_REASON.test(value)) ||
+        !SAFE_REASON.test(host.reason_code ?? '')) {
       throw new TypeError('personal_host_prior_invalid');
     }
     results.set(host.host, host);
@@ -77,9 +100,9 @@ export async function inspectDetectedPersonalHosts({ context, hosts, registry } 
   const results = [];
   for (const target of targets) {
     try {
-      results.push(hostResult(target.host, await target.adapter.inspect(context)));
+      results.push(hostResult(target, await target.adapter.inspect(context)));
     } catch (error) {
-      results.push(hostResult(target.host, {
+      results.push(hostResult(target, {
         reason_code: SAFE_REASON.test(error?.code ?? '')
           ? error.code
           : `${target.host.replaceAll('-', '_')}_inspection_failed`,
@@ -97,7 +120,7 @@ export async function activateDetectedPersonalHosts({ context, hosts, registry, 
     let before;
     try {
       const priorResult = previous.get(target.host);
-      if (priorResult?.verified === true) {
+      if (priorResult?.installed === true) {
         attempts.set(target.host, { activated: priorResult.activated });
         continue;
       }
@@ -125,12 +148,12 @@ export async function activateDetectedPersonalHosts({ context, hosts, registry, 
     const attempt = attempts.get(target.host) ?? {};
     try {
       const current = await target.adapter.inspect(context);
-      results.push(hostResult(target.host, current?.ready === true ? current : {
+      results.push(hostResult(target, current?.ready === true ? current : {
         ...current,
         reason_code: attempt.reason_code ?? stableReason(target.host, current, 'activation_required'),
       }, { activated: attempt.activated === true }));
     } catch (error) {
-      results.push(hostResult(target.host, {
+      results.push(hostResult(target, {
         reason_code: attempt.reason_code ?? (SAFE_REASON.test(error?.code ?? '')
           ? error.code
           : `${target.host.replaceAll('-', '_')}_inspection_failed`),

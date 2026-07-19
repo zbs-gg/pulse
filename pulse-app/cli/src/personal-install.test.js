@@ -31,6 +31,21 @@ function supportedPlan(overrides = {}) {
   };
 }
 
+function hostStatus(host, {
+  ready = false,
+  installed = ready,
+  mcpReady = ready,
+  activated = installed,
+  reasonCode = ready ? `${host.replaceAll('-', '_')}_verified` : `${host.replaceAll('-', '_')}_activation_required`,
+  milestones = ready ? ['turn_capture'] : [],
+} = {}) {
+  return {
+    host, detected: true, compatible: true, installed, mcp_ready: mcpReady, activated,
+    verified: mcpReady && ready, lifecycle_ready: ready, reload_required: mcpReady && !ready,
+    milestones, reason_code: reasonCode,
+  };
+}
+
 function harness(overrides = {}) {
   const state = {
     runtime: false,
@@ -71,10 +86,7 @@ function harness(overrides = {}) {
     inspectActivation: async () => ({
       product_ready: state.activation,
       parity: state.activation ? 'complete' : 'blocked',
-      hosts: [{
-        host: 'codex', activated: state.activation, verified: state.activation,
-        lifecycle_ready: state.activation, reason_code: state.activation ? 'codex_verified' : 'codex_activation_required',
-      }],
+      hosts: [hostStatus('codex', { ready: state.activation })],
     }),
     activateHosts: async () => {
       mutations.push('activation');
@@ -190,8 +202,8 @@ test('one verified harness makes the product ready while secondary parity stays 
     product_ready: true,
     parity: 'degraded',
     hosts: [
-      { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'host_verified' },
-      { host: 'cursor', activated: true, verified: false, lifecycle_ready: false, reason_code: 'cursor_lifecycle_required' },
+      hostStatus('claude-code', { ready: true, reasonCode: 'host_verified' }),
+      hostStatus('cursor', { ready: false, installed: true, mcpReady: true, reasonCode: 'cursor_lifecycle_required' }),
     ],
   };
   run.dependencies.inspectActivation = async () => degraded;
@@ -213,8 +225,8 @@ test('a host rollback failure blocks readiness even when another host is verifie
     product_ready: true,
     parity: 'degraded',
     hosts: [
-      { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'claude_plugin_verified' },
-      { host: 'codex', activated: false, verified: false, lifecycle_ready: false, reason_code: 'codex_activation_rollback_failed' },
+      hostStatus('claude-code', { ready: true, reasonCode: 'claude_plugin_verified' }),
+      hostStatus('codex', { ready: false, reasonCode: 'codex_activation_rollback_failed' }),
     ],
   };
   run.dependencies.inspectActivation = async () => unsafe;
@@ -306,7 +318,7 @@ test('a fresh process resumes from durable inspected facts without repeating the
       createBinding: async ({ principal }) => { state.binding = { binding_id: 'binding_test', principal_ref: principal.principal_id }; save(); },
       inspectCore: async () => ({ ready: state.core, full_retrieval: state.core, context: {} }),
       activateCore: async () => { state.core = true; state.core_mutations += 1; save(); },
-      inspectActivation: async () => ({ product_ready: state.activation, parity: state.activation ? 'complete' : 'blocked', hosts: [{ host: 'codex', activated: state.activation, verified: state.activation, lifecycle_ready: state.activation, reason_code: state.activation ? 'codex_verified' : 'codex_activation_required' }] }),
+      inspectActivation: async () => ({ product_ready: state.activation, parity: state.activation ? 'complete' : 'blocked', hosts: [{ host: 'codex', detected: true, compatible: true, installed: state.activation, mcp_ready: state.activation, activated: state.activation, verified: state.activation, lifecycle_ready: state.activation, reload_required: false, milestones: state.activation ? ['turn_capture'] : [], reason_code: state.activation ? 'codex_verified' : 'codex_activation_required' }] }),
       activateHosts: async () => { state.activation = true; state.health = true; save(); },
       inspectHealth: async () => ({ ready: state.health, full_retrieval: state.health }),
       writeReceipt: async (receipt) => {

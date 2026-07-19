@@ -182,12 +182,35 @@ export function createPlatformServices({
     if (typeof applicationPath !== 'string' || !pathAPI.isAbsolute(applicationPath) || pathAPI.resolve(applicationPath) !== applicationPath) {
       fail('platform_application_path_invalid');
     }
-    if (platform === 'win32') return inspectExecutable(applicationPath);
+    if (platform === 'win32') {
+      const executable = inspectExecutable(applicationPath);
+      return executable ? Object.freeze({
+        canonical_path: executable.canonical_path,
+        application: true,
+        executable_path: executable.canonical_path,
+        executable_sha256: executable.sha256,
+      }) : null;
+    }
     try {
       const canonicalPath = realpathSync(applicationPath);
       const info = statSync(canonicalPath);
-      if (platform === 'darwin' ? !info.isDirectory() : (!info.isFile() || (info.mode & 0o111) === 0)) return null;
-      return Object.freeze({ canonical_path: canonicalPath, application: true });
+      if (platform === 'darwin') {
+        if (!info.isDirectory()) return null;
+        const executable = inspectExecutable(pathAPI.join(canonicalPath, 'Contents', 'MacOS', 'Cursor'));
+        return executable ? Object.freeze({
+          canonical_path: canonicalPath,
+          application: true,
+          executable_path: executable.canonical_path,
+          executable_sha256: executable.sha256,
+        }) : null;
+      }
+      const executable = inspectExecutable(canonicalPath);
+      return executable ? Object.freeze({
+        canonical_path: canonicalPath,
+        application: true,
+        executable_path: executable.canonical_path,
+        executable_sha256: executable.sha256,
+      }) : null;
     } catch {
       return null;
     }

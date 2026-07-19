@@ -57,7 +57,7 @@ import {
   detectCodexCLI,
   formatPersonalInstallPlan,
 } from './install-plan.js';
-import { detectClaudeCodeCLI, SUPPORTED_HOST_IDS } from './supported-hosts.js';
+import { detectClaudeCodeCLI, detectCursorInstallation, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { selectHomeDoctorReport } from './home-doctor.js';
 import {
   activateDetectedPersonalHosts,
@@ -682,14 +682,52 @@ function personalInstallHostRegistry(targets) {
       return true;
     } catch { return false; }
   };
+  const lifecycleFor = async (context, host) => {
+    try {
+      const result = await boundPulseRequest(context.resolved, '/memory/lifecycle-readiness', {
+        method: 'GET', timeoutMs: 1500,
+      });
+      if (result?.schema !== 'pulse.supported_host_lifecycle_readiness.v1' ||
+          !Array.isArray(result.hosts) || result.hosts.length !== SUPPORTED_HOST_IDS.length) {
+        throw new Error('supported_host_lifecycle_invalid');
+      }
+      const seen = new Set();
+      for (const entry of result.hosts) {
+        if (!entry || !SUPPORTED_HOST_IDS.includes(entry.host) || seen.has(entry.host) ||
+            typeof entry.lifecycle_ready !== 'boolean' ||
+            !['first_memory_pending', 'context_offer_pending', 'host_observation_pending', 'ready'].includes(entry.state) ||
+            !Array.isArray(entry.milestones) || entry.milestones.some((value) =>
+              !['write_receipt', 'session_context', 'prompt_context'].includes(value))) {
+          throw new Error('supported_host_lifecycle_invalid');
+        }
+        seen.add(entry.host);
+      }
+      const selected = result.hosts.find((entry) => entry.host === host);
+      if (!selected || selected.lifecycle_ready !== (selected.state === 'ready')) {
+        throw new Error('supported_host_lifecycle_invalid');
+      }
+      return selected;
+    } catch {
+      return { host, state: 'first_memory_pending', lifecycle_ready: false, milestones: [] };
+    }
+  };
   return {
     'claude-code': {
       inspect: async (context) => {
         const result = inspectClaudeNativeProductPlugin(context.edge, claudeExecutable);
+        const staticReady = result.ok === true && captureFor(context, 'claude-code') && accessFor(context, 'claude-code');
+        const lifecycle = staticReady
+          ? await lifecycleFor(context, 'claude-code')
+          : { lifecycle_ready: false, milestones: [] };
         return {
-          ready: result.ok === true && captureFor(context, 'claude-code') && accessFor(context, 'claude-code'),
-          lifecycle_ready: false,
-          reason_code: result.ok ? 'claude_plugin_verified' : (result.reason ?? 'claude_activation_required'),
+          ready: staticReady,
+          installed: result.ok === true,
+          mcp_ready: staticReady,
+          lifecycle_ready: staticReady && lifecycle.lifecycle_ready === true,
+          milestones: lifecycle.milestones,
+          reason_code: !staticReady
+            ? (result.reason ?? 'claude_activation_required')
+            : lifecycle.lifecycle_ready ? 'claude_lifecycle_verified' : 'claude_lifecycle_required',
         };
       },
       activate: async (context) => {
@@ -708,10 +746,19 @@ function personalInstallHostRegistry(targets) {
       inspect: async (context) => {
         const plugin = codexPluginStatus(codexExecutable);
         const exact = inspectCodexPluginCompatibility(plugin, context.edge);
+        const staticReady = exact.ok === true && captureFor(context, 'codex') && accessFor(context, 'codex');
+        const lifecycle = staticReady
+          ? await lifecycleFor(context, 'codex')
+          : { lifecycle_ready: false, milestones: [] };
         return {
-          ready: exact.ok === true && captureFor(context, 'codex') && accessFor(context, 'codex'),
-          lifecycle_ready: false,
-          reason_code: exact.ok ? 'codex_plugin_verified' : (exact.reason ?? 'codex_activation_required'),
+          ready: staticReady,
+          installed: exact.ok === true,
+          mcp_ready: staticReady,
+          lifecycle_ready: staticReady && lifecycle.lifecycle_ready === true,
+          milestones: lifecycle.milestones,
+          reason_code: !staticReady
+            ? (exact.reason ?? 'codex_activation_required')
+            : lifecycle.lifecycle_ready ? 'codex_lifecycle_verified' : 'codex_lifecycle_required',
         };
       },
       activate: async (context) => {
@@ -755,11 +802,19 @@ function personalInstallHostRegistry(targets) {
         const result = inspectCursorPlugin({
           cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
         });
-        const lifecycle = inspectCursorLifecycleReadiness(context.resolved);
+        const staticReady = result.ready === true && captureFor(context, 'cursor') && accessFor(context, 'cursor');
+        const lifecycle = staticReady
+          ? await lifecycleFor(context, 'cursor')
+          : { lifecycle_ready: false, milestones: [] };
         return {
-          ready: result.ready === true && captureFor(context, 'cursor') && accessFor(context, 'cursor'),
-          lifecycle_ready: lifecycle.ready,
-          reason_code: result.ready ? 'cursor_plugin_verified' : result.reason,
+          ready: staticReady,
+          installed: result.ready === true,
+          mcp_ready: staticReady,
+          lifecycle_ready: staticReady && lifecycle.lifecycle_ready,
+          milestones: lifecycle.milestones,
+          reason_code: !staticReady
+            ? (result.reason ?? 'cursor_activation_required')
+            : lifecycle.lifecycle_ready ? 'cursor_lifecycle_verified' : 'cursor_lifecycle_required',
         };
       },
       activate: async (context) => {
@@ -866,6 +921,22 @@ function personalInstallDependencies(plan) {
       }
       if (probe.executable_path !== claudeExecutable || probe.executable_sha256 !== expectedClaudeDigest) {
         throw new PersonalInstallError('claude_identity_changed');
+      }
+    }
+    const cursor = target('cursor');
+    if (cursor) {
+      const expectedAppPath = cursor.app_path;
+      const expectedExecutablePath = cursor.executable_path;
+      const expectedExecutableDigest = cursor.executable_sha256;
+      if (typeof expectedAppPath !== 'string' || !isAbsolute(expectedAppPath) ||
+          typeof expectedExecutablePath !== 'string' || !isAbsolute(expectedExecutablePath) ||
+          typeof expectedExecutableDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedExecutableDigest)) {
+        throw new PersonalInstallError('cursor_identity_invalid');
+      }
+      const probe = detectCursorInstallation({ appCandidates: [expectedAppPath] });
+      if (!probe.available || probe.app_path !== expectedAppPath ||
+          probe.executable_path !== expectedExecutablePath || probe.executable_sha256 !== expectedExecutableDigest) {
+        throw new PersonalInstallError('cursor_identity_changed');
       }
     }
     identitiesVerified = true;
@@ -2829,7 +2900,7 @@ function hookConfig(runtimePath, runtimeDigest) {
       PreToolUse: [{ matcher: '*', hooks: [handler('PreToolUse', 10)] }],
       PostToolUse: [
         {
-          matcher: 'mcp__pulse__pulse_remember',
+          matcher: 'mcp__pulse-product__pulse_remember',
           hooks: [handler('PostToolUse', 10)],
         },
       ],

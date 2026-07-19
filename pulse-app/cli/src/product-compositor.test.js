@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
   composeBoundResumeEvidence,
   createContinuityDeliveryOffer,
+  createContinuityDeliveryObservation,
+  observePendingContinuityDelivery,
+  recordContinuityObservationTicket,
   renderCommonsResume,
 } from './product-compositor.js';
 import { TeamRemoteClientError } from './team-remote-client.js';
@@ -170,6 +176,68 @@ test('native lifecycle identity stays stable while divergent payload replay chan
   assert.equal(divergent.idempotencyKey, first.idempotencyKey);
   assert.notEqual(divergent.offer.context_id, first.offer.context_id);
   assert.notEqual(divergent.offer.payload_digest, first.offer.payload_digest);
+});
+
+test('a later same-session host event promotes only a receipt-backed content-free offer ticket', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-continuity-observation-'));
+  try {
+    const runtime = resolved('personal');
+    runtime.runtime.data_dir = root;
+    const start = {
+      host: 'claude-code', event: 'session_start', session_id: 'session_1',
+      source_event_key: `event_${'b'.repeat(64)}`,
+    };
+    const measurement = createContinuityDeliveryOffer(runtime, start, 'remembered context payload', {
+      object_ids: ['memory_1'], evidence_ids: ['pulse:memory_1'],
+    });
+    const offerReceipt = {
+      schema: 'pulse.continuity_delivery_receipt.v1', receipt_id: 'delivery_offer_1',
+      state: 'offered_to_host', purpose: measurement.offer.purpose,
+      context_id: measurement.offer.context_id, binding_digest: measurement.offer.binding_digest,
+      repository_id: measurement.offer.repository_id, host: measurement.offer.host,
+      session_ref: measurement.offer.session_ref, payload_digest: measurement.offer.payload_digest,
+      source_event_digest: measurement.offer.source_event_digest,
+      created_at: new Date().toISOString(),
+    };
+    const ticket = recordContinuityObservationTicket({
+      resolved: runtime, offer: measurement.offer, receipt: offerReceipt,
+    });
+    const ticketDirectory = join(root, 'runtime', 'continuity-observations');
+    const ticketPath = join(ticketDirectory, readdirSync(ticketDirectory)[0]);
+    assert.doesNotMatch(readFileSync(ticketPath, 'utf8'), /remembered context payload|memory_1/);
+
+    const promptEvent = {
+      host: 'claude-code', native_event: 'UserPromptSubmit', event: 'turn_start',
+      source: 'prompt_submitted', session_id: 'session_1',
+      source_event_key: `event_${'c'.repeat(64)}`,
+    };
+    const expected = createContinuityDeliveryObservation(ticket, promptEvent);
+    const calls = [];
+    const observed = await observePendingContinuityDelivery(runtime, promptEvent, {
+      request: async (_resolved, path, options) => {
+        calls.push({ path, options });
+        return {
+          ...offerReceipt, receipt_id: 'delivery_observed_1', parent_receipt_id: offerReceipt.receipt_id,
+          state: 'host_observed', source_event_digest: options.body.source_event_digest,
+        };
+      },
+    });
+    assert.equal(observed.state, 'host_observed');
+    assert.equal(calls[0].path, '/continuity/delivery/observations');
+    assert.deepEqual(calls[0].options.body, expected.body);
+    assert.equal(calls[0].options.idempotencyKey, expected.idempotencyKey);
+    assert.deepEqual(readdirSync(ticketDirectory), []);
+    assert.equal(await observePendingContinuityDelivery(runtime, promptEvent, { request: async () => assert.fail() }), undefined);
+
+    assert.throws(() => createContinuityDeliveryObservation(ticket, {
+      ...promptEvent, host: 'cursor',
+    }), /continuity_observation_event_invalid/);
+    assert.throws(() => createContinuityDeliveryObservation(ticket, {
+      ...promptEvent, native_event: 'PreToolUse', source: 'mcp__pulse-product__pulse_context',
+    }), /continuity_observation_event_invalid/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('composition returns only the structured IDs declared as included in rendered continuity', async () => {

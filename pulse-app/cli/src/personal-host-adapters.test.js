@@ -80,8 +80,12 @@ test('activation skips prior verified mutation but returns fresh evidence for ev
     product_ready: true,
     parity: 'degraded',
     hosts: [
-      { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'host_verified' },
-      { host: 'cursor', activated: false, verified: false, lifecycle_ready: false, reason_code: 'cursor_activation_required' },
+      { host: 'claude-code', detected: true, compatible: true, installed: true, mcp_ready: true,
+        activated: true, verified: true, lifecycle_ready: true, reload_required: false,
+        milestones: ['turn_capture'], reason_code: 'host_verified' },
+      { host: 'cursor', detected: true, compatible: true, installed: false, mcp_ready: false,
+        activated: false, verified: false, lifecycle_ready: false, reload_required: false,
+        milestones: [], reason_code: 'cursor_activation_required' },
     ],
   };
   const result = await activateDetectedPersonalHosts({
@@ -112,8 +116,12 @@ test('a prior verified host that disappears cannot make the final result ready',
       product_ready: true,
       parity: 'degraded',
       hosts: [
-        { host: 'claude-code', activated: true, verified: true, lifecycle_ready: true, reason_code: 'host_verified' },
-        { host: 'cursor', activated: false, verified: false, lifecycle_ready: false, reason_code: 'cursor_activation_required' },
+        { host: 'claude-code', detected: true, compatible: true, installed: true, mcp_ready: true,
+          activated: true, verified: true, lifecycle_ready: true, reload_required: false,
+          milestones: ['turn_capture'], reason_code: 'host_verified' },
+        { host: 'cursor', detected: true, compatible: true, installed: false, mcp_ready: false,
+          activated: false, verified: false, lifecycle_ready: false, reload_required: false,
+          milestones: [], reason_code: 'cursor_activation_required' },
       ],
     },
   });
@@ -135,6 +143,25 @@ test('inspection never activates and reports zero verified hosts as not ready', 
   assert.equal(result.product_ready, false);
   assert.equal(result.parity, 'blocked');
   assert.deepEqual(calls, ['inspect:cursor']);
+});
+
+test('static plugin readiness remains reload-required until a real lifecycle is observed', async () => {
+  const calls = [];
+  const registry = {
+    'claude-code': adapter({ ready: false }, calls, 'claude-code'),
+    codex: adapter({ ready: true, lifecycleReady: false }, calls, 'codex'),
+    cursor: adapter({ ready: false }, calls, 'cursor'),
+  };
+  const result = await inspectDetectedPersonalHosts({
+    context: { store_id: 'store_personal_test' }, hosts: hosts('codex'), registry,
+  });
+  assert.equal(result.product_ready, false);
+  assert.equal(result.parity, 'blocked');
+  assert.deepEqual(result.hosts[0], {
+    host: 'codex', detected: true, compatible: true, installed: true, mcp_ready: true,
+    activated: true, verified: false, lifecycle_ready: false, reload_required: true,
+    milestones: [], reason_code: 'codex_lifecycle_required',
+  });
 });
 
 test('unknown hosts and unsafe thrown reason strings fail closed to stable codes', async () => {

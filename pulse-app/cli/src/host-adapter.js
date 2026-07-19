@@ -452,7 +452,7 @@ export function isDestructivePulseShellInvocation(toolName, toolInput) {
 
 export function isTrustedPulseProductTool(toolName) {
   return typeof toolName === 'string' &&
-    /^mcp__(?:pulse-product|pulse)__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish|sync))$/i.test(toolName);
+    /^mcp__pulse-product__pulse_(?:remember|graph_delta|tray|tray_status|source_(?:register|window|status)|shared_(?:stage|inspect|edit|reject|cards|publish|sync))$/i.test(toolName);
 }
 
 export function hookBundleDigest(bytes) {

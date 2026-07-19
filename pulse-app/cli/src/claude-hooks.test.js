@@ -206,11 +206,13 @@ test('Claude lifecycle retries are byte-stable across clocks and subagent offers
   }
 });
 
-test('Claude UserPromptSubmit never mints host_observed from hook execution alone', async () => {
+test('Claude UserPromptSubmit attempts only a correlated pending-offer observation', async () => {
   let deliveries = 0;
+  let observations = 0;
   const output = await handleClaudeHook('UserPromptSubmit', base, {
     resolveRuntime: () => resolved,
     writeTurnContext: () => {},
+    observeDelivery: async () => { observations++; },
   });
   assert.equal(typeof claudeHooks.flushClaudeHookOutput, 'function');
   await claudeHooks.flushClaudeHookOutput('UserPromptSubmit', base, output, {
@@ -218,6 +220,7 @@ test('Claude UserPromptSubmit never mints host_observed from hook execution alon
     recordDelivery: async () => { deliveries++; },
   });
   assert.equal(deliveries, 0);
+  assert.equal(observations, 1);
 });
 
 test('all Claude turn hooks bind to one canonical Stop identity at the trusted repo root', async () => {
@@ -274,7 +277,7 @@ test('Claude PreToolUse uses official deny output and mints an exact Pulse lease
   const output = await handleClaudeHook('PreToolUse', {
     ...base,
     hook_event_name: 'PreToolUse',
-    tool_name: 'mcp__pulse__pulse_remember',
+    tool_name: 'mcp__pulse-product__pulse_remember',
     tool_input: toolInput,
     tool_use_id: 'tool-memory',
   }, {
@@ -286,8 +289,22 @@ test('Claude PreToolUse uses official deny output and mints an exact Pulse lease
   assert.deepEqual(output, {});
   assert.equal(leases.length, 1);
   assert.equal(leases[0][2], 'claude-code');
-  assert.equal(leases[0][3], 'mcp__pulse__pulse_remember');
+  assert.equal(leases[0][3], 'mcp__pulse-product__pulse_remember');
   assert.deepEqual(leases[0][4], toolInput);
+
+  await handleClaudeHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__pulse__pulse_remember',
+    tool_input: toolInput,
+    tool_use_id: 'tool-legacy-memory',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...args) => leases.push(args),
+  });
+  assert.equal(leases.length, 1);
 });
 
 test('Claude PostToolUse announces only daemon-corroborated same-turn receipts', async () => {
@@ -295,7 +312,7 @@ test('Claude PostToolUse announces only daemon-corroborated same-turn receipts',
   const output = await handleClaudeHook('PostToolUse', {
     ...base,
     hook_event_name: 'PostToolUse',
-    tool_name: 'mcp__pulse__pulse_remember',
+    tool_name: 'mcp__pulse-product__pulse_remember',
     tool_use_id: 'tool-memory',
     tool_response: { content: [{ type: 'text', text: JSON.stringify({ receipts: [{
       schema: 'pulse.write_receipt.v1', receipt_id: 'receipt_01', ledger_id: 'ledger_01',
@@ -315,6 +332,14 @@ test('Claude PostToolUse announces only daemon-corroborated same-turn receipts',
     }),
   });
   assert.match(output.systemMessage, /receipt_01:pending/);
+
+  const legacy = await handleClaudeHook('PostToolUse', {
+    ...base,
+    hook_event_name: 'PostToolUse',
+    tool_name: 'mcp__pulse__pulse_remember',
+    tool_response: { receipts: [{ receipt_id: 'legacy' }] },
+  }, { resolveRuntime: () => resolved });
+  assert.deepEqual(legacy, {});
 
   const ignored = await handleClaudeHook('PostToolUse', {
     ...base,
