@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   DESKTOP_TARGET_IDS,
   DesktopTargetError,
+  detectDesktopLibc,
   resolveDesktopTarget,
   selectDesktopTarget,
 } from './desktop-target.js';
@@ -17,6 +18,15 @@ test('desktop target authority contains exactly the six universal targets', () =
     'win32-arm64',
     'win32-x64',
   ]);
+});
+
+test('desktop libc detection admits glibc and fails closed for musl or unavailable reports', () => {
+  assert.equal(detectDesktopLibc({
+    platform: 'linux', report: { getReport: () => ({ header: { glibcVersionRuntime: '2.39' } }) },
+  }), 'gnu');
+  assert.equal(detectDesktopLibc({ platform: 'linux', report: { getReport: () => ({ header: {} }) } }), null);
+  assert.equal(detectDesktopLibc({ platform: 'linux', report: { getReport: () => { throw new Error('unavailable'); } } }), null);
+  assert.equal(detectDesktopLibc({ platform: 'darwin' }), null);
 });
 
 test('host facts resolve to one exact desktop target and distinguish GNU from musl', () => {

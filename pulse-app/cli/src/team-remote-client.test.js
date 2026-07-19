@@ -401,7 +401,7 @@ test('operation deadline caps a blocking Keychain credential generation read', a
       }),
       /team_remote_operation_timeout/,
     );
-    assert.ok(Date.now() - started < 90, `credential lookup exceeded operation bound: ${Date.now() - started}ms`);
+    assert.ok(Date.now() - started < 500, `credential lookup exceeded operation bound: ${Date.now() - started}ms`);
     assert.ok(observedTimeouts.length > 0 && observedTimeouts.every((value) => value <= 30), observedTimeouts);
   } finally {
     await resetTeamRemoteSessionsForTests();

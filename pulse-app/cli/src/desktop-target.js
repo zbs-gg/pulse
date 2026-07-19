@@ -17,6 +17,19 @@ export class DesktopTargetError extends Error {
   }
 }
 
+export function detectDesktopLibc({
+  platform = process.platform,
+  report = process.report,
+} = {}) {
+  if (platform !== 'linux') return null;
+  try {
+    const version = report?.getReport?.()?.header?.glibcVersionRuntime;
+    return typeof version === 'string' && /^\d+\.\d+(?:\.\d+)?$/.test(version) ? 'gnu' : null;
+  } catch {
+    return null;
+  }
+}
+
 function unavailable() {
   throw new DesktopTargetError('release_target_unavailable');
 }

@@ -69,6 +69,14 @@ export function writeProductEdgeFixture(target) {
 		recursive: true, dereference: true,
 		filter: (sourcePath) => includeRuntimePath(cliRoot, sourcePath),
 	});
+	const mcpDist = join(repoRoot, 'mcp', 'dist');
+	if (!existsSync(join(mcpDist, 'index.js'))) {
+		throw new Error('synthetic product edge requires a built MCP distribution');
+	}
+	cpSync(mcpDist, join(target, 'runtime', 'vendor', 'pulse-mcp-dist'), {
+		recursive: true, dereference: true,
+		filter: (sourcePath) => !sourcePath.endsWith('.map') && !sourcePath.endsWith('.d.ts'),
+	});
 	pruneEmptyDirectories(target);
 	normalizePrivateTree(target);
 	return treeManifestFromRoot(target);

@@ -2,7 +2,7 @@ import { statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
-import { DesktopTargetError, resolveDesktopTarget } from './desktop-target.js';
+import { DesktopTargetError, detectDesktopLibc, resolveDesktopTarget } from './desktop-target.js';
 import { createPlatformServices, defaultPlatformServices } from './platform-services.js';
 import { assertSupportedNodeVersion } from './release-manifest.js';
 import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
@@ -348,7 +348,7 @@ export function buildPersonalInstallPlan({
   codexHome = join(home, '.codex'),
   platform = process.platform,
   architecture = process.arch,
-  libc,
+  libc = detectDesktopLibc({ platform }),
   nodeVersion = process.versions.node,
   detectWorkspace,
   detectClaude,

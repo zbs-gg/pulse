@@ -23,6 +23,7 @@ import {
   verifyReleaseManifestEnvelope,
 } from './release-manifest.js';
 import { createPlatformServices } from './platform-services.js';
+import { detectDesktopLibc } from './desktop-target.js';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(PACKAGE_ROOT, 'release', 'personal-preview-manifest.json');
@@ -404,6 +405,7 @@ export function packagedPersonalRuntimeOptions(dataDir) {
   if ((manifestOverride || rootOverride) && !testMode) fail('release_override_forbidden');
   const options = {
     dataDir,
+    libc: detectDesktopLibc(),
     manifestPath: manifestOverride ?? DEFAULT_MANIFEST_PATH,
     testMode,
     trustedKeys: pinnedReleaseKeyring(rootOverride),
