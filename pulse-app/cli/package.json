@@ -50,6 +50,7 @@
     "src/personal-live-readiness.js",
     "src/personal-principal.js",
     "src/personal-runtime-installer.js",
+    "src/product-hook-entrypoint.js",
     "src/release-attestation.js",
     "src/target-release-attestation.js",
     "src/release-manifest.js",

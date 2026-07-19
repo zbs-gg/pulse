@@ -31,7 +31,8 @@ test('Cursor plugin is a native thin adapter over the shared Pulse runtime', () 
 
   const launcher = readFileSync(join(pluginRoot, 'hooks', 'cursor-hook.mjs'), 'utf8');
   const server = readFileSync(join(pluginRoot, 'mcp', 'cursor-server.mjs'), 'utf8');
-  assert.match(launcher, /'cursor-hook'/);
+  assert.match(launcher, /runProductHookEntrypoint\('cursor', eventName\)/);
+  assert.doesNotMatch(launcher, /spawn\(/);
   assert.match(server, /'cursor-mcp'/);
   assert.match(launcher, /runtime-locator\.mjs/);
   assert.match(server, /runtime-locator\.mjs/);
@@ -40,6 +41,7 @@ test('Cursor plugin is a native thin adapter over the shared Pulse runtime', () 
 test('published Pulse package carries the Cursor adapter and CLI entrypoints', () => {
   const packageJSON = JSON.parse(readFileSync(join(repoRoot, 'pulse-app', 'cli', 'package.json'), 'utf8'));
   assert.ok(packageJSON.files.includes('src/cursor-hooks.js'));
+  assert.ok(packageJSON.files.includes('src/product-hook-entrypoint.js'));
   const cli = readFileSync(join(repoRoot, 'pulse-app', 'cli', 'src', 'cli.js'), 'utf8');
   assert.match(cli, /command === 'cursor-mcp'/);
   assert.match(cli, /command === 'cursor-hook'/);

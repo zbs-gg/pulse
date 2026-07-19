@@ -796,6 +796,9 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
     assert.equal(entries[0].hooks.length, 1);
     assert.match(entries[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/pulse-hook\.mjs/);
   }
+  const launcher = readFileSync(resolve(pluginRoot, 'hooks', 'pulse-hook.mjs'), 'utf8');
+  assert.match(launcher, /runProductHookEntrypoint\('codex', eventName\)/);
+  assert.doesNotMatch(launcher, /spawn\(/);
 });
 
 test('native hook trust accepts only the exact enabled Pulse plugin hook set reported by Codex', () => {

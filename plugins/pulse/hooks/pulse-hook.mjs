@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveProductEnvironment } from '../runtime-locator.mjs';
 
 const eventName = process.argv[2];
@@ -35,25 +34,13 @@ if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted Codex runtime is missing; run `pulse connect codex` again.');
 }
 
-const child = spawn(process.execPath, [cliPath, 'codex-hook', eventName], {
-  stdio: ['inherit', 'inherit', 'inherit'],
-  env: {
-    ...process.env,
-    ...productEnvironment,
-    PULSE_PLUGIN_DATA: process.env.PLUGIN_DATA ?? '',
-    PULSE_HOOK_BUNDLE_DIGEST: hooksDigest,
-  },
+Object.assign(process.env, productEnvironment, {
+  PULSE_PLUGIN_DATA: process.env.PLUGIN_DATA ?? '',
+  PULSE_HOOK_BUNDLE_DIGEST: hooksDigest,
 });
-
-child.on('error', (error) => {
-  process.stderr.write(`[pulse] hook launcher failed: ${error.message}\n`);
-  process.exitCode = 1;
-});
-
-child.on('exit', (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-  } else {
-    process.exitCode = code ?? 1;
-  }
-});
+const entrypointPath = join(runtimeRoot, 'src', 'product-hook-entrypoint.js');
+if (!existsSync(entrypointPath)) {
+  throw new Error('Pulse trusted Codex hook runtime is missing; run `pulse connect codex` again.');
+}
+const { runProductHookEntrypoint } = await import(pathToFileURL(entrypointPath).href);
+await runProductHookEntrypoint('codex', eventName);

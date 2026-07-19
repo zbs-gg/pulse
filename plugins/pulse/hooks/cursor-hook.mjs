@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { resolveProductEnvironment } from '../runtime-locator.mjs';
 
 const eventName = process.argv[2];
@@ -11,16 +12,10 @@ if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted runtime is missing; reconnect Pulse to Cursor.');
 }
 
-const child = spawn(process.execPath, [cliPath, 'cursor-hook', eventName], {
-  stdio: ['inherit', 'inherit', 'inherit'],
-  env: { ...process.env, ...productEnvironment },
-});
-
-child.on('error', (error) => {
-  process.stderr.write(`[pulse] Cursor hook launcher failed: ${error.message}\n`);
-  process.exitCode = 1;
-});
-child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exitCode = code ?? 1;
-});
+Object.assign(process.env, productEnvironment);
+const entrypointPath = join(resolve(cliPath, '..', '..'), 'src', 'product-hook-entrypoint.js');
+if (!existsSync(entrypointPath)) {
+  throw new Error('Pulse trusted Cursor hook runtime is missing; reconnect Pulse to Cursor.');
+}
+const { runProductHookEntrypoint } = await import(pathToFileURL(entrypointPath).href);
+await runProductHookEntrypoint('cursor', eventName);

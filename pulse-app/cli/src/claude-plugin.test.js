@@ -30,7 +30,9 @@ test('Claude Code plugin is a native thin adapter over the shared Pulse runtime'
       }
     }
   }
-  assert.match(readFileSync(join(pluginRoot, 'hooks', 'claude-hook.mjs'), 'utf8'), /'claude-hook'/);
+  const launcher = readFileSync(join(pluginRoot, 'hooks', 'claude-hook.mjs'), 'utf8');
+  assert.match(launcher, /runProductHookEntrypoint\('claude-code', eventName\)/);
+  assert.doesNotMatch(launcher, /spawn\(/);
   assert.match(readFileSync(join(pluginRoot, 'mcp', 'claude-server.mjs'), 'utf8'), /'claude-mcp'/);
 });
 
