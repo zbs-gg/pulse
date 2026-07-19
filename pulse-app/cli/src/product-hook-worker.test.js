@@ -4,7 +4,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { createHookWorkerRuntimeResolver } from './product-hook-worker.js';
+import { __productHookWorkerTest, createHookWorkerRuntimeResolver } from './product-hook-worker.js';
+
+test('worker requests are bound to the exact client-selected workspace digest', () => {
+  const token = 'a'.repeat(64);
+  const workspaceDigest = 'b'.repeat(64);
+  const request = {
+    schema: 'pulse.hook_worker.request.v1',
+    request_id: 'c'.repeat(64),
+    token,
+    host: 'codex',
+    event_name: 'SessionStart',
+    workspace_digest: workspaceDigest,
+    input: { cwd: '/workspace/pulse', session_id: 'session-one' },
+  };
+  assert.equal(__productHookWorkerTest.validRequest(request, 'codex', workspaceDigest, token), true);
+  assert.equal(__productHookWorkerTest.validRequest(
+    { ...request, workspace_digest: 'd'.repeat(64) }, 'codex', workspaceDigest, token,
+  ), false);
+});
 
 test('hook worker reuses one verified runtime only while authority witnesses stay exact', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-hook-worker-resolver.'));

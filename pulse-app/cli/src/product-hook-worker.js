@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:net';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{64}$/;
@@ -45,15 +45,6 @@ function sameWitnesses(witnesses) {
   }
 }
 
-function inputInsideWorkspace(input, canonicalWorkspace) {
-  const cwd = typeof input?.cwd === 'string' ? input.cwd : process.cwd();
-  if (!isAbsolute(cwd)) return false;
-  let current;
-  try { current = realpathSync(resolve(cwd)); } catch { return false; }
-  const path = relative(canonicalWorkspace, current);
-  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
-}
-
 function hookSessionID(host, input) {
   const value = host === 'cursor' ? input?.session_id ?? input?.conversation_id : input?.session_id;
   return typeof value === 'string' && value.length > 0 && value.length <= 255 ? value : undefined;
@@ -88,16 +79,12 @@ export function createHookWorkerRuntimeResolver({
       }
       const cached = sessions.get(sessionID);
       const currentTime = now();
-      if (cached && cached.expiresAt > currentTime &&
-          inputInsideWorkspace(input, cached.resolved.binding.workspace.canonical_path) &&
-          sameWitnesses(cached.witnesses)) {
+      if (cached && cached.expiresAt > currentTime && sameWitnesses(cached.witnesses)) {
         return cached.resolved;
       }
       sessions.delete(sessionID);
       const resolved = resolveRuntime(input);
-      if (!resolved?.binding?.workspace?.canonical_path || !inputInsideWorkspace(input, resolved.binding.workspace.canonical_path)) {
-        throw new Error('hook_worker_workspace_mismatch');
-      }
+      if (!resolved?.binding?.workspace?.canonical_path) throw new Error('hook_worker_binding_invalid');
       const paths = witnessPaths(resolved);
       if (!Array.isArray(paths) || paths.length < 1 || paths.some((path) => typeof path !== 'string' || !isAbsolute(path))) {
         throw new Error('hook_worker_witness_paths_invalid');
@@ -112,9 +99,10 @@ export function createHookWorkerRuntimeResolver({
   });
 }
 
-function validRequest(value, expectedHost, token) {
-  const keys = ['event_name', 'host', 'input', 'request_id', 'schema', 'token'];
+function validRequest(value, expectedHost, expectedWorkspaceDigest, token) {
+  const keys = ['event_name', 'host', 'input', 'request_id', 'schema', 'token', 'workspace_digest'];
   return exactObject(value, keys) && value.schema === REQUEST_SCHEMA && value.host === expectedHost &&
+    value.workspace_digest === expectedWorkspaceDigest && SHA256.test(value.workspace_digest ?? '') &&
     typeof value.event_name === 'string' && value.event_name.length > 0 && value.event_name.length <= 64 &&
     typeof value.request_id === 'string' && SHA256.test(value.request_id) &&
     value.input && typeof value.input === 'object' && !Array.isArray(value.input) && safeEqual(value.token, token);
@@ -185,7 +173,7 @@ export async function serveProductHookWorker({
       const serialized = body.slice(0, newline);
       let request;
       try { request = JSON.parse(serialized); } catch { request = null; }
-      if (!validRequest(request, host, token)) {
+      if (!validRequest(request, host, workspaceDigest, token)) {
         respond({ schema: RESPONSE_SCHEMA, request_id: request?.request_id ?? '', ok: false, error_code: 'hook_worker_request_invalid' });
         return;
       }

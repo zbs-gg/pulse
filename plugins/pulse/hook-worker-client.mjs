@@ -97,6 +97,7 @@ function dispatchWorker(receipt, { host, eventName, input }, timeoutMs = 65_000)
     token: receipt.token,
     host,
     event_name: eventName,
+    workspace_digest: receipt.workspace_digest,
     input,
   })}\n`;
   if (Buffer.byteLength(request) > MAX_INPUT_BYTES + (64 << 10)) {
