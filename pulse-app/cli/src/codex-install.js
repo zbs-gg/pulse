@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { migrateLegacyPulseHookConfig } from './host-adapter.js';
 import { defaultPlatformServices } from './platform-services.js';
@@ -710,12 +710,14 @@ function runtimeTreeDigest(root) {
 }
 
 export function includeRuntimePath(sourceRoot, sourcePath) {
-  const relative = sourcePath.slice(sourceRoot.length).replace(/^\/+/, '');
-  if (relative === '') return true;
-  const top = relative.split('/')[0];
+  const nativeRelative = relative(resolve(sourceRoot), resolve(sourcePath));
+  if (nativeRelative === '') return true;
+  if (nativeRelative === '..' || nativeRelative.startsWith(`..${sep}`) || isAbsolute(nativeRelative)) return false;
+  const normalized = nativeRelative.split(sep).join('/');
+  const top = normalized.split('/')[0];
   if (!new Set(['src', 'vendor', 'node_modules', 'package.json', 'LICENSE']).has(top)) return false;
-  if (top === 'vendor' && relative !== 'vendor' && !relative.startsWith('vendor/pulse-mcp-dist')) return false;
-  return !relative.endsWith('.test.js') && !relative.endsWith('.map') && !relative.endsWith('.d.ts');
+  if (top === 'vendor' && normalized !== 'vendor' && !normalized.startsWith('vendor/pulse-mcp-dist')) return false;
+  return !normalized.endsWith('.test.js') && !normalized.endsWith('.map') && !normalized.endsWith('.d.ts');
 }
 
 function committedRuntimeDigest(dataDir) {
