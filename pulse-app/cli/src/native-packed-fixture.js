@@ -1,20 +1,29 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { defaultPlatformServices } from './platform-services.js';
 
 const SAFE_FIXTURE_ID = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 
 function contained(root, path, platformServices) {
-  if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path) return false;
-  const value = relative(root, path);
-  if (value !== '' && value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value)) return true;
+  if (typeof path !== 'string' || !isAbsolute(path)) return false;
+  if (resolve(path) === path) {
+    const value = relative(root, path);
+    if (value !== '' && value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value)) return true;
+  }
   // Windows can spell the same directory through short and long path forms.
-  // When lexical containment disagrees, require native, no-reparse directory
-  // identities and compare the canonical handle-backed paths.
+  // When lexical containment disagrees, walk native, no-reparse directory
+  // identities until the fixture root itself is proven as a strict ancestor.
   try {
-    const canonicalRoot = platformServices.inspectPathIdentity(root, { kind: 'directory' }).canonical_path;
-    const canonicalPath = platformServices.inspectPathIdentity(path, { kind: 'directory' }).canonical_path;
-    return canonicalPath !== canonicalRoot && platformServices.isPathInside(canonicalPath, canonicalRoot);
+    const rootIdentity = platformServices.inspectPathIdentity(root, { kind: 'directory' }).identity_token;
+    let current = path;
+    for (let depth = 0; depth < 256; depth += 1) {
+      const identity = platformServices.inspectPathIdentity(current, { kind: 'directory' }).identity_token;
+      if (depth > 0 && identity === rootIdentity) return true;
+      const parent = dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+    return false;
   } catch {
     return false;
   }
