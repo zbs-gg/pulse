@@ -21,14 +21,23 @@ async function recoverProductBindingAuthority(env = process.env, dependencies = 
   await recover();
 }
 
+function requiresProductBindingRecovery(eventName) {
+  return eventName === 'SessionStart';
+}
+
 export async function runProductHookEntrypoint(host, eventName, dependencies = {}) {
   const loadRunner = RUNNERS[host];
   if (!loadRunner || typeof eventName !== 'string' || eventName.length < 1 || eventName.length > 64) {
     throw new Error('Pulse product hook entrypoint is invalid');
   }
-  await recoverProductBindingAuthority(dependencies.environment ?? process.env, dependencies);
+  if (requiresProductBindingRecovery(eventName)) {
+    await recoverProductBindingAuthority(dependencies.environment ?? process.env, dependencies);
+  }
   const runner = await loadRunner();
   await runner(eventName, dependencies);
 }
 
-export const __productHookEntrypointTest = Object.freeze({ recoverProductBindingAuthority });
+export const __productHookEntrypointTest = Object.freeze({
+  recoverProductBindingAuthority,
+  requiresProductBindingRecovery,
+});

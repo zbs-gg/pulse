@@ -29,6 +29,13 @@ test('product hook entrypoint recovers production and isolated test authority ex
   ]);
 });
 
+test('binding transaction recovery runs only at the SessionStart trust boundary', () => {
+  assert.equal(__productHookEntrypointTest.requiresProductBindingRecovery('SessionStart'), true);
+  for (const eventName of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']) {
+    assert.equal(__productHookEntrypointTest.requiresProductBindingRecovery(eventName), false);
+  }
+});
+
 test('product hook entrypoint rejects an unknown host before authority or runtime work', async () => {
   let recovered = false;
   await assert.rejects(

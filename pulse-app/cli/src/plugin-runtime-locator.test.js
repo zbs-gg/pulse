@@ -241,6 +241,13 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     })?.runtimeDigest, environmentProof.runtimeDigest,
     'the hook lease must not walk unrelated CLI source that the bundled hook never loads');
     writeFileSync(runtimeEntrypoint, runtimeEntrypointBytes);
+    writeFileSync(join(productPluginRoot, 'runtime.mjs'), Buffer.concat([bytes, Buffer.from('// drift\n')]));
+    assert.equal(trust.productEnvironmentCacheProof({
+      edgeProfile: 'hook', host: 'codex', locatorPath,
+      pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    })?.pluginDigest, environmentProof.pluginDigest,
+    'the executing plugin stays covered by the short lease instead of rehashing itself after startup');
+    writeFileSync(join(productPluginRoot, 'runtime.mjs'), bytes);
     writeFileSync(dependencyPath, Buffer.concat([dependencyBytes, Buffer.from('// drift\n')]));
     const callsBeforeLeasedDependencyRead = calls.length;
     assert.equal(trust.productEnvironmentCacheProof({

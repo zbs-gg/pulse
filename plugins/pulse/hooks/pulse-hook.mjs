@@ -17,19 +17,12 @@ if (runtimeManifest?.schema !== 'pulse.codex_runtime.v2' ||
 		runtimeManifest.tree_digest !== productEnvironment.PULSE_RUNTIME_DIGEST) {
   throw new Error('Pulse trusted Codex runtime manifest is invalid; run `pulse connect codex` again.');
 }
-const digest = createHash('sha256');
-for (const relative of [
-	'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'windows-platform-adapter.mjs',
-	'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
-]) {
-  digest.update(relative);
-  digest.update('\x00');
-  digest.update(readFileSync(join(pluginRoot, relative)));
-  digest.update('\x00');
-}
-digest.update('runtime-tree-digest\x00');
-digest.update(productEnvironment.PULSE_RUNTIME_DIGEST);
-const hooksDigest = digest.digest('hex');
+const hooksDigest = createHash('sha256')
+  .update('pulse-codex-hook-contract-v2\x00')
+  .update(productEnvironment.PULSE_PLUGIN_TREE_DIGEST)
+  .update('\x00')
+  .update(productEnvironment.PULSE_RUNTIME_DIGEST)
+  .digest('hex');
 if (!existsSync(cliPath)) {
   throw new Error('Pulse trusted Codex runtime is missing; run `pulse connect codex` again.');
 }

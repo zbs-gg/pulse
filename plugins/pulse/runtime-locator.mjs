@@ -375,7 +375,9 @@ function createTrustServices({
               : { runtimeEdgeDigest: windowsRuntimeEdgeDigest(runtimeRoot, boundedTrust) }),
           };
           if (!validWindowsIntegrityCache(cache, expected)) return undefined;
-          const pluginDigest = pluginTreeDigest(pluginRoot, boundedTrust);
+          const pluginDigest = edgeProfile === 'hook'
+            ? cache.plugin_digest
+            : pluginTreeDigest(pluginRoot, boundedTrust);
           const daemonDigest = edgeProfile === 'hook'
             ? cache.daemon_digest
             : bytesDigest(preliminaryPrivateBytes(daemonPath, 512 * 1024 * 1024));
