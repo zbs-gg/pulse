@@ -51,6 +51,7 @@
     "src/personal-principal.js",
     "src/personal-runtime-installer.js",
     "src/release-attestation.js",
+    "src/target-release-attestation.js",
     "src/release-manifest.js",
     "src/supported-hosts.js",
     "src/managed-embedder-release.js",
@@ -85,6 +86,7 @@
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
     "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
+    "fixture:target-release": "node scripts/target-release-fixture.mjs",
     "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",
     "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"

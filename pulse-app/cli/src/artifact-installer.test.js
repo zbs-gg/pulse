@@ -609,6 +609,14 @@ test('portable archive streams the exact canonical tree without system extractio
     assert.deepEqual(result.treeManifest, manifest);
     assert.deepEqual(readFileSync(join(target, 'bin', 'pulse')), payload);
     assert.equal(lstatSync(join(target, 'bin', 'pulse')).mode & 0o777, 0o700);
+    const insufficient = join(root, 'insufficient-target');
+    await assert.rejects(materializeVerifiedPortableArchive(carrier, insufficient, portableArtifact(carrierBytes, {
+      tree_digest: digest(Buffer.from(canonicalArtifactJSON(manifest))),
+    }), undefined, {
+      availableBytes: () => payload.length - 1,
+      minimumFreeBytes: 0,
+    }), /artifact_disk_insufficient/);
+    assert.equal(existsSync(insufficient), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

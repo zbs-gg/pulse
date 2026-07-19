@@ -161,21 +161,27 @@ test('production presence carrier uses the same exact-tree contract as the insta
 	assert.match(packager, /join\(mountPoint, 'bin', expectedHelperIdentifier\)/);
 });
 
-test('one production release builder emits every installer artifact and stops before unapproved notarization', () => {
+test('target release builder emits native artifacts and production stays explicitly authorized', () => {
 	const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
 	assert.equal(packageJSON.scripts?.['build:personal-release'], 'node scripts/build-personal-release.mjs');
 	const builder = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'build-personal-release.mjs'), 'utf8',
 	);
-	for (const artifact of ['daemon', 'embedder-runtime', 'model', 'plugin-runtime', 'presence-helper']) {
+	for (const artifact of ['daemon', 'embedder-runtime']) {
 		assert.match(builder, new RegExp(`['\"]${artifact}['\"]`));
 	}
 	assert.match(builder, /PULSE_RELEASE_SUBMISSION_AUTHORIZATION/);
-	assert.match(builder, /apple-notarization-approved/);
-	assert.ok(builder.indexOf('notarization_submission_authorization_required') < builder.lastIndexOf('buildDaemon('));
+	assert.match(builder, /target-build-approved/);
+	assert.ok(builder.indexOf('requireProductionAuthority') < builder.lastIndexOf('buildDaemonTarget'));
 	assert.match(builder, /notarytool', 'submit'/);
-	assert.match(builder, /sign-release-manifest\.mjs/);
-	assert.match(builder, /materializeVerifiedDmg/);
-	assert.match(builder, /materializeVerifiedTarGz/);
-	assert.match(builder, /verified_unpublished/);
+	assert.match(builder, /production_ready: false/);
+
+	const fixture = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'target-release-fixture.mjs'), 'utf8',
+	);
+	for (const artifact of ['daemon', 'embedder-runtime', 'model', 'plugin-runtime', 'presence-helper']) {
+		assert.match(fixture, new RegExp(`['\"]${artifact}['\"]`));
+	}
+	assert.match(fixture, /allowFixtureVerification: true/);
+	assert.match(fixture, /production_ready: false/);
 });

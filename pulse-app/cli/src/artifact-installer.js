@@ -776,16 +776,25 @@ async function extractPortableArchive(carrier, destination, preflight, options) 
 export async function materializeVerifiedPortableArchive(carrier, targetRoot, artifact, _treeManifest, {
   platformServices = defaultPlatformServices, maxFiles = 4096, maxTotalBytes = 4 * 1024 * 1024 * 1024,
   maxEntries = 8192, maxDepth = 32, timeoutMs = 120_000,
+  availableBytes = defaultAvailableBytes, minimumFreeBytes = 256 * 1024 * 1024,
 } = {}) {
   const actual = sha256File(carrier, platformServices);
   if (artifact.format !== 'tar.gz' || actual.stat.size !== artifact.bytes || actual.digest !== artifact.sha256) {
     fail('artifact_carrier_digest_mismatch');
   }
-  if (![maxFiles, maxTotalBytes, maxEntries, maxDepth, timeoutMs].every((value) => Number.isSafeInteger(value) && value > 0)) {
+  if (![maxFiles, maxTotalBytes, maxEntries, maxDepth, timeoutMs].every((value) => Number.isSafeInteger(value) && value > 0) ||
+      typeof availableBytes !== 'function' || !Number.isSafeInteger(minimumFreeBytes) || minimumFreeBytes < 0) {
     fail('artifact_activation_configuration_invalid');
   }
   const options = { maxDepth, maxEntries, maxFiles, maxTotalBytes, platformServices, timeoutMs };
   const preflight = await preflightPortableArchive(carrier, artifact, options);
+  const installedBytes = preflight.manifest.files.reduce((total, entry) => total + entry.bytes, 0);
+  const requiredBytes = installedBytes + minimumFreeBytes;
+  const freeBytes = availableBytes(existsSync(targetRoot) ? targetRoot : dirname(resolve(targetRoot)));
+  if (!Number.isSafeInteger(installedBytes) || installedBytes < 1 || !Number.isSafeInteger(requiredBytes) ||
+      !Number.isSafeInteger(freeBytes) || freeBytes < requiredBytes) {
+    fail('artifact_disk_insufficient');
+  }
   const work = mkdtempSync(join(tmpdir(), 'pulse-artifact-archive-'));
   ensurePrivateDirectory(work, platformServices);
   try {
@@ -1289,15 +1298,19 @@ export async function activateArtifactVersion(artifact, stagedPath, {
   let activationTree = treeManifest;
   if (!existsSync(target)) {
     const materializedBytes = treeManifest?.files?.reduce((total, entry) => total + entry.bytes, 0) ?? artifact.bytes;
+    const requiredBytes = materializedBytes + minimumFreeBytes;
+    const freeBytes = typeof availableBytes === 'function' ? availableBytes(versionsRoot) : null;
     if (typeof availableBytes !== 'function' || !Number.isSafeInteger(minimumFreeBytes) || minimumFreeBytes < 0 ||
         !Number.isSafeInteger(materializedBytes) || materializedBytes < 1 ||
-        availableBytes(versionsRoot) < materializedBytes + minimumFreeBytes) {
+        !Number.isSafeInteger(requiredBytes) || !Number.isSafeInteger(freeBytes) || freeBytes < requiredBytes) {
       fail('artifact_disk_insufficient');
     }
     const temporary = `${target}.new-${process.pid}-${Date.now()}`;
     ensurePrivateDirectory(temporary, platformServices);
     try {
-      const materialized = await selectedMaterializer(stagedPath, temporary, artifact, treeManifest, { platformServices });
+      const materialized = await selectedMaterializer(stagedPath, temporary, artifact, treeManifest, {
+        availableBytes, minimumFreeBytes, platformServices,
+      });
       activationTree = materialized?.treeManifest ?? treeManifest;
       assertArtifactTreeDigest(artifact, activationTree);
       validateArtifactTree(temporary, activationTree, { platformServices });

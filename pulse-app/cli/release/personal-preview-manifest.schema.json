@@ -133,7 +133,7 @@
             "gatekeeper": { "type": "boolean" },
             "identifier": { "type": ["string", "null"] },
             "notarized": { "type": "boolean" },
-            "scheme": { "enum": ["apple-developer-id", "release-manifest", "windows-authenticode"] },
+            "scheme": { "enum": ["apple-developer-id", "fixture", "release-manifest", "windows-authenticode"] },
             "stapled": { "type": "boolean" },
             "team_id": { "type": ["string", "null"] }
           }

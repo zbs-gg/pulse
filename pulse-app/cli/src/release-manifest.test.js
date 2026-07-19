@@ -343,11 +343,22 @@ test('fixture verification profile is explicit and cannot satisfy production ver
   fixtureCatalog.targets['linux-x64-gnu'].verification_profile = {
     fixture_id: 'linux-x64-pr', kind: 'fixture', production: false,
   };
+  for (const artifact of Object.values(fixtureCatalog.targets['linux-x64-gnu'].artifacts)) {
+    artifact.signing = { ...portableSigning(), scheme: 'fixture' };
+  }
   const signed = catalogEnvelope(root, channel, fixtureCatalog);
   const options = verifyOptions(root, { architecture: 'x64', libc: 'gnu', platform: 'linux' });
   expectCode(() => verifyReleaseManifestEnvelope(signed, options), 'release_fixture_verification_forbidden');
   const verified = verifyReleaseManifestEnvelope(signed, { ...options, allowFixtureVerification: true });
   assert.equal(verified.verification_profile.kind, 'fixture');
+
+  const fixtureSmuggledIntoProduction = catalogPayload(channel);
+  fixtureSmuggledIntoProduction.targets['linux-x64-gnu'].artifacts.daemon.signing = {
+    ...portableSigning(), scheme: 'fixture',
+  };
+  expectCode(() => verifyReleaseManifestEnvelope(
+    catalogEnvelope(root, channel, fixtureSmuggledIntoProduction), options,
+  ), 'artifact_signing_invalid');
 });
 
 test('missing current target and capability-artifact confusion fail closed', () => {

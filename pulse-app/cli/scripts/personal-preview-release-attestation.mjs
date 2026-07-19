@@ -17,6 +17,7 @@ import {
   unassignedAssignmentTurnRef,
 } from '../src/release-attestation.js';
 import { SUPPORTED_HOST_IDS } from '../src/supported-hosts.js';
+import { attestSelectedTarget } from '../src/target-release-attestation.js';
 import { inspectPresenceTrust } from '../src/trust-helper.js';
 import { readUnassignedInbox, unassignedInboxPath } from '../src/unassigned-inbox.js';
 import { resolveWorkspaceBinding } from '../src/workspace-binding.js';
@@ -58,27 +59,16 @@ function exactJSON(stdout, code) {
   try { return JSON.parse(stdout); } catch { fail(code); }
 }
 
-function verifyInstalledNativeExecutables(committed) {
-  let verified = 0;
-  for (const kind of ['daemon', 'embedder-runtime', 'presence-helper']) {
+function installedArtifactAttestationInputs(committed, release) {
+  const artifacts = {};
+  for (const [kind, descriptor] of Object.entries(release.artifacts)) {
     const activation = committed.activations[kind];
-    if (!activation) fail('physical_attestation_native_activation_missing', kind);
+    if (!activation) fail('physical_attestation_activation_missing', kind);
     const metadata = exactJSON(readFileSync(join(activation.version_path, 'activation.json'), 'utf8'),
       'physical_attestation_activation_metadata_invalid');
-    const executables = metadata?.tree?.files?.filter((entry) => entry.executable === true) ?? [];
-    if (executables.length < 1) fail('physical_attestation_native_executable_missing', kind);
-    for (const entry of executables) {
-      const executable = join(activation.version_path, entry.path);
-      run('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', executable], {
-        code: 'physical_attestation_codesign_failed',
-      });
-      run('/usr/sbin/spctl', ['-a', '-t', 'execute', '-vv', executable], {
-        code: 'physical_attestation_gatekeeper_failed',
-      });
-      verified += 1;
-    }
+    artifacts[kind] = Object.freeze({ descriptor, root: activation.version_path, tree: metadata.tree });
   }
-  return verified;
+  return Object.freeze(artifacts);
 }
 
 async function productJSON(runtime, secret, path, { method = 'GET', body } = {}) {
@@ -271,7 +261,18 @@ if (host === 'codex' && (doctor.trust?.native_hook_trusted !== true ||
 
 const presence = inspectPresenceTrust({ probePublicKey: true, probeCapabilities: true });
 if (!presence.ready) fail('physical_attestation_presence_not_ready', presence.issues.join(', '));
-const nativeExecutablesVerified = verifyInstalledNativeExecutables(committed);
+const nativeAttestation = attestSelectedTarget({
+  artifacts: installedArtifactAttestationInputs(committed, releaseInspection.release),
+  catalogVerified: releaseInspection.release.historical_only === false,
+  manifestDigest: releaseInspection.release.manifest_digest,
+  mode: 'production',
+  platform: process.platform,
+  target: {
+    platform: process.platform,
+    verification_profile: releaseInspection.release.verification_profile,
+  },
+});
+const nativeExecutablesVerified = nativeAttestation.executables_verified;
 
 const binding = resolveWorkspaceBinding({ cwd: workspace });
 if (binding.mode !== 'personal' || binding.fallback !== false) fail('physical_attestation_binding_invalid');
