@@ -118,7 +118,29 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.deepEqual(activationProof.activationBytes, Buffer.from(`${JSON.stringify({ daemon_path: file })}\n`));
     assert.equal(activationProof.daemonPath, file);
     assert.equal(activationProof.runtimeDigest, treeDigest);
-    assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch', 'batch', 'batch']);
+    const productHome = join(root, 'product-home');
+    const dataDir = join(root, 'data');
+    const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
+    mkdirSync(runtimeRoot, { recursive: true });
+    writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), '{}\n');
+    const locatorKey = __runtimeLocatorTest.workspaceDigest(root);
+    const locatorPath = join(root, 'product-locators.json');
+    writeFileSync(locatorPath, `${JSON.stringify({ entries: { [locatorKey]: {
+      data_dir: dataDir, workspace_digest: locatorKey, workspace_path: root,
+    } } })}\n`);
+    const productHostAccessPath = join(productHome, 'product-host-access', locatorKey, 'codex.json');
+    mkdirSync(resolve(productHostAccessPath, '..'), { recursive: true });
+    writeFileSync(productHostAccessPath, '{}\n');
+    const productActivationPath = join(dataDir, 'runtime', 'product-daemon.json');
+    writeFileSync(productActivationPath, `${JSON.stringify({ daemon_path: file })}\n`);
+    const environmentProof = trust.productEnvironmentProof({
+      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+    });
+    assert.equal(environmentProof.locatorKey, locatorKey);
+    assert.equal(environmentProof.workspaceIdentity, 'volume:file');
+    assert.equal(environmentProof.daemonPath, file);
+    assert.equal(environmentProof.runtimeDigest, treeDigest);
+    assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch', 'batch', 'batch', 'batch']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

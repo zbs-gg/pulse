@@ -60,13 +60,21 @@ function nativeExecutableDigest(proof) {
   return proof.sha256;
 }
 
-function preliminaryDaemonPath(activationPath) {
+function preliminaryPrivateJSON(path) {
   try {
-    const info = lstatSync(activationPath);
+    const info = lstatSync(path);
     if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > PRIVATE_JSON_LIMIT) {
       throw new Error('unsafe');
     }
-    const activation = JSON.parse(readFileSync(activationPath, 'utf8'));
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function preliminaryDaemonPath(activationPath) {
+  try {
+    const activation = preliminaryPrivateJSON(activationPath);
     if (typeof activation?.daemon_path !== 'string' || !isAbsolute(activation.daemon_path)) {
       throw new Error('unsafe');
     }
@@ -151,6 +159,75 @@ function createTrustServices({
         ]);
         return Object.freeze({
           locatorBytes: nativePrivateBytes(results[0]),
+          workspaceIdentity: nativeWorkspaceIdentity(results[1]),
+        });
+      },
+      productEnvironmentProof({ locatorPath, workspacePath, productHome, host, pluginRoot }) {
+        const preliminaryLocator = preliminaryPrivateJSON(locatorPath);
+        const locatorKey = workspaceDigest(workspacePath);
+        const entry = preliminaryLocator?.entries?.[locatorKey];
+        if (!entry || entry.workspace_digest !== locatorKey ||
+            typeof entry.workspace_path !== 'string' || workspaceDigest(entry.workspace_path) !== locatorKey ||
+            typeof entry.data_dir !== 'string' || !isAbsolute(entry.data_dir)) {
+          return undefined;
+        }
+        const dataDir = resolve(entry.data_dir);
+        const hostAccessPath = join(productHome, 'product-host-access', locatorKey, `${host}.json`);
+        const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+        const expectedRuntimePath = join(dataDir, 'runtime', 'codex', 'current', 'src', 'cli.js');
+        const runtimeRoot = resolve(expectedRuntimePath, '..', '..');
+        const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
+        const daemonPath = preliminaryDaemonPath(activationPath);
+        const results = adapter.batch([
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: locatorPath },
+          },
+          { operation: 'inspect_path_identity', payload: { kind: 'directory', path: workspacePath } },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: hostAccessPath },
+          },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: activationPath },
+          },
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: 'runtime-manifest.json', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: runtimeRoot,
+            },
+          },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: runtimeManifestPath },
+          },
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: '', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: pluginRoot,
+            },
+          },
+          { operation: 'inspect_executable', payload: { path: daemonPath } },
+        ]);
+        return Object.freeze({
+          activationBytes: nativePrivateBytes(results[3]),
+          activationPath,
+          daemonDigest: nativeExecutableDigest(results[7]),
+          daemonPath,
+          dataDir,
+          expectedRuntimePath,
+          hostAccessBytes: nativePrivateBytes(results[2]),
+          hostAccessPath,
+          locatorBytes: nativePrivateBytes(results[0]),
+          locatorKey,
+          pluginDigest: nativeTreeDigest(results[6]),
+          runtimeDigest: nativeTreeDigest(results[4]),
+          runtimeManifestBytes: nativePrivateBytes(results[5]),
+          runtimeManifestPath,
+          runtimeRoot,
           workspaceIdentity: nativeWorkspaceIdentity(results[1]),
         });
       },
@@ -409,9 +486,15 @@ export function resolveProductEnvironment({
   const legacyCodexPath = join(codexHome, 'pulse', 'product-locators.json');
   const locatorPath = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
   const canonical = canonicalWorkspace(cwd);
-  const locatorProof = typeof trust.workspaceLocatorProof === 'function'
-    ? trust.workspaceLocatorProof(locatorPath, canonical)
+  const pluginRoot = dirname(fileURLToPath(import.meta.url));
+  const environmentProof = typeof trust.productEnvironmentProof === 'function'
+    ? trust.productEnvironmentProof({
+      host, locatorPath, pluginRoot, productHome, workspacePath: canonical,
+    })
     : undefined;
+  const locatorProof = environmentProof ?? (typeof trust.workspaceLocatorProof === 'function'
+    ? trust.workspaceLocatorProof(locatorPath, canonical)
+    : undefined);
   const locator = locatorProof
     ? parsePrivateJSON(locatorProof.locatorBytes)
     : readPrivateJSON(trust, locatorPath);
@@ -443,17 +526,28 @@ export function resolveProductEnvironment({
   if (entry.trust_mode === 'production' && env.PULSE_TRUST_MODE === 'test') {
     throw new Error('Pulse host trust mode does not match the production product locator.');
   }
+  if (environmentProof && (key !== environmentProof.locatorKey ||
+      resolve(entry.data_dir) !== environmentProof.dataDir)) {
+    throw new Error('Pulse product locator changed during native integrity validation.');
+  }
+  const dataDir = resolve(entry.data_dir);
   const hostAccessPath = join(productHome, 'product-host-access', key, `${host}.json`);
-  const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
-  const expectedRuntimePath = join(entry.data_dir, 'runtime', 'codex', 'current', 'src', 'cli.js');
+  const activationPath = join(dataDir, 'runtime', 'product-daemon.json');
+  const expectedRuntimePath = join(dataDir, 'runtime', 'codex', 'current', 'src', 'cli.js');
   const runtimeRoot = resolve(expectedRuntimePath, '..', '..');
   const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
-  const pluginRoot = dirname(fileURLToPath(import.meta.url));
-  const activationProof = typeof trust.productActivationProof === 'function'
+  const activationProof = environmentProof ?? (typeof trust.productActivationProof === 'function'
     ? trust.productActivationProof({
       activationPath, hostAccessPath, pluginRoot, runtimeManifestPath, runtimeRoot,
     })
-    : undefined;
+    : undefined);
+  if (environmentProof && (activationPath !== environmentProof.activationPath ||
+      hostAccessPath !== environmentProof.hostAccessPath ||
+      expectedRuntimePath !== environmentProof.expectedRuntimePath ||
+      runtimeManifestPath !== environmentProof.runtimeManifestPath ||
+      runtimeRoot !== environmentProof.runtimeRoot)) {
+    throw new Error('Pulse product environment changed during native integrity validation.');
+  }
   const [hostAccess, activation] = activationProof
     ? [parsePrivateJSON(activationProof.hostAccessBytes), parsePrivateJSON(activationProof.activationBytes)]
     : typeof trust.readPrivateFiles === 'function'
@@ -534,7 +628,7 @@ export function resolveProductEnvironment({
     throw new Error('Pulse product daemon activation failed integrity validation.');
   }
   const productEnvironment = {
-    PULSE_DATA_DIR: entry.data_dir,
+    PULSE_DATA_DIR: dataDir,
     PULSE_RUNTIME_PATH: activation.runtime_path,
     PULSE_RUNTIME_DIGEST: activation.runtime_tree_digest,
     PULSE_PLUGIN_TREE_DIGEST: activation.plugin_tree_digest,
