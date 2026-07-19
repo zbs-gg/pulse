@@ -73,6 +73,10 @@ import {
   projectSupportedHostLiveReadiness,
 } from './personal-live-readiness.js';
 import {
+  PERSONAL_PROTECTED_ACTIONS,
+  portablePersonalAuthorityProfile,
+} from './personal-authority-profile.js';
+import {
   PersonalPrincipalError,
   ensurePersonalPrincipal,
   readPersonalPrincipal,
@@ -1670,6 +1674,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
+  const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
   const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
     ? checkCommandVersion(process.execPath, [codexExecutable, '--version'])
     : checkCommandVersion(codexExecutable, ['--version']);
@@ -1811,9 +1816,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
     liveStatus.capture_enabled === true && liveStatus.raw_capture_enabled === false;
 
   const checks = {
-		presence_trust: presenceTrust.ready
-			? { ok: true, detail: presenceTrust.status }
-			: { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+		presence_trust: enhancedPresenceDoctorCheck(authorityProfile, presenceTrust),
 		authority: locatorAuthority,
     codex,
 		host_access: codexHostAccess
@@ -1867,6 +1870,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
   return {
 	product: `Pulse Codex ${runtime?.kind === 'desk' ? 'Desk' : runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'codex',
+    authority_profile: authorityProfile,
     verdict: ready
 		? syntheticAuthority
 			? 'Pulse Codex synthetic test lifecycle ready; production authority is not active.'
@@ -1906,6 +1910,7 @@ async function runCodexDoctor(rest = []) {
       : report.trust.raw_transcript_capture === true ? 'on' : 'unknown';
     console.log(`\nPrivacy: backend LLM ${report.trust.backend_llm_enabled === false ? 'off' : 'unknown'}; raw transcript capture ${rawCapture}; external embedding API ${report.trust.external_embedding_api ? 'on' : 'off'}`);
     console.log(`Retrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
+    printPersonalAuthorityProfile(report.authority_profile);
     console.log(`Personal readiness: ${report.personal_live_readiness.outcome} (${report.personal_live_readiness.reason_code}) at ${report.personal_live_readiness.checked_at}`);
     console.log(`Verdict: ${report.verdict}`);
 		if (report.personal_live_readiness.outcome !== 'ready') {
@@ -2041,6 +2046,7 @@ async function claudeLegacyProductDoctorReport() {
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
+  const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
   const version = claudeProductVersionCheck();
   let binding;
   let runtime;
@@ -2082,9 +2088,7 @@ async function claudeLegacyProductDoctorReport() {
 	const expectedAuthorityMode = process.env.PULSE_TRUST_MODE === 'test' ? 'synthetic-test' : 'production';
 	const authorityMatches = mcp.authority_mode === expectedAuthorityMode;
 	const checks = {
-		presence_trust: presenceTrust.ready
-			? { ok: true, detail: presenceTrust.status }
-			: { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+		presence_trust: enhancedPresenceDoctorCheck(authorityProfile, presenceTrust),
 		authority: authorityMatches
 			? { ok: true, detail: mcp.authority_mode === 'synthetic-test'
 				? 'synthetic test authority; never production-trusted'
@@ -2117,6 +2121,7 @@ async function claudeLegacyProductDoctorReport() {
   return {
 	product: `Pulse Claude Code ${runtime?.kind === 'desk' ? 'Desk' : runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'claude-code',
+    authority_profile: authorityProfile,
     personal_live_readiness: personalLiveReadiness,
     verdict: ready
 		? mcp.authority_mode === 'synthetic-test'
@@ -2144,6 +2149,7 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
+  const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
   let resolved;
   let bindingError;
   try {
@@ -2196,9 +2202,7 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
     : undefined;
   const legacyShadowAbsent = detection?.available && legacyRegistration?.status !== 0;
   const checks = {
-    presence_trust: presenceTrust.ready
-      ? { ok: true, detail: presenceTrust.status }
-      : { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+    presence_trust: enhancedPresenceDoctorCheck(authorityProfile, presenceTrust),
     authority: authorityMatches
       ? { ok: true, detail: syntheticAuthority ? 'synthetic test authority; never production-trusted' : 'production shared locator authority' }
       : { ok: false, detail: locatorError ?? 'shared workspace locator is missing or mismatched' },
@@ -2239,6 +2243,7 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
   return {
     product: `Pulse Claude Code ${resolved?.runtime?.kind === 'desk' ? 'Desk' : resolved?.runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'claude-code',
+    authority_profile: authorityProfile,
     personal_live_readiness: personalLiveReadiness,
     verdict: ready
       ? syntheticAuthority
@@ -2285,8 +2290,8 @@ async function runClaudeProductDoctor(rest = []) {
     console.log('[pulse] doctor claude-code');
     for (const [label, check] of Object.entries(report.checks)) printDoctorLine(label, check);
     console.log(`\nRetrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
+    printPersonalAuthorityProfile(report.authority_profile);
     console.log(`Verdict: ${report.verdict}`);
-    if (!report.checks.presence_trust.ok) console.log('Next: pulse trust install --confirm "install pulse presence helper"');
   }
   if (Object.values(report.checks).some((check) => !check.ok)) process.exitCode = 1;
 }
@@ -2296,6 +2301,7 @@ async function cursorProductDoctorReport() {
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
+  const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
   let resolved;
   let bindingError;
   try {
@@ -2352,9 +2358,7 @@ async function cursorProductDoctorReport() {
     liveStatus.backend_llm_enabled === false && liveStatus.capture_enabled === true &&
     liveStatus.raw_capture_enabled === false;
   const checks = {
-    presence_trust: presenceTrust.ready
-      ? { ok: true, detail: presenceTrust.status }
-      : { ok: false, detail: `${presenceTrust.status}: ${presenceTrust.issues.join(', ')}` },
+    presence_trust: enhancedPresenceDoctorCheck(authorityProfile, presenceTrust),
     authority: {
       ok: true,
       detail: syntheticAuthority ? 'synthetic test authority; never production-trusted' : 'production shared locator authority',
@@ -2389,6 +2393,7 @@ async function cursorProductDoctorReport() {
   return {
     product: `Pulse Cursor ${resolved?.runtime?.kind === 'desk' ? 'Desk' : resolved?.runtime?.kind === 'personal' ? 'Personal' : 'unbound'} memory`,
     target_host: 'cursor',
+    authority_profile: authorityProfile,
     personal_live_readiness: personalLiveReadiness,
     verdict: ready
       ? syntheticAuthority
@@ -2418,6 +2423,7 @@ async function runCursorProductDoctor(rest = []) {
     console.log('[pulse] doctor cursor');
     for (const [label, check] of Object.entries(report.checks)) printDoctorLine(label, check);
     console.log(`\nRetrieval: ${report.trust.full_retrieval ? `full (${report.trust.embedder})` : 'fallback only; full retrieval is not enabled'}`);
+    printPersonalAuthorityProfile(report.authority_profile);
     console.log(`Verdict: ${report.verdict}`);
     if (!report.checks.hooks.ok && report.checks.plugin.ok) console.log('Next: complete one normal Cursor turn, then run doctor again');
   }
@@ -3106,6 +3112,51 @@ function printDoctorLine(label, check) {
   const status = check.ok ? 'ok' : (check.warn ? 'warn' : 'missing');
   const detail = check.detail ? ` - ${check.detail}` : '';
   console.log(`${label}: ${status}${detail}`);
+}
+
+function personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority = false } = {}) {
+  if (!syntheticAuthority && presenceTrust?.ready === true) {
+    return portablePersonalAuthorityProfile({
+      schema: 'pulse.enhanced_presence.profile.v1',
+      version: 1,
+      kind: 'macos_native',
+      available: true,
+      protected_actions: [...PERSONAL_PROTECTED_ACTIONS],
+      reason_code: '',
+    });
+  }
+  return portablePersonalAuthorityProfile();
+}
+
+function enhancedPresenceDoctorCheck(profile, presenceTrust) {
+  if (profile.enhanced_presence.available) {
+    return {
+      ok: true,
+      detail: `optional enhanced presence ready for ${profile.enhanced_presence.protected_actions.join(', ')}`,
+    };
+  }
+  const status = typeof presenceTrust?.status === 'string' ? presenceTrust.status : 'unavailable';
+  const issues = Array.isArray(presenceTrust?.issues) && presenceTrust.issues.length > 0
+    ? `: ${presenceTrust.issues.join(', ')}`
+    : '';
+  return {
+    ok: true,
+    detail: `optional enhanced presence unavailable (${status}${issues}); ordinary Personal memory remains ready`,
+  };
+}
+
+function printPersonalAuthorityProfile(profile) {
+  console.log(`Authority profile: ${profile.schema} (${profile.kind})`);
+  console.log('Ordinary Personal memory: ready without enhanced presence');
+  if (profile.enhanced_presence.available) {
+    console.log(`Authorized protected actions: ${profile.enhanced_presence.protected_actions.join(', ')}`);
+    return;
+  }
+  console.log('Authorized protected actions: none');
+  console.log(`Unavailable protected actions: ${PERSONAL_PROTECTED_ACTIONS.join(', ')}`);
+  if (process.platform === 'darwin') {
+    console.log(`Optional setup for ${PERSONAL_PROTECTED_ACTIONS.join(' and ')} only: pulse trust install --confirm "${TRUST_INSTALL_CONFIRMATION}"`);
+  }
 }
 
 async function doctorReport() {

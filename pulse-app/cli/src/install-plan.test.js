@@ -129,13 +129,35 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     assert.deepEqual(plan.current_state, cleanState);
     assert.equal(plan.privacy.raw_transcript_capture, 'off');
     assert.equal(plan.privacy.backend_model_calls, 'off');
+    assert.deepEqual(plan.authority_profile, {
+      schema: 'pulse.personal_authority_profile.v1',
+      version: 1,
+      kind: 'portable',
+      ordinary_ready: true,
+      enhanced_presence: {
+        schema: 'pulse.enhanced_presence.profile.v1',
+        version: 1,
+        kind: 'unavailable',
+        available: false,
+        protected_actions: [],
+        reason_code: 'enhanced_presence_unavailable',
+      },
+    });
+    assert.deepEqual(plan.protected_actions, {
+      enhanced_presence_required: ['binding.change', 'vault.wipe'],
+      ordinary_personal_requires_enhanced_presence: false,
+      optional_setup_command: 'pulse trust install --confirm "install pulse presence helper"',
+    });
     assert.ok(plan.local_writes.some((entry) => entry.path === join(home, '.pulse', 'identity', 'personal-principal.json')));
     assert.ok(plan.local_writes.some((entry) => entry.path === join(home, '.pulse', 'vaults', 'personal', 'store_personal_<generated>') && entry.preserved_on_uninstall));
+    assert.equal(plan.local_writes.some((entry) => entry.purpose === 'macos_presence_helper'), false);
     assert.deepEqual(
       plan.network_effects.find((entry) => entry.code === 'verified_release_downloads').destinations,
       ['https://models.zbs.gg', 'https://releases.zbs.gg'],
     );
     assert.ok(plan.required_human_approvals.every((entry) => entry.automatable_by_yes === false));
+    assert.equal(plan.required_human_approvals.some((entry) => entry.code === 'macos_presence_and_binding'), false);
+    assert.equal(plan.required_human_approvals.some((entry) => entry.code === 'binding_replacement_if_needed'), false);
     assert.deepEqual(plan.next_action, {
       code: 'approve_install_disclosure',
       command: 'pulse install',
@@ -186,6 +208,13 @@ test('all six catalog targets are eligible while musl and historical v1 stay una
     assert.equal(plan.outcome, 'ready_to_install', targetID);
     assert.equal(plan.detected.target.id, targetID);
     assert.equal(plan.release.target_id, targetID);
+    assert.equal(
+      plan.protected_actions.optional_setup_command,
+      targetID.startsWith('darwin-')
+        ? 'pulse trust install --confirm "install pulse presence helper"'
+        : null,
+      targetID,
+    );
   }
   const musl = buildPersonalInstallPlan({
     ...base, platform: 'linux', architecture: 'x64', libc: 'musl',
@@ -412,7 +441,11 @@ test('human disclosure names the exact project, downloads, local writes, privacy
     assert.match(output, /https:\/\/models\.zbs\.gg/);
     assert.match(output, /raw transcript capture: off/i);
     assert.match(output, /backend model calls: off/i);
-    assert.match(output, /macos_presence_and_binding/);
+    assert.match(output, /pulse\.personal_authority_profile\.v1/);
+    assert.match(output, /ordinary Personal memory: ready without enhanced presence/i);
+    assert.match(output, /binding\.change, vault\.wipe/);
+    assert.match(output, /optional setup for those protected actions only: pulse trust install --confirm "install pulse presence helper"/i);
+    assert.doesNotMatch(output, /macos_presence_and_binding/);
     assert.match(output, /signed binding and Personal vault are preserved/i);
     assert.match(output, /runtime uninstall: unavailable in this U3 build/i);
     assert.match(output, /wipe is separate/i);

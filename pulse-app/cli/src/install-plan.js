@@ -6,6 +6,10 @@ import { DesktopTargetError, resolveDesktopTarget } from './desktop-target.js';
 import { createPlatformServices, defaultPlatformServices } from './platform-services.js';
 import { assertSupportedNodeVersion } from './release-manifest.js';
 import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
+import {
+  PERSONAL_PROTECTED_ACTIONS,
+  portablePersonalAuthorityProfile,
+} from './personal-authority-profile.js';
 import { personalPrincipalPath } from './personal-principal.js';
 import { DEFAULT_TRUST_PATHS } from './trust-helper.js';
 import { canonicalizeWorkspace, defaultBindingPaths } from './workspace-binding.js';
@@ -255,6 +259,15 @@ export function formatPersonalInstallPlan(plan) {
     : '';
   const currentState = Object.entries(plan.current_state)
     .map(([name, status]) => `  - ${name}: ${status}`);
+  const authorityProfile = plan.authority_profile ?? portablePersonalAuthorityProfile();
+  const protectedActions = plan.protected_actions ?? {
+    enhanced_presence_required: [...PERSONAL_PROTECTED_ACTIONS],
+    ordinary_personal_requires_enhanced_presence: false,
+    optional_setup_command: null,
+  };
+  const optionalProtectedSetup = protectedActions.optional_setup_command
+    ? `  - optional setup for those protected actions only: ${protectedActions.optional_setup_command}`
+    : '  - no enhanced-presence adapter is available for this target';
   return `Pulse Personal install
 
 Project: ${workspace?.canonical_path ?? 'unavailable'}
@@ -290,6 +303,12 @@ Privacy:
   - backend model calls: ${plan.privacy.backend_model_calls}
   - old chat import: ${plan.privacy.old_chat_import}
   - memory: ${plan.privacy.memory_location}
+
+Authority:
+  - profile: ${authorityProfile.schema}
+  - ordinary Personal memory: ready without enhanced presence
+  - enhanced presence is optional and required only for: ${protectedActions.enhanced_presence_required.join(', ')}
+${optionalProtectedSetup}
 
 Human approvals:
 ${approvals.join('\n')}
@@ -421,9 +440,6 @@ export function buildPersonalInstallPlan({
       { path: join(pulseRoot, 'vaults', 'personal', 'store_personal_<generated>'), purpose: 'private_memory_vault', preserved_on_uninstall: true },
       { path: join(pulseRoot, 'caches', 'personal', 'store_personal_<generated>'), purpose: 'rebuildable_retrieval_cache', preserved_on_uninstall: false },
       { path: join(pulseRoot, 'receipts', 'install', '<workspace_id>.json'), purpose: 'install_receipt', preserved_on_uninstall: false },
-      ...(verifiedRelease?.capabilities.includes('presence-helper') ? [
-        { path: DEFAULT_TRUST_PATHS.helperPath, purpose: 'macos_presence_helper', preserved_on_uninstall: false },
-      ] : []),
       { path: dirname(DEFAULT_TRUST_PATHS.publicKeyPath), purpose: 'root_owned_binding_trust', preserved_on_uninstall: true },
       { path: join(resolve(home), '.pulse', 'product-locators.json'), purpose: 'shared_harness_workspace_locator', preserved_on_uninstall: false },
       ...compatibleHosts.map((host) => ({
@@ -460,13 +476,17 @@ export function buildPersonalInstallPlan({
       old_chat_import: 'not_requested',
       memory_location: 'local_private_vault',
     },
+    authority_profile: portablePersonalAuthorityProfile(),
+    protected_actions: {
+      enhanced_presence_required: [...PERSONAL_PROTECTED_ACTIONS],
+      ordinary_personal_requires_enhanced_presence: false,
+      optional_setup_command: verifiedRelease?.capabilities.includes('presence-helper')
+        ? 'pulse trust install --confirm "install pulse presence helper"'
+        : null,
+    },
     required_human_approvals: [
       { code: 'install_disclosure_consent', automatable_by_yes: false },
-      ...(verifiedRelease?.capabilities.includes('presence-helper') ? [
-        { code: 'macos_presence_and_binding', automatable_by_yes: false },
-      ] : []),
       ...(codex?.activation_target ? [{ code: 'codex_hook_trust', automatable_by_yes: false }] : []),
-      { code: 'binding_replacement_if_needed', automatable_by_yes: false },
     ],
     rollback: {
       remove_runtime: null,

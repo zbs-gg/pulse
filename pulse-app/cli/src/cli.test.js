@@ -548,12 +548,53 @@ test('doctor cursor --json reports the native Cursor product contract', () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.target_host, 'cursor');
   assert.equal(report.verdict, 'Pulse Cursor automatic lifecycle is not ready.');
+  assert.deepEqual(report.authority_profile, {
+    schema: 'pulse.personal_authority_profile.v1',
+    version: 1,
+    kind: 'portable',
+    ordinary_ready: true,
+    enhanced_presence: {
+      schema: 'pulse.enhanced_presence.profile.v1',
+      version: 1,
+      kind: 'unavailable',
+      available: false,
+      protected_actions: [],
+      reason_code: 'enhanced_presence_unavailable',
+    },
+  });
+  assert.equal(report.checks.presence_trust.ok, true);
+  assert.match(report.checks.presence_trust.detail, /optional/i);
   for (const key of ['presence_trust', 'binding', 'runtime', 'plugin', 'hooks', 'vault', 'capture', 'retrieval']) {
     assert.ok(report.checks[key], `missing check ${key}`);
     assert.equal(typeof report.checks[key].ok, 'boolean');
     assert.equal(typeof report.checks[key].detail, 'string');
   }
   assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
+});
+
+test('doctor presents native presence as optional and scoped only to protected actions', () => {
+  const { result } = run(['doctor', 'claude-code'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Authority profile: pulse\.personal_authority_profile\.v1/);
+  assert.match(result.stdout, /Ordinary Personal memory: ready without enhanced presence/i);
+  assert.match(result.stdout, /Unavailable protected actions: binding\.change, vault\.wipe/i);
+  assert.doesNotMatch(result.stdout, /Next: pulse trust install/);
+  assert.match(result.stdout, /Optional setup for binding\.change and vault\.wipe only: pulse trust install --confirm "install pulse presence helper"/i);
+});
+
+test('Codex doctor exposes the same portable authority profile without making presence a readiness failure', () => {
+  const { result } = run(['doctor', 'codex', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.target_host, 'codex');
+  assert.equal(report.authority_profile.schema, 'pulse.personal_authority_profile.v1');
+  assert.equal(report.authority_profile.ordinary_ready, true);
+  assert.equal(report.authority_profile.enhanced_presence.available, false);
+  assert.deepEqual(report.authority_profile.enhanced_presence.protected_actions, []);
+  assert.equal(report.checks.presence_trust.ok, true);
+  assert.notEqual(report.personal_live_readiness.reason_code, 'presence_required');
 });
 
 test('viewer --print-url prints only the authenticated URL', () => {

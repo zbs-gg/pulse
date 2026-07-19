@@ -66,3 +66,4 @@ export function normalizePersonalAuthorityProfile(value) {
 
 export const PERSONAL_AUTHORITY_PROFILE_SCHEMA = PERSONAL_SCHEMA;
 export const ENHANCED_PRESENCE_PROFILE_SCHEMA = ENHANCED_SCHEMA;
+export const PERSONAL_PROTECTED_ACTIONS = PROTECTED_ACTIONS;
