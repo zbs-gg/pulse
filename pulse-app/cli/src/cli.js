@@ -661,6 +661,12 @@ function nativeFixtureActivationDetail(error) {
   return JSON.stringify({ code, message, name });
 }
 
+function nativeFixtureActivationStage(stage) {
+  if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION !== '1') return;
+  if (typeof stage !== 'string' || !/^[a-z0-9_]{1,64}$/.test(stage)) return;
+  process.stderr.write(`[pulse-native-fixture] core activation stage: ${stage}\n`);
+}
+
 async function inspectPersonalInstallCore(binding) {
   try {
     const resolved = exactPersonalCore(binding);
@@ -690,9 +696,12 @@ async function inspectPersonalInstallCore(binding) {
 }
 
 async function activatePersonalInstallCoreTransaction(binding) {
+  nativeFixtureActivationStage('transaction_started');
   await recoverBindingAuthority();
+  nativeFixtureActivationStage('authority_recovered');
   const resolved = exactPersonalCore(binding);
   const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
+  nativeFixtureActivationStage('vault_lock_acquired');
   try {
       const previousDaemon = inspectVaultRuntime(resolved.runtime);
       if (previousDaemon.status === 'running') await assertVaultRuntimeHealthy(resolved.runtime);
@@ -701,6 +710,7 @@ async function activatePersonalInstallCoreTransaction(binding) {
       let runtimeInstalled = false;
       try {
         const managedRuntime = await ensureManagedProductRuntime(resolved.runtime, { publishConfig: false });
+        nativeFixtureActivationStage('runtime_provisioned');
         if (previousDaemon.status === 'running' &&
             previousDaemon.managed_embedder?.config_digest !== managedRuntime.managed_embedder.config_digest) {
           await stopVaultRuntimeAndWait(resolved.runtime);
@@ -714,19 +724,24 @@ async function activatePersonalInstallCoreTransaction(binding) {
         });
         runtimeInstalled = true;
         if (!installedRuntime.ok) throw new Error('personal_core_runtime_install_failed');
+        nativeFixtureActivationStage('plugin_installed');
         const runtimeStatus = inspectVaultRuntime(resolved.runtime);
         if (['stopped', 'crashed', 'running'].includes(runtimeStatus.status)) {
+          nativeFixtureActivationStage('daemon_start_started');
           await startVaultRuntime(resolved.runtime, {
             daemonPath: managedRuntime.daemon.path,
             managedEmbedder: managedRuntime.managed_embedder,
             host: 'pulse-product',
             allowRollback: false,
           });
+          nativeFixtureActivationStage('daemon_started');
         } else {
           throw new Error('personal_core_runtime_state_invalid');
         }
         await assertVaultRuntimeHealthy(resolved.runtime);
+        nativeFixtureActivationStage('daemon_healthy');
         writeProductDaemonActivation(managedRuntime, installedRuntime);
+        nativeFixtureActivationStage('activation_written');
         const defaults = defaultBindingPaths();
         writeSharedProductLocator({
           codexHome: codexHomePath(),
@@ -739,6 +754,7 @@ async function activatePersonalInstallCoreTransaction(binding) {
         });
 		finalizeCodexRuntimeInstall(DATA_DIR);
 		commitPersonalRuntimeRelease(managedRuntime.verified_release, { dataDir: DATA_DIR });
+        nativeFixtureActivationStage('transaction_complete');
       } catch (error) {
         if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
           const diagnostic = [error?.code, error?.message]
@@ -760,16 +776,21 @@ async function activatePersonalInstallCoreTransaction(binding) {
         throw error;
       }
   } finally {
+    nativeFixtureActivationStage('vault_lock_release_started');
     await releaseVaultActivation();
+    nativeFixtureActivationStage('vault_lock_released');
   }
 }
 
 async function activatePersonalInstallCore(binding) {
   const releaseActivation = await acquireProductActivationLock();
+  nativeFixtureActivationStage('product_lock_acquired');
   try {
     await activatePersonalInstallCoreTransaction(binding);
   } finally {
+    nativeFixtureActivationStage('product_lock_release_started');
     await releaseActivation();
+    nativeFixtureActivationStage('product_lock_released');
   }
 }
 

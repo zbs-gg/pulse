@@ -377,7 +377,7 @@ try {
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
   const installed = packedPulse(tarball, ['install', '--json'], {
-    cwd: workspace, env, statuses: [0, 1], timeout: 15 * 60_000,
+    cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
   assert.equal(installResult.outcome, 'action_required', `${JSON.stringify(installResult)}\n${installed.stderr}`);
@@ -528,7 +528,7 @@ try {
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(repairPlan),
   };
   const repaired = packedPulse(tarball, ['repair', '--json'], {
-    cwd: workspace, env: repairEnv, statuses: [0, 1], timeout: 15 * 60_000,
+    cwd: workspace, env: repairEnv, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
   });
   const repairResult = json(repaired.stdout, 'native packed repair result is invalid');
   assert.equal(repairResult.outcome, 'ready', `${JSON.stringify(repairResult)}\n${repaired.stderr}`);

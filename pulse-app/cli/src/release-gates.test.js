@@ -61,9 +61,16 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	const cli = readFileSync(join(root, 'pulse-app', 'cli', 'src', 'cli.js'), 'utf8');
 	assert.match(cli, /PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION/);
 	assert.match(cli, /core activation detail/);
+	assert.match(cli, /core activation stage/);
+	assert.match(cli, /daemon_start_started/);
+	assert.match(cli, /transaction_complete/);
 	assert.match(cli, /<windows-path>/);
 	assert.match(cli, /defaultPlatformServices\.inspectExecutable\(resolve\(managedRuntime\.daemon\.path\)\)/);
 	assert.match(cli, /executableProof\.sha256 !== managedRuntime\.daemon\.digest/);
+	const nativePacked = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'personal-native-packed-e2e.mjs'), 'utf8',
+	);
+	assert.match(nativePacked, /process\.platform === 'win32' \? 180_000 : 15 \* 60_000/);
 	for (const script of [
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',
