@@ -8,7 +8,7 @@ const eventName = process.argv[2];
 const hookRoot = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(hookRoot, '..');
 const productEnvironment = resolveProductEnvironment({
-  host: 'codex', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
+  edgeProfile: 'hook', host: 'codex', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
 });
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 const runtimeRoot = resolve(cliPath, '..', '..');

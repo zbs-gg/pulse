@@ -176,6 +176,9 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     mkdirSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist'), { recursive: true });
     mkdirSync(join(runtimeRoot, 'node_modules', 'dependency'), { recursive: true });
     writeFileSync(join(runtimeRoot, 'src', 'cli.js'), 'export const ready = true;\n');
+    const productHookBundlePath = join(runtimeRoot, 'src', 'product-hook-entrypoint.bundle.js');
+    const productHookBundleBytes = Buffer.from('export const runProductHookEntrypoint = async () => {};\n');
+    writeFileSync(productHookBundlePath, productHookBundleBytes);
     writeFileSync(join(runtimeRoot, 'vendor', 'pulse-mcp-dist', 'index.js'), 'export const mcp = true;\n');
     writeFileSync(join(runtimeRoot, 'package.json'), '{"name":"@zbs-gg/pulse"}\n');
     const dependencyPath = join(runtimeRoot, 'node_modules', 'dependency', 'index.js');
@@ -218,6 +221,26 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     trust.writeProductEnvironmentCache(environmentProof, 'codex');
     assert.equal(calls.filter(([operation]) => operation === 'write').length, 1,
       'a still-valid receipt must not spawn a second Windows writer');
+    assert.equal(trust.productEnvironmentCacheProof({
+      edgeProfile: 'hook', host: 'codex', locatorPath,
+      pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    })?.runtimeDigest, environmentProof.runtimeDigest,
+    'the hook lease must bind the exact bundled hook execution edge');
+    writeFileSync(productHookBundlePath, Buffer.concat([productHookBundleBytes, Buffer.from('// drift\n')]));
+    assert.equal(trust.productEnvironmentCacheProof({
+      edgeProfile: 'hook', host: 'codex', locatorPath,
+      pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    }), undefined, 'bundled hook drift must invalidate the bounded receipt immediately');
+    writeFileSync(productHookBundlePath, productHookBundleBytes);
+    const runtimeEntrypoint = join(runtimeRoot, 'src', 'cli.js');
+    const runtimeEntrypointBytes = readFileSync(runtimeEntrypoint);
+    writeFileSync(runtimeEntrypoint, Buffer.concat([runtimeEntrypointBytes, Buffer.from('// drift\n')]));
+    assert.equal(trust.productEnvironmentCacheProof({
+      edgeProfile: 'hook', host: 'codex', locatorPath,
+      pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    })?.runtimeDigest, environmentProof.runtimeDigest,
+    'the hook lease must not walk unrelated CLI source that the bundled hook never loads');
+    writeFileSync(runtimeEntrypoint, runtimeEntrypointBytes);
     writeFileSync(dependencyPath, Buffer.concat([dependencyBytes, Buffer.from('// drift\n')]));
     const callsBeforeLeasedDependencyRead = calls.length;
     assert.equal(trust.productEnvironmentCacheProof({
@@ -230,8 +253,6 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     }).runtimeDigest, environmentProof.runtimeDigest,
     'the next full native proof must detect third-party tree drift');
     writeFileSync(dependencyPath, dependencyBytes);
-    const runtimeEntrypoint = join(runtimeRoot, 'src', 'cli.js');
-    const runtimeEntrypointBytes = readFileSync(runtimeEntrypoint);
     writeFileSync(runtimeEntrypoint, Buffer.concat([runtimeEntrypointBytes, Buffer.from('// drift\n')]));
     assert.equal(trust.productEnvironmentCacheProof({
       host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,

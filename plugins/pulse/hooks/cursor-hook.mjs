@@ -5,7 +5,7 @@ import { enableProductCompileCache, resolveProductEnvironment } from '../runtime
 
 const eventName = process.argv[2];
 const productEnvironment = resolveProductEnvironment({
-  host: 'cursor', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
+  edgeProfile: 'hook', host: 'cursor', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
 });
 const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
 if (!existsSync(cliPath)) {

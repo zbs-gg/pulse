@@ -15,10 +15,11 @@ const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 // Windows process startup and ACL walks are expensive. A SessionStart still
 // proves every signed tree and writes this owner-private bounded receipt.
 // Events inside its short window avoid another native process, bind the exact
-// workspace and authority files, and rehash the executable Pulse edge: our
-// source, MCP distribution, plugin, and daemon. The large third-party
-// node_modules tree remains covered by the short lease established by the full
-// native proof. Any edge/authority drift or lease expiry falls back to it.
+// workspace and authority files, and rehash the edge they are about to execute.
+// Hooks load one self-contained bundle; MCP loads the wider CLI/MCP runtime.
+// The large third-party node_modules tree and the already-running daemon remain
+// covered by the short lease established by the full native proof. Any selected
+// edge/authority drift or lease expiry falls back to that full proof.
 const WINDOWS_INTEGRITY_CACHE_TTL_MS = 2 * 60 * 1000;
 const WINDOWS_INTEGRITY_CACHE_SCHEMA = 'pulse.windows_product_integrity_cache.v1';
 
@@ -151,6 +152,18 @@ function windowsRuntimeEdgeDigest(runtimeRoot, trust = windowsBoundedTreeTrust()
   return hash.digest('hex');
 }
 
+function windowsHookEdgeDigest(runtimeRoot) {
+  const hash = createHash('sha256');
+  for (const relative of ['package.json', 'src/product-hook-entrypoint.bundle.js']) {
+    const bytes = preliminaryPrivateBytes(join(runtimeRoot, ...relative.split('/')));
+    hash.update(relative);
+    hash.update('\x00');
+    hash.update(bytes);
+    hash.update('\x00');
+  }
+  return hash.digest('hex');
+}
+
 function windowsIntegrityCachePath(productHome, locatorKey, host) {
   return join(productHome, 'integrity-cache', locatorKey, `${host}.json`);
 }
@@ -177,6 +190,7 @@ function windowsIntegrityCacheRecord(proof, host, nowMs = Date.now()) {
     activation_digest: bytesDigest(proof.activationBytes),
     runtime_manifest_digest: bytesDigest(proof.runtimeManifestBytes),
     runtime_edge_digest: proof.runtimeEdgeDigest ?? windowsRuntimeEdgeDigest(proof.runtimeRoot),
+    hook_edge_digest: proof.hookEdgeDigest ?? windowsHookEdgeDigest(proof.runtimeRoot),
     runtime_digest: proof.runtimeDigest,
     plugin_digest: proof.pluginDigest,
     daemon_digest: proof.daemonDigest,
@@ -188,7 +202,8 @@ function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
     'schema', 'created_at_ms', 'expires_at_ms', 'host', 'locator_key', 'workspace_identity', 'workspace_witness',
     'data_dir', 'activation_path', 'host_access_path', 'runtime_manifest_path', 'runtime_root',
     'plugin_root', 'daemon_path', 'expected_runtime_path', 'locator_digest', 'host_access_digest',
-    'activation_digest', 'runtime_manifest_digest', 'runtime_edge_digest', 'runtime_digest', 'plugin_digest', 'daemon_digest',
+    'activation_digest', 'runtime_manifest_digest', 'runtime_edge_digest', 'hook_edge_digest',
+    'runtime_digest', 'plugin_digest', 'daemon_digest',
   ];
   if (!exactObject(cache, keys) || cache.schema !== WINDOWS_INTEGRITY_CACHE_SCHEMA ||
       !Number.isSafeInteger(cache.created_at_ms) || !Number.isSafeInteger(cache.expires_at_ms) ||
@@ -206,8 +221,9 @@ function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
       cache.host_access_digest !== bytesDigest(expected.hostAccessBytes) ||
       cache.activation_digest !== bytesDigest(expected.activationBytes) ||
       cache.runtime_manifest_digest !== bytesDigest(expected.runtimeManifestBytes) ||
-      cache.runtime_edge_digest !== expected.runtimeEdgeDigest ||
-      ![cache.runtime_edge_digest, cache.runtime_digest, cache.plugin_digest, cache.daemon_digest]
+      (expected.runtimeEdgeDigest !== undefined && cache.runtime_edge_digest !== expected.runtimeEdgeDigest) ||
+      (expected.hookEdgeDigest !== undefined && cache.hook_edge_digest !== expected.hookEdgeDigest) ||
+      ![cache.runtime_edge_digest, cache.hook_edge_digest, cache.runtime_digest, cache.plugin_digest, cache.daemon_digest]
         .every((value) => SHA256.test(value ?? ''))) {
     return false;
   }
@@ -320,8 +336,11 @@ function createTrustServices({
           workspaceIdentity: nativeWorkspaceIdentity(results[1]),
         });
       },
-      productEnvironmentCacheProof({ locatorPath, workspacePath, productHome, host, pluginRoot }) {
+      productEnvironmentCacheProof({
+        locatorPath, workspacePath, productHome, host, pluginRoot, edgeProfile = 'runtime',
+      }) {
         try {
+          if (!['hook', 'runtime'].includes(edgeProfile)) return undefined;
           const preliminaryLocator = preliminaryPrivateJSON(locatorPath);
           const locatorKey = workspaceDigest(workspacePath);
           const entry = preliminaryLocator?.entries?.[locatorKey];
@@ -344,18 +363,22 @@ function createTrustServices({
           const activationBytes = preliminaryPrivateBytes(activationPath);
           const runtimeManifestBytes = preliminaryPrivateBytes(runtimeManifestPath);
           const cacheBytes = preliminaryPrivateBytes(cachePath);
+          const cache = parsePrivateJSON(cacheBytes);
           const workspaceWitness = windowsWorkspaceWitness(workspacePath);
           const boundedTrust = windowsBoundedTreeTrust();
           const expected = {
             activationBytes, activationPath, daemonPath, dataDir, expectedRuntimePath,
             host, hostAccessBytes, hostAccessPath, locatorBytes, locatorKey, pluginRoot,
             runtimeManifestBytes, runtimeManifestPath, runtimeRoot, workspaceWitness,
-            runtimeEdgeDigest: windowsRuntimeEdgeDigest(runtimeRoot, boundedTrust),
+            ...(edgeProfile === 'hook'
+              ? { hookEdgeDigest: windowsHookEdgeDigest(runtimeRoot) }
+              : { runtimeEdgeDigest: windowsRuntimeEdgeDigest(runtimeRoot, boundedTrust) }),
           };
-          const cache = parsePrivateJSON(cacheBytes);
           if (!validWindowsIntegrityCache(cache, expected)) return undefined;
           const pluginDigest = pluginTreeDigest(pluginRoot, boundedTrust);
-          const daemonDigest = bytesDigest(preliminaryPrivateBytes(daemonPath, 512 * 1024 * 1024));
+          const daemonDigest = edgeProfile === 'hook'
+            ? cache.daemon_digest
+            : bytesDigest(preliminaryPrivateBytes(daemonPath, 512 * 1024 * 1024));
           if (pluginDigest !== cache.plugin_digest ||
               daemonDigest !== cache.daemon_digest) return undefined;
           return Object.freeze({
@@ -449,6 +472,7 @@ function createTrustServices({
         const nowMs = Date.now();
         const proofWithEdge = {
           ...proof,
+          hookEdgeDigest: windowsHookEdgeDigest(proof.runtimeRoot),
           runtimeEdgeDigest: windowsRuntimeEdgeDigest(proof.runtimeRoot),
         };
         const existing = preliminaryPrivateJSON(proof.cachePath);
@@ -712,12 +736,16 @@ export function resolveProductEnvironment({
   platform = process.platform,
   architecture = process.arch,
   windowsAdapter,
+  edgeProfile = 'runtime',
 } = {}) {
   if (!['claude-code', 'codex', 'cursor'].includes(host)) {
     throw new Error('Pulse product host identity is missing or invalid.');
   }
   if (!['refresh', 'reuse'].includes(integrity)) {
     throw new Error('Pulse product integrity mode is missing or invalid.');
+  }
+  if (!['hook', 'runtime'].includes(edgeProfile)) {
+    throw new Error('Pulse product execution edge is missing or invalid.');
   }
   const trust = createTrustServices({ platform, architecture, windowsAdapter });
   const productHome = resolve(env.PULSE_HOME || join(homedir(), '.pulse'));
@@ -728,7 +756,7 @@ export function resolveProductEnvironment({
   const canonical = canonicalWorkspace(cwd);
   const pluginRoot = dirname(fileURLToPath(import.meta.url));
   const proofInput = {
-      host, locatorPath, pluginRoot, productHome, workspacePath: canonical,
+      edgeProfile, host, locatorPath, pluginRoot, productHome, workspacePath: canonical,
   };
   const cachedEnvironmentProof = integrity === 'reuse' &&
     typeof trust.productEnvironmentCacheProof === 'function'
