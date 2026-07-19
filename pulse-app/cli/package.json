@@ -36,6 +36,7 @@
     "src/binding-admin.js",
     "src/trust-helper.js",
     "src/workspace-binding.js",
+    "src/windows-bootstrap-adapter.js",
     "src/unassigned-inbox.js",
     "src/product-binding-verifier.js",
     "src/local-supervisor.js",
@@ -65,7 +66,8 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.4.0"
+    "@modelcontextprotocol/sdk": "^1.4.0",
+    "tar-stream": "3.2.0"
   },
   "scripts": {
     "check": "node src/cli.js --help",
@@ -81,6 +83,7 @@
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
+    "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
     "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
     "prepack": "node scripts/prepare-preview-vendor.mjs",

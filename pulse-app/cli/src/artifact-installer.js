@@ -1,11 +1,15 @@
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync,
+  chmodSync, closeSync, constants, copyFileSync, createReadStream, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync,
   readSync, readdirSync, renameSync, rmSync, statfsSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createGunzip } from 'node:zlib';
+import { extract } from 'tar-stream';
 
 import { defaultPlatformServices } from './platform-services.js';
 
@@ -73,7 +77,8 @@ function validateDescriptor(artifact) {
   if (!artifact || typeof artifact !== 'object' || typeof artifact.id !== 'string' || !SAFE_ID.test(artifact.id) ||
       typeof artifact.kind !== 'string' || !SAFE_ID.test(artifact.kind) || typeof artifact.version !== 'string' ||
       !Number.isSafeInteger(artifact.epoch) || artifact.epoch < 1 || !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 1 ||
-      artifact.bytes > 64 * 1024 * 1024 * 1024 || typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256)) {
+      artifact.bytes > 64 * 1024 * 1024 * 1024 || typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256) ||
+      (artifact.tree_digest !== undefined && (typeof artifact.tree_digest !== 'string' || !SHA256.test(artifact.tree_digest)))) {
     fail('artifact_descriptor_invalid');
   }
   let url;
@@ -319,7 +324,8 @@ export async function downloadVerifiedArtifact(artifact, {
 }
 
 function safeRelativePath(path) {
-  return typeof path === 'string' && path.length > 0 && path.length <= 512 && !path.startsWith('/') && !path.includes('\\') &&
+  return typeof path === 'string' && path.length > 0 && path.length <= 512 && !path.startsWith('/') &&
+    !/^[A-Za-z]:\//.test(path) && !path.includes('\\') &&
     path.split('/').every((part) => part && part !== '.' && part !== '..' && !part.includes('\0'));
 }
 
@@ -338,6 +344,13 @@ function validateTreeManifest(manifest) {
     entries.set(entry.path, entry);
   }
   return entries;
+}
+
+function assertArtifactTreeDigest(artifact, manifest) {
+  if (artifact.tree_digest !== undefined &&
+      createHash('sha256').update(canonical(manifest)).digest('hex') !== artifact.tree_digest) {
+    fail('artifact_tree_digest_mismatch');
+  }
 }
 
 export function validateArtifactTree(root, manifest, {
@@ -599,100 +612,195 @@ export async function materializeVerifiedDmg(carrier, targetRoot, artifact, _tre
   }
 }
 
-function safeArchiveListing(carrier) {
-  let names;
-  let verbose;
-  try {
-    names = execFileSync('/usr/bin/tar', ['-tzf', carrier], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-    verbose = execFileSync('/usr/bin/tar', ['-tvzf', carrier], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
-  } catch { fail('artifact_archive_invalid'); }
-  const listed = names.split('\n').filter(Boolean);
-  const paths = listed.map((path) => path.endsWith('/') ? path.slice(0, -1) : path);
-  if (paths.length < 1 || paths.length > 8192 || paths.some((path) => !safeRelativePath(path)) ||
-      new Set(paths).size !== paths.length) fail('artifact_archive_path_invalid');
-  const lines = verbose.split('\n').filter(Boolean);
-  if (lines.length !== paths.length || lines.some((line) => !['-', 'd'].includes(line[0]))) fail('artifact_archive_entry_invalid');
-  return {
-    directories: new Set(listed.filter((path) => path.endsWith('/')).map((path) => path.slice(0, -1))),
-    files: new Set(listed.filter((path) => !path.endsWith('/'))),
-  };
+function inflatedArchiveLimit(maxTotalBytes, maxFiles) {
+  const value = maxTotalBytes + (maxFiles * 1024) + (4 * 1024 * 1024);
+  return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
-function streamArchivePayloadWithin(carrier, maximumBytes, { timeoutMs = 120_000 } = {}) {
-  return new Promise((resolveStream, rejectStream) => {
-    const child = spawn('/usr/bin/tar', ['-xOzf', carrier], { stdio: ['ignore', 'pipe', 'ignore'] });
-    let bytes = 0;
-    let settled = false;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) rejectStream(error); else resolveStream(bytes);
-    };
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(new ArtifactInstallerError('artifact_archive_preflight_timeout'));
-    }, timeoutMs);
-    child.stdout.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes > maximumBytes) {
-        child.kill('SIGKILL');
-        finish(new ArtifactInstallerError('artifact_archive_too_large'));
-      }
-    });
-    child.once('error', () => finish(new ArtifactInstallerError('artifact_archive_invalid')));
-    child.once('exit', (status) => {
-      if (settled) return;
-      finish(status === 0 ? null : new ArtifactInstallerError('artifact_archive_invalid'));
-    });
+async function walkPortableArchive(carrier, onEntry, {
+  maximumInflatedBytes, timeoutMs,
+}) {
+  let inflated = 0;
+  const budget = new Transform({
+    transform(chunk, _encoding, callback) {
+      inflated += chunk.length;
+      callback(inflated > maximumInflatedBytes
+        ? new ArtifactInstallerError('artifact_archive_too_large')
+        : null, chunk);
+    },
   });
+  const unpack = extract();
+  unpack.on('entry', (header, stream, next) => {
+    Promise.resolve(onEntry(header, stream)).then(() => next(), (error) => next(error));
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  try {
+    await pipeline(createReadStream(carrier), createGunzip(), budget, unpack, { signal: controller.signal });
+  } catch (error) {
+    if (error instanceof ArtifactInstallerError) throw error;
+    if (controller.signal.aborted) fail('artifact_archive_preflight_timeout');
+    fail('artifact_archive_invalid');
+  } finally { clearTimeout(timer); }
 }
 
-async function preflightArchive(carrier) {
-  const listing = safeArchiveListing(carrier);
-  let manifestBytes;
-  try {
-    manifestBytes = execFileSync('/usr/bin/tar', ['-xOzf', carrier, CARRIER_TREE_FILE], {
-      encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 + 1, timeout: 10_000,
-    });
-  } catch { fail('artifact_carrier_manifest_invalid'); }
-  const manifest = parseCarrierTreeManifest(manifestBytes);
-  const expectedFiles = new Set([...manifest.files.map((entry) => entry.path), CARRIER_TREE_FILE]);
-  const hasOptionalControl = listing.files.has('internal-manifest.json');
-  if (hasOptionalControl) expectedFiles.add('internal-manifest.json');
-  if (listing.files.size !== expectedFiles.size || [...expectedFiles].some((path) => !listing.files.has(path))) {
-    fail('artifact_carrier_unexpected');
+function validatePortableHeader(header, seen, { maxEntries, maxDepth }) {
+  if (header?.type === 'directory' && typeof header.name === 'string' && header.name.endsWith('/')) {
+    header.name = header.name.slice(0, -1);
+  }
+  if (!header || typeof header.name !== 'string' || !safeRelativePath(header.name)) fail('artifact_archive_path_invalid');
+  if (header.pax && Object.keys(header.pax).length > 0) fail('artifact_archive_path_override');
+  if (seen.has(header.name)) fail('artifact_archive_path_invalid');
+  seen.add(header.name);
+  if (seen.size > maxEntries) fail('artifact_carrier_too_many_entries');
+  if (header.name.split('/').length - 1 > maxDepth) fail('artifact_tree_too_deep');
+  if (!Number.isSafeInteger(header.size) || header.size < 0) fail('artifact_archive_entry_invalid');
+  if (header.type !== 'file' && header.type !== 'directory') fail('artifact_archive_entry_invalid');
+  if (header.type === 'directory' && header.size !== 0) fail('artifact_archive_entry_invalid');
+}
+
+async function drainPortableEntry(stream, maximumBytes, collect = false) {
+  let total = 0;
+  const chunks = [];
+  for await (const chunk of stream) {
+    const bytes = Buffer.from(chunk);
+    total += bytes.length;
+    if (total > maximumBytes) fail('artifact_archive_too_large');
+    if (collect) chunks.push(bytes);
+  }
+  return collect ? Buffer.concat(chunks, total) : total;
+}
+
+async function preflightPortableArchive(carrier, artifact, {
+  maxFiles, maxTotalBytes, maxEntries, maxDepth, timeoutMs,
+}) {
+  const seen = new Set();
+  const files = new Map();
+  const directories = new Set();
+  let manifestBytes = null;
+  await walkPortableArchive(carrier, async (header, stream) => {
+    validatePortableHeader(header, seen, { maxEntries, maxDepth });
+    if (header.type === 'directory') {
+      directories.add(header.name);
+      await drainPortableEntry(stream, 0);
+      return;
+    }
+    files.set(header.name, header.size);
+    if (header.name === CARRIER_TREE_FILE) {
+      manifestBytes = await drainPortableEntry(stream, 2 * 1024 * 1024, true);
+      return;
+    }
+    const limit = OPTIONAL_CARRIER_CONTROL_FILES.has(header.name) ? 2 * 1024 * 1024 : maxTotalBytes;
+    const actual = await drainPortableEntry(stream, limit);
+    if (actual !== header.size) fail('artifact_archive_invalid');
+  }, { maximumInflatedBytes: inflatedArchiveLimit(maxTotalBytes, maxFiles), timeoutMs });
+  if (manifestBytes === null) fail('artifact_carrier_missing');
+  const manifest = parseCarrierTreeManifest(manifestBytes.toString('utf8'));
+  assertArtifactTreeDigest(artifact, manifest);
+  if (manifest.files.length > maxFiles) fail('artifact_tree_too_many_files');
+  let payloadBytes = 0;
+  for (const entry of manifest.files) {
+    if (entry.path.split('/').length - 1 > maxDepth) fail('artifact_tree_too_deep');
+    payloadBytes += entry.bytes;
+    if (!Number.isSafeInteger(payloadBytes) || payloadBytes > maxTotalBytes) fail('artifact_archive_too_large');
+  }
+  const expectedFiles = new Set([CARRIER_TREE_FILE, ...manifest.files.map((entry) => entry.path)]);
+  if (files.has('internal-manifest.json')) expectedFiles.add('internal-manifest.json');
+  if (files.size !== expectedFiles.size || [...expectedFiles].some((path) => !files.has(path))) fail('artifact_carrier_unexpected');
+  const expectedByPath = new Map(manifest.files.map((entry) => [entry.path, entry]));
+  for (const [path, size] of files) {
+    if (expectedByPath.has(path) && expectedByPath.get(path).bytes !== size) fail('artifact_carrier_digest_mismatch');
   }
   const allowedDirectories = new Set();
   for (const path of expectedFiles) {
     const parts = path.split('/');
     for (let count = 1; count < parts.length; count += 1) allowedDirectories.add(parts.slice(0, count).join('/'));
   }
-  if ([...listing.directories].some((path) => !allowedDirectories.has(path))) fail('artifact_carrier_unexpected');
-  const payloadBytes = manifest.files.reduce((total, entry) => total + entry.bytes, 0);
-  if (!Number.isSafeInteger(payloadBytes) || payloadBytes > 4 * 1024 * 1024 * 1024) fail('artifact_archive_too_large');
-  const maximumBytes = payloadBytes + Buffer.byteLength(manifestBytes) + (hasOptionalControl ? 2 * 1024 * 1024 : 0);
-  const streamed = await streamArchivePayloadWithin(carrier, maximumBytes);
-  if (streamed < payloadBytes + Buffer.byteLength(manifestBytes)) fail('artifact_archive_invalid');
-  return manifest;
+  if ([...directories].some((path) => !allowedDirectories.has(path))) fail('artifact_carrier_unexpected');
+  return { allowedDirectories, expectedByPath, expectedFiles, manifest };
 }
 
-export async function materializeVerifiedTarGz(carrier, targetRoot, artifact, _treeManifest, {
-  platformServices = defaultPlatformServices,
+function writePortableEntry(stream, destination, expected, platformServices) {
+  return (async () => {
+    ensurePrivateDirectory(dirname(destination), platformServices);
+    let fd;
+    try {
+      fd = openSync(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), expected.mode);
+    } catch { fail('artifact_archive_extract_failed'); }
+    let total = 0;
+    try {
+      for await (const chunk of stream) {
+        const bytes = Buffer.from(chunk);
+        total += bytes.length;
+        if (total > expected.bytes) fail('artifact_archive_too_large');
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(fd, bytes, offset, bytes.length - offset);
+          if (written < 1) fail('artifact_archive_extract_failed');
+          offset += written;
+        }
+      }
+      if (total !== expected.bytes) fail('artifact_archive_invalid');
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    if (platformServices.platform !== 'win32') chmodSync(destination, expected.mode);
+    assertPrivateState(destination, 'file', 'artifact_archive_extract_failed', platformServices);
+  })();
+}
+
+async function extractPortableArchive(carrier, destination, preflight, options) {
+  const seen = new Set();
+  await walkPortableArchive(carrier, async (header, stream) => {
+    validatePortableHeader(header, seen, options);
+    if (header.type === 'directory') {
+      if (!preflight.allowedDirectories.has(header.name)) fail('artifact_carrier_unexpected');
+      ensurePrivateDirectory(join(destination, header.name), options.platformServices);
+      await drainPortableEntry(stream, 0);
+      return;
+    }
+    if (!preflight.expectedFiles.has(header.name)) fail('artifact_carrier_unexpected');
+    const expected = preflight.expectedByPath.get(header.name) ?? {
+      bytes: header.size, mode: 0o600, executable: false,
+    };
+    if (header.size !== expected.bytes) fail('artifact_carrier_digest_mismatch');
+    await writePortableEntry(stream, join(destination, header.name), expected, options.platformServices);
+  }, {
+    maximumInflatedBytes: inflatedArchiveLimit(options.maxTotalBytes, options.maxFiles),
+    timeoutMs: options.timeoutMs,
+  });
+}
+
+export async function materializeVerifiedPortableArchive(carrier, targetRoot, artifact, _treeManifest, {
+  platformServices = defaultPlatformServices, maxFiles = 4096, maxTotalBytes = 4 * 1024 * 1024 * 1024,
+  maxEntries = 8192, maxDepth = 32, timeoutMs = 120_000,
 } = {}) {
   const actual = sha256File(carrier, platformServices);
-  if (artifact.format !== 'tar.gz' || actual.stat.size !== artifact.bytes || actual.digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
-  await preflightArchive(carrier);
+  if (artifact.format !== 'tar.gz' || actual.stat.size !== artifact.bytes || actual.digest !== artifact.sha256) {
+    fail('artifact_carrier_digest_mismatch');
+  }
+  if (![maxFiles, maxTotalBytes, maxEntries, maxDepth, timeoutMs].every((value) => Number.isSafeInteger(value) && value > 0)) {
+    fail('artifact_activation_configuration_invalid');
+  }
+  const options = { maxDepth, maxEntries, maxFiles, maxTotalBytes, platformServices, timeoutMs };
+  const preflight = await preflightPortableArchive(carrier, artifact, options);
   const work = mkdtempSync(join(tmpdir(), 'pulse-artifact-archive-'));
+  ensurePrivateDirectory(work, platformServices);
   try {
-    execFileSync('/usr/bin/tar', ['-xzf', carrier, '-C', work, '--no-same-owner', '--no-same-permissions'], { stdio: 'ignore' });
+    await extractPortableArchive(carrier, work, preflight, options);
     if (sha256File(carrier, platformServices).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
-    return await materializeVerifiedCarrierDirectory(work, targetRoot, artifact, { platformServices });
+    validateCarrierDirectory(work, preflight.manifest, { maxEntries, maxDepth, platformServices });
+    copyManifestFiles(work, targetRoot, preflight.manifest, platformServices);
+    return { treeManifest: preflight.manifest };
   } catch (error) {
     if (error instanceof ArtifactInstallerError) throw error;
     fail('artifact_archive_extract_failed');
   } finally { rmSync(work, { recursive: true, force: true }); }
 }
+
+// Stable name retained for historical callers; tar.gz now always uses the
+// portable streaming materializer above rather than a system archive tool.
+export const materializeVerifiedTarGz = materializeVerifiedPortableArchive;
 
 export async function materializeVerifiedModelFile(sourceFile, targetRoot, artifact, treeManifest, {
   platformServices = defaultPlatformServices,
@@ -807,7 +915,23 @@ function validateDataOnlyModel(root, artifact, treeManifest, platformServices = 
     fail('artifact_model_policy_invalid');
   }
   const files = treeManifest.files.filter((entry) => entry.path !== INSTALLED_METADATA);
-  if (files.length !== 1 || !files[0].path.endsWith('.safetensors') || files[0].executable) fail('artifact_model_tree_invalid');
+  if (artifact.model_policy.required_files !== undefined) {
+    const policyKeys = Object.keys(artifact.model_policy).sort().join('\0');
+    const required = artifact.model_policy.required_files;
+    if (policyKeys !== 'custom_code\0data_only\0engine\0model\0required_files\0revision' ||
+        artifact.model_policy.engine !== 'transformers-js-onnx' || artifact.model_policy.model !== 'BAAI/bge-m3' ||
+        !/^[a-f0-9]{40}$/.test(artifact.model_policy.revision ?? '') || !Array.isArray(required) || required.length < 1 ||
+        new Set(required).size !== required.length || required.some((path) => !safeRelativePath(path)) ||
+        files.some((entry) => entry.executable) ||
+        [...files.map((entry) => entry.path)].sort().join('\0') !== [...required].sort().join('\0')) {
+      fail('artifact_model_tree_invalid');
+    }
+    return;
+  }
+  if (Object.keys(artifact.model_policy).sort().join('\0') !== 'custom_code\0data_only' ||
+      files.length !== 1 || !files[0].path.endsWith('.safetensors') || files[0].executable) {
+    fail('artifact_model_tree_invalid');
+  }
   validateSafetensorsFile(join(root, files[0].path), { platformServices });
 }
 
@@ -882,14 +1006,17 @@ function activationPointerRecord(activation) {
 }
 
 function validateVerifiedRelease(release) {
-  if (!release || release.schema !== 'pulse.verified_release_manifest.v1' ||
+  if (!release || release.schema !== 'pulse.verified_release_manifest.v2' ||
       typeof release.manifest_digest !== 'string' || !SHA256.test(release.manifest_digest) ||
       typeof release.version !== 'string' || !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
       !release.artifacts || Array.isArray(release.artifacts) || typeof release.artifacts !== 'object') {
     fail('artifact_release_invalid');
   }
   const kinds = Object.keys(release.artifacts).sort();
-  if (kinds.length < 1 || kinds.length > 16) fail('artifact_release_invalid');
+  if (kinds.length < 1 || kinds.length > 16 || kinds.some((kind) => {
+    const artifact = release.artifacts[kind];
+    return !artifact || typeof artifact.tree_digest !== 'string' || !SHA256.test(artifact.tree_digest);
+  })) fail('artifact_release_invalid');
   return kinds;
 }
 
@@ -931,6 +1058,7 @@ export function readActivatedArtifactSet(release, { installRoot, platformService
     if (activation.version !== release.version || activation.epoch !== release.epoch) {
       fail('artifact_activation_set_identity_mismatch');
     }
+    if (activation.tree_digest !== artifact.tree_digest) fail('artifact_activation_set_identity_mismatch');
     activations[kind] = activation;
   }
   return Object.freeze({ activations: Object.freeze(activations), record: Object.freeze(record) });
@@ -975,6 +1103,7 @@ export function writeActivatedArtifactSet(release, { installRoot, platformServic
     if (activation.version !== release.version || activation.epoch !== release.epoch) {
       fail('artifact_activation_set_identity_mismatch');
     }
+    if (activation.tree_digest !== artifact.tree_digest) fail('artifact_activation_set_identity_mismatch');
     activations[kind] = activationPointerRecord(activation);
   }
   atomicJSON(join(resolve(installRoot), ACTIVE_SET_FILE), {
@@ -988,9 +1117,9 @@ export function writeActivatedArtifactSet(release, { installRoot, platformServic
 }
 
 function defaultMaterializerFor(artifact) {
+  if (artifact.format === 'tar.gz') return materializeVerifiedPortableArchive;
   if (artifact.kind === 'model') return materializeVerifiedModelFile;
   if (artifact.format === 'dmg') return materializeVerifiedDmg;
-  if (artifact.format === 'tar.gz') return materializeVerifiedTarGz;
   return materializeVerifiedTree;
 }
 
@@ -1002,7 +1131,7 @@ export async function activateArtifactVersion(artifact, stagedPath, {
   validateDescriptor(artifact);
   const selectedMaterializer = materialize ?? defaultMaterializerFor(artifact);
   if (typeof installRoot !== 'string' || typeof selectedMaterializer !== 'function') fail('artifact_activation_configuration_invalid');
-  if (![materializeVerifiedTree, materializeVerifiedModelFile, materializeVerifiedDmg, materializeVerifiedTarGz]
+  if (![materializeVerifiedTree, materializeVerifiedModelFile, materializeVerifiedDmg, materializeVerifiedPortableArchive]
     .includes(selectedMaterializer) && !testOnlyMaterializer) {
     fail('artifact_materializer_not_allowed');
   }
@@ -1023,6 +1152,7 @@ export async function activateArtifactVersion(artifact, stagedPath, {
     const expectedTreeDigest = treeManifest === undefined ? null : createHash('sha256').update(canonical(treeManifest)).digest('hex');
     if (current.sha256 === artifact.sha256 && current.version === artifact.version && current.epoch === artifact.epoch) {
       if (expectedTreeDigest !== null && current.tree_digest !== expectedTreeDigest) fail('artifact_activation_identity_mismatch');
+      if (artifact.tree_digest !== undefined && current.tree_digest !== artifact.tree_digest) fail('artifact_tree_digest_mismatch');
       return current;
     }
   }
@@ -1042,6 +1172,7 @@ export async function activateArtifactVersion(artifact, stagedPath, {
     try {
       const materialized = await selectedMaterializer(stagedPath, temporary, artifact, treeManifest, { platformServices });
       activationTree = materialized?.treeManifest ?? treeManifest;
+      assertArtifactTreeDigest(artifact, activationTree);
       validateArtifactTree(temporary, activationTree, { platformServices });
       validateDataOnlyModel(temporary, artifact, activationTree, platformServices);
       const metadata = installedMetadata(artifact, activationTree);
@@ -1055,6 +1186,7 @@ export async function activateArtifactVersion(artifact, stagedPath, {
   } else {
     const metadata = readInstalledMetadata(join(target, INSTALLED_METADATA), platformServices);
     activationTree = treeManifest ?? metadata.value.tree;
+    assertArtifactTreeDigest(artifact, activationTree);
     if (canonical(metadata.value) !== canonical(installedMetadata(artifact, activationTree))) fail('artifact_activation_identity_mismatch');
     validateArtifactTree(target, {
       ...activationTree,

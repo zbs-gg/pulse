@@ -19,6 +19,8 @@ const LEGACY_MANIFEST_SCHEMA = 'pulse.personal_preview.release_manifest.v1';
 const LEGACY_ENVELOPE_SCHEMA = 'pulse.release_envelope.v1';
 const CATALOG_SCHEMA = 'pulse.personal_preview.release_catalog.v2';
 const CATALOG_ENVELOPE_SCHEMA = 'pulse.release_catalog_envelope.v2';
+const VERIFIED_CATALOG_SCHEMA = 'pulse.verified_release_manifest.v2';
+const VERIFIED_LEGACY_SCHEMA = 'pulse.verified_release_manifest.v1';
 const AUTHORITY_SCHEMA = 'pulse.release_authority.v1';
 const AUTHORITY_ENVELOPE_SCHEMA = 'pulse.release_authority_envelope.v1';
 const EPOCH_SCHEMA = 'pulse.minimum_release_epoch.v1';
@@ -37,6 +39,17 @@ const FORMAT_BY_KIND = Object.freeze({
   'plugin-runtime': 'tar.gz',
   'presence-helper': 'dmg',
 });
+const PORTABLE_MODEL_REQUIRED_FILES = Object.freeze([
+  'LICENSES/BGE-M3-MIT.txt',
+  'PROVENANCE.json',
+  'model_int8.onnx',
+  'pulse-model-contract.json',
+  'support/config.json',
+  'support/special_tokens_map.json',
+  'support/tokenizer.json',
+  'support/tokenizer_config.json',
+]);
+const PORTABLE_MODEL_REVISION = '5617a9f61b028005a4858fdac845db406aefb181';
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -243,15 +256,21 @@ function validateAllowedOrigins(origins) {
 function validateCatalogArtifact(name, artifact, release, allowedOrigins, expected) {
   exactKeys(artifact, [
     'architecture', 'bytes', 'epoch', 'executable', 'format', 'id', 'kind', 'minimum_os', 'model_policy', 'origin',
-    'platform', 'sha256', 'signing', 'url', 'version',
+    'platform', 'sha256', 'signing', 'tree_digest', 'url', 'version',
   ], 'artifact_fields_invalid');
   if (artifact.kind !== name || typeof artifact.id !== 'string' || !SAFE_ID.test(artifact.id)) fail('artifact_identity_invalid');
-  const allowedFormats = name === 'model' ? ['safetensors'] : name === 'plugin-runtime' ? ['tar.gz'] :
-    expected.platform === 'darwin' ? ['dmg'] : ['tar.gz'];
+  const allowedFormats = ['tar.gz'];
   if (!allowedFormats.includes(artifact.format)) fail('artifact_format_invalid');
   if (name === 'model') {
-    exactKeys(artifact.model_policy, ['custom_code', 'data_only'], 'artifact_model_policy_invalid');
+    exactKeys(artifact.model_policy, [
+      'custom_code', 'data_only', 'engine', 'model', 'required_files', 'revision',
+    ], 'artifact_model_policy_invalid');
     if (artifact.model_policy.custom_code !== false || artifact.model_policy.data_only !== true) fail('artifact_model_policy_invalid');
+    if (artifact.model_policy.engine !== 'transformers-js-onnx' || artifact.model_policy.model !== 'BAAI/bge-m3' ||
+        artifact.model_policy.revision !== PORTABLE_MODEL_REVISION ||
+        canonicalReleaseJSON(artifact.model_policy.required_files) !== canonicalReleaseJSON(PORTABLE_MODEL_REQUIRED_FILES)) {
+      fail('artifact_model_policy_invalid');
+    }
   } else if (artifact.model_policy !== null) fail('artifact_model_policy_invalid');
   if (artifact.version !== release.version || artifact.epoch !== release.epoch) fail('artifact_version_incompatible');
   if (artifact.platform !== expected.platform) fail('artifact_platform_incompatible');
@@ -259,6 +278,7 @@ function validateCatalogArtifact(name, artifact, release, allowedOrigins, expect
   if (typeof artifact.minimum_os !== 'string' || !/^\d+\.\d+$/.test(artifact.minimum_os)) fail('artifact_minimum_os_invalid');
   if (!Number.isSafeInteger(artifact.bytes) || artifact.bytes < 1 || artifact.bytes > 64 * 1024 * 1024 * 1024) fail('artifact_size_invalid');
   if (typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256)) fail('artifact_digest_invalid');
+  if (typeof artifact.tree_digest !== 'string' || !SHA256.test(artifact.tree_digest)) fail('artifact_tree_digest_invalid');
   if (typeof artifact.origin !== 'string' || !allowedOrigins.has(artifact.origin)) fail('artifact_origin_not_allowed');
   let url;
   try { url = new URL(artifact.url); } catch { fail('artifact_url_invalid'); }
@@ -270,13 +290,54 @@ function validateCatalogArtifact(name, artifact, release, allowedOrigins, expect
   validateSigning(artifact.signing, executable, expected.platform);
 }
 
-function validateCatalogTarget(targetID, target, release, allowedOrigins) {
+// This profile is signed release-policy metadata. Platform attestation still
+// has to prove the declared policy against the extracted native files; merely
+// verifying this catalog never turns the declaration into runtime evidence.
+function validateVerificationProfile(profile, definition, artifacts, options) {
+  if (!profile || Array.isArray(profile) || typeof profile !== 'object') fail('release_verification_profile_invalid');
+  if (profile.kind === 'fixture') {
+    exactKeys(profile, ['fixture_id', 'kind', 'production'], 'release_verification_profile_invalid');
+    if (profile.production !== false || typeof profile.fixture_id !== 'string' || !SAFE_ID.test(profile.fixture_id)) {
+      fail('release_verification_profile_invalid');
+    }
+    if (options.allowFixtureVerification !== true) fail('release_fixture_verification_forbidden');
+    return;
+  }
+  if (profile.kind === 'apple') {
+    exactKeys(profile, ['gatekeeper', 'kind', 'notarized', 'stapled', 'team_id'], 'release_verification_profile_invalid');
+    if (definition.platform !== 'darwin' || profile.gatekeeper !== true || profile.notarized !== true || profile.stapled !== true ||
+        typeof profile.team_id !== 'string' || !TEAM_ID.test(profile.team_id) ||
+        Object.values(artifacts).filter((artifact) => artifact.executable).some((artifact) => artifact.signing.team_id !== profile.team_id)) {
+      fail('release_verification_profile_invalid');
+    }
+    return;
+  }
+  if (profile.kind === 'windows') {
+    exactKeys(profile, ['kind', 'publisher', 'timestamp_url', 'timestamped'], 'release_verification_profile_invalid');
+    let timestamp;
+    try { timestamp = new URL(profile.timestamp_url); } catch { fail('release_verification_profile_invalid'); }
+    if (definition.platform !== 'win32' || profile.timestamped !== true ||
+        typeof profile.publisher !== 'string' || !/^CN=[^,\r\n]{1,128}(?:, ?(?:O|OU|L|S|C)=[^,\r\n]{1,128})*$/.test(profile.publisher) ||
+        timestamp.protocol !== 'https:' || timestamp.username || timestamp.password || timestamp.search || timestamp.hash) {
+      fail('release_verification_profile_invalid');
+    }
+    return;
+  }
+  exactKeys(profile, ['kind', 'policy'], 'release_verification_profile_invalid');
+  if (profile.kind !== 'linux' || profile.policy !== 'signed-catalog-tree-v1' || definition.platform !== 'linux') {
+    fail('release_verification_profile_invalid');
+  }
+}
+
+function validateCatalogTarget(targetID, target, release, allowedOrigins, options) {
   let definition;
   try { definition = desktopTargetDefinition(targetID); } catch (error) {
     if (error instanceof DesktopTargetError) fail('release_target_catalog_invalid');
     throw error;
   }
-  exactKeys(target, ['architecture', 'artifacts', 'capabilities', 'libc', 'platform'], 'release_target_fields_invalid');
+  exactKeys(target, [
+    'architecture', 'artifacts', 'capabilities', 'libc', 'platform', 'verification_profile',
+  ], 'release_target_fields_invalid');
   if (target.platform !== definition.platform || target.architecture !== definition.architecture || target.libc !== definition.libc) {
     fail('release_target_identity_invalid');
   }
@@ -286,6 +347,7 @@ function validateCatalogTarget(targetID, target, release, allowedOrigins) {
   const expectedArtifacts = [...TARGET_ARTIFACTS, ...(target.capabilities.includes('presence-helper') ? OPTIONAL_ARTIFACTS : [])];
   exactKeys(target.artifacts, expectedArtifacts, 'release_target_capability_invalid');
   for (const name of expectedArtifacts) validateCatalogArtifact(name, target.artifacts[name], release, allowedOrigins, definition);
+  validateVerificationProfile(target.verification_profile, definition, target.artifacts, options);
 }
 
 function validateCatalogPayload(payload, options) {
@@ -300,7 +362,7 @@ function validateCatalogPayload(payload, options) {
   if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object' ||
       Object.keys(payload.targets).some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) fail('release_target_catalog_invalid');
   for (const [targetID, target] of Object.entries(payload.targets)) {
-    validateCatalogTarget(targetID, target, payload.release, allowedOrigins);
+    validateCatalogTarget(targetID, target, payload.release, allowedOrigins, options);
   }
   let selected;
   let target;
@@ -418,8 +480,9 @@ export function verifyReleaseManifestEnvelope(envelope, options = {}) {
       catalog_schema: CATALOG_SCHEMA,
       capabilities: [...validated.selected.capabilities],
       historical_only: false,
-      schema: 'pulse.verified_release_manifest.v1',
+      schema: VERIFIED_CATALOG_SCHEMA,
       target_id: validated.target.id,
+      verification_profile: JSON.parse(canonicalReleaseJSON(validated.selected.verification_profile)),
     };
   } else {
     exactKeys(envelope, ['payload', 'schema', 'signature'], 'envelope_fields_invalid');
@@ -437,8 +500,9 @@ export function verifyReleaseManifestEnvelope(envelope, options = {}) {
       catalog_schema: null,
       capabilities: ['presence-helper'],
       historical_only: true,
-      schema: 'pulse.verified_release_manifest.v1',
+      schema: VERIFIED_LEGACY_SCHEMA,
       target_id: 'darwin-arm64',
+      verification_profile: null,
     };
   }
   const minimum = options.minimumAcceptedEpoch ?? 0;

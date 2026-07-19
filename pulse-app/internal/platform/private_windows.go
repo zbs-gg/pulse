@@ -178,7 +178,7 @@ func openWindowsPath(path string, directory, write, exclusive bool, security *wi
 }
 
 func validateWindowsHandle(handle windows.Handle, path string, policy FilePolicy) (FileInfo, error) {
-	if policy.ExpectedUID != nil || policy.AllowRootOwner {
+	if policy.ExpectedUID != nil {
 		return FileInfo{}, ErrUnsupported
 	}
 	var raw windows.ByHandleFileInformation
@@ -205,7 +205,7 @@ func validateWindowsHandle(handle windows.Handle, path string, policy FilePolicy
 	if policy.Executable && !isWindowsExecutable(path) {
 		return FileInfo{}, fmt.Errorf("%w: file is not executable", ErrUnsafe)
 	}
-	if policy.RequireCurrentOwner || policy.OwnerOnly || policy.NoUntrustedWrite {
+	if policy.RequireCurrentOwner || policy.AllowRootOwner || policy.OwnerOnly || policy.NoUntrustedWrite {
 		if err := validateWindowsSecurity(handle, policy); err != nil {
 			return FileInfo{}, err
 		}
@@ -230,9 +230,6 @@ func validateWindowsSecurity(handle windows.Handle, policy FilePolicy) error {
 	if err != nil {
 		return err
 	}
-	if policy.RequireCurrentOwner && !owner.Equals(user) {
-		return fmt.Errorf("%w: owner mismatch", ErrUnsafe)
-	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil || dacl == nil {
 		return fmt.Errorf("%w: missing DACL", ErrUnsafe)
@@ -244,6 +241,14 @@ func validateWindowsSecurity(handle windows.Handle, policy FilePolicy) error {
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
+	}
+	currentOwner := owner.Equals(user)
+	rootOwner := owner.Equals(system) || owner.Equals(administrators)
+	if policy.RequireCurrentOwner && !currentOwner && !(policy.AllowRootOwner && rootOwner) {
+		return fmt.Errorf("%w: owner mismatch", ErrUnsafe)
+	}
+	if !policy.RequireCurrentOwner && policy.AllowRootOwner && !rootOwner {
+		return fmt.Errorf("%w: trusted OS owner required", ErrUnsafe)
 	}
 	writeMask := windows.ACCESS_MASK(windows.GENERIC_WRITE | windows.GENERIC_ALL | windows.DELETE |
 		windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
@@ -284,6 +289,14 @@ func validateWindowsPath(path string, policy FilePolicy) (FileInfo, error) {
 	}
 	defer windows.CloseHandle(handle)
 	return validateWindowsHandle(handle, path, policy)
+}
+
+// InspectWindowsPathIdentity returns an opaque volume/file identity after
+// rejecting reparse points and enforcing the requested path kind. It exists
+// for the pre-download npm bootstrap adapter; callers must not interpret the
+// token or use it as an authorization decision by itself.
+func InspectWindowsPathIdentity(path string, directory bool) (FileInfo, error) {
+	return validateWindowsPath(path, FilePolicy{Directory: directory})
 }
 
 func readPrivateFile(path string, policy FilePolicy) ([]byte, FileInfo, error) {

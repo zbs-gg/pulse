@@ -29,11 +29,21 @@ function tree(files) {
   };
 }
 
-function safetensors() {
-  const header = Buffer.from(JSON.stringify({ embedding: { dtype: 'F32', shape: [1], data_offsets: [0, 4] } }));
-  const prefix = Buffer.alloc(8);
-  prefix.writeBigUInt64LE(BigInt(header.length));
-  return Buffer.concat([prefix, header, Buffer.alloc(4)]);
+const PORTABLE_MODEL_REQUIRED_FILES = Object.freeze([
+  'LICENSES/BGE-M3-MIT.txt', 'PROVENANCE.json', 'model_int8.onnx', 'pulse-model-contract.json',
+  'support/config.json', 'support/special_tokens_map.json', 'support/tokenizer.json', 'support/tokenizer_config.json',
+]);
+
+function portableModelPolicy() {
+  return {
+    custom_code: false, data_only: true, engine: 'transformers-js-onnx', model: 'BAAI/bge-m3',
+    required_files: [...PORTABLE_MODEL_REQUIRED_FILES],
+    revision: '5617a9f61b028005a4858fdac845db406aefb181',
+  };
+}
+
+function treeDigest(value) {
+  return digest(Buffer.from(canonicalReleaseJSON(value)));
 }
 
 function fixture() {
@@ -46,12 +56,19 @@ function fixture() {
   const files = {
     daemon: [['bin/pulse', Buffer.from('#!/bin/sh\nexit 0\n'), 0o700]],
     'embedder-runtime': [
-      ['runtime/bin/python3.12', Buffer.from('#!/bin/sh\nexit 0\n'), 0o700],
-      ['helper.py', Buffer.from('helper\n'), 0o600],
-      ['support/config.json', Buffer.from('{}\n'), 0o600],
-      ['support/tokenizer.json', Buffer.from('{}\n'), 0o600],
+      ['bin/pulse-embedder', Buffer.from('#!/bin/sh\nexit 0\n'), 0o700],
+      ['runtime/package.json', Buffer.from('{}\n'), 0o600],
     ],
-    model: [['model.safetensors', safetensors(), 0o600]],
+    model: [
+      ['LICENSES/BGE-M3-MIT.txt', Buffer.from('MIT\n'), 0o600],
+      ['PROVENANCE.json', Buffer.from('{"source":"BAAI/bge-m3"}\n'), 0o600],
+      ['model_int8.onnx', Buffer.from('fixture-onnx\n'), 0o600],
+      ['pulse-model-contract.json', Buffer.from('{"schema":"pulse.portable_embedder.model.v1"}\n'), 0o600],
+      ['support/config.json', Buffer.from('{}\n'), 0o600],
+      ['support/special_tokens_map.json', Buffer.from('{}\n'), 0o600],
+      ['support/tokenizer.json', Buffer.from('{}\n'), 0o600],
+      ['support/tokenizer_config.json', Buffer.from('{}\n'), 0o600],
+    ],
     'plugin-runtime': [['runtime/index.js', Buffer.from('export {};\n'), 0o600]],
     'presence-helper': [['bin/gg.zbs.pulse.presence-helper', Buffer.from('#!/bin/sh\nexit 0\n'), 0o700]],
   };
@@ -59,16 +76,14 @@ function fixture() {
   const carriers = new Map();
   for (const kind of Object.keys(files)) {
     const executable = ['daemon', 'embedder-runtime', 'presence-helper'].includes(kind);
-    const format = executable ? 'dmg' : kind === 'model' ? 'safetensors' : 'tar.gz';
-    const carrier = kind === 'model'
-      ? files[kind][0][1]
-      : Buffer.from(`carrier:${kind}`);
+    const format = 'tar.gz';
+    const carrier = Buffer.from(`carrier:${kind}`);
     const url = `https://releases.zbs.gg/pulse/0.7.0/${kind}.${format}`;
     carriers.set(url, carrier);
     artifacts[kind] = {
       architecture: 'arm64', bytes: carrier.length, epoch: 7, executable, format,
       id: `pulse-${kind}`, kind, minimum_os: '13.0',
-      model_policy: kind === 'model' ? { custom_code: false, data_only: true } : null,
+      model_policy: kind === 'model' ? portableModelPolicy() : null,
       origin: 'https://releases.zbs.gg', platform: 'darwin', sha256: digest(carrier),
       signing: executable ? {
         gatekeeper: true, identifier: `gg.zbs.pulse.${kind}`, notarized: true,
@@ -77,7 +92,7 @@ function fixture() {
         gatekeeper: false, identifier: null, notarized: false,
         scheme: 'release-manifest', stapled: false, team_id: null,
       },
-      url, version: '0.7.0',
+      tree_digest: treeDigest(tree(files[kind])), url, version: '0.7.0',
     };
   }
   const payload = {
@@ -101,6 +116,9 @@ function fixture() {
           'presence-helper': artifacts['presence-helper'],
         },
         capabilities: ['presence-helper'], libc: null, platform: 'darwin',
+        verification_profile: {
+          gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5',
+        },
       },
     },
   };
@@ -146,8 +164,22 @@ function fixture() {
 }
 
 function legacyEnvelope(value) {
+  const artifacts = Object.fromEntries(Object.entries(value.artifacts).map(([kind, artifact]) => {
+    const { tree_digest: _treeDigest, ...legacy } = artifact;
+    if (kind !== 'model') {
+      return [kind, legacy.executable ? {
+        ...legacy, format: 'dmg', url: `https://releases.zbs.gg/pulse/0.7.0/${kind}.dmg`,
+      } : legacy];
+    }
+    const bytes = Buffer.from('\u0010\u0000\u0000\u0000\u0000\u0000\u0000\u0000{"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}\u0000');
+    return [kind, {
+      ...legacy, bytes: bytes.length, format: 'safetensors',
+      model_policy: { custom_code: false, data_only: true }, sha256: digest(bytes),
+      url: 'https://releases.zbs.gg/pulse/0.7.0/model.safetensors',
+    }];
+  }));
   const payload = {
-    allowed_origins: ['https://releases.zbs.gg'], artifacts: value.artifacts,
+    allowed_origins: ['https://releases.zbs.gg'], artifacts,
     release: {
       channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
       issued_at: '2026-07-15T00:00:00.000Z', key_id: value.keyID,
@@ -208,6 +240,8 @@ test('empty Personal install downloads the signed compatibility set and publishe
     assert.equal(requests.length, 5);
     assert.ok(privateDirectoryCalls > 0, 'selected platform services reach artifact activation and private journals');
     assert.equal(installed.release.manifest_digest.length, 64);
+    assert.equal(installed.release.schema, 'pulse.verified_release_manifest.v2');
+    assert.deepEqual(installed.release.artifacts.model.model_policy.required_files, PORTABLE_MODEL_REQUIRED_FILES);
     assert.deepEqual(Object.keys(installed.activationSet.activations).sort(), Object.keys(value.files).sort());
     assert.equal(JSON.parse(readFileSync(join(dataDir, 'runtime', 'install-journal.json'), 'utf8')).phase, 'activated');
 		assert.equal(existsSync(join(dataDir, 'runtime', 'minimum-release-epoch.json')), false,

@@ -100,6 +100,49 @@ async function activateManagedRuntimeFixtures(root) {
   };
 }
 
+async function activateWindowsManagedRuntimeFixtures(root) {
+  const installRoot = join(root, 'artifacts');
+  const daemon = Buffer.from('windows-daemon');
+  const runner = Buffer.from('windows-embedder');
+  const config = Buffer.from('{}\n');
+  const model = safetensorsFixture();
+  const fixtures = [
+    { descriptor: artifact('pulse-daemon', 'daemon', '1'.repeat(64)), files: [['bin/pulse.exe', daemon, 0o700]] },
+    { descriptor: artifact('pulse-embedder-runtime', 'embedder-runtime', '2'.repeat(64)), files: [['bin/pulse-embedder.exe', runner, 0o700]] },
+    {
+      descriptor: artifact('pulse-model', 'model-runtime', '3'.repeat(64)),
+      files: [
+        ['model_int8.onnx', model, 0o600], ['pulse-model-contract.json', config, 0o600],
+        ['support/config.json', config, 0o600], ['support/special_tokens_map.json', config, 0o600],
+        ['support/tokenizer.json', config, 0o600], ['support/tokenizer_config.json', config, 0o600],
+      ],
+    },
+  ];
+  for (const fixture of fixtures) {
+    await activateArtifactVersion(fixture.descriptor, join(root, 'unused'), {
+      installRoot,
+      treeManifest: { schema: 'pulse.artifact_tree.v1', files: fixture.files.map(([path, bytes, mode]) => treeEntry(path, bytes, mode)) },
+      testOnlyMaterializer: true,
+      materialize: async (_staged, target) => {
+        for (const [path, bytes, mode] of fixture.files) {
+          const destination = join(target, path);
+          mkdirSync(join(destination, '..'), { recursive: true, mode: 0o700 });
+          writeFileSync(destination, bytes, { mode });
+          chmodSync(destination, mode);
+        }
+      },
+    });
+  }
+  return {
+    installRoot,
+    verifiedActivations: {
+      daemon: readActivatedArtifact('pulse-daemon', { installRoot, expectedKind: 'daemon' }),
+      embedderRuntime: readActivatedArtifact('pulse-embedder-runtime', { installRoot, expectedKind: 'embedder-runtime' }),
+      model: readActivatedArtifact('pulse-model', { installRoot, expectedKind: 'model-runtime' }),
+    },
+  };
+}
+
 test('managed product runtime resolves three verified activations and atomically pins a private embedder config', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-managed-runtime.'));
   const runtime = vaultRuntimeFromBinding(binding('personal', root));
@@ -148,6 +191,21 @@ test('managed product runtime resolves three verified activations and atomically
   assert.equal(inspectManagedEmbedderConfig(runtime, managed.managed_embedder, {
     platformServices: caseInsensitivePlatformServices,
   }).config.runner_path, disk.runner_path);
+});
+
+test('managed product runtime selects pulse.exe for a Windows target', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-managed-runtime-windows.'));
+  try {
+    const runtime = vaultRuntimeFromBinding(binding('personal', root));
+    const { installRoot, verifiedActivations } = await activateWindowsManagedRuntimeFixtures(root);
+    const local = createPlatformServices();
+    const platformServices = { ...local, platform: 'win32' };
+    const managed = resolveManagedRuntime(runtime, { installRoot, verifiedActivations, platformServices });
+    assert.equal(managed.daemon.path.endsWith('/bin/pulse.exe'), true);
+    assert.equal(managed.managed_embedder.config.runner_path.endsWith('/bin/pulse-embedder.exe'), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('managed embedder v1 remains explicit legacy state and cannot satisfy portable readiness', () => {

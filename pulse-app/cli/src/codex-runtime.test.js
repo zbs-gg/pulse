@@ -20,7 +20,9 @@ import {
 	writeHostToolLease,
 } from './codex-runtime.js';
 import { readUnassignedInbox, unassignedInboxPath } from './unassigned-inbox.js';
-import { activateArtifactVersion, readActivatedArtifact, writeActivatedArtifactSet } from './artifact-installer.js';
+import {
+	activateArtifactVersion, canonicalArtifactJSON, readActivatedArtifact, writeActivatedArtifactSet,
+} from './artifact-installer.js';
 
 function artifactDescriptor(id, kind, sha256) {
 	return {
@@ -67,8 +69,10 @@ async function managedActivationFixture(dataDir) {
 		]],
 	];
 	for (const [descriptor, files] of fixtures) {
+		const manifest = artifactTree(files);
+		descriptor.tree_digest = createHash('sha256').update(canonicalArtifactJSON(manifest)).digest('hex');
 		await activateArtifactVersion(descriptor, join(dataDir, 'unused'), {
-			installRoot, treeManifest: artifactTree(files), testOnlyMaterializer: true,
+			installRoot, treeManifest: manifest, testOnlyMaterializer: true,
 			materialize: async (_source, target) => {
 				for (const [path, bytes, mode] of files) {
 					const destination = join(target, path);
@@ -80,7 +84,7 @@ async function managedActivationFixture(dataDir) {
 		});
 	}
 	const release = {
-		schema: 'pulse.verified_release_manifest.v1', manifest_digest: 'a'.repeat(64),
+		schema: 'pulse.verified_release_manifest.v2', manifest_digest: 'a'.repeat(64),
 		version: '0.8.0', epoch: 8,
 		artifacts: Object.fromEntries(fixtures.map(([descriptor]) => [descriptor.kind, descriptor])),
 	};

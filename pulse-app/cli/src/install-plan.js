@@ -120,11 +120,16 @@ export function detectInstallResources({ home = homedir(), platformServices = de
 
 function releaseStatus(release) {
   if (!release) return null;
-  if (release.schema !== 'pulse.verified_release_manifest.v1' ||
+  if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2'].includes(release.schema) ||
       typeof release.version !== 'string' || !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
       !/^[a-f0-9]{64}$/.test(release.manifest_digest ?? '') ||
       typeof release.target_id !== 'string' || typeof release.historical_only !== 'boolean' ||
       !Array.isArray(release.capabilities) || !release.artifacts || Array.isArray(release.artifacts)) {
+    throw new TypeError('install_plan_release_invalid');
+  }
+  if (release.schema === 'pulse.verified_release_manifest.v2' &&
+      (!release.verification_profile || Array.isArray(release.verification_profile) ||
+       typeof release.verification_profile !== 'object')) {
     throw new TypeError('install_plan_release_invalid');
   }
   const kinds = Object.keys(release.artifacts).sort();
@@ -158,6 +163,9 @@ function releaseStatus(release) {
     origins: [...new Set(artifacts.map((artifact) => artifact.origin))].sort(),
     total_download_bytes: artifacts.reduce((total, artifact) => total + artifact.bytes, 0),
     target_id: release.target_id,
+    verification_profile: release.verification_profile === undefined
+      ? null
+      : JSON.parse(JSON.stringify(release.verification_profile)),
     version: release.version,
   };
 }

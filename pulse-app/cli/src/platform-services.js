@@ -7,6 +7,8 @@ import {
 import { homedir, release as osReleaseDefault } from 'node:os';
 import path, { dirname, win32 } from 'node:path';
 
+import { loadBundledWindowsAdapter } from './windows-bootstrap-adapter.js';
+
 const SHA256 = /^[a-f0-9]{64}$/;
 const STARTUP_NONCE = /^[a-f0-9]{64}$/;
 const LOCK_SCHEMA = 'pulse.platform_lock.v1';
@@ -48,7 +50,16 @@ function nativeOperation(nativeAdapter, name) {
   if (typeof operation !== 'function') {
     fail('platform_native_adapter_unavailable', `native ${name} adapter is unavailable`);
   }
-  return operation.bind(nativeAdapter);
+  return (...args) => {
+    try { return operation.apply(nativeAdapter, args); } catch (error) {
+      if (error?.code === 'ENOENT') throw error;
+      if (error instanceof PlatformServicesError) throw error;
+      if (typeof error?.code === 'string' && error.code.startsWith('platform_')) {
+        fail(error.code, error.message);
+      }
+      fail('platform_native_adapter_failed', `native ${name} adapter failed`);
+    }
+  };
 }
 
 function canonicalVersion(value) {
@@ -115,6 +126,11 @@ export function createPlatformServices({
       typeof home !== 'string' || typeof spawn !== 'function' || typeof osRelease !== 'function' ||
       typeof nodeExecutable !== 'string' || typeof randomBytes !== 'function') {
     fail('platform_services_configuration_invalid');
+  }
+  if (platform === 'win32' && process.platform === 'win32' && nativeAdapter === undefined) {
+    try { nativeAdapter = loadBundledWindowsAdapter({ architecture }); } catch (error) {
+      fail(error?.code ?? 'platform_native_adapter_unavailable', error?.message);
+    }
   }
   const pathAPI = platform === 'win32' ? win32 : path;
 

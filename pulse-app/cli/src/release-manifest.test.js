@@ -127,16 +127,55 @@ function portableSigning() {
   };
 }
 
+const PORTABLE_MODEL_REQUIRED_FILES = Object.freeze([
+  'LICENSES/BGE-M3-MIT.txt',
+  'PROVENANCE.json',
+  'model_int8.onnx',
+  'pulse-model-contract.json',
+  'support/config.json',
+  'support/special_tokens_map.json',
+  'support/tokenizer.json',
+  'support/tokenizer_config.json',
+]);
+
+function portableModelPolicy() {
+  return {
+    custom_code: false,
+    data_only: true,
+    engine: 'transformers-js-onnx',
+    model: 'BAAI/bge-m3',
+    required_files: [...PORTABLE_MODEL_REQUIRED_FILES],
+    revision: '5617a9f61b028005a4858fdac845db406aefb181',
+  };
+}
+
+function verificationProfile(platform) {
+  if (platform === 'darwin') {
+    return { gatekeeper: true, kind: 'apple', notarized: true, stapled: true, team_id: '44N4NZ86S5' };
+  }
+  if (platform === 'win32') {
+    return {
+      kind: 'windows',
+      publisher: 'CN=ZBS GG Inc.',
+      timestamp_url: 'https://timestamp.digicert.com',
+      timestamped: true,
+    };
+  }
+  return { kind: 'linux', policy: 'signed-catalog-tree-v1' };
+}
+
 function targetArtifact(kind, targetID, overrides = {}) {
   const [platform, architecture, libc = null] = targetID.split('-');
   const darwinExecutable = platform === 'darwin' && ['daemon', 'embedder-runtime', 'presence-helper'].includes(kind);
   return artifact(kind, {
     architecture,
-    format: darwinExecutable ? 'dmg' : kind === 'model' ? 'safetensors' : 'tar.gz',
+    format: 'tar.gz',
     minimum_os: platform === 'darwin' ? '13.0' : '0.0',
+    model_policy: kind === 'model' ? portableModelPolicy() : null,
     platform,
     signing: darwinExecutable ? artifact(kind).signing : portableSigning(),
-    url: `https://releases.zbs.gg/pulse/0.8.0/${targetID}/${kind}.${darwinExecutable ? 'dmg' : kind === 'model' ? 'safetensors' : 'tar.gz'}`,
+    tree_digest: 'b'.repeat(64),
+    url: `https://releases.zbs.gg/pulse/0.8.0/${targetID}/${kind}.tar.gz`,
     ...overrides,
   });
 }
@@ -150,13 +189,24 @@ function catalogPayload(channelKeys, overrides = {}) {
       'embedder-runtime': targetArtifact('embedder-runtime', targetID),
       ...(capabilities.includes('presence-helper') ? { 'presence-helper': targetArtifact('presence-helper', targetID) } : {}),
     };
-    return [targetID, { architecture, artifacts, capabilities, libc, platform }];
+    return [targetID, {
+      architecture, artifacts, capabilities, libc, platform,
+      verification_profile: verificationProfile(platform),
+    }];
   }));
   return {
     allowed_origins: ['https://releases.zbs.gg'],
     common_artifacts: {
-      model: artifact('model', { architecture: 'all', minimum_os: '0.0', platform: 'all' }),
-      'plugin-runtime': artifact('plugin-runtime', { architecture: 'all', minimum_os: '0.0', platform: 'all' }),
+      model: targetArtifact('model', 'darwin-arm64', {
+        architecture: 'all', minimum_os: '0.0', platform: 'all',
+        signing: portableSigning(),
+        url: 'https://releases.zbs.gg/pulse/0.8.0/model.tar.gz',
+      }),
+      'plugin-runtime': targetArtifact('plugin-runtime', 'darwin-arm64', {
+        architecture: 'all', minimum_os: '0.0', platform: 'all',
+        signing: portableSigning(),
+        url: 'https://releases.zbs.gg/pulse/0.8.0/plugin-runtime.tar.gz',
+      }),
     },
     release: {
       channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
@@ -232,17 +282,67 @@ test('delegated catalog selects one exact target and preserves optional capabili
     const result = verifyReleaseManifestEnvelope(signed, verifyOptions(root, {
       architecture, libc, platform,
     }));
-    assert.equal(result.schema, 'pulse.verified_release_manifest.v1');
+    assert.equal(result.schema, 'pulse.verified_release_manifest.v2');
     assert.equal(result.catalog_schema, 'pulse.personal_preview.release_catalog.v2');
     assert.equal(result.target_id, targetID);
     assert.equal(result.historical_only, false);
     assert.equal(result.authority.root_key_id, root.keyID);
     assert.equal(result.authority.channel_key_id, channel.keyID);
+    assert.deepEqual(result.verification_profile, verificationProfile(platform));
+    assert.equal(result.artifacts.model.format, 'tar.gz');
+    assert.equal(result.artifacts.model.tree_digest, 'b'.repeat(64));
+    assert.deepEqual(result.artifacts.model.model_policy.required_files, PORTABLE_MODEL_REQUIRED_FILES);
     assert.deepEqual(result.capabilities, platform === 'darwin' ? ['presence-helper'] : []);
     assert.deepEqual(Object.keys(result.artifacts).sort(), platform === 'darwin'
       ? ['daemon', 'embedder-runtime', 'model', 'plugin-runtime', 'presence-helper']
       : ['daemon', 'embedder-runtime', 'model', 'plugin-runtime']);
   }
+});
+
+test('v2 catalog binds canonical trees and rejects mismatched platform verification profiles', () => {
+  const root = keyFixture();
+  const channel = keyFixture();
+
+  const missingTree = catalogPayload(channel);
+  delete missingTree.common_artifacts.model.tree_digest;
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, missingTree), verifyOptions(root)), 'artifact_fields_invalid');
+
+  const legacyModel = catalogPayload(channel);
+  legacyModel.common_artifacts.model.format = 'safetensors';
+  legacyModel.common_artifacts.model.url = 'https://releases.zbs.gg/pulse/0.8.0/model.safetensors';
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, legacyModel), verifyOptions(root)), 'artifact_format_invalid');
+
+  const wrongProfile = catalogPayload(channel);
+  wrongProfile.targets['win32-x64'].verification_profile = verificationProfile('linux');
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, wrongProfile), verifyOptions(root, {
+    architecture: 'x64', platform: 'win32',
+  })), 'release_verification_profile_invalid');
+
+  const wrongPublisher = catalogPayload(channel);
+  wrongPublisher.targets['win32-x64'].verification_profile.publisher = 'Unknown Publisher';
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, wrongPublisher), verifyOptions(root, {
+    architecture: 'x64', platform: 'win32',
+  })), 'release_verification_profile_invalid');
+
+  const missingTimestamp = catalogPayload(channel);
+  missingTimestamp.targets['win32-x64'].verification_profile.timestamped = false;
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, missingTimestamp), verifyOptions(root, {
+    architecture: 'x64', platform: 'win32',
+  })), 'release_verification_profile_invalid');
+});
+
+test('fixture verification profile is explicit and cannot satisfy production verification', () => {
+  const root = keyFixture();
+  const channel = keyFixture();
+  const fixtureCatalog = catalogPayload(channel);
+  fixtureCatalog.targets['linux-x64-gnu'].verification_profile = {
+    fixture_id: 'linux-x64-pr', kind: 'fixture', production: false,
+  };
+  const signed = catalogEnvelope(root, channel, fixtureCatalog);
+  const options = verifyOptions(root, { architecture: 'x64', libc: 'gnu', platform: 'linux' });
+  expectCode(() => verifyReleaseManifestEnvelope(signed, options), 'release_fixture_verification_forbidden');
+  const verified = verifyReleaseManifestEnvelope(signed, { ...options, allowFixtureVerification: true });
+  assert.equal(verified.verification_profile.kind, 'fixture');
 });
 
 test('missing current target and capability-artifact confusion fail closed', () => {
@@ -415,6 +515,9 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   assert.equal(schema.properties.schema.const, 'pulse.personal_preview.release_catalog.v2');
   assert.equal(schema.properties.common_artifacts.additionalProperties, false);
   assert.deepEqual(schema.properties.targets.propertyNames.enum, DESKTOP_TARGET_IDS);
+  assert.deepEqual(schema.$defs.artifact.required.includes('tree_digest'), true);
+  assert.deepEqual(schema.$defs.artifact.properties.format.enum, ['tar.gz']);
+  assert.equal(schema.$defs.target.required.includes('verification_profile'), true);
   const keys = pinnedReleaseKeyring();
   assert.equal(keys.length, 1);
   assert.match(keys[0].key_id, /^[a-f0-9]{64}$/);

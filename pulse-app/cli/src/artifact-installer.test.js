@@ -7,6 +7,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { pack } from 'tar-stream';
 
 import {
   activateArtifactVersion,
@@ -14,6 +16,7 @@ import {
   codesignIdentityMatches,
   downloadVerifiedArtifact,
   materializeVerifiedCarrierDirectory,
+  materializeVerifiedPortableArchive,
   materializeVerifiedTarGz,
   parseCodesignIdentity,
   readActivatedArtifact,
@@ -25,6 +28,47 @@ import {
 } from './artifact-installer.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+async function portableArchive(entries) {
+  const archive = pack();
+  const chunks = [];
+  const completed = new Promise((resolve, reject) => {
+    archive.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    archive.once('end', resolve);
+    archive.once('error', reject);
+  });
+  for (const entry of entries) {
+    const bytes = Buffer.from(entry.bytes ?? '');
+    archive.entry({
+      name: entry.path,
+      mode: entry.mode ?? 0o600,
+      type: entry.type ?? 'file',
+      ...(entry.linkname ? { linkname: entry.linkname } : {}),
+      ...(entry.pax ? { pax: entry.pax } : {}),
+    }, bytes);
+  }
+  archive.finalize();
+  await completed;
+  return gzipSync(Buffer.concat(chunks));
+}
+
+function portableArtifact(bytes, overrides = {}) {
+  return artifact(bytes, {
+    format: 'tar.gz',
+    url: 'https://releases.zbs.gg/pulse/0.8.0/daemon.tar.gz',
+    ...overrides,
+  });
+}
+
+function withSocketType(carrier) {
+  const tar = gunzipSync(carrier);
+  tar[156] = 's'.charCodeAt(0);
+  tar.fill(0x20, 148, 156);
+  const checksum = [...tar.subarray(0, 512)].reduce((total, byte) => total + byte, 0);
+  const field = Buffer.from(`${checksum.toString(8).padStart(6, '0')}\0 `);
+  field.copy(tar, 148);
+  return gzipSync(tar);
+}
 
 test('codesign identity parsing requires one exact identifier and team', () => {
   assert.deepEqual(parseCodesignIdentity([
@@ -388,9 +432,10 @@ test('committed set survives a partial pointer switch and reused carriers still 
     await activateArtifactVersion(first, source, {
       installRoot, materialize, testOnlyMaterializer: true, treeManifest: firstTree,
     });
+    const signedFirst = { ...first, tree_digest: digest(Buffer.from(canonicalArtifactJSON(firstTree))) };
     writeActivatedArtifactSet({
-      schema: 'pulse.verified_release_manifest.v1', manifest_digest: 'a'.repeat(64),
-      version: first.version, epoch: first.epoch, artifacts: { daemon: first },
+      schema: 'pulse.verified_release_manifest.v2', manifest_digest: 'a'.repeat(64),
+      version: first.version, epoch: first.epoch, artifacts: { daemon: signedFirst },
     }, { installRoot });
 
     writeFileSync(source, secondBytes, { mode: 0o600 });
@@ -448,25 +493,107 @@ test('carrier materializer copies only the canonical allowlisted tree with norma
 
 test('tar carrier aborts an oversized declared payload before extracting to disk', async () => {
   const root = sandbox();
-  const source = join(root, 'source');
   const target = join(root, 'target');
-  const carrier = join(root, 'plugin.tar.gz');
-  const declared = Buffer.from('x');
-  const actual = Buffer.alloc(2 * 1024 * 1024, 7);
   try {
-    mkdirSync(source, { mode: 0o700 });
     mkdirSync(target, { mode: 0o700 });
-    writeFileSync(join(source, 'runtime.js'), actual, { mode: 0o600 });
-    writeFileSync(join(source, 'pulse-artifact-tree.json'), `${canonicalArtifactJSON(treeManifest([
-      { path: 'runtime.js', bytes: declared, mode: 0o600, executable: false },
-    ]))}\n`, { mode: 0o600 });
-    execFileSync('/usr/bin/tar', ['-czf', carrier, '-C', source, 'pulse-artifact-tree.json', 'runtime.js']);
-    const carrierBytes = readFileSync(carrier);
-    await assert.rejects(materializeVerifiedTarGz(carrier, target, {
-      id: 'pulse-plugin-runtime', kind: 'plugin-runtime', version: '0.8.0', epoch: 8,
-      bytes: carrierBytes.length, sha256: digest(carrierBytes), format: 'tar.gz',
-      origin: 'https://releases.zbs.gg', url: 'https://releases.zbs.gg/pulse/0.8.0/plugin.tar.gz',
-    }), /artifact_archive_too_large/);
+    const manifest = { schema: 'pulse.artifact_tree.v1', files: [{
+      path: 'runtime.js', bytes: 4 * 1024 * 1024 * 1024 + 1, mode: 0o600,
+      executable: false, sha256: '0'.repeat(64),
+    }] };
+    const carrierBytes = await portableArchive([{
+      path: 'pulse-artifact-tree.json', bytes: `${canonicalArtifactJSON(manifest)}\n`,
+    }]);
+    const carrier = join(root, 'plugin.tar.gz');
+    writeFileSync(carrier, carrierBytes, { mode: 0o600 });
+    await assert.rejects(materializeVerifiedPortableArchive(carrier, target, portableArtifact(carrierBytes)),
+      /artifact_archive_too_large/);
     assert.deepEqual(readdirSync(target), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('portable archive streams the exact canonical tree without system extraction', async () => {
+  const root = sandbox();
+  const carrier = join(root, 'runtime.tar.gz');
+  const target = join(root, 'target');
+  const payload = Buffer.from('portable-runtime');
+  const manifest = treeManifest([{ path: 'bin/pulse', bytes: payload, mode: 0o700, executable: true }]);
+  const manifestBytes = `${canonicalArtifactJSON(manifest)}\n`;
+  const carrierBytes = await portableArchive([
+    { path: 'bin/', type: 'directory' },
+    { path: 'pulse-artifact-tree.json', bytes: manifestBytes },
+    { path: 'bin/pulse', bytes: payload, mode: 0o777 },
+  ]);
+  try {
+    mkdirSync(target, { mode: 0o700 });
+    writeFileSync(carrier, carrierBytes, { mode: 0o600 });
+    const result = await materializeVerifiedPortableArchive(carrier, target, portableArtifact(carrierBytes, {
+      tree_digest: digest(Buffer.from(canonicalArtifactJSON(manifest))),
+    }));
+    assert.deepEqual(result.treeManifest, manifest);
+    assert.deepEqual(readFileSync(join(target, 'bin', 'pulse')), payload);
+    assert.equal(lstatSync(join(target, 'bin', 'pulse')).mode & 0o777, 0o700);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('portable archive rejects paths, duplicates, links, special entries, and PAX path overrides', async () => {
+  const root = sandbox();
+  const target = join(root, 'target');
+  const manifest = treeManifest([{ path: 'payload', bytes: Buffer.from('ok'), mode: 0o600 }]);
+  const manifestEntry = { path: 'pulse-artifact-tree.json', bytes: `${canonicalArtifactJSON(manifest)}\n` };
+  const cases = [
+    ['absolute', [{ path: '/payload', bytes: 'ok' }], /artifact_archive_path_invalid/],
+    ['drive-absolute', [{ path: 'C:/payload', bytes: 'ok' }], /artifact_archive_path_invalid/],
+    ['dot', [{ path: './payload', bytes: 'ok' }], /artifact_archive_path_invalid/],
+    ['traversal', [{ path: '../payload', bytes: 'ok' }], /artifact_archive_path_invalid/],
+    ['duplicate', [manifestEntry, { path: 'payload', bytes: 'ok' }, { path: 'payload', bytes: 'ok' }], /artifact_archive_path_invalid/],
+    ['pax', [manifestEntry, { path: 'ignored', pax: { path: 'payload' }, bytes: 'ok' }], /artifact_archive_path_override/],
+    ['undeclared', [manifestEntry, { path: 'payload', bytes: 'ok' }, { path: 'extra', bytes: 'x' }], /artifact_carrier_unexpected/],
+    ['tampered', [manifestEntry, { path: 'payload', bytes: 'no' }], /artifact_carrier_digest_mismatch/],
+  ];
+  for (const [name, entries, expected] of cases) {
+    const bytes = await portableArchive(entries);
+    const carrier = join(root, `${name}.tar.gz`);
+    writeFileSync(carrier, bytes, { mode: 0o600 });
+    await assert.rejects(materializeVerifiedPortableArchive(carrier, target, portableArtifact(bytes)), expected, name);
+    assert.equal(existsSync(target), false, `${name} must not mutate target`);
+  }
+  for (const type of ['link', 'symlink', 'block-device', 'character-device', 'fifo', 'contiguous-file']) {
+    const bytes = await portableArchive([{ path: 'unsafe', type, linkname: type.includes('link') ? 'payload' : undefined }]);
+    const carrier = join(root, `${type}.tar.gz`);
+    writeFileSync(carrier, bytes, { mode: 0o600 });
+    await assert.rejects(materializeVerifiedPortableArchive(carrier, target, portableArtifact(bytes)),
+      /artifact_archive_entry_invalid/, type);
+  }
+  const ordinary = await portableArchive([{ path: 'unsafe', bytes: '' }]);
+  const socket = withSocketType(ordinary);
+  const socketCarrier = join(root, 'socket.tar.gz');
+  writeFileSync(socketCarrier, socket, { mode: 0o600 });
+  await assert.rejects(materializeVerifiedPortableArchive(socketCarrier, target, portableArtifact(socket)),
+    /artifact_archive_entry_invalid/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('portable archive rejects file-count, depth, and signed tree-digest confusion before writing', async () => {
+  const root = sandbox();
+  const target = join(root, 'target');
+  try {
+    const cases = [
+      ['count', treeManifest(Array.from({ length: 4097 }, (_, index) => ({
+        path: `f${index}`, bytes: Buffer.alloc(0), mode: 0o600,
+      }))), /artifact_tree_too_many_files/, {}],
+      ['depth', treeManifest([{ path: `${Array.from({ length: 34 }, () => 'd').join('/')}/f`,
+        bytes: Buffer.alloc(0), mode: 0o600 }]), /artifact_tree_too_deep/, {}],
+      ['digest', treeManifest([{ path: 'payload', bytes: Buffer.from('ok'), mode: 0o600 }]),
+        /artifact_tree_digest_mismatch/, { tree_digest: 'f'.repeat(64) }],
+    ];
+    for (const [name, manifest, expected, overrides] of cases) {
+      const bytes = await portableArchive([{
+        path: 'pulse-artifact-tree.json', bytes: `${canonicalArtifactJSON(manifest)}\n`,
+      }]);
+      const carrier = join(root, `${name}.tar.gz`);
+      writeFileSync(carrier, bytes, { mode: 0o600 });
+      await assert.rejects(materializeVerifiedPortableArchive(carrier, target, portableArtifact(bytes, overrides)), expected, name);
+      assert.equal(existsSync(target), false, `${name} must not mutate target`);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

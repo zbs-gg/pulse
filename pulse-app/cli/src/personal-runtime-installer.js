@@ -72,16 +72,6 @@ function previousActivationDigest(path) {
   } catch { return null; }
 }
 
-function modelTree(artifact) {
-  return {
-    schema: 'pulse.artifact_tree.v1',
-    files: [{
-      path: 'model.safetensors', bytes: artifact.bytes, sha256: artifact.sha256,
-      mode: 0o600, executable: false,
-    }],
-  };
-}
-
 function loadReleaseTestMaterializers(path) {
   if (!isAbsolute(path)) fail('release_test_materializer_spec_invalid');
   let bytes;
@@ -243,7 +233,6 @@ export async function provisionPersonalRuntime({
       const fixture = materializers?.[kind];
       const options = {
         installRoot, platformServices,
-        ...(kind === 'model' ? { treeManifest: fixture?.treeManifest ?? modelTree(artifact) } : {}),
         ...(fixture ? {
           materialize: fixture.materialize,
           testOnlyMaterializer: true,

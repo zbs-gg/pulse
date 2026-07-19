@@ -249,7 +249,8 @@ export function resolveManagedRuntime(runtime, {
       'managed product runtime requires one verified signed compatibility set',
     );
   }
-  const daemonPath = activatedFile(daemonActivation, 'bin/pulse', platformServices, { executable: true });
+  const daemonRelativePath = platformServices.platform === 'win32' ? 'bin/pulse.exe' : 'bin/pulse';
+  const daemonPath = activatedFile(daemonActivation, daemonRelativePath, platformServices, { executable: true });
   const modelRoot = activatedDirectory(modelActivation, '.', platformServices);
   const supportRoot = activatedDirectory(modelActivation, 'support', platformServices);
   activatedFile(modelActivation, 'model_int8.onnx', platformServices);

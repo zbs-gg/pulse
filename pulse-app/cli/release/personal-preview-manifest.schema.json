@@ -52,7 +52,7 @@
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["architecture", "artifacts", "capabilities", "libc", "platform"],
+      "required": ["architecture", "artifacts", "capabilities", "libc", "platform", "verification_profile"],
       "properties": {
         "architecture": { "enum": ["arm64", "x64"] },
         "artifacts": {
@@ -72,7 +72,8 @@
           "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" }
         },
         "libc": { "enum": ["gnu", null] },
-        "platform": { "enum": ["darwin", "linux", "win32"] }
+        "platform": { "enum": ["darwin", "linux", "win32"] },
+        "verification_profile": { "$ref": "#/$defs/verification_profile" }
       }
     },
     "artifact": {
@@ -80,14 +81,14 @@
       "additionalProperties": false,
       "required": [
         "architecture", "bytes", "epoch", "executable", "format", "id", "kind", "minimum_os",
-        "model_policy", "origin", "platform", "sha256", "signing", "url", "version"
+        "model_policy", "origin", "platform", "sha256", "signing", "tree_digest", "url", "version"
       ],
       "properties": {
         "architecture": { "enum": ["all", "arm64", "x64"] },
         "bytes": { "type": "integer", "minimum": 1, "maximum": 68719476736 },
         "epoch": { "type": "integer", "minimum": 1 },
         "executable": { "type": "boolean" },
-        "format": { "enum": ["dmg", "safetensors", "tar.gz"] },
+        "format": { "enum": ["tar.gz"] },
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
         "kind": { "enum": ["daemon", "embedder-runtime", "model", "plugin-runtime", "presence-helper"] },
         "minimum_os": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
@@ -97,14 +98,33 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["custom_code", "data_only"],
-              "properties": { "custom_code": { "const": false }, "data_only": { "const": true } }
+              "required": ["custom_code", "data_only", "engine", "model", "required_files", "revision"],
+              "properties": {
+                "custom_code": { "const": false },
+                "data_only": { "const": true },
+                "engine": { "const": "transformers-js-onnx" },
+                "model": { "const": "BAAI/bge-m3" },
+                "required_files": {
+                  "const": [
+                    "LICENSES/BGE-M3-MIT.txt",
+                    "PROVENANCE.json",
+                    "model_int8.onnx",
+                    "pulse-model-contract.json",
+                    "support/config.json",
+                    "support/special_tokens_map.json",
+                    "support/tokenizer.json",
+                    "support/tokenizer_config.json"
+                  ]
+                },
+                "revision": { "const": "5617a9f61b028005a4858fdac845db406aefb181" }
+              }
             }
           ]
         },
         "origin": { "type": "string", "format": "uri", "pattern": "^https://" },
         "platform": { "enum": ["all", "darwin", "linux", "win32"] },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "tree_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "signing": {
           "type": "object",
           "additionalProperties": false,
@@ -121,6 +141,52 @@
         "url": { "type": "string", "format": "uri", "pattern": "^https://" },
         "version": { "type": "string" }
       }
+    },
+    "verification_profile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fixture_id", "kind", "production"],
+          "properties": {
+            "fixture_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+            "kind": { "const": "fixture" },
+            "production": { "const": false }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gatekeeper", "kind", "notarized", "stapled", "team_id"],
+          "properties": {
+            "gatekeeper": { "const": true },
+            "kind": { "const": "apple" },
+            "notarized": { "const": true },
+            "stapled": { "const": true },
+            "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "publisher", "timestamp_url", "timestamped"],
+          "properties": {
+            "kind": { "const": "windows" },
+            "publisher": { "type": "string", "pattern": "^CN=[^,\\r\\n]{1,128}(, ?(O|OU|L|S|C)=[^,\\r\\n]{1,128})*$" },
+            "timestamp_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "timestamped": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "policy"],
+          "properties": {
+            "kind": { "const": "linux" },
+            "policy": { "const": "signed-catalog-tree-v1" }
+          }
+        }
+      ]
     }
   }
 }
