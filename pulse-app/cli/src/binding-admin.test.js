@@ -237,7 +237,7 @@ test('a bad presence signature is rejected before rename and preserves the trust
   assert.equal(resolved.mode, 'personal');
 });
 
-test('parallel onboarding is serialized by lockf without a lost registry update', async () => {
+test('parallel onboarding is serialized by the portable private lock without a lost registry update', async () => {
   const setup = fixture();
   const firstRepository = makeRepository(setup.home, 'first-project');
   const secondRepository = makeRepository(setup.home, 'second-project');

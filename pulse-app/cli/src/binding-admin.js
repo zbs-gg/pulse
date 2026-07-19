@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, renameSync, rmSync,
@@ -15,12 +15,14 @@ import {
   verifyBindingRegistryAnchor,
   verifyBindingRegistry,
 } from './workspace-binding.js';
+import { createPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const HELPER_PATH = '/Library/PrivilegedHelperTools/gg.zbs.pulse.presence-helper';
 const ROOT_ANCHOR_PATH = '/Library/Application Support/Pulse/trust/workspace-bindings.anchor.json';
 const SAFE_VAULT_ID = /^[a-z][a-z0-9_]{2,127}$/;
 const SAFE_PROJECT_ID = /^project_[a-z0-9][a-z0-9_]{0,119}$/;
 const TRANSACTION_SCHEMA = 'pulse.workspace-binding-transaction.v1';
+const defaultPlatformServices = createPlatformServices();
 
 function fail(code) {
   throw new Error(`binding_admin_${code}`);
@@ -315,59 +317,30 @@ export function removeRootBindingAnchor({ anchorPath = ROOT_ANCHOR_PATH } = {}) 
 }
 
 async function withRegistryLock(registryPath, action, {
-  lockfPath = '/usr/bin/lockf',
+  platformServices = defaultPlatformServices,
   timeoutSeconds = 30,
 } = {}) {
   if (typeof action !== 'function' || !Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 ||
-      timeoutSeconds > 300) fail('request_invalid');
-  const directory = dirname(registryPath);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
+      timeoutSeconds > 300 || typeof platformServices?.acquirePrivateLock !== 'function') fail('request_invalid');
   const lockPath = `${registryPath}.lock`;
-  closeSync(openSync(lockPath, 'a', 0o600));
-  chmodSync(lockPath, 0o600);
-
-  const holder = spawn(lockfPath, [
-    '-k', '-s', '-t', String(timeoutSeconds), lockPath,
-    '/bin/sh', '-c', 'printf "pulse-binding-lock-ready\\n"; /bin/cat >/dev/null',
-  ], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  holder.stdin.on('error', () => {});
-  holder.stderr.resume();
-  await new Promise((resolveReady, rejectReady) => {
-    let stdout = '';
-    let ready = false;
-    const reject = () => {
-      if (ready) return;
-      ready = true;
-      rejectReady(new Error('binding_admin_registry_lock_unavailable'));
-    };
-    holder.once('error', reject);
-    holder.once('exit', reject);
-    holder.stdout.setEncoding('utf8');
-    holder.stdout.on('data', (chunk) => {
-      if (ready) return;
-      stdout += chunk;
-      if (stdout.length > 128) {
-        holder.kill('SIGTERM');
-        reject();
-        return;
-      }
-      if (stdout.includes('pulse-binding-lock-ready\n')) {
-        ready = true;
-        resolveReady();
-      }
-    });
-  });
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let release;
+  while (!release) {
+    try {
+      release = platformServices.acquirePrivateLock(lockPath, { staleAfterMs: 0, timeoutMs: 0 });
+    } catch (error) {
+      if (!(error instanceof PlatformServicesError) || error.code !== 'platform_lock_occupied' ||
+          Date.now() >= deadline) fail('registry_lock_unavailable');
+      // Yield so a concurrent transaction in this process can finish its
+      // durable anchor write and release the same portable lock.
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
 
   try {
     return await action();
   } finally {
-    holder.stdin.end();
-    await new Promise((resolveExit) => {
-      if (holder.exitCode !== null || holder.signalCode !== null) resolveExit();
-      else holder.once('exit', resolveExit);
-    });
+    release();
   }
 }
 
@@ -432,7 +405,7 @@ export async function recoverWorkspaceBindingTransaction({
   anchorPath = defaultBindingPaths(home).anchorPath,
   rootPublicKey = true,
   rootAnchor = true,
-  lockfPath = '/usr/bin/lockf',
+  platformServices = defaultPlatformServices,
   lockTimeoutSeconds = 30,
 } = {}) {
   if (!isAbsolute(home) || typeof rootPublicKey !== 'boolean' || typeof rootAnchor !== 'boolean') {
@@ -441,7 +414,7 @@ export async function recoverWorkspaceBindingTransaction({
   secureTrustFile(publicKeyPath, { root: rootPublicKey });
   return withRegistryLock(registryPath, () => recoverBindingTransactionLocked({
     registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor,
-  }), { lockfPath, timeoutSeconds: lockTimeoutSeconds });
+  }), { platformServices, timeoutSeconds: lockTimeoutSeconds });
 }
 
 export async function createWorkspaceBinding({
@@ -462,7 +435,7 @@ export async function createWorkspaceBinding({
   anchorRemover = removeRootBindingAnchor,
   rootPublicKey = true,
   rootAnchor = true,
-  lockfPath = '/usr/bin/lockf',
+  platformServices = defaultPlatformServices,
   lockTimeoutSeconds = 30,
   onTransitionPhase = () => {},
 } = {}) {
@@ -583,5 +556,5 @@ export async function createWorkspaceBinding({
     const result = verified.bindings.find((binding) => binding.binding_id === replacement.binding_id);
     if (!result) fail('write_verification_failed');
     return result;
-  }, { lockfPath, timeoutSeconds: lockTimeoutSeconds });
+  }, { platformServices, timeoutSeconds: lockTimeoutSeconds });
 }
