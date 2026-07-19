@@ -503,6 +503,12 @@ test('supervisor delegates process control and can bind readiness to a startup n
     assert.equal(started.status, 'running');
     assert.equal(JSON.parse(readFileSync(runtime.pid_file, 'utf8')).startup_nonce, 'd'.repeat(64));
     assert.equal(inspectVaultRuntime(runtime, { platformServices }).status, 'running');
+    const nativeWindowsProofServices = {
+      ...platformServices,
+      platform: 'win32',
+      readIntegrityFile() { throw new Error('native executable proof must not reread the whole binary'); },
+    };
+    assert.equal(inspectVaultRuntime(runtime, { platformServices: nativeWindowsProofServices }).status, 'running');
     assert.equal((await stopVaultRuntimeAndWait(runtime, { platformServices })).status, 'stopped');
     assert.ok(calls.inspect > 0);
     assert.ok(calls.terminate > 0);

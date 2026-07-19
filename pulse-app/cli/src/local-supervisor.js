@@ -347,22 +347,27 @@ export function resolveManagedRuntime(runtime, {
   };
 }
 
-function trustedExecutable(path, platformServices) {
+function trustedExecutableProof(path, platformServices) {
   let proof;
   try {
     proof = platformServices.inspectExecutable(resolve(path));
     if (!proof) throw new Error('missing executable proof');
-    platformServices.readIntegrityFile(proof.canonical_path, { owner: 'root-or-current', maxBytes: 64 * 1024 * 1024 });
+    // The Windows adapter opens the executable through the native platform
+    // API and returns the digest from that same owner/reparse-safe proof. Do
+    // not immediately read the whole binary twice more on every host hook.
+    if (platformServices.platform === 'win32') {
+      if (!/^[a-f0-9]{64}$/.test(proof.sha256 ?? '')) throw new Error('missing executable digest');
+      return { path: proof.canonical_path, digest: proof.sha256 };
+    }
+    const bytes = platformServices.readIntegrityFile(proof.canonical_path, {
+      owner: 'root-or-current', maxBytes: 64 * 1024 * 1024,
+    });
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    if (proof.sha256 !== digest) throw new Error('executable changed during verification');
+    return { path: proof.canonical_path, digest };
   } catch {
     throw new SupervisorError('vault_binary_unsafe', 'vault daemon must be an owner/root-controlled executable');
   }
-  return proof.canonical_path;
-}
-
-function executableDigest(path, platformServices) {
-  return createHash('sha256').update(platformServices.readIntegrityFile(path, {
-    owner: 'root-or-current', maxBytes: 64 * 1024 * 1024,
-  })).digest('hex');
 }
 
 function readRuntimeReceipt(path, platformServices) {
@@ -403,8 +408,8 @@ function receiptMetadataMatches(runtime, receipt, platformServices) {
     return false;
   }
   try {
-    if (trustedExecutable(receipt.executable, platformServices) !== receipt.executable ||
-        executableDigest(receipt.executable, platformServices) !== receipt.executable_digest) return false;
+    const executable = trustedExecutableProof(receipt.executable, platformServices);
+    if (executable.path !== receipt.executable || executable.digest !== receipt.executable_digest) return false;
     const managed = managedEmbedderFromReceipt(receipt);
     if (managed === null) return false;
     if (managed) inspectManagedEmbedderConfig(runtime, managed, { platformServices });
@@ -589,8 +594,9 @@ export async function startVaultRuntime(runtime, {
   daemonPath, managedEmbedder, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
   platformServices = defaultPlatformServices, requireStartupNonce = true,
 } = {}) {
-  const executable = trustedExecutable(daemonPath, platformServices);
-  const desiredDigest = executableDigest(executable, platformServices);
+  const executableProof = trustedExecutableProof(daemonPath, platformServices);
+  const executable = executableProof.path;
+  const desiredDigest = executableProof.digest;
   const desiredManaged = managedEmbedder
     ? inspectManagedEmbedderConfig(runtime, managedEmbedder, { platformServices }) : undefined;
   if (typeof requireStartupNonce !== 'boolean') {

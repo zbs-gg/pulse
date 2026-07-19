@@ -129,7 +129,7 @@ export function readProductActivationBundle(
 	if (daemonProof.sha256 !== activation.daemon_digest) {
 		throw new Error('product_activation_daemon_digest_mismatch');
 	}
-	if (!verifyArtifacts) return { activation };
+	if (!verifyArtifacts) return { activation, daemonProof };
 	const installRoot = join(resolve(dataDir), 'artifacts');
 	const committedSet = readCommittedArtifactSet({ installRoot });
 	const committed = committedSet.activations;
@@ -171,6 +171,7 @@ export function readProductActivationBundle(
 		activation,
 		activations: { daemon, embedderRuntime, model, pluginRuntime, presenceHelper },
 		committedSet,
+		daemonProof,
 	};
 }
 
@@ -228,18 +229,16 @@ function managedRuntimeForActivation(runtime, bundle, {
 	return managed;
 }
 
-function runtimeMatchesActivation(status, activation, managedEmbedder, platformServices = defaultPlatformServices) {
+function runtimeMatchesActivation(
+	status, activation, daemonProof, managedEmbedder, platformServices = defaultPlatformServices,
+) {
 	const managedIdentityMatches = status.managed_embedder?.config_path ===
 		join(status.runtime.data_dir, 'runtime', 'managed-embedder.json') &&
 		status.managed_embedder?.embedder_runtime_activation_digest === activation.embedder_runtime_activation_digest &&
 		status.managed_embedder?.embedder_runtime_tree_digest === activation.embedder_runtime_tree_digest &&
 		status.managed_embedder?.model_activation_digest === activation.model_activation_digest &&
 		status.managed_embedder?.model_tree_digest === activation.model_tree_digest;
-	return status.status === 'running' && samePlatformPath(
-		inspectPrivateExecutable(status.executable, 'product_running_daemon', platformServices).canonical_path,
-		inspectPrivateExecutable(activation.daemon_path, 'product_daemon', platformServices).canonical_path,
-		platformServices,
-	) &&
+	return status.status === 'running' && samePlatformPath(status.executable, daemonProof.canonical_path, platformServices) &&
 			status.executable_digest === activation.daemon_digest &&
 			managedIdentityMatches && (!managedEmbedder || (
 				status.managed_embedder.config_path === managedEmbedder.config_path &&
@@ -250,10 +249,10 @@ function runtimeMatchesActivation(status, activation, managedEmbedder, platformS
 export async function ensureActivatedVaultRuntime(resolved, { platformServices = defaultPlatformServices } = {}) {
 	let bundle = readProductActivationBundle(undefined, { verifyArtifacts: false, platformServices });
 	let { activation } = bundle;
-	let status = inspectVaultRuntime(resolved.runtime);
-	if (runtimeMatchesActivation(status, activation, undefined, platformServices)) {
+	let status = inspectVaultRuntime(resolved.runtime, { platformServices });
+	if (runtimeMatchesActivation(status, activation, bundle.daemonProof, undefined, platformServices)) {
 		try {
-			await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
+			await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false, platformServices });
 			return activation;
 		} catch (error) {
 			if (!(error instanceof SupervisorError) || error.code !== 'vault_full_retrieval_unavailable') throw error;
@@ -269,19 +268,23 @@ export async function ensureActivatedVaultRuntime(resolved, { platformServices =
 		bundle = readProductActivationBundle(undefined, { platformServices });
 		activation = bundle.activation;
 		let managedRuntime = managedRuntimeForActivation(resolved.runtime, bundle, { platformServices });
-		status = inspectVaultRuntime(resolved.runtime);
-		if (runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder, platformServices)) {
+		status = inspectVaultRuntime(resolved.runtime, { platformServices });
+		if (runtimeMatchesActivation(
+			status, activation, bundle.daemonProof, managedRuntime.managed_embedder, platformServices,
+		)) {
 			try {
-				await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false });
+				await assertVaultRuntimeHealthy(resolved.runtime, { status, fullRetrievalSmoke: false, platformServices });
 				return activation;
 			} catch (error) {
 				if (!(error instanceof SupervisorError) || error.code !== 'vault_full_retrieval_unavailable') throw error;
 				await stopVaultRuntimeAndWait(resolved.runtime);
-				status = inspectVaultRuntime(resolved.runtime);
+		status = inspectVaultRuntime(resolved.runtime, { platformServices });
 			}
 		}
 		let started = false;
-		if (!runtimeMatchesActivation(status, activation, managedRuntime.managed_embedder, platformServices)) {
+		if (!runtimeMatchesActivation(
+			status, activation, bundle.daemonProof, managedRuntime.managed_embedder, platformServices,
+		)) {
 			if (!['running', 'stopped', 'crashed'].includes(status.status)) {
 				throw new Error(`product_vault_${status.status}`);
 			}
