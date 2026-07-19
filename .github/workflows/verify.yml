@@ -94,7 +94,11 @@ jobs:
       - name: Build native Go product
         working-directory: pulse-app
         shell: bash
-        run: go build ./cmd/pulse ./cmd/pulse-fixture-embedder ./cmd/pulse-platform-adapter
+        run: |
+          go build ./cmd/pulse ./cmd/pulse-fixture-embedder
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            go test ./cmd/pulse-platform-adapter
+          fi
       - name: Build native MCP package
         working-directory: mcp
         shell: bash

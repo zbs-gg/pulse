@@ -38,6 +38,17 @@ var operations = []string{
 	"terminate_process",
 }
 
+func adapterTarget(architecture string) string {
+	switch architecture {
+	case "amd64":
+		return "win32-x64"
+	case "arm64":
+		return "win32-arm64"
+	default:
+		return ""
+	}
+}
+
 type request struct {
 	Schema        string `json:"schema"`
 	Path          string `json:"path,omitempty"`
@@ -79,7 +90,7 @@ func main() {
 	if os.Args[1] == "contract" {
 		writeResponse(response{Schema: responseSchema, OK: true, Result: map[string]any{
 			"operations": operations, "schema": contractSchema,
-			"target": "win32-" + runtime.GOARCH, "version": 1,
+			"target": adapterTarget(runtime.GOARCH), "version": 1,
 		}})
 		return
 	}

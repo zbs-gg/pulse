@@ -13,6 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
+import { projectPersonalLiveReadiness } from '../src/personal-live-readiness.js';
 import { exactTarballPulseInvocation } from '../src/release-attestation.js';
 import { releaseTargetDefinition } from './release-builder-core.mjs';
 import { writeProductEdgeFixture } from './product-release-fixture.mjs';
@@ -60,6 +61,7 @@ async function freePort() {
 function buildFixtureEmbedder({ outputRoot, runnerName, targetID: selectedTarget }) {
   const target = releaseTargetDefinition(selectedTarget);
   const path = join(outputRoot, 'bin', runnerName);
+  rmSync(path, { force: true });
   run('go', ['build', '-trimpath', '-o', path, './cmd/pulse-fixture-embedder'], {
     cwd: appRoot,
     env: { ...process.env, CGO_ENABLED: '0', GOARCH: target.goarch, GOOS: target.goos },
@@ -227,16 +229,18 @@ function rememberThroughInstalledMCP(pluginRoot, memoryArguments, { cwd, env }) 
 }
 
 async function openVisibleHomeCard({ candidate, runtime, secret }) {
-  const checkedAt = new Date().toISOString();
+  const checks = Object.fromEntries([
+    'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+    'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
+    'activation', 'vault', 'capture', 'retrieval', 'hooks',
+  ].map((name) => [name, { ok: true }]));
+  checks.hooks = { ok: false, reason: 'lifecycle_receipt_missing' };
+  const liveReadiness = projectPersonalLiveReadiness(checks, new Date());
+  assert.equal(liveReadiness.reason_code, 'codex_hook_lifecycle_required');
   const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
-    body: JSON.stringify({ live_readiness: {
-      schema: 'pulse.personal_live_readiness.v1', outcome: 'action_required',
-      reason_code: 'codex_hook_lifecycle_required',
-      next_action: { code: 'complete_codex_lifecycle', label: 'Complete one normal Codex turn' },
-      checked_at: checkedAt,
-    } }),
+    body: JSON.stringify({ live_readiness: liveReadiness }),
     signal: AbortSignal.timeout(5000),
   });
   assert.equal(sessionResponse.status, 200);
