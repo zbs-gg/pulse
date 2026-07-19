@@ -841,18 +841,51 @@ export async function materializeVerifiedPortableArchive(carrier, targetRoot, ar
       !Number.isSafeInteger(freeBytes) || freeBytes < requiredBytes) {
     fail('artifact_disk_insufficient');
   }
-  const work = mkdtempSync(join(tmpdir(), 'pulse-artifact-archive-'));
+  // Windows tree trust is deliberately proved by one native, whole-tree
+  // operation. Extract directly into the private activation staging directory
+  // so the exact bytes that pass ACL/link/hash verification are the bytes that
+  // are atomically renamed into service. Copying them into a second tree would
+  // require the whole payload to be written and proved again, which makes large
+  // JS runtimes take minutes to install under Windows filesystem/AV interception.
+  const directWindowsTarget = platformServices.platform === 'win32' &&
+    typeof platformServices.validatePrivateTree === 'function';
+  const work = directWindowsTarget ? resolve(targetRoot) : mkdtempSync(join(tmpdir(), 'pulse-artifact-archive-'));
   ensurePrivateDirectory(work, platformServices);
+  const stagingIdentity = directWindowsTarget
+    ? inspectPathIdentity(work, 'directory', 'artifact_activation_path_invalid', platformServices)
+    : null;
   try {
     await extractPortableArchive(carrier, work, preflight, options);
     if (sha256File(carrier, platformServices).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
     validateCarrierDirectory(work, preflight.manifest, { maxEntries, maxDepth, maxTotalBytes, platformServices });
+    if (directWindowsTarget) {
+      for (const control of [CARRIER_TREE_FILE, ...OPTIONAL_CARRIER_CONTROL_FILES]) {
+        if (!existsSync(join(work, control))) continue;
+        try { platformServices.removePrivateFile(resolve(work, control), { missing: false }); }
+        catch { fail('artifact_carrier_entry_unsafe'); }
+      }
+      const verifiedIdentity = inspectPathIdentity(
+        work, 'directory', 'artifact_activation_path_invalid', platformServices,
+      );
+      if (verifiedIdentity.identity_token !== stagingIdentity.identity_token) {
+        fail('artifact_activation_path_invalid');
+      }
+      return {
+        treeManifest: preflight.manifest,
+        verifiedTarget: Object.freeze({
+          identity_token: verifiedIdentity.identity_token,
+          tree_digest: createHash('sha256').update(canonical(preflight.manifest)).digest('hex'),
+        }),
+      };
+    }
     copyManifestFiles(work, targetRoot, preflight.manifest, platformServices);
     return { treeManifest: preflight.manifest };
   } catch (error) {
     if (error instanceof ArtifactInstallerError) throw error;
     fail('artifact_archive_extract_failed');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally {
+    if (!directWindowsTarget) rmSync(work, { recursive: true, force: true });
+  }
 }
 
 // Stable name retained for historical callers; tar.gz now always uses the
@@ -1359,7 +1392,15 @@ export async function activateArtifactVersion(artifact, stagedPath, {
       });
       activationTree = materialized?.treeManifest ?? treeManifest;
       assertArtifactTreeDigest(artifact, activationTree);
-      validateArtifactTree(temporary, activationTree, { platformServices });
+      const activationTreeDigest = createHash('sha256').update(canonical(activationTree)).digest('hex');
+      const verifiedIdentity = inspectPathIdentity(
+        temporary, 'directory', 'artifact_activation_path_invalid', platformServices,
+      );
+      const alreadyVerifiedTarget = selectedMaterializer === materializeVerifiedPortableArchive &&
+        platformServices.platform === 'win32' &&
+        materialized?.verifiedTarget?.identity_token === verifiedIdentity.identity_token &&
+        materialized?.verifiedTarget?.tree_digest === activationTreeDigest;
+      if (!alreadyVerifiedTarget) validateArtifactTree(temporary, activationTree, { platformServices });
       validateDataOnlyModel(temporary, artifact, activationTree, platformServices);
       const metadata = installedMetadata(artifact, activationTree);
       atomicJSON(join(temporary, INSTALLED_METADATA), metadata, platformServices);

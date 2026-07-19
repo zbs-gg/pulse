@@ -620,7 +620,7 @@ test('portable archive streams the exact canonical tree without system extractio
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('Windows portable extraction defers thousands of per-file ACL calls to one native tree proof', async () => {
+test('Windows portable extraction proves and activates the exact staging tree once', async () => {
   const root = sandbox();
   const carrier = join(root, 'runtime.tar.gz');
   const target = join(root, 'target');
@@ -636,7 +636,12 @@ test('Windows portable extraction defers thousands of per-file ACL calls to one 
     ...defaultPlatformServices,
     platform: 'win32',
     ensurePrivateDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
-    assertPrivateState: () => { throw new Error('per-file ACL proof must be deferred'); },
+    assertPrivateState: (path, { kind }) => {
+      if (kind === 'directory') return {
+        canonical_path: path, kind, owner_only: true, reparse_point: false,
+      };
+      throw new Error('per-file ACL proof must be deferred');
+    },
     validatePrivateTree: (path, { files }) => {
       for (const file of files) {
         const bytes = readFileSync(join(path, file.path));
@@ -655,7 +660,20 @@ test('Windows portable extraction defers thousands of per-file ACL calls to one 
       platformServices: windowsBatchServices,
     });
     assert.deepEqual(readFileSync(join(target, 'runtime', 'index.js')), payload);
-    assert.equal(proofs.length, 2, 'one proof validates extraction and one validates the activated target tree');
+    assert.equal(proofs.length, 1, 'the exact private staging tree is proved once and then atomically activated');
+    assert.equal(existsSync(join(target, 'pulse-artifact-tree.json')), false,
+      'the signed carrier control file is removed after the payload proof');
+
+    proofs.length = 0;
+    const installRoot = join(root, 'installed');
+    const activated = await activateArtifactVersion(portableArtifact(carrierBytes, {
+      tree_digest: digest(Buffer.from(canonicalArtifactJSON(manifest))),
+    }), carrier, {
+      installRoot, minimumFreeBytes: 0, platformServices: windowsBatchServices, treeManifest: manifest,
+    });
+    assert.deepEqual(readFileSync(join(activated.version_path, 'runtime', 'index.js')), payload);
+    assert.equal(proofs.length, 1,
+      'activation trusts the identity-bound proof returned for the same staging directory');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
