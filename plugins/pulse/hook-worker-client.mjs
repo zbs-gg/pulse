@@ -152,7 +152,10 @@ function spawnWorker({ host, expected, receiptPath, workspace, token }) {
     throw new Error('hook_worker_product_environment_invalid');
   }
   const child = spawn(process.execPath, [expected.entrypointPath, '--pulse-hook-worker', host], {
-    cwd: workspace.workspacePath,
+    // Windows cannot remove a workspace while a live process owns it as cwd.
+    // The request carries the canonical workspace explicitly, so keep the
+    // bounded worker in its owner-private runtime directory instead.
+    cwd: dirname(receiptPath),
     detached: true,
     env: {
       ...process.env,
@@ -234,12 +237,15 @@ export async function runHookWorkerClient({
   }
   const input = await readHookInput(inputStream);
   const workspace = workerWorkspace(pluginRoot, input);
+  const boundedInput = typeof input.cwd === 'string'
+    ? input
+    : { ...input, cwd: workspace.workspacePath };
   const receiptPath = workerReceiptPath(host, workspace.digest);
   let expected = isSessionStart(eventName) ? await resolveEnvironment() : undefined;
   let receipt = privateReceipt(receiptPath);
   if (validReceipt(receipt, { host, workspaceDigest: workspace.digest, expected })) {
     try {
-      const output = await dispatchWorker(receipt, { host, eventName, input });
+      const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
       await writeOutput(output, outputStream);
       return;
     } catch (error) {
@@ -249,7 +255,7 @@ export async function runHookWorkerClient({
 
   expected ??= await resolveEnvironment();
   receipt = await ensureWorker({ host, expected, receiptPath, workspace });
-  const output = await dispatchWorker(receipt, { host, eventName, input });
+  const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
   await writeOutput(output, outputStream);
 }
 
