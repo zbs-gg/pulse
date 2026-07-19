@@ -106,12 +106,30 @@ export function loadPluginWindowsAdapter({
 } = {}) {
   const { binaryPath, target } = validatedBinary(catalogRoot, architecture);
   const call = (operation, payload = {}) => invoke({ binaryPath, operation, payload, target });
-  const contract = call('contract');
-  if (!exactObject(contract, ['operations', 'schema', 'target', 'version']) ||
-      contract.schema !== CONTRACT_SCHEMA || contract.target !== target || contract.version !== 1 ||
-      JSON.stringify(contract.operations) !== JSON.stringify(EXPECTED_OPERATIONS)) {
-    fail('pulse_windows_plugin_adapter_contract_invalid');
-  }
+  let contractVerified = false;
+  const verifyContract = (contract) => {
+    if (!exactObject(contract, ['operations', 'schema', 'target', 'version']) ||
+        contract.schema !== CONTRACT_SCHEMA || contract.target !== target || contract.version !== 1 ||
+        JSON.stringify(contract.operations) !== JSON.stringify(EXPECTED_OPERATIONS)) {
+      fail('pulse_windows_plugin_adapter_contract_invalid');
+    }
+    contractVerified = true;
+  };
+  const batched = (requests) => {
+    const wireRequests = contractVerified
+      ? requests
+      : [{ operation: 'contract', payload: {} }, ...requests];
+    const result = call('batch', {
+      requests: wireRequests.map(({ operation, payload }) => ({ operation, request: payload })),
+    });
+    if (!exactObject(result, ['results']) || !Array.isArray(result.results) ||
+        result.results.length !== wireRequests.length) {
+      fail('pulse_windows_plugin_adapter_protocol_invalid');
+    }
+    if (contractVerified) return result.results;
+    verifyContract(result.results[0]);
+    return result.results.slice(1);
+  };
   return Object.freeze({
     batch(requests) {
       if (!Array.isArray(requests) || requests.length < 1 || requests.length > 16 ||
@@ -119,37 +137,34 @@ export function loadPluginWindowsAdapter({
             !BATCH_OPERATIONS.has(item.operation) || !object(item.payload))) {
         fail('pulse_windows_plugin_adapter_batch_invalid');
       }
-      const result = call('batch', {
-        requests: requests.map(({ operation, payload }) => ({ operation, request: payload })),
-      });
-      if (!exactObject(result, ['results']) || !Array.isArray(result.results) ||
-          result.results.length !== requests.length) {
-        fail('pulse_windows_plugin_adapter_protocol_invalid');
-      }
-      return result.results;
+      return batched(requests);
     },
     digestPrivateTree(path, { excludeRootFile, maximumDepth, maximumEntries, maximumTotalBytes }) {
-      return call('digest_private_tree', {
+      return batched([{ operation: 'digest_private_tree', payload: {
         exclude_root_file: excludeRootFile ?? '', maximum_depth: maximumDepth,
         maximum_entries: maximumEntries, maximum_total_bytes: maximumTotalBytes, path,
-      });
+      } }])[0];
     },
     readPrivateFile(path, { minBytes = 1, maxBytes = 1024 * 1024 } = {}) {
-      const result = call('read_private_file', {
+      const result = batched([{ operation: 'read_private_file', payload: {
         encoding: '', maximum_bytes: maxBytes, minimum_bytes: minBytes, path,
-      });
+      } }])[0];
       if (!exactObject(result, ['bytes_base64']) || typeof result.bytes_base64 !== 'string') {
         fail('pulse_windows_plugin_adapter_protocol_invalid');
       }
       return Buffer.from(result.bytes_base64, 'base64');
     },
     inspectPrivateTree(path, { entries, maximumDepth, maximumEntries, maximumTotalBytes }) {
-      return call('inspect_private_tree', {
+      return batched([{ operation: 'inspect_private_tree', payload: {
         entries, maximum_depth: maximumDepth, maximum_entries: maximumEntries,
         maximum_total_bytes: maximumTotalBytes, path,
-      });
+      } }])[0];
     },
-    inspectPathIdentity(path, { kind }) { return call('inspect_path_identity', { kind, path }); },
-    inspectExecutable(path) { return call('inspect_executable', { path }); },
+    inspectPathIdentity(path, { kind }) {
+      return batched([{ operation: 'inspect_path_identity', payload: { kind, path } }])[0];
+    },
+    inspectExecutable(path) {
+      return batched([{ operation: 'inspect_executable', payload: { path } }])[0];
+    },
   });
 }

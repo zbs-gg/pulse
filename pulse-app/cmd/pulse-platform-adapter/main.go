@@ -80,6 +80,7 @@ type batchOperation struct {
 }
 
 var batchOperations = map[string]bool{
+	"contract":              true,
 	"digest_private_tree":   true,
 	"inspect_executable":    true,
 	"inspect_path_identity": true,
@@ -118,10 +119,7 @@ func main() {
 		os.Exit(2)
 	}
 	if os.Args[1] == "contract" {
-		writeResponse(response{Schema: responseSchema, OK: true, Result: map[string]any{
-			"operations": operations, "schema": contractSchema,
-			"target": adapterTarget(runtime.GOARCH), "version": 1,
-		}})
+		writeResponse(response{Schema: responseSchema, OK: true, Result: contract()})
 		return
 	}
 	input, err := io.ReadAll(io.LimitReader(os.Stdin, maximumInput+1))
@@ -143,6 +141,8 @@ func main() {
 
 func dispatch(operation string, value request) (any, error) {
 	switch operation {
+	case "contract":
+		return contract(), nil
 	case "batch":
 		if len(value.Requests) < 1 || len(value.Requests) > 16 {
 			return nil, fmt.Errorf("%w: batch_size", platform.ErrUnsafe)
@@ -246,6 +246,13 @@ func dispatch(operation string, value request) (any, error) {
 		return releaseLock(value)
 	default:
 		return nil, fmt.Errorf("%w: operation", platform.ErrUnsupported)
+	}
+}
+
+func contract() map[string]any {
+	return map[string]any{
+		"operations": operations, "schema": contractSchema,
+		"target": adapterTarget(runtime.GOARCH), "version": 1,
 	}
 }
 

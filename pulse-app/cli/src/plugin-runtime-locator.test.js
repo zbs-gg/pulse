@@ -38,6 +38,8 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     const bytes = Buffer.from('export const ready = true;\n');
     writeFileSync(file, bytes);
     writeFileSync(join(root, 'runtime-manifest.json'), '{}\n');
+    const activationPath = join(root, 'activation.json');
+    writeFileSync(activationPath, `${JSON.stringify({ daemon_path: file })}\n`);
     const calls = [];
     const treeDigest = createHash('sha256').update('runtime.mjs').update('\0').update(bytes).update('\0').digest('hex');
     const adapter = {
@@ -78,6 +80,12 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
               reparse_point: false, sha256: createHash('sha256').update(readFileSync(payload.path)).digest('hex'),
             };
           }
+          if (operation === 'inspect_path_identity') {
+            return {
+              canonical_path: payload.path, identity_token: 'volume:file', kind: payload.kind,
+              reparse_point: false,
+            };
+          }
           throw new Error(`unexpected batch operation: ${operation}`);
         });
       },
@@ -91,6 +99,9 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.equal(trust.executableDigest(file), createHash('sha256').update(bytes).digest('hex'));
     assert.deepEqual(calls.map(([operation]) => operation), ['identity', 'read', 'digest', 'executable']);
     assert.equal(calls[2][2].excludeRootFile, 'runtime-manifest.json');
+    const locatorProof = trust.workspaceLocatorProof(file, root);
+    assert.deepEqual(locatorProof.locatorBytes, bytes);
+    assert.equal(locatorProof.workspaceIdentity, 'volume:file');
     assert.deepEqual(trust.readPrivateFiles([{ path: file, maxBytes: 1024 }]), [bytes]);
     const edge = trust.productEdgeProof({
       daemonPath: file, pluginRoot: root, runtimeManifestPath: join(root, 'runtime-manifest.json'), runtimeRoot: root,
@@ -99,7 +110,15 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.equal(edge.pluginDigest, treeDigest);
     assert.equal(edge.daemonDigest, createHash('sha256').update(bytes).digest('hex'));
     assert.deepEqual(edge.runtimeManifestBytes, Buffer.from('{}\n'));
-    assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch']);
+    const activationProof = trust.productActivationProof({
+      activationPath, hostAccessPath: file, pluginRoot: root,
+      runtimeManifestPath: join(root, 'runtime-manifest.json'), runtimeRoot: root,
+    });
+    assert.deepEqual(activationProof.hostAccessBytes, bytes);
+    assert.deepEqual(activationProof.activationBytes, Buffer.from(`${JSON.stringify({ daemon_path: file })}\n`));
+    assert.equal(activationProof.daemonPath, file);
+    assert.equal(activationProof.runtimeDigest, treeDigest);
+    assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch', 'batch', 'batch']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -158,19 +177,23 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
       architecture: 'x64', catalogRoot: root,
       invoke: ({ operation, payload }) => {
         calls.push({ operation, payload });
-        if (operation === 'contract') return {
-          operations: WINDOWS_ADAPTER_OPERATIONS,
-          schema: 'pulse.windows_bootstrap_adapter.contract.v1', target, version: 1,
-        };
-        if (operation === 'read_private_file') return { bytes_base64: Buffer.from('private').toString('base64') };
-        if (operation === 'inspect_path_identity') return {
-          canonical_path: payload.path, identity_token: 'volume:file', kind: payload.kind,
-          reparse_point: false,
-        };
-        if (operation === 'digest_private_tree') return {
-          bytes: 7, files: 1, tree_digest: 'a'.repeat(64),
-        };
-        if (operation === 'batch') return { results: payload.requests.map(() => ({ bytes: 7 })) };
+        if (operation === 'batch') return { results: payload.requests.map(({ operation: nested, request }) => {
+          if (nested === 'contract') return {
+            operations: WINDOWS_ADAPTER_OPERATIONS,
+            schema: 'pulse.windows_bootstrap_adapter.contract.v1', target, version: 1,
+          };
+          if (nested === 'read_private_file') {
+            return { bytes_base64: Buffer.from('private').toString('base64') };
+          }
+          if (nested === 'inspect_path_identity') return {
+            canonical_path: request.path, identity_token: 'volume:file', kind: request.kind,
+            reparse_point: false,
+          };
+          if (nested === 'digest_private_tree') return {
+            bytes: 7, files: 1, tree_digest: 'a'.repeat(64),
+          };
+          throw new Error(`unexpected nested operation: ${nested}`);
+        }) };
         throw new Error(`unexpected operation: ${operation}`);
       },
     });
@@ -185,11 +208,11 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
     }), { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) });
     assert.deepEqual(adapter.batch([
       { operation: 'read_private_file', payload: { maximum_bytes: 1024, minimum_bytes: 1, path: 'C:\\private.json' } },
-    ]), [{ bytes: 7 }]);
+    ]), [{ bytes_base64: Buffer.from('private').toString('base64') }]);
     assert.deepEqual(calls.map(({ operation }) => operation), [
-      'contract', 'read_private_file', 'inspect_path_identity', 'digest_private_tree', 'batch',
+      'batch', 'batch', 'batch', 'batch',
     ]);
-    assert.equal(calls[1].payload.path, 'C:\\private.json');
+    assert.equal(calls[0].payload.requests[1].request.path, 'C:\\private.json');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -28,6 +28,17 @@ function nativePrivateBytes(proof, maxBytes = PRIVATE_JSON_LIMIT) {
   return bytes;
 }
 
+function nativeWorkspaceIdentity(proof) {
+  if (!exactObject(proof, ['canonical_path', 'identity_token', 'kind', 'reparse_point']) ||
+      proof.kind !== 'directory' || proof.reparse_point !== false ||
+      typeof proof.canonical_path !== 'string' || !isAbsolute(proof.canonical_path) ||
+      typeof proof.identity_token !== 'string' || proof.identity_token.length < 1 ||
+      proof.identity_token.length > 1024) {
+    throw new Error('Pulse workspace identity native proof is invalid');
+  }
+  return proof.identity_token;
+}
+
 function nativeTreeDigest(proof) {
   if (!exactObject(proof, ['bytes', 'files', 'tree_digest']) ||
       !Number.isSafeInteger(proof.bytes) || proof.bytes < 1 || proof.bytes > TREE_MAX_BYTES ||
@@ -47,6 +58,22 @@ function nativeExecutableDigest(proof) {
     throw new Error('Pulse product executable native proof is invalid');
   }
   return proof.sha256;
+}
+
+function preliminaryDaemonPath(activationPath) {
+  try {
+    const info = lstatSync(activationPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > PRIVATE_JSON_LIMIT) {
+      throw new Error('unsafe');
+    }
+    const activation = JSON.parse(readFileSync(activationPath, 'utf8'));
+    if (typeof activation?.daemon_path !== 'string' || !isAbsolute(activation.daemon_path)) {
+      throw new Error('unsafe');
+    }
+    return resolve(activation.daemon_path);
+  } catch {
+    throw new Error('Pulse product activation is missing or invalid; reconnect this workspace.');
+  }
 }
 
 function workspaceDigest(canonicalPath) {
@@ -110,15 +137,22 @@ function createTrustServices({
     return Object.freeze({
       platform,
       workspaceIdentity(path) {
-        const proof = adapter.inspectPathIdentity(path, { kind: 'directory' });
-        if (!exactObject(proof, ['canonical_path', 'identity_token', 'kind', 'reparse_point']) ||
-            proof.kind !== 'directory' || proof.reparse_point !== false ||
-            typeof proof.canonical_path !== 'string' || !isAbsolute(proof.canonical_path) ||
-            typeof proof.identity_token !== 'string' || proof.identity_token.length < 1 ||
-            proof.identity_token.length > 1024) {
-          throw new Error('Pulse workspace identity native proof is invalid');
-        }
-        return proof.identity_token;
+        return nativeWorkspaceIdentity(adapter.inspectPathIdentity(path, { kind: 'directory' }));
+      },
+      workspaceLocatorProof(locatorPath, workspacePath) {
+        const results = adapter.batch([
+          {
+            operation: 'read_private_file',
+            payload: {
+              encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: locatorPath,
+            },
+          },
+          { operation: 'inspect_path_identity', payload: { kind: 'directory', path: workspacePath } },
+        ]);
+        return Object.freeze({
+          locatorBytes: nativePrivateBytes(results[0]),
+          workspaceIdentity: nativeWorkspaceIdentity(results[1]),
+        });
       },
       treeDigest(path, excludeRootFile) {
         const proof = adapter.digestPrivateTree(path, {
@@ -162,6 +196,51 @@ function createTrustServices({
         return results.map((proof, index) => nativePrivateBytes(
           proof, requests[index].maxBytes ?? PRIVATE_JSON_LIMIT,
         ));
+      },
+      productActivationProof({
+        hostAccessPath, activationPath, runtimeRoot, runtimeManifestPath, pluginRoot,
+      }) {
+        // This ordinary read supplies only the daemon path for routing the native
+        // batch. The protected bytes returned below remain the sole authority.
+        const daemonPath = preliminaryDaemonPath(activationPath);
+        const results = adapter.batch([
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: hostAccessPath },
+          },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: activationPath },
+          },
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: 'runtime-manifest.json', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: runtimeRoot,
+            },
+          },
+          {
+            operation: 'read_private_file',
+            payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: runtimeManifestPath },
+          },
+          {
+            operation: 'digest_private_tree',
+            payload: {
+              exclude_root_file: '', maximum_depth: TREE_MAX_DEPTH,
+              maximum_entries: TREE_MAX_ENTRIES, maximum_total_bytes: TREE_MAX_BYTES, path: pluginRoot,
+            },
+          },
+          { operation: 'inspect_executable', payload: { path: daemonPath } },
+        ]);
+        return Object.freeze({
+          activationBytes: nativePrivateBytes(results[1]),
+          daemonDigest: nativeExecutableDigest(results[5]),
+          daemonPath,
+          hostAccessBytes: nativePrivateBytes(results[0]),
+          pluginDigest: nativeTreeDigest(results[4]),
+          runtimeDigest: nativeTreeDigest(results[2]),
+          runtimeManifestBytes: nativePrivateBytes(results[3]),
+        });
       },
       productEdgeProof({ runtimeRoot, runtimeManifestPath, pluginRoot, daemonPath }) {
         const results = adapter.batch([
@@ -329,13 +408,21 @@ export function resolveProductEnvironment({
   const sharedPath = join(productHome, 'product-locators.json');
   const legacyCodexPath = join(codexHome, 'pulse', 'product-locators.json');
   const locatorPath = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
-  const locator = readPrivateJSON(trust, locatorPath);
   const canonical = canonicalWorkspace(cwd);
+  const locatorProof = typeof trust.workspaceLocatorProof === 'function'
+    ? trust.workspaceLocatorProof(locatorPath, canonical)
+    : undefined;
+  const locator = locatorProof
+    ? parsePrivateJSON(locatorProof.locatorBytes)
+    : readPrivateJSON(trust, locatorPath);
   const validLocatorSchema = locatorPath === sharedPath
     ? locator?.schema === 'pulse.product_locators.v1'
     : locator?.schema === 'pulse.codex_product_locators.v1';
   let selected;
-  try { selected = validLocatorSchema ? selectLocatorEntry(locator, canonical, trust) : undefined; } catch {}
+  const locatorTrust = locatorProof
+    ? { workspaceIdentity: () => locatorProof.workspaceIdentity }
+    : trust;
+  try { selected = validLocatorSchema ? selectLocatorEntry(locator, canonical, locatorTrust) : undefined; } catch {}
   const entry = selected?.entry;
   const key = selected?.key;
   const allowed = [
@@ -358,7 +445,18 @@ export function resolveProductEnvironment({
   }
   const hostAccessPath = join(productHome, 'product-host-access', key, `${host}.json`);
   const activationPath = join(entry.data_dir, 'runtime', 'product-daemon.json');
-  const [hostAccess, activation] = typeof trust.readPrivateFiles === 'function'
+  const expectedRuntimePath = join(entry.data_dir, 'runtime', 'codex', 'current', 'src', 'cli.js');
+  const runtimeRoot = resolve(expectedRuntimePath, '..', '..');
+  const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
+  const pluginRoot = dirname(fileURLToPath(import.meta.url));
+  const activationProof = typeof trust.productActivationProof === 'function'
+    ? trust.productActivationProof({
+      activationPath, hostAccessPath, pluginRoot, runtimeManifestPath, runtimeRoot,
+    })
+    : undefined;
+  const [hostAccess, activation] = activationProof
+    ? [parsePrivateJSON(activationProof.hostAccessBytes), parsePrivateJSON(activationProof.activationBytes)]
+    : typeof trust.readPrivateFiles === 'function'
     ? trust.readPrivateFiles([
       { path: hostAccessPath, maxBytes: PRIVATE_JSON_LIMIT },
       { path: activationPath, maxBytes: PRIVATE_JSON_LIMIT },
@@ -398,18 +496,17 @@ export function resolveProductEnvironment({
       typeof activation.activated_at !== 'string' || Number.isNaN(Date.parse(activation.activated_at))) {
     throw new Error('Pulse product activation is missing or invalid; reconnect this workspace.');
   }
-  const expectedRuntimePath = join(entry.data_dir, 'runtime', 'codex', 'current', 'src', 'cli.js');
   if (resolve(activation.runtime_path) !== resolve(expectedRuntimePath)) {
     throw new Error('Pulse product activation runtime does not match the shared runtime root.');
   }
-  const runtimeRoot = resolve(activation.runtime_path, '..', '..');
-  const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
-  const pluginRoot = dirname(fileURLToPath(import.meta.url));
-  const edgeProof = typeof trust.productEdgeProof === 'function'
+  if (activationProof && resolve(activation.daemon_path) !== activationProof.daemonPath) {
+    throw new Error('Pulse product activation changed during native integrity validation.');
+  }
+  const edgeProof = activationProof ?? (typeof trust.productEdgeProof === 'function'
     ? trust.productEdgeProof({
       daemonPath: resolve(activation.daemon_path), pluginRoot, runtimeManifestPath, runtimeRoot,
     })
-    : undefined;
+    : undefined);
   const actualRuntimeDigest = edgeProof?.runtimeDigest ?? runtimeTreeDigest(runtimeRoot, trust);
   const runtimeManifest = edgeProof
     ? parsePrivateJSON(edgeProof.runtimeManifestBytes)

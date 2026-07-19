@@ -102,6 +102,7 @@ func TestBatchRunsOnlyBoundedReadOnlyProofs(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof, err := dispatch("batch", request{Requests: []batchOperation{
+		{Operation: "contract", Request: request{}},
 		{Operation: "read_private_file", Request: request{
 			Path: path, MinimumBytes: 1, MaximumBytes: 1024,
 		}},
@@ -113,7 +114,8 @@ func TestBatchRunsOnlyBoundedReadOnlyProofs(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := proof.(map[string]any)["results"].([]any)
-	if len(results) != 2 || string(results[0].(map[string]any)["bytes_base64"].([]byte)) != string(payload) {
+	if len(results) != 3 || results[0].(map[string]any)["schema"] != contractSchema ||
+		string(results[1].(map[string]any)["bytes_base64"].([]byte)) != string(payload) {
 		t.Fatalf("unexpected batch proof: %#v", proof)
 	}
 	if _, err := dispatch("batch", request{Requests: []batchOperation{{
