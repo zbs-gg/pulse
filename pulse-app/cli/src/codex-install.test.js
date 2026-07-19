@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
 	chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync,
 	readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
@@ -220,6 +221,42 @@ test('signed Codex product edge accepts only the exact release-owned plugin and 
 			() => resolveSignedCodexProductEdge({ release: wrongVersion.release, activation: wrongVersion.activation }),
 			/codex_plugin_version_mismatch/,
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('Windows proves each signed Codex product tree in one native operation', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-windows-edge-'));
+	try {
+		const fixture = writeSignedProductEdgeFixture(root);
+		const proofs = [];
+		const platformServices = {
+			platform: 'win32',
+			assertPrivateState: () => { throw new Error('per-entry directory proof is forbidden'); },
+			readPrivateFile: () => { throw new Error('per-entry file proof is forbidden'); },
+			validatePrivateTree: (path, { files }) => {
+				for (const file of files) {
+					const bytes = readFileSync(join(path, file.path));
+					assert.equal(file.bytes, bytes.length);
+					assert.equal(file.executable, false);
+					assert.equal(file.sha256, createHash('sha256').update(bytes).digest('hex'));
+				}
+				proofs.push({ path, files: files.length });
+				return { bytes: files.reduce((total, file) => total + file.bytes, 0), files: files.length };
+			},
+		};
+		const edge = resolveSignedCodexProductEdge({
+			release: fixture.release,
+			activation: fixture.activation,
+			platformServices,
+		});
+		assert.match(edge.runtime_tree_digest, /^[a-f0-9]{64}$/);
+		assert.deepEqual(proofs.map(({ path }) => path), [
+			realpathSync(fixture.marketplaceRoot),
+			realpathSync(fixture.pluginRoot),
+			realpathSync(fixture.runtimeRoot),
+		]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

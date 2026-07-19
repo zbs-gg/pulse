@@ -144,45 +144,56 @@ function ownerControlledTreeDigest(root, label, {
 	const windows = platformServices.platform === 'win32';
 	const rootInfo = lstatSync(base);
 	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : rootInfo.uid;
-	if (windows) {
-		try { platformServices.assertPrivateState(base, { kind: 'directory' }); } catch { throw new Error(`${label}_unsafe`); }
-	} else if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== currentUID ||
-		(rootInfo.mode & 0o022) !== 0) {
+	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || (!windows && (rootInfo.uid !== currentUID ||
+		(rootInfo.mode & 0o022) !== 0))) {
 		throw new Error(`${label}_unsafe`);
 	}
 	const hash = createHash('sha256');
+	const proofFiles = [];
 	const visit = (directory, prefix = '') => {
 		for (const name of readdirSync(directory).sort()) {
-			if (prefix === '' && excluded.has(name)) continue;
+			const excludedFromDigest = prefix === '' && excluded.has(name);
 			const path = join(directory, name);
 			const relative = prefix ? `${prefix}/${name}` : name;
 			const info = lstatSync(path);
 			if (info.isSymbolicLink() || (!windows && (info.uid !== currentUID || (info.mode & 0o022) !== 0 ||
 				(info.isFile() && info.nlink !== 1)))) throw new Error(`${label}_unsafe`);
 			if (info.isDirectory()) {
-				if (windows) {
-					try { platformServices.assertPrivateState(path, { kind: 'directory' }); } catch { throw new Error(`${label}_unsafe`); }
-				}
 				visit(path, relative);
 			} else if (info.isFile()) {
-				let bytes = readFileSync(path);
+				if (windows && info.size > 64 * 1024 * 1024) throw new Error(`${label}_unsafe`);
+				const bytes = readFileSync(path);
 				if (windows) {
-					try {
-						bytes = platformServices.readPrivateFile(path, {
-							encoding: null, minBytes: 0, maxBytes: 64 * 1024 * 1024,
-						});
-					} catch { throw new Error(`${label}_unsafe`); }
+					proofFiles.push({
+						bytes: bytes.length,
+						executable: false,
+						path: relative,
+						sha256: createHash('sha256').update(bytes).digest('hex'),
+					});
 				}
-				hash.update(relative);
-				hash.update('\x00');
-				hash.update(bytes);
-				hash.update('\x00');
+				if (!excludedFromDigest) {
+					hash.update(relative);
+					hash.update('\x00');
+					hash.update(bytes);
+					hash.update('\x00');
+				}
 			} else {
 				throw new Error(`${label}_unsafe`);
 			}
 		}
 	};
 	visit(base);
+	if (windows) {
+		try {
+			// Prove the exact owner-only tree in one native process. Spawning the
+			// Windows adapter once per runtime entry makes a real install take minutes.
+			if (proofFiles.length > 0 && typeof platformServices.validatePrivateTree === 'function') {
+				platformServices.validatePrivateTree(base, { files: proofFiles });
+			} else {
+				platformServices.assertPrivateState(base, { kind: 'directory' });
+			}
+		} catch { throw new Error(`${label}_unsafe`); }
+	}
 	return hash.digest('hex');
 }
 
@@ -199,7 +210,9 @@ function requireProductEdgeFile(root, relative, label) {
 	return path;
 }
 
-export function resolveSignedCodexProductEdge({ release, activation } = {}) {
+export function resolveSignedCodexProductEdge({
+	release, activation, platformServices = defaultPlatformServices,
+} = {}) {
 	if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2'].includes(release?.schema) ||
 		!SHA256.test(release.manifest_digest ?? '') ||
 		typeof release.version !== 'string' || release.version.length < 1 ||
@@ -263,11 +276,11 @@ export function resolveSignedCodexProductEdge({ release, activation } = {}) {
 		plugin_runtime_activation_digest: activation.activation_digest,
 		plugin_runtime_tree_digest: activation.tree_digest,
 		marketplace_root: marketplaceRoot,
-		marketplace_tree_digest: ownerControlledTreeDigest(marketplaceRoot, 'codex_marketplace_snapshot'),
+		marketplace_tree_digest: ownerControlledTreeDigest(marketplaceRoot, 'codex_marketplace_snapshot', { platformServices }),
 		plugin_root: pluginRoot,
-		plugin_tree_digest: ownerControlledTreeDigest(pluginRoot, 'codex_plugin_snapshot'),
+		plugin_tree_digest: ownerControlledTreeDigest(pluginRoot, 'codex_plugin_snapshot', { platformServices }),
 		runtime_root: runtimeRoot,
-		runtime_tree_digest: ownerControlledTreeDigest(runtimeRoot, 'codex_runtime_snapshot'),
+		runtime_tree_digest: ownerControlledTreeDigest(runtimeRoot, 'codex_runtime_snapshot', { platformServices }),
 	});
 }
 
