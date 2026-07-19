@@ -811,7 +811,7 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   assert.match(launcher, /host: 'codex'/);
   assert.doesNotMatch(launcher, /spawn\(/);
   assert.match(workerClient, /workspace_digest: receipt\.workspace_digest/);
-  assert.match(workerClient, /cwd: dirname\(receiptPath\)/);
+  assert.match(workerClient, /cwd: dirname\(process\.execPath\)/);
 });
 
 test('native hook trust accepts only the exact enabled Pulse plugin hook set reported by Codex', () => {

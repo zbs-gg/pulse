@@ -155,7 +155,7 @@ function spawnWorker({ host, expected, receiptPath, workspace, token }) {
     // Windows cannot remove a workspace while a live process owns it as cwd.
     // The request carries the canonical workspace explicitly, so keep the
     // bounded worker in its owner-private runtime directory instead.
-    cwd: dirname(receiptPath),
+    cwd: dirname(process.execPath),
     detached: true,
     env: {
       ...process.env,
