@@ -65,6 +65,13 @@ export function writeProductEdgeFixture(target) {
 	cpSync(join(repoRoot, 'plugins', 'pulse'), join(target, 'marketplace', 'plugins', 'pulse'), {
 		recursive: true, dereference: true,
 	});
+	// The plugin launcher runs before it can trust or import the activated CLI
+	// runtime. Keep the Windows ACL/reparse verifier beside that launcher and
+	// inside the signed plugin tree so Windows never falls back to POSIX modes.
+	cpSync(join(cliRoot, 'runtime', 'windows-bootstrap'),
+		join(target, 'marketplace', 'plugins', 'pulse', 'native', 'windows-bootstrap'), {
+			recursive: true, dereference: true,
+		});
 	cpSync(cliRoot, join(target, 'runtime'), {
 		recursive: true, dereference: true,
 		filter: (sourcePath) => includeRuntimePath(cliRoot, sourcePath),

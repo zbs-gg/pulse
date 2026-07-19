@@ -18,7 +18,8 @@ if (runtimeManifest?.schema !== 'pulse.codex_runtime.v2' ||
 }
 const digest = createHash('sha256');
 for (const relative of [
-	'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+	'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'windows-platform-adapter.mjs',
+	'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
 ]) {
   digest.update(relative);
   digest.update('\x00');

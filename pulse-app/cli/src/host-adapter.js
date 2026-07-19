@@ -460,9 +460,10 @@ export function hookBundleDigest(bytes) {
 }
 
 export function codexHookExecutionDigest(pluginRoot, runtimePath) {
-  const hash = createHash('sha256');
+	const hash = createHash('sha256');
 	for (const relative of [
-		'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
+		'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'windows-platform-adapter.mjs',
+		'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
 	]) {
     hash.update(relative);
     hash.update('\x00');

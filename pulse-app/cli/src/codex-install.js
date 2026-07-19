@@ -253,6 +253,7 @@ export function resolveSignedCodexProductEdge({
 		['hooks/hooks.json', 'codex_plugin_hooks'],
 		['hooks/pulse-hook.mjs', 'codex_plugin_hook_launcher'],
 		['runtime-locator.mjs', 'codex_plugin_runtime_locator'],
+		['windows-platform-adapter.mjs', 'codex_plugin_windows_platform_adapter'],
 		['mcp/server.mjs', 'codex_plugin_mcp_launcher'],
 	]) requireProductEdgeFile(pluginRoot, relative, label);
 	const runtimePackagePath = requireProductEdgeFile(runtimeRoot, 'package.json', 'codex_runtime_package');
