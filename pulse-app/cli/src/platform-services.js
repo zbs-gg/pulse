@@ -96,6 +96,7 @@ function windowsCandidates(home, env, pathAPI) {
       pathAPI.join(programFiles, 'Cursor', 'Cursor.exe'),
     ],
     git: [
+      pathAPI.join(programFiles, 'Git', 'bin', 'git.exe'),
       pathAPI.join(programFiles, 'Git', 'cmd', 'git.exe'),
       pathAPI.join(localAppData, 'Programs', 'Git', 'cmd', 'git.exe'),
     ],

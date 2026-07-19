@@ -51,6 +51,14 @@ test('native packed Codex calibration path is available only under the exact iso
   assert.equal(production.hostCandidates().codex.includes(executable), false);
 });
 
+test('Windows Git discovery includes the native bin executable used by hosted runners', () => {
+  const services = createPlatformServices({
+    platform: 'win32', architecture: 'x64', home: 'C:\\Users\\Pulse',
+    env: { ProgramFiles: 'C:\\Program Files' }, nativeAdapter: {},
+  });
+  assert.equal(services.hostCandidates().git[0], 'C:\\Program Files\\Git\\bin\\git.exe');
+});
+
 test('port probing distinguishes occupied from unknown without a system utility', () => {
   const occupied = createPlatformServices({
     platform: 'darwin', spawn: () => ({ status: 2, stdout: '', stderr: '' }),

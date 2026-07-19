@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
-  symlinkSync, writeFileSync,
+  writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -146,8 +146,13 @@ function exposeCodexToIsolatedHome(home) {
   }
   const bin = join(home, '.local', 'bin');
   mkdirSync(bin, { recursive: true, mode: 0o700 });
-  symlinkSync(realpathSync(executable), join(bin, 'codex'));
-  return realpathSync(executable);
+  const destination = join(bin, 'codex');
+  // Runner-managed global npm trees may be group-writable. Production host
+  // discovery correctly rejects that; the clean-room harness therefore uses
+  // an exact private copy instead of weakening the executable policy.
+  copyFileSync(realpathSync(executable), destination);
+  chmodSync(destination, 0o700);
+  return realpathSync(destination);
 }
 
 function stopFixtureProcesses(root) {
