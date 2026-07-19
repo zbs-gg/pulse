@@ -40,6 +40,7 @@ type Store struct {
 	storeID               string
 	expectedBootstrapRoot *teamauth.BootstrapRoot
 	clock                 func() time.Time
+	runtimeAuthorityMu    sync.RWMutex
 	expectedBindingDigest string
 	expectedPolicyEpoch   int64
 	expectedResolverEpoch int64
@@ -79,13 +80,21 @@ func (s *Store) ConfigureProductRuntimeAuthority(bindingDigest string, policyEpo
 	if !trayBindingDigestPattern.MatchString(bindingDigest) || policyEpoch < 0 || resolverEpoch < 0 {
 		return errors.New("product runtime authority is invalid")
 	}
+	s.runtimeAuthorityMu.Lock()
 	s.expectedBindingDigest = bindingDigest
 	s.expectedPolicyEpoch = policyEpoch
 	s.expectedResolverEpoch = resolverEpoch
+	s.runtimeAuthorityMu.Unlock()
 	return nil
 }
 
 func (s *Store) productRuntimeAuthority() (string, int64, int64) {
+	s.runtimeAuthorityMu.RLock()
+	defer s.runtimeAuthorityMu.RUnlock()
+	return s.productRuntimeAuthorityLocked()
+}
+
+func (s *Store) productRuntimeAuthorityLocked() (string, int64, int64) {
 	return s.expectedBindingDigest, s.expectedPolicyEpoch, s.expectedResolverEpoch
 }
 

@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,10 +15,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/unassigned"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 const (
-	homeSessionRequestMaxBytes = int64(4 << 10)
+	homeSessionRequestMaxBytes          = int64(4 << 10)
+	homeProtectedWipeBeginSchemaV1      = "pulse.home.protected_wipe_begin.v1"
+	homeProtectedWipeMaximumPending     = 16
+	homeProtectedWipeMaximumCeremonyTTL = 90 * time.Second
 )
 
 var (
@@ -36,6 +42,32 @@ type homeSessionResponse struct {
 	TargetURL     string `json:"target_url"`
 }
 
+type homeProtectedWipeBeginResponse struct {
+	Schema              string                            `json:"schema"`
+	Action              userpresence.Action               `json:"action"`
+	CeremonyID          string                            `json:"ceremony_id"`
+	ProfileKind         userpresence.EnhancedPresenceKind `json:"profile_kind"`
+	TargetDigest        string                            `json:"target_digest"`
+	RepositoryID        string                            `json:"repository_id"`
+	StoreID             string                            `json:"store_id"`
+	BindingDigest       string                            `json:"binding_digest"`
+	AffectedDataCount   uint64                            `json:"affected_data_count"`
+	AffectedDataDigest  string                            `json:"affected_data_digest"`
+	AffectedDataVersion uint64                            `json:"affected_data_version"`
+	Display             string                            `json:"display"`
+	ExpiresAt           time.Time                         `json:"expires_at"`
+}
+
+type homeProtectedWipePending struct {
+	sessionDigest  [sha256.Size]byte
+	routeScope     string
+	trustedSurface string
+	targetDigest   string
+	profileKind    userpresence.EnhancedPresenceKind
+	expiresAt      time.Time
+	snapshot       store.ProductMemoryWipeSnapshotV1
+}
+
 func (s *Server) homeHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(s.homeHardenMiddleware)
@@ -50,8 +82,227 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/tray/{id}/commit", s.handleHomeTrayCommit)
 		r.Post("/unassigned/{id}/assign", s.handleHomeUnassignedAssign)
 		r.Post("/unassigned/{id}/delete", s.handleHomeUnassignedDelete)
+		r.Post("/protected/wipe/begin", s.handleHomeProtectedWipeBegin)
+		r.Post("/protected/wipe/complete", s.handleHomeProtectedWipeComplete)
 	})
 	return r
+}
+
+func (s *Server) handleHomeProtectedWipeBegin(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	profile := s.cfg.EnhancedPresenceAuthorizer.Profile()
+	if !profile.Available || !profileAuthorizes(profile, userpresence.ActionVaultWipe) {
+		http.Error(w, "Protected memory wipe is unavailable on this machine.", http.StatusConflict)
+		return
+	}
+	snapshot, err := s.cfg.Store.PrepareProductMemoryWipe(r.Context())
+	if err != nil {
+		writeHomeProtectedWipeError(w, err)
+		return
+	}
+	bindingDigest, repositoryID, boundaryOK := s.cfg.Store.ProductRuntimeBoundary()
+	if !boundaryOK || bindingDigest != snapshot.BindingDigest {
+		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
+		return
+	}
+	target := userpresence.ProtectedActionTargetV1{
+		Schema: userpresence.ProtectedActionTargetSchemaV1, Action: userpresence.ActionVaultWipe,
+		AffectedDataCount: snapshot.AffectedDataCount, AffectedDataDigest: snapshot.AffectedDataDigest,
+		AffectedDataVersion: snapshot.AffectedDataVersion, BindingDigest: snapshot.BindingDigest,
+		PolicyEpoch: snapshot.PolicyEpoch, RepositoryID: repositoryID, StoreID: snapshot.StoreID,
+	}
+	targetDigest, err := target.Digest()
+	if err != nil {
+		writeHomeProtectedWipeError(w, err)
+		return
+	}
+	ceremony, err := s.cfg.EnhancedPresenceAuthorizer.Begin(r.Context(), target)
+	if err != nil {
+		writeHomeProtectedWipeError(w, err)
+		return
+	}
+	now := s.homeNow()
+	if ceremony.Schema != userpresence.EnhancedPresenceCeremonySchemaV1 ||
+		ceremony.ProfileKind != profile.Kind || ceremony.TargetDigest != targetDigest ||
+		!validLowerHexDigest(ceremony.CeremonyID) || !validLowerHexDigest(ceremony.TargetDigest) ||
+		!ceremony.ExpiresAt.UTC().After(now) || ceremony.ExpiresAt.UTC().Sub(now) > homeProtectedWipeMaximumCeremonyTTL {
+		writeHomeProtectedWipeError(w, userpresence.ErrEnhancedCeremonyInvalid)
+		return
+	}
+	sessionDigest, validSession := viewerSessionIDDigest(session.ID)
+	if !validSession {
+		writeHomeProtectedWipeError(w, errViewerSessionUnauthorized)
+		return
+	}
+	pending := homeProtectedWipePending{
+		sessionDigest: sessionDigest, routeScope: session.RouteScope,
+		trustedSurface: session.TrustedSurfaceInstance, targetDigest: targetDigest,
+		profileKind: ceremony.ProfileKind, expiresAt: ceremony.ExpiresAt.UTC(), snapshot: snapshot,
+	}
+	s.homeProtectedWipeMu.Lock()
+	s.pruneHomeProtectedWipesLocked(now)
+	_, collision := s.homeProtectedWipeItems[ceremony.CeremonyID]
+	stored := !collision && len(s.homeProtectedWipeItems) < homeProtectedWipeMaximumPending
+	if stored {
+		s.homeProtectedWipeItems[ceremony.CeremonyID] = pending
+	}
+	s.homeProtectedWipeMu.Unlock()
+	if !stored {
+		http.Error(w, "Protected memory wipe is temporarily unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, homeProtectedWipeBeginResponse{
+		Schema: homeProtectedWipeBeginSchemaV1, Action: userpresence.ActionVaultWipe,
+		CeremonyID: ceremony.CeremonyID, ProfileKind: ceremony.ProfileKind,
+		TargetDigest: targetDigest, RepositoryID: repositoryID, StoreID: snapshot.StoreID,
+		BindingDigest: snapshot.BindingDigest, AffectedDataCount: snapshot.AffectedDataCount,
+		AffectedDataDigest: snapshot.AffectedDataDigest, AffectedDataVersion: snapshot.AffectedDataVersion,
+		Display:   fmt.Sprintf("Authorize deletion of %d bound local memory record(s).", snapshot.AffectedDataCount),
+		ExpiresAt: ceremony.ExpiresAt.UTC(),
+	})
+}
+
+func (s *Server) handleHomeProtectedWipeComplete(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "ceremony_id") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	ceremonyID := r.PostForm.Get("ceremony_id")
+	if !validLowerHexDigest(ceremonyID) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sessionDigest, validSession := viewerSessionIDDigest(session.ID)
+	if !validSession {
+		writeHomeProtectedWipeError(w, errViewerSessionUnauthorized)
+		return
+	}
+	now := s.homeNow()
+	s.homeProtectedWipeMu.Lock()
+	pending, exists := s.homeProtectedWipeItems[ceremonyID]
+	expired := exists && !now.Before(pending.expiresAt)
+	if expired {
+		delete(s.homeProtectedWipeItems, ceremonyID)
+		exists = false
+	} else if exists && pending.sessionDigest == sessionDigest &&
+		memoryPresentationConstantEqual(pending.routeScope, session.RouteScope) &&
+		memoryPresentationConstantEqual(pending.trustedSurface, session.TrustedSurfaceInstance) {
+		delete(s.homeProtectedWipeItems, ceremonyID)
+	} else if exists {
+		exists = false
+	}
+	s.pruneHomeProtectedWipesLocked(now)
+	s.homeProtectedWipeMu.Unlock()
+	if expired {
+		http.Error(w, "The protected memory wipe request expired.", http.StatusGone)
+		return
+	}
+	if !exists {
+		http.Error(w, "The protected memory wipe request changed or was already used.", http.StatusConflict)
+		return
+	}
+	assertion, err := s.cfg.EnhancedPresenceAuthorizer.Complete(r.Context(), userpresence.EnhancedPresenceCompletionV1{
+		Schema:     userpresence.EnhancedPresenceCompletionSchemaV1,
+		CeremonyID: ceremonyID, TargetDigest: pending.targetDigest,
+	})
+	if err != nil {
+		writeHomeProtectedWipeError(w, err)
+		return
+	}
+	if assertion.Schema != userpresence.EnhancedPresenceAssertionSchemaV1 ||
+		assertion.Action != userpresence.ActionVaultWipe || assertion.CeremonyID != ceremonyID ||
+		assertion.ProfileKind != pending.profileKind || assertion.TargetDigest != pending.targetDigest ||
+		assertion.PolicyEpoch != pending.snapshot.PolicyEpoch || !validLowerHexDigest(assertion.AssertionDigest) ||
+		assertion.ApprovedAt.IsZero() || assertion.ExpiresAt.UTC() != pending.expiresAt ||
+		!assertion.ApprovedAt.UTC().Before(assertion.ExpiresAt.UTC()) || !now.Before(assertion.ExpiresAt.UTC()) {
+		writeHomeProtectedWipeError(w, userpresence.ErrEnhancedCeremonyInvalid)
+		return
+	}
+	if err := s.verifyHomeBinding(r.Context()); err != nil {
+		http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
+		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
+		return
+	}
+	receipt, err := s.cfg.Store.WipeProductMemoryIfSnapshot(r.Context(), pending.snapshot)
+	if err != nil {
+		writeHomeProtectedWipeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, receipt)
+}
+
+func exactHomeFormFields(r *http.Request, names ...string) bool {
+	if r == nil || len(r.PostForm) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if values := r.PostForm[name]; len(values) != 1 || values[0] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func profileAuthorizes(profile userpresence.EnhancedPresenceProfile, action userpresence.Action) bool {
+	for _, candidate := range profile.ProtectedActions {
+		if candidate == action {
+			return true
+		}
+	}
+	return false
+}
+
+func validLowerHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) pruneHomeProtectedWipesLocked(now time.Time) {
+	for ceremonyID, pending := range s.homeProtectedWipeItems {
+		if !now.Before(pending.expiresAt) {
+			delete(s.homeProtectedWipeItems, ceremonyID)
+		}
+	}
+}
+
+func writeHomeProtectedWipeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, userpresence.ErrEnhancedActionUnavailable):
+		http.Error(w, "Protected memory wipe is unavailable on this machine.", http.StatusConflict)
+	case errors.Is(err, store.ErrProductMemoryWipeEmpty):
+		http.Error(w, "There is no bound product memory to wipe.", http.StatusConflict)
+	case errors.Is(err, store.ErrProductMemoryWipeSnapshotInvalid),
+		errors.Is(err, store.ErrProductMemoryWipeSnapshotStale):
+		http.Error(w, "The protected memory set changed. Start the wipe again.", http.StatusConflict)
+	case errors.Is(err, userpresence.ErrEnhancedCeremonyExpired), errors.Is(err, userpresence.ErrPresenceExpired):
+		http.Error(w, "The protected memory wipe request expired.", http.StatusGone)
+	case errors.Is(err, userpresence.ErrEnhancedCeremonyInvalid),
+		errors.Is(err, userpresence.ErrPresenceInvalid), errors.Is(err, userpresence.ErrPresenceReplay),
+		errors.Is(err, userpresence.ErrPresenceDenied), errors.Is(err, errViewerSessionUnauthorized):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	default:
+		http.Error(w, "Protected memory wipe failed.", http.StatusBadRequest)
+	}
 }
 
 func (s *Server) homeHardenMiddleware(next http.Handler) http.Handler {

@@ -98,12 +98,14 @@ type BillingStatus struct {
 
 // Server wraps the chi router.
 type Server struct {
-	cfg              Config
-	started          time.Time
-	homeSessions     *viewerSessionManager
-	homePresentation *MemoryPresentationService
-	trayScheduleMu   sync.Mutex
-	traySchedules    map[memoryTrayScheduleKey]*memoryTrayScheduleState
+	cfg                    Config
+	started                time.Time
+	homeSessions           *viewerSessionManager
+	homePresentation       *MemoryPresentationService
+	homeProtectedWipeMu    sync.Mutex
+	homeProtectedWipeItems map[string]homeProtectedWipePending
+	trayScheduleMu         sync.Mutex
+	traySchedules          map[memoryTrayScheduleKey]*memoryTrayScheduleState
 }
 
 func New(cfg Config) (*Server, error) {
@@ -127,7 +129,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	server := &Server{
 		cfg: cfg, started: time.Now(),
-		traySchedules: make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
+		homeProtectedWipeItems: make(map[string]homeProtectedWipePending),
+		traySchedules:          make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
 	}
 	if cfg.HomeOrigin != "" {
 		parsedHomeOrigin, err := url.Parse(cfg.HomeOrigin)

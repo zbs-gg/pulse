@@ -2492,7 +2492,14 @@ func (s *Store) WipeProductMemory() error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := s.purgeDeskPublicationIntentsTx(tx, "", s.clock().UTC(), true); err != nil {
+	if err := s.applyProductMemoryWipeTx(tx, s.clock().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) applyProductMemoryWipeTx(tx *sql.Tx, now time.Time) error {
+	if err := s.purgeDeskPublicationIntentsTx(tx, "", now, true); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`
@@ -2515,5 +2522,5 @@ func (s *Store) WipeProductMemory() error {
 	if err := wipeHostExtractedGraph(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }

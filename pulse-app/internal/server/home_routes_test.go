@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -37,6 +38,15 @@ func (warmingProductTestEmbedder) Ready() bool { return false }
 
 type homeEnhancedPresenceAuthorizerStub struct {
 	profile userpresence.EnhancedPresenceProfile
+}
+
+type homeEnhancedPresenceProver struct {
+	calls int
+}
+
+func (prover *homeEnhancedPresenceProver) Prove(context.Context, userpresence.Challenge) error {
+	prover.calls++
+	return nil
 }
 
 func (stub homeEnhancedPresenceAuthorizerStub) Profile() userpresence.EnhancedPresenceProfile {
@@ -144,6 +154,233 @@ func TestMemoryHomeOrdinarySessionNeedsNoNativePresenceAndGrantsNoProtectedRoute
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("ordinary Home session reached protected route %q: status=%d", path, response.Code)
 		}
+	}
+}
+
+func TestHomeProtectedWipeBindsTheExactSnapshotAndConsumesPresenceOnce(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_protected", "Private content must never enter the protected receipt.")
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	prover := &homeEnhancedPresenceProver{}
+	gate, err := userpresence.NewGate(prover, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, err := userpresence.NewSynchronousGateAuthorizer(
+		gate, func() time.Time { return now }, bytes.NewReader(bytes.Repeat([]byte{0x51}, 256)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.cfg.EnhancedPresenceAuthorizer = authorizer
+	srv.homeSessions.clock = func() time.Time { return now }
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	begin := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(begin, homeMutationRequest(srv, session, "protected/wipe/begin", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+	}))
+	if begin.Code != http.StatusOK {
+		t.Fatalf("protected wipe begin status=%d body=%s", begin.Code, begin.Body.String())
+	}
+	if strings.Contains(begin.Body.String(), "Private content") {
+		t.Fatalf("protected wipe begin leaked memory content: %s", begin.Body.String())
+	}
+	var started homeProtectedWipeBeginResponse
+	if err := json.Unmarshal(begin.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Schema != homeProtectedWipeBeginSchemaV1 || started.AffectedDataCount == 0 ||
+		len(started.CeremonyID) != 64 || len(started.TargetDigest) != 64 {
+		t.Fatalf("invalid protected wipe begin response: %#v", started)
+	}
+
+	completeForm := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"ceremony_id":              {started.CeremonyID},
+	}
+	completed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(completed, homeMutationRequest(srv, session, "protected/wipe/complete", completeForm))
+	if completed.Code != http.StatusOK {
+		t.Fatalf("protected wipe complete status=%d body=%s", completed.Code, completed.Body.String())
+	}
+	var receipt store.ProductMemoryWipeReceiptV1
+	if err := json.Unmarshal(completed.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Schema != store.ProductMemoryWipeReceiptSchemaV1 || receipt.SnapshotDigest != started.AffectedDataDigest {
+		t.Fatalf("invalid protected wipe receipt: %#v", receipt)
+	}
+	if prover.calls != 1 {
+		t.Fatalf("presence proof calls=%d", prover.calls)
+	}
+	var remaining int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("protected wipe left %d capsules", remaining)
+	}
+
+	replay := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(replay, homeMutationRequest(srv, session, "protected/wipe/complete", completeForm))
+	if replay.Code != http.StatusConflict || prover.calls != 1 {
+		t.Fatalf("protected wipe replay status=%d presence_calls=%d", replay.Code, prover.calls)
+	}
+}
+
+func TestHomeProtectedWipeRefusesDataAddedAfterTheHumanSnapshot(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_before", "Approved set.")
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	prover := &homeEnhancedPresenceProver{}
+	gate, _ := userpresence.NewGate(prover, func() time.Time { return now })
+	authorizer, _ := userpresence.NewSynchronousGateAuthorizer(
+		gate, func() time.Time { return now }, bytes.NewReader(bytes.Repeat([]byte{0x52}, 256)),
+	)
+	srv.cfg.EnhancedPresenceAuthorizer = authorizer
+	srv.homeSessions.clock = func() time.Time { return now }
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	begin := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(begin, homeMutationRequest(srv, session, "protected/wipe/begin", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+	}))
+	var started homeProtectedWipeBeginResponse
+	if begin.Code != http.StatusOK || json.Unmarshal(begin.Body.Bytes(), &started) != nil {
+		t.Fatalf("protected wipe begin status=%d body=%s", begin.Code, begin.Body.String())
+	}
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_after", "This was never approved.")
+
+	completed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(completed, homeMutationRequest(srv, session, "protected/wipe/complete", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "ceremony_id": {started.CeremonyID},
+	}))
+	if completed.Code != http.StatusConflict || !strings.Contains(completed.Body.String(), "changed") {
+		t.Fatalf("stale protected wipe status=%d body=%s", completed.Code, completed.Body.String())
+	}
+	if prover.calls != 1 {
+		t.Fatalf("presence proof calls=%d", prover.calls)
+	}
+	var remaining int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 2 {
+		t.Fatalf("stale protected wipe deleted data; capsules=%d", remaining)
+	}
+}
+
+func TestHomeProtectedWipeStaysUnavailableWithoutAnEnhancedAdapter(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_safe", "Must remain without an enhanced adapter.")
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, homeMutationRequest(srv, session, "protected/wipe/begin", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+	}))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unavailable") {
+		t.Fatalf("unavailable protected wipe status=%d body=%s", response.Code, response.Body.String())
+	}
+	var remaining int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("unavailable protected wipe changed data; capsules=%d", remaining)
+	}
+}
+
+func TestHomeProtectedWipeIsBoundToTheBeginningHomeSession(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_session_bound", "Bound to the first Home session.")
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	prover := &homeEnhancedPresenceProver{}
+	gate, _ := userpresence.NewGate(prover, func() time.Time { return now })
+	authorizer, _ := userpresence.NewSynchronousGateAuthorizer(
+		gate, func() time.Time { return now }, bytes.NewReader(bytes.Repeat([]byte{0x53}, 256)),
+	)
+	srv.cfg.EnhancedPresenceAuthorizer = authorizer
+	srv.homeSessions.clock = func() time.Time { return now }
+	first, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(begin, homeMutationRequest(srv, first, "protected/wipe/begin", url.Values{
+		viewerSessionCSRFFormField: {first.CSRFToken},
+	}))
+	var started homeProtectedWipeBeginResponse
+	if begin.Code != http.StatusOK || json.Unmarshal(begin.Body.Bytes(), &started) != nil {
+		t.Fatalf("protected wipe begin status=%d body=%s", begin.Code, begin.Body.String())
+	}
+
+	wrongSession := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wrongSession, homeMutationRequest(srv, second, "protected/wipe/complete", url.Values{
+		viewerSessionCSRFFormField: {second.CSRFToken}, "ceremony_id": {started.CeremonyID},
+	}))
+	if wrongSession.Code != http.StatusConflict || prover.calls != 0 {
+		t.Fatalf("wrong-session completion status=%d presence_calls=%d", wrongSession.Code, prover.calls)
+	}
+	completed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(completed, homeMutationRequest(srv, first, "protected/wipe/complete", url.Values{
+		viewerSessionCSRFFormField: {first.CSRFToken}, "ceremony_id": {started.CeremonyID},
+	}))
+	if completed.Code != http.StatusOK || prover.calls != 1 {
+		t.Fatalf("bound-session completion status=%d presence_calls=%d body=%s", completed.Code, prover.calls, completed.Body.String())
+	}
+}
+
+func TestHomeProtectedWipeExpiresWithoutInvokingPresence(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	seedHomeProtectedWipeCapsule(t, vault, "capsule_expiry", "Must survive an expired ceremony.")
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	prover := &homeEnhancedPresenceProver{}
+	gate, _ := userpresence.NewGate(prover, func() time.Time { return now })
+	authorizer, _ := userpresence.NewSynchronousGateAuthorizer(
+		gate, func() time.Time { return now }, bytes.NewReader(bytes.Repeat([]byte{0x54}, 256)),
+	)
+	srv.cfg.EnhancedPresenceAuthorizer = authorizer
+	srv.homeSessions.clock = func() time.Time { return now }
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(begin, homeMutationRequest(srv, session, "protected/wipe/begin", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+	}))
+	var started homeProtectedWipeBeginResponse
+	if begin.Code != http.StatusOK || json.Unmarshal(begin.Body.Bytes(), &started) != nil {
+		t.Fatalf("protected wipe begin status=%d body=%s", begin.Code, begin.Body.String())
+	}
+	now = now.Add(91 * time.Second)
+	expired := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(expired, homeMutationRequest(srv, session, "protected/wipe/complete", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "ceremony_id": {started.CeremonyID},
+	}))
+	if expired.Code != http.StatusGone || prover.calls != 0 {
+		t.Fatalf("expired completion status=%d presence_calls=%d body=%s", expired.Code, prover.calls, expired.Body.String())
+	}
+	var remaining int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("expired protected wipe changed data; capsules=%d", remaining)
 	}
 }
 
@@ -869,6 +1106,23 @@ func newHomeRouteFixture(t *testing.T) (*Server, *store.Store) {
 		t.Fatal(err)
 	}
 	return srv, vault
+}
+
+func seedHomeProtectedWipeCapsule(t *testing.T, vault *store.Store, id, summary string) {
+	t.Helper()
+	_, err := vault.DB().Exec(`
+		INSERT INTO memory_capsules(
+			id, schema_version, source_host, conversation_scope, source_timestamp,
+			kind, redacted_summary, confidence, evidence_hint, privacy_tier,
+			retention, tags, created_at
+		) VALUES (?, 'pulse.memory_capsule.v1', 'codex', 'project',
+		          '2026-07-19T00:00:00Z', 'decision', ?, 1, 'fixture',
+		          'private', 'durable', '[]', '2026-07-19T00:00:00Z')`,
+		id, summary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func homePageRequest(srv *Server, session viewerSessionView) *http.Request {
