@@ -80,9 +80,10 @@ func LoadTeam(dataDir string) (*Config, error) {
 }
 
 func ensurePrivateTeamDataDir(path string) error {
-	if _, supported := platform.CurrentUserID(); !supported {
-		return fmt.Errorf("team data directory security: %w", platform.ErrUnsupported)
-	}
+	// InspectPrivateDirectory is the cross-platform ownership boundary. POSIX
+	// proves the effective UID and mode; Windows proves the current-user owner,
+	// protected DACL, and absence of reparse points. Requiring a numeric UID here
+	// made every native Windows Personal/Desk vault fail before secret creation.
 	exists, err := platform.InspectPrivateDirectory(path, true)
 	if err != nil {
 		return errors.New("team data directory must be an owner-only 0700 directory")
@@ -121,12 +122,8 @@ func loadOrCreateTeamSecret(path string) (string, error) {
 }
 
 func readStrictTeamSecret(path string) (string, error) {
-	uid, supported := platform.CurrentUserID()
-	if !supported {
-		return "", fmt.Errorf("team IPC secret security: %w", platform.ErrUnsupported)
-	}
 	data, err := platform.ReadPrivateFile(path, platform.FilePolicy{
-		MinimumBytes: 64, MaximumBytes: 64, ExpectedUID: &uid, OwnerOnly: true, SingleLink: true,
+		MinimumBytes: 64, MaximumBytes: 64, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
 	})
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

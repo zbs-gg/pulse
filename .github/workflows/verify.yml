@@ -98,6 +98,7 @@ jobs:
           go build ./cmd/pulse ./cmd/pulse-fixture-embedder
           if [[ "${{ matrix.platform }}" == "win32" ]]; then
             go test ./cmd/pulse-platform-adapter
+            go test ./internal/config -run '^TestLoadVaultPinsKindAndStoreIdentity$'
           fi
       - name: Build native MCP package
         working-directory: mcp

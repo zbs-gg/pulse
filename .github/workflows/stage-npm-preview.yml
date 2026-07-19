@@ -1,0 +1,109 @@
+name: Stage npm preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_candidate_run_id:
+        description: Successful Production candidate workflow run on main
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact SHA-256 printed by the protected candidate run
+        required: true
+        type: string
+      confirmation:
+        description: Type "stage @zbs-gg/pulse preview"
+        required: true
+        type: string
+
+concurrency:
+  group: stage-npm-preview
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  stage:
+    name: Verify and stage immutable npm candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-preview
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.production_candidate_run_id }}
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      STAGE_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.4.1
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Require reviewed main and explicit human intent
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$STAGE_CONFIRMATION" = 'stage @zbs-gg/pulse preview'
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+      - name: Install exact staged-publishing client
+        shell: bash
+        run: |
+          npm install --global npm@11.18.0
+          test "$(node --version)" = v24.4.1
+          test "$(npm --version)" = 11.18.0
+      - name: Require one successful production candidate for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > candidate-run.json
+          test "$(jq -r .name candidate-run.json)" = 'Production candidate'
+          test "$(jq -r .path candidate-run.json)" = '.github/workflows/production-candidate.yml'
+          test "$(jq -r .event candidate-run.json)" = workflow_dispatch
+          test "$(jq -r .head_branch candidate-run.json)" = main
+          test "$(jq -r .head_sha candidate-run.json)" = "$GITHUB_SHA"
+          test "$(jq -r .conclusion candidate-run.json)" = success
+          mkdir candidate
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-candidate \
+            --dir candidate
+      - name: Verify candidate, universal proof, and exact package bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          node pulse-app/cli/scripts/verify-npm-stage-candidate.mjs \
+            --candidate "$GITHUB_WORKSPACE/candidate/candidate.json" \
+            --commit "$GITHUB_SHA" \
+            --sha256 "$CANDIDATE_SHA256" > stage-verification.json
+          universal_run_id="$(jq -r .universal_run_id stage-verification.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$universal_run_id" > universal-run.json
+          test "$(jq -r .name universal-run.json)" = Universal
+          test "$(jq -r .path universal-run.json)" = '.github/workflows/verify.yml'
+          test "$(jq -r .event universal-run.json)" = push
+          test "$(jq -r .head_branch universal-run.json)" = main
+          test "$(jq -r .head_sha universal-run.json)" = "$GITHUB_SHA"
+          test "$(jq -r .conclusion universal-run.json)" = success
+      - name: Stage exact candidate through npm OIDC
+        shell: bash
+        run: |
+          tarball="$(jq -r .tarball stage-verification.json)"
+          npm stage publish "$GITHUB_WORKSPACE/candidate/$tarball" \
+            --tag preview \
+            --access public
+      - name: Human approval remains mandatory
+        shell: bash
+        run: |
+          echo 'Candidate is staged, not public.'
+          echo 'Review its immutable preview-tag bytes, then approve it with npm 2FA.'

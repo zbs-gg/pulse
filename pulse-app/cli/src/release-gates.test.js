@@ -155,6 +155,32 @@ test('npm publication runs the repository release gate before preparing package 
   );
 });
 
+test('npm preview release is manual, OIDC-only, staged, and still requires human 2FA approval', () => {
+  const workflow = readFileSync(join(root, '.github', 'workflows', 'stage-npm-preview.yml'), 'utf8');
+  assert.match(workflow, /^\s*workflow_dispatch:/m);
+  assert.match(workflow, /^\s*id-token: write$/m);
+  assert.match(workflow, /^\s*environment: npm-preview$/m);
+  assert.match(workflow, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(workflow, /test "\$STAGE_CONFIRMATION" = 'stage @zbs-gg\/pulse preview'/);
+  assert.match(workflow, /test -z "\$\{NODE_AUTH_TOKEN:-\}"/);
+  assert.match(workflow, /test -z "\$\{NPM_TOKEN:-\}"/);
+  assert.match(workflow, /npm@11\.18\.0/);
+  assert.match(workflow, /pulse-npm-production-candidate/);
+  assert.match(workflow, /\.github\/workflows\/production-candidate\.yml/);
+  assert.match(workflow, /\.github\/workflows\/verify\.yml/);
+  assert.match(workflow, /verify-npm-stage-candidate\.mjs/);
+  assert.match(workflow, /npm stage publish "\$GITHUB_WORKSPACE\/candidate\/\$tarball"/);
+  assert.match(workflow, /--tag preview/);
+  assert.doesNotMatch(workflow, /npm publish|npm stage approve|NODE_AUTH_TOKEN:\s*\$\{\{|NPM_TOKEN:\s*\$\{\{/);
+  assert.ok(workflow.indexOf('verify-npm-stage-candidate.mjs') < workflow.indexOf('npm stage publish'));
+
+  const release = readFileSync(join(root, 'docs', 'release', 'NPM_STAGED_PREVIEW.md'), 'utf8');
+  assert.match(release, /npm stage publish/);
+  assert.match(release, /2FA/);
+  assert.match(release, /production:false/);
+  assert.match(release, /Long-lived publication tokens are forbidden/);
+});
+
 test('production presence carrier uses the same exact-tree contract as the installer', () => {
 	const builder = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'build-presence-helper.mjs'), 'utf8',

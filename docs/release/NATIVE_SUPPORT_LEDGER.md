@@ -54,3 +54,5 @@ remains separately labeled and never upgrades a missing native product claim.
 model quality/resource gate, npm provenance check, or package digest check is
 missing or red. Publishing requires an explicitly authorized protected release
 workflow; the PR workflow never publishes npm packages or production assets.
+The fail-closed OIDC and human-approval contract is documented in
+[`NPM_STAGED_PREVIEW.md`](NPM_STAGED_PREVIEW.md).
