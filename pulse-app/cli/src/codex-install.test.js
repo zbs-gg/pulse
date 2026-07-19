@@ -443,6 +443,43 @@ test('workspace host-access markers disconnect one harness without breaking othe
 	}
 });
 
+test('host-access markers delegate Windows ACL proof, atomic write, and removal to platform services', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-product-host-access-platform-'));
+	try {
+		const productHome = join(root, '.pulse');
+		const binding = { workspace: { canonical_path: join(root, 'workspace') } };
+		const calls = [];
+		const platformServices = {
+			resolvePath: (path) => path,
+			ensurePrivateDirectory: (path) => {
+				calls.push(`directory:${path}`);
+				mkdirSync(path, { recursive: true, mode: 0o700 });
+			},
+			atomicWritePrivateFile: (path, bytes, options) => {
+				calls.push(`write:${path}:${options.ensureParent}:${options.maxBytes}`);
+				writeFileSync(path, bytes, { mode: 0o600 });
+			},
+			readPrivateFile: (path, options) => {
+				calls.push(`read:${path}:${options.maxBytes}`);
+				return readFileSync(path, options.encoding);
+			},
+			removePrivateFile: (path, options) => {
+				calls.push(`remove:${path}:${options.missing}`);
+				rmSync(path, { force: true });
+			},
+		};
+		const path = writeProductHostAccess({ productHome, binding, host: 'codex', platformServices });
+		assert.equal(readProductHostAccess({ productHome, binding, host: 'codex', platformServices }).record.host, 'codex');
+		removeProductHostAccess({ productHome, binding, host: 'codex', platformServices });
+		assert.deepEqual(calls.filter((call) => call.startsWith('directory:')).length, 3);
+		assert.equal(calls.some((call) => call === `write:${path}:false:2048`), true);
+		assert.equal(calls.filter((call) => call === `read:${path}:2048`).length, 3);
+		assert.equal(calls.includes(`remove:${path}:true`), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test('successful trusted hook writes a content-free global readiness receipt', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-codex-ready-'));
   try {

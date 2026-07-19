@@ -576,23 +576,24 @@ export function productHostAccessPath({ productHome = join(homedir(), '.pulse'),
 	);
 }
 
-function requirePrivateDirectory(path) {
-	mkdirSync(path, { recursive: true, mode: 0o700 });
-	const info = lstatSync(path);
-	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-	if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUID || (info.mode & 0o077) !== 0) {
+function requirePrivateDirectory(path, platformServices = defaultPlatformServices) {
+	try {
+		return platformServices.ensurePrivateDirectory(platformServices.resolvePath(path));
+	} catch {
 		throw new Error('Product host access directory is unsafe');
 	}
 }
 
-function readProductHostAccessPath(path, workspaceDigest, host) {
-	const info = lstatSync(path);
-	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-	if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
-		(info.mode & 0o077) !== 0 || info.size > 2048) {
+function readProductHostAccessPath(path, workspaceDigest, host, platformServices = defaultPlatformServices) {
+	let record;
+	try {
+		const bytes = platformServices.readPrivateFile(platformServices.resolvePath(path), {
+			encoding: 'utf8', minBytes: 1, maxBytes: 2048,
+		});
+		record = JSON.parse(bytes);
+	} catch {
 		throw new Error('Product host access marker is unsafe');
 	}
-	const record = JSON.parse(readFileSync(path, 'utf8'));
 	if (record?.schema !== 'pulse.product_host_access.v1' || record.host !== host ||
 		record.workspace_digest !== workspaceDigest ||
 		Object.keys(record).sort().join('\0') !== ['host', 'schema', 'workspace_digest'].sort().join('\0')) {
@@ -601,32 +602,50 @@ function readProductHostAccessPath(path, workspaceDigest, host) {
 	return record;
 }
 
-export function readProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+export function readProductHostAccess({
+	productHome = join(homedir(), '.pulse'), binding, host, platformServices = defaultPlatformServices,
+}) {
 	const path = productHostAccessPath({ productHome, binding, host });
 	return {
 		path,
-		record: readProductHostAccessPath(path, codexProductWorkspaceDigest(binding.workspace.canonical_path), host),
+		record: readProductHostAccessPath(
+			path, codexProductWorkspaceDigest(binding.workspace.canonical_path), host, platformServices,
+		),
 	};
 }
 
-export function writeProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+export function writeProductHostAccess({
+	productHome = join(homedir(), '.pulse'), binding, host, platformServices = defaultPlatformServices,
+}) {
 	const path = productHostAccessPath({ productHome, binding, host });
-	requirePrivateDirectory(resolve(productHome));
-	requirePrivateDirectory(join(resolve(productHome), 'product-host-access'));
-	requirePrivateDirectory(dirname(path));
-	atomicWriteJSON(path, {
+	requirePrivateDirectory(resolve(productHome), platformServices);
+	requirePrivateDirectory(join(resolve(productHome), 'product-host-access'), platformServices);
+	requirePrivateDirectory(dirname(path), platformServices);
+	const record = {
 		schema: 'pulse.product_host_access.v1',
 		workspace_digest: codexProductWorkspaceDigest(binding.workspace.canonical_path),
 		host,
-	});
-	readProductHostAccess({ productHome, binding, host });
+	};
+	try {
+		platformServices.atomicWritePrivateFile(
+			platformServices.resolvePath(path), `${JSON.stringify(record, null, 2)}\n`,
+			{ ensureParent: false, maxBytes: 2048 },
+		);
+	} catch {
+		throw new Error('Product host access marker is unsafe');
+	}
+	readProductHostAccess({ productHome, binding, host, platformServices });
 	return path;
 }
 
-export function removeProductHostAccess({ productHome = join(homedir(), '.pulse'), binding, host }) {
+export function removeProductHostAccess({
+	productHome = join(homedir(), '.pulse'), binding, host, platformServices = defaultPlatformServices,
+}) {
 	const path = productHostAccessPath({ productHome, binding, host });
-	if (existsSync(path)) readProductHostAccess({ productHome, binding, host });
-	rmSync(path, { force: true });
+	if (existsSync(path)) readProductHostAccess({ productHome, binding, host, platformServices });
+	try { platformServices.removePrivateFile(platformServices.resolvePath(path), { missing: true }); } catch {
+		throw new Error('Product host access marker is unsafe');
+	}
 	const root = join(resolve(productHome), 'product-host-access');
 	const workspaceDirectory = dirname(path);
 	const workspaceMarkers = existsSync(workspaceDirectory)
@@ -639,7 +658,7 @@ export function removeProductHostAccess({ productHome = join(homedir(), '.pulse'
 			if (!/^[a-f0-9]{64}$/.test(workspaceDigest)) throw new Error('Product host access directory is invalid');
 			const candidate = join(root, workspaceDigest, `${host}.json`);
 			if (!existsSync(candidate)) continue;
-			readProductHostAccessPath(candidate, workspaceDigest, host);
+			readProductHostAccessPath(candidate, workspaceDigest, host, platformServices);
 			remainingForHost += 1;
 		}
 		if (readdirSync(root).length === 0) rmSync(root, { recursive: true, force: true });
