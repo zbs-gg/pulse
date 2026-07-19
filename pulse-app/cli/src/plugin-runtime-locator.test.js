@@ -161,6 +161,9 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.equal(cachedEnvironmentProof.pluginDigest, environmentProof.pluginDigest);
     assert.equal(cachedEnvironmentProof.daemonDigest, environmentProof.daemonDigest);
     assert.deepEqual(calls.slice(9).map(([operation]) => operation), ['write', 'batch']);
+    trust.writeProductEnvironmentCache(environmentProof, 'codex');
+    assert.equal(calls.filter(([operation]) => operation === 'write').length, 1,
+      'a still-valid receipt must not spawn a second Windows writer');
     writeFileSync(productActivationPath, `${JSON.stringify({ daemon_path: file, changed: true })}\n`);
     assert.equal(trust.productEnvironmentCacheProof({
       host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,

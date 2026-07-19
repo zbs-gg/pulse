@@ -282,7 +282,6 @@ function createTrustServices({
             },
             { operation: 'inspect_private_state', payload: { kind: 'directory', path: runtimeRoot } },
             { operation: 'inspect_private_state', payload: { kind: 'directory', path: pluginRoot } },
-            { operation: 'inspect_private_state', payload: { kind: 'file', path: daemonPath } },
             { operation: 'inspect_private_state', payload: { kind: 'file', path: expectedRuntimePath } },
           ]);
           const locatorBytes = nativePrivateBytes(results[0]);
@@ -294,7 +293,6 @@ function createTrustServices({
           nativePrivateState(results[6], 'directory');
           nativePrivateState(results[7], 'directory');
           nativePrivateState(results[8], 'file');
-          nativePrivateState(results[9], 'file');
           const expected = {
             activationBytes, activationPath, daemonPath, dataDir, expectedRuntimePath,
             host, hostAccessBytes, hostAccessPath, locatorBytes, locatorKey, pluginRoot,
@@ -387,7 +385,13 @@ function createTrustServices({
         });
       },
       writeProductEnvironmentCache(proof, host) {
-        const record = windowsIntegrityCacheRecord(proof, host);
+        const nowMs = Date.now();
+        const existing = preliminaryPrivateJSON(proof.cachePath);
+        if (validWindowsIntegrityCache(existing, { ...proof, host }, nowMs) &&
+            existing.expires_at_ms - nowMs > 30_000) {
+          return;
+        }
+        const record = windowsIntegrityCacheRecord(proof, host, nowMs);
         const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
         adapter.atomicWritePrivateFile(proof.cachePath, bytes, {
           ensureParent: true, maxBytes: PRIVATE_JSON_LIMIT,
