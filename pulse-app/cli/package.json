@@ -81,6 +81,7 @@
     "test:personal-interruption": "node scripts/personal-preview-interruption-e2e.mjs",
     "test:personal-multiharness": "node scripts/personal-preview-multiharness-e2e.mjs",
     "test:personal-native-packed": "node scripts/personal-native-packed-e2e.mjs",
+    "test:native-universal-target": "node scripts/native-universal-target.mjs",
     "attest:personal-preview": "node scripts/personal-preview-release-attestation.mjs",
     "test:git-team-memory": "node scripts/git-team-memory-e2e.mjs",
     "test:codex-product:real-mlx": "PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs",

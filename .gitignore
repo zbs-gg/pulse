@@ -7,6 +7,7 @@ vendor/
 
 # Local workspace / release artifacts
 node_modules/
+.pulse-ci/
 /node_modules/
 /.worktrees/
 /artifacts/

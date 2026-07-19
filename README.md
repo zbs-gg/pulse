@@ -29,12 +29,15 @@ pulse doctor codex
 pulse home                           # memories, continuity, token evidence
 ```
 
-The release-gated Personal path is Apple Silicon + Node 20+ + a Git project +
-any one of Claude Code, Cursor, or Codex. Pulse detects every compatible host
-already installed and connects them to one shared local Core and vault. It
-needs no Go, Python, Make, Docker, model API key, or manual configuration
-editing. On unsupported hosts, [Safe Mode](#safe-mode--fallback-not-the-product)
-remains a separately labeled compatibility fallback, **not** the engine.
+The release target is macOS, Windows, and GNU/Linux on arm64 and x64, with
+Node 20+, a Git project, and any one of Claude Code, Cursor, or Codex. Pulse
+detects every compatible host already installed and connects them to one
+shared local Core and vault. It needs no Go, Python, Make, Docker, model API
+key, or manual configuration editing. A target is public support only when its
+exact native and production evidence is green in the
+[support ledger](docs/release/NATIVE_SUPPORT_LEDGER.md). On unsupported hosts,
+[Safe Mode](#safe-mode--fallback-not-the-product) remains a separately labeled
+compatibility fallback, **not** the engine.
 
 ![What the next agent session receives — the Pulse continuity pack](docs/assets/continuity-pack.png)
 
@@ -60,9 +63,10 @@ Please install it carefully:
    npm view @zbs-gg/pulse dist-tags
    The host-neutral Personal path requires preview 0.7.0 or newer and
    `pulse.personal_install_plan.v2` with all three supported hosts.
-3. Check whether this is an Apple Silicon Mac with Node 20+, a Git project,
-   and at least one of Claude Code, Cursor, or Codex. Otherwise explain Safe
-   Mode separately.
+3. Check that this exact OS/architecture is green in
+   docs/release/NATIVE_SUPPORT_LEDGER.md, with Node 20+, a Git project, and at
+   least one of Claude Code, Cursor, or Codex. Otherwise explain Safe Mode
+   separately.
 4. Explain in plain English what Pulse will write, where memory is stored,
    what does NOT happen by default, and how I can erase it.
 5. Ask me for confirmation before installing anything.
@@ -148,6 +152,11 @@ legacy and should not be the default install path.
 _"MCP-compatible" means protocol-level only. The current synthetic matrix
 covers orchestration contracts; physical clean-machine attestation owns the
 one-command product claim._
+
+Native OS/architecture and harness claims are tracked separately in the
+[release support ledger](docs/release/NATIVE_SUPPORT_LEDGER.md). A green PR
+fixture is required engineering evidence, not permission to call unpublished
+or unsigned bytes production support.
 
 ## Install — Personal Pulse
 

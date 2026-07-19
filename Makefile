@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test git-team-memory-e2e verify personal-real-mlx-release personal-preview-attestation team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test native-universal-contract git-team-memory-e2e verify personal-real-mlx-release personal-preview-attestation team-remote-daemon-store-acceptance team-deploy-static-verify team-race-release release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -66,6 +66,10 @@ mcp-build: ## Build MCP server (mcp/)
 
 cli-test: ## Run published CLI contract tests (pulse-app/cli/)
 	cd $(CLI_DIR) && $(NPM) test
+
+native-universal-contract: ## Validate the exact six-target required GitHub matrix
+	cd $(CLI_DIR) && node scripts/native-universal-matrix.mjs --check
+	cd $(CLI_DIR) && node --test src/native-universal-matrix.test.js
 
 git-team-memory-e2e: ## Prove committed Git memory reaches a second checkout through the existing ranker
 	cd $(CLI_DIR) && $(NPM) run test:git-team-memory

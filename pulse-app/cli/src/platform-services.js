@@ -79,6 +79,9 @@ function windowsCandidates(home, env, pathAPI) {
       pathAPI.join(appData, 'npm', 'claude.cmd'),
     ],
     codex: [
+      ...(env.PULSE_TRUST_MODE === 'test' && env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1' &&
+        typeof env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE === 'string'
+        ? [env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE] : []),
       pathAPI.join(home, '.local', 'bin', 'codex.exe'),
       pathAPI.join(home, '.local', 'bin', 'codex.cmd'),
       pathAPI.join(appData, 'npm', 'codex.cmd'),

@@ -30,11 +30,13 @@ and appears in Memory Home with honest token-economy evidence.
 2. Run `npm view @zbs-gg/pulse dist-tags --json`. The Personal path described
    here requires the `preview` release that contains version `0.7.0` or newer
    and emits `pulse.personal_install_plan.v2`.
-3. Check for an Apple Silicon Mac, Node 20+, a Git project, and at least one of
-   Claude Code, Cursor, or Codex.
+3. Check `docs/release/NATIVE_SUPPORT_LEDGER.md` for this exact OS,
+   architecture, and harness, then require Node 20+, a Git project, and at
+   least one of Claude Code, Cursor, or Codex.
 4. Explain the install in plain language:
-   - a verified Pulse-owned daemon, local embedding runtime, model, native
-     plugins for every detected compatible host, and macOS presence helper are installed;
+   - a verified Pulse-owned daemon, local embedding runtime, model, and native
+     plugins for every detected compatible host are installed; enhanced
+     protected-action presence remains an optional separately verified capability;
    - the daemon listens only on numeric loopback and memory stays in a private,
      project-bound local vault;
    - raw transcript capture and backend model calls are off by default;

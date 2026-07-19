@@ -25,7 +25,12 @@ editing. Memory remains in a private project-bound local vault; raw transcript
 capture, backend model calls, old-chat import, and Personal-to-Git publication
 are off by default.
 
-The wizard may pause for real human actions such as the macOS presence prompt,
+The intended target set is macOS, Windows, and GNU/Linux on arm64 and x64.
+Before presenting the command as supported, the agent must find the exact
+target and harness in the [native support ledger](release/NATIVE_SUPPORT_LEDGER.md).
+PR fixture evidence alone does not authorize a public support claim.
+
+The wizard may pause for real human actions such as protected-action presence,
 Codex hook trust, Claude Code plugin approval, or a Cursor reload. Rerun the
 same command or use `pulse repair`; verified Core and host work is reused.
 

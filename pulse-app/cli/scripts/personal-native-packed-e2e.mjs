@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
@@ -126,12 +126,14 @@ function exposeCodexToIsolatedHome(home) {
     executable = result.stdout.split(/\r?\n/).find(Boolean);
   }
   if (!executable || !existsSync(executable)) throw new Error('native packed Codex executable is unavailable');
+  if (process.platform === 'win32') {
+    assert.equal(/\.exe$/i.test(executable), true);
+    return realpathSync(executable);
+  }
   const bin = join(home, '.local', 'bin');
   mkdirSync(bin, { recursive: true, mode: 0o700 });
-  if (process.platform === 'win32') {
-    throw new Error('Windows native host exposure requires the U11 calibrated runner adapter');
-  }
   symlinkSync(realpathSync(executable), join(bin, 'codex'));
+  return realpathSync(executable);
 }
 
 function stopFixtureProcesses(root) {
@@ -297,8 +299,8 @@ try {
   for (const path of [home, codexHome, workspace, dataDir, join(dataDir, 'artifacts'), npmCache]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
-  exposeCodexToIsolatedHome(home);
-  run('/usr/bin/git', ['init', '--quiet'], { cwd: workspace });
+  const codexExecutable = exposeCodexToIsolatedHome(home);
+  run(process.platform === 'win32' ? 'git' : '/usr/bin/git', ['init', '--quiet'], { cwd: workspace });
   writeFileSync(join(workspace, 'README.md'), '# Native packed Pulse fixture\n', { mode: 0o600 });
   const fixture = await buildAndInstallTargetFixture({
     buildEmbedder: buildFixtureEmbedder,
@@ -329,6 +331,7 @@ try {
     PULSE_NATIVE_PACKED_FIXTURE_ROOT: root,
     PULSE_NATIVE_PACKED_FIXTURE_PORT: String(port),
     PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH: trust.privatePath,
+    PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: codexExecutable,
     PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
   };
   const planResult = packedPulse(tarball, ['install-plan', '--json'], {
@@ -344,6 +347,7 @@ try {
     ...baseEnv,
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
+  const installStartedAt = Date.now();
   const installed = packedPulse(tarball, ['install', '--json'], {
     cwd: workspace, env, statuses: [0, 1], timeout: 15 * 60_000,
   });
@@ -353,7 +357,7 @@ try {
   assert.equal(installResult.host_status.hosts[0].installed, true);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
-  assert.equal(pluginRoot.endsWith('/pulse/0.7.0'), true);
+  assert.equal(basename(pluginRoot), '0.7.0');
 
   const { runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace);
   const secret = readFileSync(join(runtime.data_dir, 'secret.key'), 'utf8').trim();
@@ -443,6 +447,8 @@ try {
   assert.equal(terminalCard.latest_receipt.safe_provenance.host, 'codex');
   assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
   const objectID = terminalCard.canonical_object_id;
+  const firstValueMs = Date.now() - installStartedAt;
+  assert.equal(firstValueMs <= 60_000, true, `native packed first value took ${firstValueMs}ms`);
 
   const freshSessionID = 'session-native-packed-fresh';
   const freshTurnID = 'turn-native-packed-fresh';
@@ -471,6 +477,15 @@ try {
     body: { query: summary, scope: 'project', limit: 10, privacy_ceiling: 'private' },
   });
   assert.equal(recalled.items.some((item) => item.id === objectID && item.summary === summary), true);
+  const viewer = await productJSON(runtime, secret,
+    '/viewer/data?thread_id=native-packed-e2e&host=codex&token_budget=900');
+  const economy = viewer?.next_resume?.token_economy;
+  assert.equal(viewer?.next_resume?.included_object_ids?.includes(objectID), true);
+  assert.equal(['collecting_baseline', 'estimated', 'measured'].includes(economy?.state), true);
+  assert.equal(typeof economy?.method_id, 'string');
+  assert.equal(economy.method_id.length > 0, true);
+  assert.equal(Number.isInteger(economy.pulse_tokens) && economy.pulse_tokens > 0, true);
+  assert.equal('savings_percentage' in economy, false);
 
   const repairPlanResult = packedPulse(tarball, ['install-plan', '--json'], {
     cwd: workspace, env: baseEnv, timeout: 180_000,
@@ -498,9 +513,12 @@ try {
     host,
     packed_tarball_sha256: tarball.sha256,
     packed_tarball_bytes: tarball.bytes,
+    release_manifest_digest: plan.release.manifest_digest,
+    release_artifact_ids: plan.release.artifacts.map((artifact) => artifact.id).sort(),
     exact_public_install_command: true,
     native_daemon: true,
     native_fixture_embedder: true,
+    store_id: runtime.store_id,
     static_host_attached: true,
     visible_memory_card: true,
     first_memory_saved: true,
@@ -510,6 +528,13 @@ try {
     lifecycle_ready: true,
     repair_ready: true,
     same_object_recalled: true,
+    first_value_ms: firstValueMs,
+    token_economy: {
+      state: economy.state,
+      method_id: economy.method_id,
+      method_version: economy.method_version,
+      pulse_tokens: economy.pulse_tokens,
+    },
     production_ready: false,
     support_proven: false,
   };

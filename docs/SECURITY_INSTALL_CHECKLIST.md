@@ -1,6 +1,7 @@
 # Security Install Checklist
 
-Use this checklist before installing Pulse MCP Preview v0.4.2 for a user.
+Use this checklist before installing Pulse Personal Preview v0.7.0 or newer
+for a user.
 
 ## Required Checks
 
@@ -9,6 +10,9 @@ Use this checklist before installing Pulse MCP Preview v0.4.2 for a user.
 - [ ] Old chat import is not run by default.
 - [ ] The install source is real: npm preview package is published, or the user
       explicitly provided a source bundle, tarball, or local checkout.
+- [ ] The exact OS, architecture, and harness are green in
+      `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not
+      presented as public support.
 - [ ] Local storage path is shown.
 - [ ] Claude Code MCP config location is shown.
 - [ ] Claude Code hooks location is shown.

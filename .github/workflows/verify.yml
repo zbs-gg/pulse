@@ -1,0 +1,105 @@
+name: Universal
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: universal-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Matrix contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - id: matrix
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          node scripts/native-universal-matrix.mjs --check
+          echo "value=$(node scripts/native-universal-matrix.mjs --github)" >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Native / ${{ matrix.target_id }} / ${{ matrix.host }}
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.contract.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node_version }}
+          cache: npm
+          cache-dependency-path: |
+            pulse-app/cli/package-lock.json
+            mcp/package-lock.json
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: pulse-app/go.sum
+      - name: Install exact harness calibration
+        shell: bash
+        run: |
+          npm install --global "${{ matrix.harness_package }}@${{ matrix.harness_version }}"
+          codex --version
+      - name: Verify native Go contract
+        working-directory: pulse-app
+        shell: bash
+        run: go test ./...
+      - name: Verify native CLI contract
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npm test
+      - name: Verify native MCP contract
+        working-directory: mcp
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npm test
+      - name: Prove exact packed Personal continuity
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          npm run test:native-universal-target --
+          --target "${{ matrix.target_id }}"
+          --out ".pulse-ci/evidence/${{ matrix.target_id }}.json"
+      - name: Upload content-free target evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pulse-native-${{ matrix.target_id }}
+          path: pulse-app/cli/.pulse-ci/evidence/${{ matrix.target_id }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  universal-required:
+    name: Universal / required
+    if: always()
+    needs: [contract, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every native target
+        env:
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        shell: bash
+        run: |
+          test "$CONTRACT_RESULT" = success
+          test "$NATIVE_RESULT" = success
