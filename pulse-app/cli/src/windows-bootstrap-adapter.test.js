@@ -20,6 +20,7 @@ const operations = Object.freeze([
   'acquire_private_lock',
   'atomic_write_private_file',
   'ensure_private_directory',
+  'digest_private_tree',
   'inspect_executable',
   'inspect_path_identity',
   'inspect_private_state',
@@ -85,6 +86,9 @@ test('bundled selector verifies the exact digest and exposes the complete native
     if (operation === 'inspect_private_tree') {
       return { bytes: payload.entries.reduce((total, entry) => total + entry.bytes, 0), files: payload.entries.length };
     }
+    if (operation === 'digest_private_tree') {
+      return { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) };
+    }
     if (operation === 'inspect_process') {
       return { command: 'node.exe', identity_token: 'process-identity', pid: payload.pid, running: true };
     }
@@ -109,10 +113,14 @@ test('bundled selector verifies the exact digest and exposes the complete native
     entries: [{ bytes: 7, executable: false, path: 'index.js', sha256: 'a'.repeat(64) }],
     maximumDepth: 32, maximumEntries: 8192, maximumTotalBytes: 4096,
   }), { bytes: 7, files: 1 });
+  assert.deepEqual(adapter.digestPrivateTree(`${path}\\runtime`, {
+    excludeRootFile: 'runtime-manifest.json', maximumDepth: 32,
+    maximumEntries: 8192, maximumTotalBytes: 4096,
+  }), { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) });
   const release = adapter.acquirePrivateLock(`${path}\\install.lock`, { staleAfterMs: 1000, timeoutMs: 0 });
   release();
   assert.deepEqual(calls.map(({ operation }) => operation), [
-    'contract', 'inspect_private_state', 'read_integrity_file', 'inspect_private_tree',
+    'contract', 'inspect_private_state', 'read_integrity_file', 'inspect_private_tree', 'digest_private_tree',
     'inspect_process', 'acquire_private_lock', 'release_private_lock',
   ]);
 });

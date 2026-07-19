@@ -33,7 +33,7 @@ const (
 
 var operations = []string{
 	"acquire_private_lock", "atomic_write_private_file", "ensure_private_directory",
-	"inspect_executable", "inspect_path_identity", "inspect_private_state", "inspect_private_tree", "inspect_process",
+	"digest_private_tree", "inspect_executable", "inspect_path_identity", "inspect_private_state", "inspect_private_tree", "inspect_process",
 	"read_integrity_file", "read_private_file", "release_private_lock", "remove_private_file",
 	"terminate_process",
 }
@@ -69,6 +69,7 @@ type request struct {
 	MaximumDepth      int                `json:"maximum_depth,omitempty"`
 	MaximumEntries    int                `json:"maximum_entries,omitempty"`
 	MaximumTotalBytes int64              `json:"maximum_total_bytes,omitempty"`
+	ExcludeRootFile   string             `json:"exclude_root_file,omitempty"`
 }
 
 type privateTreeEntry struct {
@@ -124,6 +125,8 @@ func main() {
 
 func dispatch(operation string, value request) (any, error) {
 	switch operation {
+	case "digest_private_tree":
+		return digestPrivateTree(value)
 	case "inspect_executable":
 		data, _, err := platform.ReadPrivateFileWithInfo(value.Path, platform.FilePolicy{
 			MaximumBytes: 512 * 1024 * 1024, NoUntrustedWrite: true, SingleLink: true, Executable: true,
@@ -240,6 +243,84 @@ func validPrivateTreePath(value string) bool {
 		}
 	}
 	return true
+}
+
+func digestPrivateTree(value request) (any, error) {
+	if value.Path == "" || !filepath.IsAbs(value.Path) ||
+		value.MaximumEntries < 1 || value.MaximumEntries > 1_000_000 ||
+		value.MaximumDepth < 1 || value.MaximumDepth > 128 ||
+		value.MaximumTotalBytes < 1 || value.MaximumTotalBytes > 64*1024*1024*1024 ||
+		(value.ExcludeRootFile != "" && (!validPrivateTreePath(value.ExcludeRootFile) ||
+			strings.Contains(value.ExcludeRootFile, "/"))) {
+		return nil, platform.ErrUnsafe
+	}
+	if _, err := platform.InspectPrivateDirectory(value.Path, false); err != nil {
+		return nil, err
+	}
+	hash := sha256.New()
+	visited := 0
+	files := 0
+	var actualBytes int64
+	err := filepath.Walk(value.Path, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(value.Path, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		visited++
+		if visited > value.MaximumEntries || strings.Count(relative, "/") > value.MaximumDepth ||
+			info.Mode()&os.ModeSymlink != 0 {
+			return platform.ErrUnsafe
+		}
+		if info.IsDir() {
+			_, err := platform.InspectPrivateDirectory(path, false)
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return platform.ErrUnsafe
+		}
+		remaining := value.MaximumTotalBytes - actualBytes
+		if remaining < 0 {
+			return platform.ErrUnsafe
+		}
+		maximumBytes := remaining + 1
+		if maximumBytes > 512*1024*1024 {
+			maximumBytes = 512 * 1024 * 1024
+		}
+		data, details, err := platform.ReadPrivateFileWithInfo(path, platform.FilePolicy{
+			MaximumBytes: maximumBytes, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+		})
+		if err != nil || details.Size != int64(len(data)) {
+			return platform.ErrUnsafe
+		}
+		actualBytes += int64(len(data))
+		if actualBytes < 0 || actualBytes > value.MaximumTotalBytes {
+			return platform.ErrUnsafe
+		}
+		files++
+		if relative != value.ExcludeRootFile {
+			hash.Write([]byte(relative))
+			hash.Write([]byte{0})
+			hash.Write(data)
+			hash.Write([]byte{0})
+		}
+		return nil
+	})
+	if err != nil || files < 1 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, platform.ErrUnsafe
+	}
+	return map[string]any{
+		"bytes": actualBytes, "files": files, "tree_digest": fmt.Sprintf("%x", hash.Sum(nil)),
+	}, nil
 }
 
 func inspectPrivateTree(value request) (any, error) {

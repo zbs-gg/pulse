@@ -57,3 +57,36 @@ func TestInspectPrivateTreeValidatesTheWholeExpectedTreeInOneOperation(t *testin
 		t.Fatal("tampered digest was accepted")
 	}
 }
+
+func TestDigestPrivateTreeReturnsTheCanonicalSignedTreeDigest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private-tree-digest")
+	runtimeRoot := filepath.Join(root, "runtime")
+	if err := platform.EnsurePrivateDirectory(runtimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("trusted runtime")
+	if err := platform.AtomicWritePrivateFile(filepath.Join(runtimeRoot, "index.js"), payload); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte("excluded manifest")
+	if err := platform.AtomicWritePrivateFile(filepath.Join(root, "runtime-manifest.json"), manifest); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := digestPrivateTree(request{
+		Path: root, ExcludeRootFile: "runtime-manifest.json", MaximumDepth: 32,
+		MaximumEntries: 64, MaximumTotalBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.New()
+	want.Write([]byte("runtime/index.js"))
+	want.Write([]byte{0})
+	want.Write(payload)
+	want.Write([]byte{0})
+	result := proof.(map[string]any)
+	if result["files"] != 2 || result["bytes"] != int64(len(payload)+len(manifest)) ||
+		result["tree_digest"] != fmt.Sprintf("%x", want.Sum(nil)) {
+		t.Fatalf("unexpected tree digest proof: %#v", result)
+	}
+}

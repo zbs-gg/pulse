@@ -88,6 +88,19 @@ function createTrustServices({
         }
         return proof.identity_token;
       },
+      treeDigest(path, excludeRootFile) {
+        const proof = adapter.digestPrivateTree(path, {
+          excludeRootFile, maximumDepth: TREE_MAX_DEPTH, maximumEntries: TREE_MAX_ENTRIES,
+          maximumTotalBytes: TREE_MAX_BYTES,
+        });
+        if (!exactObject(proof, ['bytes', 'files', 'tree_digest']) ||
+            !Number.isSafeInteger(proof.bytes) || proof.bytes < 1 || proof.bytes > TREE_MAX_BYTES ||
+            !Number.isSafeInteger(proof.files) || proof.files < 1 || proof.files > TREE_MAX_ENTRIES ||
+            !SHA256.test(proof.tree_digest ?? '')) {
+          throw new Error('Pulse trusted tree native digest proof is invalid');
+        }
+        return proof.tree_digest;
+      },
       readPrivateFile(path, maxBytes = PRIVATE_JSON_LIMIT) {
         const bytes = adapter.readPrivateFile(path, { minBytes: 1, maxBytes });
         if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > maxBytes) {
@@ -179,6 +192,7 @@ function readPrivateJSON(trust, path, maxBytes = PRIVATE_JSON_LIMIT) {
 // The plugin owns this verification because code inside the installed runtime
 // cannot establish its own integrity after Node has already executed it.
 function trustedTreeDigest(root, { label, excludeRootFile, trust = createTrustServices() } = {}) {
+  if (typeof trust.treeDigest === 'function') return trust.treeDigest(root, excludeRootFile);
   trust.assertTreeEntry(root, '.', 'directory');
   const hash = createHash('sha256');
   const entries = [];

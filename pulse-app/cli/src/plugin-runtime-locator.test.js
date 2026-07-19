@@ -13,7 +13,7 @@ import { writeProductEdgeFixture } from '../scripts/product-release-fixture.mjs'
 
 const WINDOWS_ADAPTER_OPERATIONS = [
   'acquire_private_lock', 'atomic_write_private_file', 'ensure_private_directory',
-  'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_private_tree', 'inspect_process',
+  'digest_private_tree', 'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_private_tree', 'inspect_process',
   'read_integrity_file', 'read_private_file', 'release_private_lock', 'remove_private_file',
   'terminate_process',
 ];
@@ -38,7 +38,12 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     writeFileSync(file, bytes);
     writeFileSync(join(root, 'runtime-manifest.json'), '{}\n');
     const calls = [];
+    const treeDigest = createHash('sha256').update('runtime.mjs').update('\0').update(bytes).update('\0').digest('hex');
     const adapter = {
+      digestPrivateTree(path, options) {
+        calls.push(['digest', path, options]);
+        return { bytes: bytes.length + 3, files: 2, tree_digest: treeDigest };
+      },
       inspectPathIdentity(path, options) {
         calls.push(['identity', path, options]);
         return {
@@ -49,13 +54,6 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
       readPrivateFile(path, options) {
         calls.push(['read', path, options]);
         return readFileSync(path);
-      },
-      inspectPrivateTree(path, options) {
-        calls.push(['tree', path, options]);
-        return {
-          bytes: options.entries.reduce((total, entry) => total + entry.bytes, 0),
-          files: options.entries.length,
-        };
       },
       inspectExecutable(path) {
         calls.push(['executable', path]);
@@ -70,12 +68,10 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     assert.deepEqual(trust.readPrivateFile(file, 1024), bytes);
     assert.equal(__runtimeLocatorTest.trustedTreeDigest(root, {
       excludeRootFile: 'runtime-manifest.json', label: 'Pulse test runtime', trust,
-    }), createHash('sha256').update('runtime.mjs').update('\0').update(bytes).update('\0').digest('hex'));
+    }), treeDigest);
     assert.equal(trust.executableDigest(file), createHash('sha256').update(bytes).digest('hex'));
-    assert.deepEqual(calls.map(([operation]) => operation), ['identity', 'read', 'tree', 'executable']);
-    assert.deepEqual(calls[2][2].entries.map((entry) => entry.path), [
-      'runtime-manifest.json', 'runtime.mjs',
-    ]);
+    assert.deepEqual(calls.map(([operation]) => operation), ['identity', 'read', 'digest', 'executable']);
+    assert.equal(calls[2][2].excludeRootFile, 'runtime-manifest.json');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -143,6 +139,9 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
           canonical_path: payload.path, identity_token: 'volume:file', kind: payload.kind,
           reparse_point: false,
         };
+        if (operation === 'digest_private_tree') return {
+          bytes: 7, files: 1, tree_digest: 'a'.repeat(64),
+        };
         throw new Error(`unexpected operation: ${operation}`);
       },
     });
@@ -151,8 +150,12 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
       canonical_path: 'C:\\workspace', identity_token: 'volume:file', kind: 'directory',
       reparse_point: false,
     });
+    assert.deepEqual(adapter.digestPrivateTree('C:\\runtime', {
+      excludeRootFile: 'runtime-manifest.json', maximumDepth: 128,
+      maximumEntries: 100000, maximumTotalBytes: 1024,
+    }), { bytes: 7, files: 1, tree_digest: 'a'.repeat(64) });
     assert.deepEqual(calls.map(({ operation }) => operation), [
-      'contract', 'read_private_file', 'inspect_path_identity',
+      'contract', 'read_private_file', 'inspect_path_identity', 'digest_private_tree',
     ]);
     assert.equal(calls[1].payload.path, 'C:\\private.json');
   } finally {
