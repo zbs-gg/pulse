@@ -61,6 +61,7 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	const cli = readFileSync(join(root, 'pulse-app', 'cli', 'src', 'cli.js'), 'utf8');
 	assert.match(cli, /PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION/);
 	assert.match(cli, /core activation detail/);
+	assert.match(cli, /codex activation detail/);
 	assert.match(cli, /core activation stage/);
 	assert.match(cli, /daemon_start_started/);
 	assert.match(cli, /transaction_complete/);

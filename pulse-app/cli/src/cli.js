@@ -920,6 +920,11 @@ function personalInstallHostRegistry(targets) {
           discardPluginTreeSnapshot(transaction.pluginTree);
           return { migration, source };
         } catch (error) {
+          if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+            process.stderr.write(
+              `[pulse-native-fixture] codex activation detail: ${nativeFixtureActivationDetail(error)}\n`,
+            );
+          }
           const failures = rollbackCodexHostActivation(transaction, codexExecutable);
           try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
           if (failures.length > 0) throw new PersonalInstallError('codex_activation_rollback_failed');
