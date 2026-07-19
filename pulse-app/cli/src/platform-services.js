@@ -68,6 +68,13 @@ function canonicalVersion(value) {
   return `${match[1]}.${match[2]}.${match[3] ?? '0'}`;
 }
 
+function nativePackedCodexCandidates(env, pathAPI) {
+  const value = env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE;
+  return env.PULSE_TRUST_MODE === 'test' && env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1' &&
+    typeof value === 'string' && pathAPI.isAbsolute(value)
+    ? [pathAPI.resolve(value)] : [];
+}
+
 function windowsCandidates(home, env, pathAPI) {
   const localAppData = env.LOCALAPPDATA || pathAPI.join(home, 'AppData', 'Local');
   const appData = env.APPDATA || pathAPI.join(home, 'AppData', 'Roaming');
@@ -79,9 +86,7 @@ function windowsCandidates(home, env, pathAPI) {
       pathAPI.join(appData, 'npm', 'claude.cmd'),
     ],
     codex: [
-      ...(env.PULSE_TRUST_MODE === 'test' && env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1' &&
-        typeof env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE === 'string'
-        ? [env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE] : []),
+      ...nativePackedCodexCandidates(env, pathAPI),
       pathAPI.join(home, '.local', 'bin', 'codex.exe'),
       pathAPI.join(home, '.local', 'bin', 'codex.cmd'),
       pathAPI.join(appData, 'npm', 'codex.cmd'),
@@ -97,10 +102,13 @@ function windowsCandidates(home, env, pathAPI) {
   };
 }
 
-function posixCandidates(platform, home, pathAPI) {
+function posixCandidates(platform, home, env, pathAPI) {
   const common = {
     claude: [pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude'],
-    codex: [pathAPI.join(home, '.local', 'bin', 'codex'), '/usr/local/bin/codex', '/usr/bin/codex'],
+    codex: [
+      ...nativePackedCodexCandidates(env, pathAPI),
+      pathAPI.join(home, '.local', 'bin', 'codex'), '/usr/local/bin/codex', '/usr/bin/codex',
+    ],
     git: platform === 'darwin'
       ? ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git']
       : ['/usr/local/bin/git', '/usr/bin/git'],
@@ -143,7 +151,7 @@ export function createPlatformServices({
     }
     const candidates = platform === 'win32'
       ? windowsCandidates(pathAPI.resolve(selectedHome), env, pathAPI)
-      : posixCandidates(platform, pathAPI.resolve(selectedHome), pathAPI);
+      : posixCandidates(platform, pathAPI.resolve(selectedHome), env, pathAPI);
     return Object.freeze(Object.fromEntries(Object.entries(candidates)
       .map(([kind, values]) => [kind, Object.freeze([...new Set(values.map((value) => pathAPI.resolve(value)))])])));
   }
@@ -154,7 +162,15 @@ export function createPlatformServices({
       fail('platform_executable_path_invalid');
     }
     if (platform === 'win32') {
-      const proof = nativeOperation(nativeAdapter, 'inspectExecutable')(executablePath);
+      let proof;
+      try {
+        proof = nativeOperation(nativeAdapter, 'inspectExecutable')(executablePath);
+      } catch (error) {
+        // Candidate discovery must treat a path that disappeared between the
+        // bounded candidate list and handle-open exactly like POSIX discovery.
+        if (error?.code === 'ENOENT') return null;
+        throw error;
+      }
       if (!exactObject(proof, [
         'canonical_path', 'executable', 'owner_only', 'regular_file', 'reparse_point', 'sha256',
       ]) || typeof proof.canonical_path !== 'string' || !pathAPI.isAbsolute(proof.canonical_path) ||

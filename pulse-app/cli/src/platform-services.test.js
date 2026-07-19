@@ -33,6 +33,24 @@ test('portable services own port probing, OS version, host candidates, and conta
   assert.ok(services.hostCandidates().cursor.some((path) => path === '/opt/Cursor/cursor'));
 });
 
+test('native packed Codex calibration path is available only under the exact isolated attestation', () => {
+  const executable = '/opt/native-codex/bin/codex';
+  const attested = createPlatformServices({
+    platform: 'linux', architecture: 'x64', home: '/home/pulse',
+    env: {
+      PULSE_TRUST_MODE: 'test',
+      PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION: '1',
+      PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable,
+    },
+  });
+  assert.equal(attested.hostCandidates().codex[0], executable);
+  const production = createPlatformServices({
+    platform: 'linux', architecture: 'x64', home: '/home/pulse',
+    env: { PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable },
+  });
+  assert.equal(production.hostCandidates().codex.includes(executable), false);
+});
+
 test('port probing distinguishes occupied from unknown without a system utility', () => {
   const occupied = createPlatformServices({
     platform: 'darwin', spawn: () => ({ status: 2, stdout: '', stderr: '' }),
@@ -116,6 +134,16 @@ test('Windows native adapter must prove ACL ownership and reject reparse points'
     () => unsafe.assertPrivateState('C:\\Users\\Pulse\\.pulse\\secret.key', { kind: 'file' }),
     (error) => error instanceof PlatformServicesError && error.code === 'platform_private_state_unsafe',
   );
+});
+
+test('Windows executable discovery treats a missing bounded candidate as absent', () => {
+  const services = createPlatformServices({
+    platform: 'win32', architecture: 'x64', home: 'C:\\Users\\Pulse',
+    nativeAdapter: {
+      inspectExecutable: () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    },
+  });
+  assert.equal(services.inspectExecutable('C:\\Users\\Pulse\\.local\\bin\\codex.exe'), null);
 });
 
 test('Git discovery uses a bounded verified executable and never inherited PATH', () => {

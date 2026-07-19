@@ -293,6 +293,26 @@ test('insufficient disk and memory are explicit preflight reasons', () => {
   }
 });
 
+test('advertised 8 GB desktops pass at the exact 7 GiB process-visible floor', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-install-memory-floor.'));
+  try {
+    const home = join(root, 'home');
+    const cwd = repository(root);
+    mkdirSync(home);
+    const plan = (memory) => buildPersonalInstallPlan({
+      cwd, home, platform: 'darwin', architecture: 'arm64', nodeVersion: '20.0.0',
+      detectCodex: codexReady, release: verifiedRelease(), currentState: cleanState,
+      detectResources: () => ({
+        disk_free_bytes: 20 * 1024 ** 3, memory_total_bytes: memory, port_18789: 'free',
+      }),
+    });
+    assert.equal(plan(7 * 1024 ** 3).outcome, 'ready_to_install');
+    assert.deepEqual(plan(7 * 1024 ** 3 - 1).reason_codes, ['memory_insufficient']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Codex detection inspects absolute candidates and probes a version only when explicitly requested', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-codex-detect.'));
   try {

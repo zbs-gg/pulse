@@ -15,7 +15,10 @@ import { DEFAULT_TRUST_PATHS } from './trust-helper.js';
 import { canonicalizeWorkspace, defaultBindingPaths } from './workspace-binding.js';
 
 const SCHEMA = 'pulse.personal_install_plan.v2';
-const MINIMUM_MEMORY_BYTES = 8 * 1024 ** 3;
+// An advertised 8 GB desktop can expose only 7 GiB to user processes (the
+// native macOS ARM runner does exactly this). The release runtime budget caps
+// the embedder at 4 GiB, so 7 GiB is the honest preflight floor.
+const MINIMUM_MEMORY_BYTES = 7 * 1024 ** 3;
 const INSTALL_HEADROOM_BYTES = 2 * 1024 ** 3;
 const CURRENT_STATE_KEYS = Object.freeze([
   'binding', 'daemon', 'embedder', 'hook_trust', 'install_receipt',
