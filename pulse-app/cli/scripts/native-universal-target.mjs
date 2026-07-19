@@ -90,6 +90,7 @@ for (const field of [
 ]) assert.equal(productReceipt[field], true, field);
 assert.equal(productReceipt.production_ready, false);
 assert.equal(productReceipt.support_proven, false);
+assert.equal(productReceipt.first_value_boundary, 'fresh_session_context');
 assert.equal(productReceipt.first_value_ms <= 60_000, true);
 assert.match(productReceipt.packed_tarball_sha256, /^[a-f0-9]{64}$/);
 assert.match(productReceipt.release_manifest_digest, /^[a-f0-9]{64}$/);
@@ -132,6 +133,7 @@ const evidence = {
     lifecycle_ready: productReceipt.lifecycle_ready,
   },
   first_value: {
+    boundary: productReceipt.first_value_boundary,
     milliseconds: productReceipt.first_value_ms,
     visible_card: productReceipt.visible_memory_card,
     same_object_recalled: productReceipt.same_object_recalled,

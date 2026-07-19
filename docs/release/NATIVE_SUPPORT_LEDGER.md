@@ -52,6 +52,13 @@ and finished lifecycle readiness. Token economy remains honestly labeled
 `collecting_baseline`; this fixture proves continuity, not a production release
 or a token-savings claim.
 
+The current `first_value` boundary is the moment a fresh host session receives
+and verifies the exact saved memory (`fresh_session_context`). Prompt-context
+lifecycle calibration still runs immediately afterward and remains required for
+the target to pass. The historical values below used the stricter earlier
+boundary through that fresh prompt, so they are conservative rather than
+directly comparable to newer receipts.
+
 | Target | Evidence artifact | First value | Packed package SHA-256 | Release manifest digest |
 |---|---|---:|---|---|
 | `darwin-arm64` | `pulse-native-darwin-arm64` | 13,058 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `c2cda1aeab2f81c32061a689e0ee2c45d524f70c60a4a4b33ba643e7ca66bcb0` |
