@@ -169,6 +169,7 @@ type memoryHomeTemplateData struct {
 	HasAttempts           bool
 	HasContext            bool
 	HasProtectedActions   bool
+	CanProtectedWipe      bool
 	EstimatedPercent      string
 	Attempts              []store.MemoryHomeAttempt
 }
@@ -189,7 +190,8 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		HasUnassignedActivity: len(page.UnassignedActivity) > 0,
 		HasAttempts:           len(attempts) > 0,
 		HasContext:            page.Data.Context.LatestDelivery != nil,
-		HasProtectedActions:   len(page.EnhancedPresenceProfile.ProtectedActions) > 0,
+		HasProtectedActions:   profileHasValidProtectedActions(page.EnhancedPresenceProfile),
+		CanProtectedWipe:      profileAuthorizes(page.EnhancedPresenceProfile, userpresence.ActionVaultWipe),
 		Attempts:              attempts,
 	}
 	view.StatusTitle, view.StatusDetail, view.StatusTone = memoryHomeReadinessCopy(page.Data.Readiness)
@@ -200,6 +202,11 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		return "", err
 	}
 	return output.String(), nil
+}
+
+func profileHasValidProtectedActions(profile userpresence.EnhancedPresenceProfile) bool {
+	return profileAuthorizes(profile, userpresence.ActionBindingChange) ||
+		profileAuthorizes(profile, userpresence.ActionVaultWipe)
 }
 
 func memoryHomeBoundedAttempts(attempts []store.MemoryHomeAttempt) []store.MemoryHomeAttempt {
@@ -396,7 +403,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
   <title>Pulse Memory Home</title>
   <style>
     :root { color-scheme:light; --bg:#f5f3ee; --paper:#fffdfa; --ink:#1d211f; --muted:#6b716c; --line:#deddd7; --green:#2f694f; --green-soft:#e4efe7; --amber:#8a6428; --amber-soft:#f6ecd8; --red:#8b4646; --red-soft:#f4e2e0; --blue:#355f76; --blue-soft:#e4eef3; font:15px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    * { box-sizing:border-box; }
+    * { box-sizing:border-box; } [hidden] { display:none!important; }
     body { margin:0; color:var(--ink); background:var(--bg); }
     main { width:min(1120px,100%); margin:0 auto; padding:28px clamp(18px,4vw,52px) 72px; }
     h1,h2,h3,p { margin:0; } h1 { font-size:clamp(32px,5vw,58px); line-height:1.02; letter-spacing:-.04em; max-width:780px; } h2 { font-size:20px; } h3 { font-size:16px; }
@@ -419,10 +426,15 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .tray-card header { display:flex; justify-content:space-between; gap:12px; margin-bottom:14px; } .kind { color:var(--amber); font-weight:700; text-transform:uppercase; font-size:12px; letter-spacing:.07em; }
     .summary { font-size:18px; color:var(--ink); }
     details { margin-top:16px; } summary { cursor:pointer; color:var(--muted); } textarea { width:100%; min-height:150px; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:white; resize:vertical; }
-    .controls { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; } button { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:999px; background:white; color:var(--ink); cursor:pointer; } button.primary { background:var(--ink); color:white; border-color:var(--ink); }
+    .controls { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; } button { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:999px; background:white; color:var(--ink); cursor:pointer; } button.primary { background:var(--ink); color:white; border-color:var(--ink); } button.danger { background:var(--red); color:white; border-color:var(--red); } button:disabled { cursor:not-allowed; opacity:.58; }
     .memory-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } .memory { min-height:150px; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--paper); } .memory .meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; color:var(--muted); font-size:12px; }
     .preview { padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; }
     .authority-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    .protected-wipe { margin-top:14px; padding:22px; border:1px solid #d7b4b0; border-radius:18px; background:var(--red-soft); }
+    .protected-wipe h3 { margin-bottom:8px; } .protected-wipe .warning { margin-top:10px; color:var(--ink); }
+    .protected-wipe-review,.protected-wipe-receipt { margin-top:16px; padding:16px; border:1px solid #ca9b96; border-radius:14px; background:var(--paper); outline-offset:4px; }
+    .protected-wipe-receipt { border-color:#9ab8a7; background:var(--green-soft); }
+    .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
     .empty { padding:24px; border:1px dashed #c9c8c1; border-radius:16px; color:var(--muted); }
     .receipt { margin-top:14px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
     .logout { margin:0; } .logout button { background:transparent; }
@@ -467,6 +479,25 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       <p>Profile <code>{{.EnhancedPresenceProfile.Schema}}</code> · version {{.EnhancedPresenceProfile.Version}} · adapter <code>{{.EnhancedPresenceProfile.Kind}}</code> · {{if .EnhancedPresenceProfile.Available}}available{{else}}unavailable{{end}}{{if .EnhancedPresenceProfile.ReasonCode}} · reason <code>{{.EnhancedPresenceProfile.ReasonCode}}</code>{{end}}</p>
       {{if .HasProtectedActions}}<div class="authority-actions" aria-label="Protected actions this profile can authorize">{{range .EnhancedPresenceProfile.ProtectedActions}}<span class="pill"><code>{{.}}</code></span>{{end}}</div>{{else}}<div class="empty" style="margin-top:14px">No protected actions can be authorized on this machine.</div>{{end}}
     </div>
+    {{if .CanProtectedWipe}}
+    <article class="protected-wipe" data-protected-wipe>
+      <h3 id="protected-wipe-title">Delete this project’s stored Pulse records</h3>
+      <p>This control is available only because the enhanced profile can authorize <code>vault.wipe</code>.</p>
+      <p class="warning"><strong>Warning:</strong> this permanently removes the exact project-bound record set you review. It cannot be undone.</p>
+      <div data-protected-wipe-idle class="controls"><button type="button" data-protected-wipe-begin>Review exact stored records</button></div>
+      <div class="protected-wipe-review" data-protected-wipe-review hidden tabindex="-1" role="group" aria-labelledby="protected-wipe-title" aria-describedby="protected-wipe-warning">
+        <p id="protected-wipe-warning"><strong>Permanent deletion.</strong> Pulse will delete exactly <strong data-protected-wipe-count></strong> stored records across memory and continuity, including supporting local receipts and projections. Record contents stay hidden.</p>
+        <p>Approval expires at <time data-protected-wipe-expiry></time> · <span data-protected-wipe-countdown aria-hidden="true"></span><span data-protected-wipe-countdown-live class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span></p>
+        <div class="controls"><button type="button" class="danger" data-protected-wipe-complete>Verify with this device and delete exact records</button><button type="button" data-protected-wipe-cancel>Cancel</button></div>
+      </div>
+      <div class="protected-wipe-receipt" data-protected-wipe-receipt hidden tabindex="-1" role="group" aria-label="Protected wipe receipt">
+        <h3>Deletion receipt</h3>
+        <p>Deleted exactly <strong data-protected-wipe-receipt-count></strong> stored records across memory and continuity, including supporting local receipts and projections, at <time data-protected-wipe-receipt-time></time>.</p>
+        <p class="receipt">Receipt <code data-protected-wipe-receipt-schema></code> · snapshot digest <code data-protected-wipe-receipt-digest></code></p>
+      </div>
+      <p class="receipt" data-protected-wipe-status role="status" aria-live="polite" aria-atomic="true">No deletion is prepared.</p>
+    </article>
+    {{end}}
   </section>
 
   {{if .UnassignedEnabled}}

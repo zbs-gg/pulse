@@ -165,7 +165,10 @@ func (s *Server) handleHomeProtectedWipeBegin(w http.ResponseWriter, r *http.Req
 		TargetDigest: targetDigest, RepositoryID: repositoryID, StoreID: snapshot.StoreID,
 		BindingDigest: snapshot.BindingDigest, AffectedDataCount: snapshot.AffectedDataCount,
 		AffectedDataDigest: snapshot.AffectedDataDigest, AffectedDataVersion: snapshot.AffectedDataVersion,
-		Display:   fmt.Sprintf("Authorize deletion of %d bound local memory record(s).", snapshot.AffectedDataCount),
+		Display: fmt.Sprintf(
+			"Authorize deletion of %d stored records across memory and continuity, including supporting local receipts and projections.",
+			snapshot.AffectedDataCount,
+		),
 		ExpiresAt: ceremony.ExpiresAt.UTC(),
 	})
 }
@@ -257,12 +260,27 @@ func exactHomeFormFields(r *http.Request, names ...string) bool {
 }
 
 func profileAuthorizes(profile userpresence.EnhancedPresenceProfile, action userpresence.Action) bool {
+	if profile.Schema != userpresence.EnhancedPresenceProfileSchemaV1 || profile.Version != 1 ||
+		!profile.Available ||
+		(profile.Kind != userpresence.EnhancedPresenceWebAuthn && profile.Kind != userpresence.EnhancedPresenceMacOSNative) ||
+		!userpresence.IsEnhancedProtectedAction(action) {
+		return false
+	}
+	seen := make(map[userpresence.Action]struct{}, len(profile.ProtectedActions))
+	authorized := false
 	for _, candidate := range profile.ProtectedActions {
+		if !userpresence.IsEnhancedProtectedAction(candidate) {
+			return false
+		}
+		if _, duplicate := seen[candidate]; duplicate {
+			return false
+		}
+		seen[candidate] = struct{}{}
 		if candidate == action {
-			return true
+			authorized = true
 		}
 	}
-	return false
+	return authorized
 }
 
 func validLowerHexDigest(value string) bool {
@@ -772,6 +790,191 @@ const memoryHomeBrowserScript = `(() => {
     }
     status.textContent = message;
   };
+
+  const protectedWipeTimers = new WeakMap();
+  const protectedWipePart = (card, name) => card.querySelector("[data-protected-wipe-" + name + "]");
+  const setProtectedWipeStatus = (card, message) => {
+    const status = protectedWipePart(card, "status");
+    if (status) status.textContent = message;
+  };
+  const setProtectedWipeBusy = (card, busy) => {
+    if (busy) {
+      card.setAttribute("aria-busy", "true");
+    } else {
+      card.removeAttribute("aria-busy");
+    }
+    card.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
+  };
+  const clearProtectedWipeTimer = (card) => {
+    const timer = protectedWipeTimers.get(card);
+    if (timer) window.clearInterval(timer);
+    protectedWipeTimers.delete(card);
+  };
+  const clearProtectedWipeRequest = (card) => {
+    clearProtectedWipeTimer(card);
+    delete card.dataset.protectedWipeCeremonyId;
+    delete card.dataset.protectedWipeExpiresAt;
+    delete card.dataset.protectedWipeAnnouncement;
+  };
+  const resetProtectedWipe = (card, message, restoreFocus) => {
+    const beginButton = protectedWipePart(card, "begin");
+    clearProtectedWipeRequest(card);
+    protectedWipePart(card, "review").hidden = true;
+    protectedWipePart(card, "receipt").hidden = true;
+    protectedWipePart(card, "idle").hidden = false;
+    setProtectedWipeBusy(card, false);
+    setProtectedWipeStatus(card, message);
+    if (restoreFocus) beginButton.focus();
+  };
+  const protectedWipeRemainingSeconds = (card) => {
+    const expiresAt = Date.parse(card.dataset.protectedWipeExpiresAt || "");
+    if (!Number.isFinite(expiresAt)) return 0;
+    return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+  };
+  const announceProtectedWipeCountdown = (card, remaining) => {
+    let bucket = "";
+    if (remaining <= 5) bucket = String(remaining);
+    else if (remaining <= 10) bucket = "10";
+    else if (remaining <= 30) bucket = "30";
+    else if (remaining <= 60) bucket = "60";
+    if (!bucket || card.dataset.protectedWipeAnnouncement === bucket) return;
+    card.dataset.protectedWipeAnnouncement = bucket;
+    const countdownLive = protectedWipePart(card, "countdown-live");
+    countdownLive.textContent = remaining === 0
+      ? "The verification request expired. Nothing was deleted."
+      : "Verification request expires in " + remaining + " seconds.";
+  };
+  const expireProtectedWipe = (card) => {
+    const review = protectedWipePart(card, "review");
+    const shouldRestoreFocus = review.contains(document.activeElement);
+    const countdownLive = protectedWipePart(card, "countdown-live");
+    countdownLive.textContent = "The verification request expired. Nothing was deleted.";
+    resetProtectedWipe(card, "The verification request expired. Nothing was deleted. Review a fresh count to try again.", shouldRestoreFocus);
+  };
+  const updateProtectedWipeCountdown = (card) => {
+    const remaining = protectedWipeRemainingSeconds(card);
+    protectedWipePart(card, "countdown").textContent = remaining + (remaining === 1 ? " second remaining" : " seconds remaining");
+    announceProtectedWipeCountdown(card, remaining);
+    if (remaining === 0) expireProtectedWipe(card);
+  };
+  const startProtectedWipeCountdown = (card) => {
+    clearProtectedWipeTimer(card);
+    card.dataset.protectedWipeAnnouncement = "initial";
+    protectedWipePart(card, "countdown-live").textContent =
+      "Verification request expires in " + protectedWipeRemainingSeconds(card) + " seconds.";
+    updateProtectedWipeCountdown(card);
+    if (!card.dataset.protectedWipeCeremonyId) return;
+    protectedWipeTimers.set(card, window.setInterval(() => updateProtectedWipeCountdown(card), 1000));
+  };
+  const validProtectedWipeBegin = (value) => value &&
+    value.schema === "pulse.home.protected_wipe_begin.v1" && value.action === "vault.wipe" &&
+    /^[0-9a-f]{64}$/.test(value.ceremony_id) && Number.isSafeInteger(value.affected_data_count) &&
+    value.affected_data_count > 0 && Number.isFinite(Date.parse(value.expires_at)) &&
+    Date.parse(value.expires_at) > Date.now();
+  const validProtectedWipeReceipt = (value) => value &&
+    value.schema === "pulse.product_memory_wipe_receipt.v1" &&
+    Number.isSafeInteger(value.affected_data_count) && value.affected_data_count > 0 &&
+    /^[0-9a-f]{64}$/.test(value.snapshot_digest) && Number.isFinite(Date.parse(value.wiped_at));
+
+  async function beginProtectedWipe(card) {
+    if (card.getAttribute("aria-busy") === "true") return;
+    setProtectedWipeBusy(card, true);
+    setProtectedWipeStatus(card, "Preparing an exact content-free record count. Nothing is being deleted.");
+    try {
+      const response = await post("protected/wipe/begin", {csrf_token: csrf});
+      if (!response.ok) {
+        const message = response.status === 409
+          ? "No protected wipe can be prepared right now. Nothing was deleted."
+          : "The exact record count could not be prepared. Nothing was deleted.";
+        resetProtectedWipe(card, message, true);
+        return;
+      }
+      const started = await response.json();
+      if (!validProtectedWipeBegin(started)) {
+        resetProtectedWipe(card, "Pulse returned an invalid protected-wipe preview. Nothing was deleted.", true);
+        return;
+      }
+      card.dataset.protectedWipeCeremonyId = started.ceremony_id;
+      card.dataset.protectedWipeExpiresAt = started.expires_at;
+      protectedWipePart(card, "count").textContent = String(started.affected_data_count);
+      const expiry = protectedWipePart(card, "expiry");
+      expiry.dateTime = started.expires_at;
+      expiry.textContent = new Date(started.expires_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+      protectedWipePart(card, "idle").hidden = true;
+      protectedWipePart(card, "receipt").hidden = true;
+      const review = protectedWipePart(card, "review");
+      review.hidden = false;
+      setProtectedWipeBusy(card, false);
+      setProtectedWipeStatus(card, "Review the exact stored-record count, then explicitly choose device verification or cancel.");
+      startProtectedWipeCountdown(card);
+      review.focus();
+    } catch (_) {
+      resetProtectedWipe(card, "The exact record count could not be prepared. Nothing was deleted.", true);
+    }
+  }
+
+  async function completeProtectedWipe(card) {
+    if (card.getAttribute("aria-busy") === "true") return;
+    if (!card.dataset.protectedWipeCeremonyId || protectedWipeRemainingSeconds(card) === 0) {
+      expireProtectedWipe(card);
+      return;
+    }
+    setProtectedWipeBusy(card, true);
+    setProtectedWipeStatus(card, "Waiting for enhanced device verification. Nothing is deleted unless verification succeeds.");
+    try {
+      const response = await post("protected/wipe/complete", {
+        csrf_token: csrf,
+        ceremony_id: card.dataset.protectedWipeCeremonyId,
+      });
+      if (!response.ok) {
+        if (response.status === 410) {
+          resetProtectedWipe(card, "The verification request expired. Nothing was deleted. Review a fresh count to try again.", true);
+        } else if (response.status === 409) {
+          resetProtectedWipe(card, "The stored record set changed or this request is no longer valid. Nothing was deleted. Review a fresh count.", true);
+        } else if (response.status === 403) {
+          resetProtectedWipe(card, "Enhanced device verification did not succeed. Nothing was deleted. Review a fresh count to try again.", true);
+        } else {
+          resetProtectedWipe(card, "Protected deletion failed. Nothing was deleted. Review a fresh count to try again.", true);
+        }
+        return;
+      }
+      const result = await response.json();
+      if (!validProtectedWipeReceipt(result)) {
+        resetProtectedWipe(card, "Pulse did not return a valid deletion receipt. Refresh Home before taking another action.", true);
+        return;
+      }
+      clearProtectedWipeRequest(card);
+      protectedWipePart(card, "idle").hidden = true;
+      protectedWipePart(card, "review").hidden = true;
+      const receipt = protectedWipePart(card, "receipt");
+      protectedWipePart(card, "receipt-count").textContent = String(result.affected_data_count);
+      const receiptTime = protectedWipePart(card, "receipt-time");
+      receiptTime.dateTime = result.wiped_at;
+      receiptTime.textContent = new Date(result.wiped_at).toLocaleString();
+      protectedWipePart(card, "receipt-schema").textContent = result.schema;
+      protectedWipePart(card, "receipt-digest").textContent = result.snapshot_digest;
+      receipt.hidden = false;
+      setProtectedWipeBusy(card, false);
+      setProtectedWipeStatus(card, "Protected deletion completed. The content-free receipt is shown below.");
+      receipt.focus();
+    } catch (_) {
+      resetProtectedWipe(card, "Protected deletion could not be confirmed. Review a fresh count before trying again.", true);
+    }
+  }
+
+  function cancelProtectedWipe(card) {
+    if (card.getAttribute("aria-busy") === "true") return;
+    resetProtectedWipe(card, "Canceled. Nothing was deleted.", true);
+  }
+
+  [...document.querySelectorAll("[data-protected-wipe]")].forEach((card) => {
+    const beginButton = protectedWipePart(card, "begin");
+    const completeButton = protectedWipePart(card, "complete");
+    const cancelButton = protectedWipePart(card, "cancel");
+    beginButton.addEventListener("click", () => beginProtectedWipe(card));
+    completeButton.addEventListener("click", () => completeProtectedWipe(card));
+    cancelButton.addEventListener("click", () => cancelProtectedWipe(card));
+  });
 
   const cards = [...document.querySelectorAll("[data-candidate-id]")];
   const intersectingCards = new Set();

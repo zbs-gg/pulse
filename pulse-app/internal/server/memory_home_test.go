@@ -9,6 +9,7 @@ import (
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 func TestBuildMemoryHomeUsesServerSideProductBoundaryAndSafeNextTaskPreview(t *testing.T) {
@@ -131,6 +132,96 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 	}
 	if strings.Contains(html, "key=") || strings.Contains(html, "X-Pulse-Key") || strings.Contains(html, "Authorization") {
 		t.Fatal("Home HTML exposed daemon authority")
+	}
+}
+
+func TestRenderMemoryHomeOnlyOffersAccessibleProtectedWipeForAnExactAuthorityProfile(t *testing.T) {
+	t.Parallel()
+	base := memoryHomePage{Data: store.MemoryHomeData{
+		Boundary: store.MemoryHomeBoundary{
+			StoreKind: string(store.StoreKindPersonal), RepositoryID: "repository_pulse",
+		},
+		Readiness: store.MemoryHomeReadinessSnapshot{
+			Outcome:    store.MemoryHomeReadinessReady,
+			NextAction: store.MemoryHomeNextAction{Label: "Continue working"},
+		},
+	}, CSRFToken: "csrf-test-value"}
+	base.EnhancedPresenceProfile = userpresence.EnhancedPresenceProfile{
+		Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+		Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+		ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe},
+	}
+
+	html, err := renderMemoryHomeHTML(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`data-protected-wipe`,
+		`type="button" data-protected-wipe-begin`,
+		`Review exact stored records`,
+		`data-protected-wipe-review hidden tabindex="-1"`,
+		`<strong>Permanent deletion.</strong>`,
+		`stored records across memory and continuity`,
+		`data-protected-wipe-countdown aria-hidden="true"`,
+		`data-protected-wipe-countdown-live class="sr-only" role="status" aria-live="polite"`,
+		`type="button" class="danger" data-protected-wipe-complete`,
+		`Verify with this device and delete exact records`,
+		`type="button" data-protected-wipe-cancel`,
+		`data-protected-wipe-status role="status" aria-live="polite" aria-atomic="true"`,
+		`data-protected-wipe-receipt hidden tabindex="-1"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("protected wipe card missing %q: %s", want, html)
+		}
+	}
+
+	invalidProfiles := []userpresence.EnhancedPresenceProfile{
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: false,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe},
+		},
+		{
+			Schema: "pulse.enhanced_presence.profile.v0", Version: 1,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe},
+		},
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 2,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe},
+		},
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+			Kind: userpresence.EnhancedPresenceUnavailable, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe},
+		},
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionBindingChange},
+		},
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe, "memory.export"},
+		},
+		{
+			Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
+			Kind: userpresence.EnhancedPresenceMacOSNative, Available: true,
+			ProtectedActions: []userpresence.Action{userpresence.ActionVaultWipe, userpresence.ActionVaultWipe},
+		},
+	}
+	for index, profile := range invalidProfiles {
+		base.EnhancedPresenceProfile = profile
+		html, err = renderMemoryHomeHTML(base)
+		if err != nil {
+			t.Fatalf("profile %d render: %v", index, err)
+		}
+		if strings.Contains(html, `data-protected-wipe`) {
+			t.Fatalf("profile %d exposed actionable protected wipe: %s", index, html)
+		}
 	}
 }
 

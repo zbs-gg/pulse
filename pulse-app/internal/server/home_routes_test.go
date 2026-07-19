@@ -86,6 +86,9 @@ func TestMemoryHomeReportsExactEnhancedPresenceProfileWithoutGrantingAuthority(t
 			t.Fatalf("unavailable profile advertised %q", forbidden)
 		}
 	}
+	if strings.Contains(defaultPage.Body.String(), `data-protected-wipe`) {
+		t.Fatal("unavailable profile rendered an actionable protected wipe")
+	}
 
 	srv.cfg.EnhancedPresenceAuthorizer = homeEnhancedPresenceAuthorizerStub{profile: userpresence.EnhancedPresenceProfile{
 		Schema: userpresence.EnhancedPresenceProfileSchemaV1, Version: 1,
@@ -99,6 +102,7 @@ func TestMemoryHomeReportsExactEnhancedPresenceProfileWithoutGrantingAuthority(t
 	}
 	for _, want := range []string{
 		"macos_native", "<code>binding.change</code>", "<code>vault.wipe</code>",
+		`data-protected-wipe`, "Review exact stored records",
 	} {
 		if !strings.Contains(availablePage.Body.String(), want) {
 			t.Fatalf("available Home profile missing %q: %s", want, availablePage.Body.String())
@@ -936,6 +940,32 @@ func TestMemoryHomeBrowserScriptIsolatesPresentationAndMutationFailures(t *testi
 		if !strings.Contains(memoryHomeBrowserScript, want) {
 			t.Errorf("Home browser script missing failure-isolation contract %q", want)
 		}
+	}
+}
+
+func TestMemoryHomeBrowserScriptRequiresExplicitProtectedWipeCompletion(t *testing.T) {
+	for _, want := range []string{
+		`async function beginProtectedWipe(card)`,
+		`async function completeProtectedWipe(card)`,
+		`function cancelProtectedWipe(card)`,
+		`post("protected/wipe/begin"`,
+		`post("protected/wipe/complete"`,
+		`beginButton.addEventListener("click", () => beginProtectedWipe(card))`,
+		`completeButton.addEventListener("click", () => completeProtectedWipe(card))`,
+		`cancelButton.addEventListener("click", () => cancelProtectedWipe(card))`,
+		`response.status === 410`,
+		`response.status === 409`,
+		`countdownLive.textContent`,
+		`review.focus()`,
+		`beginButton.focus()`,
+		`receipt.focus()`,
+	} {
+		if !strings.Contains(memoryHomeBrowserScript, want) {
+			t.Errorf("Home browser script missing protected wipe contract %q", want)
+		}
+	}
+	if strings.Count(memoryHomeBrowserScript, `completeProtectedWipe(card)`) != 2 {
+		t.Fatal("protected wipe completion must have one definition and one explicit click binding")
 	}
 }
 
