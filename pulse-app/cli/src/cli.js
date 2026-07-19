@@ -345,7 +345,7 @@ function personalInstallUsesSyntheticOverrides() {
 
 function currentNativePackedFixtureAttestation(workspace, release) {
   if (!workspace || !release) return null;
-  return nativePackedFixtureAttestation({
+  const attestation = nativePackedFixtureAttestation({
     cwd: workspace.canonical_path,
     dataDir: DATA_DIR,
     env: process.env,
@@ -360,6 +360,19 @@ function currentNativePackedFixtureAttestation(workspace, release) {
       },
     },
   });
+  if (!attestation && process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+    const root = process.env.PULSE_NATIVE_PACKED_FIXTURE_ROOT;
+    const safeInside = (path) => {
+      try { return defaultPlatformServices.isPathInside(path, root); } catch { return false; }
+    };
+    process.stderr.write([
+      '[pulse-native-fixture] attestation failed:',
+      `cwd_inside=${safeInside(workspace.canonical_path)}`,
+      `data_inside=${safeInside(DATA_DIR)}`,
+      `home_inside=${safeInside(homedir())}`,
+    ].join(' ') + '\n');
+  }
+  return attestation;
 }
 
 function currentPersonalInstallPlan() {
@@ -635,7 +648,12 @@ async function inspectPersonalInstallCore(binding) {
   try {
     const resolved = exactPersonalCore(binding);
     const runtime = inspectVaultRuntime(resolved.runtime);
-    if (runtime.status !== 'running') return { ready: false, reason_code: 'core_activation_required' };
+    if (runtime.status !== 'running') {
+      if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+        process.stderr.write(`[pulse-native-fixture] core inspection failed: runtime_${runtime.status}\n`);
+      }
+      return { ready: false, reason_code: 'core_activation_required' };
+    }
     const edge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
     const liveStatus = await boundPulseRequest(resolved, '/memory/status', { method: 'GET', timeoutMs: 1500 });
     return {
@@ -644,7 +662,12 @@ async function inspectPersonalInstallCore(binding) {
       reason_code: 'core_verified',
       context: personalCoreContext(resolved, edge, liveStatus),
     };
-  } catch {
+  } catch (error) {
+    if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+      const diagnostic = [error?.code, error?.message]
+        .find((value) => typeof value === 'string' && /^[a-z0-9_]{1,128}$/i.test(value));
+      process.stderr.write(`[pulse-native-fixture] core inspection failed: ${diagnostic ?? 'inspection_failed'}\n`);
+    }
     return { ready: false, reason_code: 'core_activation_required' };
   }
 }
