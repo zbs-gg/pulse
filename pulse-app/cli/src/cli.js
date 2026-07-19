@@ -427,7 +427,7 @@ function personalInstallReceiptStatus(workspace) {
     try {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
       resumableJournal = journal?.schema === 'pulse.personal_install_journal.v1' &&
-        ['planned', 'downloading', 'artifacts_staged', 'activating', 'activated'].includes(journal.phase) &&
+        ['planned', 'downloading', 'artifacts_staged', 'activating', 'candidate_staged', 'activated'].includes(journal.phase) &&
         typeof journal.manifest_digest === 'string' && /^[a-f0-9]{64}$/.test(journal.manifest_digest);
       if (!resumableJournal) return 'invalid';
     } catch {

@@ -10,6 +10,21 @@ import { resolveWorkspaceBinding } from './workspace-binding.js';
 const HEX_DIGEST = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
+function testAuthorityPaths(environment = process.env) {
+  if (environment.PULSE_PRODUCT_AUTHORITY_TEST_MODE !== '1' || environment.PULSE_TRUST_MODE !== 'test') {
+    return null;
+  }
+  const paths = {
+    registryPath: environment.PULSE_BINDING_REGISTRY_PATH,
+    publicKeyPath: environment.PULSE_BINDING_PUBLIC_KEY_PATH,
+    anchorPath: environment.PULSE_BINDING_ANCHOR_PATH,
+  };
+  if (Object.values(paths).some((value) => typeof value !== 'string' || !isAbsolute(value))) {
+    throw new Error('product_binding_verifier_test_authority_invalid');
+  }
+  return Object.fromEntries(Object.entries(paths).map(([name, value]) => [name, resolve(value)]));
+}
+
 export async function verifyProductBinding({
   workspace, bindingDigest, repositoryID, resolverEpoch,
   recover = recoverWorkspaceBindingTransaction,
@@ -32,7 +47,18 @@ export async function verifyProductBinding({
 async function main() {
   const [workspace, bindingDigest, repositoryID, resolverEpochText] = process.argv.slice(2);
   const resolverEpoch = Number(resolverEpochText);
-  await verifyProductBinding({ workspace, bindingDigest, repositoryID, resolverEpoch });
+  const authority = testAuthorityPaths();
+  await verifyProductBinding({
+    workspace, bindingDigest, repositoryID, resolverEpoch,
+    ...(authority ? {
+      recover: () => recoverWorkspaceBindingTransaction({
+        home: process.env.HOME, ...authority, rootPublicKey: false, rootAnchor: false,
+      }),
+      resolveBinding: ({ cwd }) => resolveWorkspaceBinding({
+        cwd, ...authority, rootAnchor: false,
+      }),
+    } : {}),
+  });
 }
 
 const invokedAsMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

@@ -36,6 +36,20 @@ function requireAbsolutePath(value, name) {
   return resolve(value);
 }
 
+function productAuthorityTestEnvironment(environment = process.env) {
+  if (environment.PULSE_TRUST_MODE !== 'test') return {};
+  const names = [
+    'PULSE_BINDING_REGISTRY_PATH', 'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_BINDING_ANCHOR_PATH',
+  ];
+  if (names.some((name) => typeof environment[name] !== 'string' || !isAbsolute(environment[name]))) {
+    return {};
+  }
+  return Object.fromEntries([
+    ['PULSE_PRODUCT_AUTHORITY_TEST_MODE', '1'], ['PULSE_TRUST_MODE', 'test'],
+    ...names.map((name) => [name, resolve(environment[name])]),
+  ]);
+}
+
 export function vaultRuntimeFromBinding(binding) {
   if (!binding || binding.fallback !== false) {
     throw new SupervisorError('vault_runtime_invalid', 'trusted binding with fallback=false is required');
@@ -592,6 +606,7 @@ export async function startVaultRuntime(runtime, {
     stdio: ['ignore', logFD, logFD],
     env: {
       HOME: process.env.HOME ?? '', PATH: '',
+		...productAuthorityTestEnvironment(),
       PULSE_RUNTIME_MODE: runtime.runtime_mode,
       PULSE_VAULT_STORE_ID: runtime.store_id,
       PULSE_BINDING_DIGEST: runtime.binding_digest,

@@ -152,6 +152,136 @@ function stopFixtureProcesses(root) {
   visit(root);
 }
 
+async function productJSON(runtime, secret, path, { method = 'GET', body } = {}) {
+  const response = await fetch(`${runtime.base_url}${path}`, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      'X-Pulse-Key': secret,
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error(`native packed product query failed: ${path}: ${response.status}`);
+  return response.json();
+}
+
+function installedRuntime(registryPath, workspace) {
+  const envelope = json(readFileSync(registryPath, 'utf8'), 'native packed binding registry is invalid');
+  const bindings = envelope?.payload?.bindings;
+  assert.equal(Array.isArray(bindings), true);
+  assert.equal(bindings.length, 1, `isolated native packed fixture must have one binding for ${workspace}`);
+  const [binding] = bindings;
+  assert.equal(binding.mode, 'personal');
+  assert.equal(binding.personal?.base_url.startsWith('http://127.0.0.1:'), true);
+  assert.equal(realpathSync(binding.personal.data_dir), binding.personal.data_dir);
+  return { binding, runtime: binding.personal };
+}
+
+function codexHook(pluginRoot, eventName, input, { cwd, env }) {
+  const result = run(process.execPath, [join(pluginRoot, 'hooks', 'pulse-hook.mjs'), eventName], {
+    cwd, env, input: JSON.stringify(input), timeout: 30_000,
+  });
+  return json(result.stdout, `native packed ${eventName} hook output is invalid`);
+}
+
+function codexHookInput({ eventName, root, sessionID, turnID, workspace, extra = {} }) {
+  return {
+    session_id: sessionID,
+    ...(turnID ? { turn_id: turnID } : {}),
+    transcript_path: join(root, 'must-not-be-read.jsonl'),
+    cwd: workspace,
+    hook_event_name: eventName,
+    model: 'gpt-5',
+    permission_mode: 'default',
+    ...extra,
+  };
+}
+
+function rememberThroughInstalledMCP(pluginRoot, memoryArguments, { cwd, env }) {
+  const input = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: '2024-11-05', capabilities: {},
+      clientInfo: { name: 'pulse-native-packed-e2e', version: '1' },
+    } },
+    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
+      name: 'pulse_remember', arguments: memoryArguments,
+    } },
+  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
+  const result = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
+    cwd, env, input, timeout: 30_000,
+  });
+  const messages = result.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) =>
+    json(line, 'native packed MCP output is invalid'));
+  assert.equal(messages.find((message) => message.id === 1)?.result?.serverInfo?.name, 'pulse-mcp');
+  assert.equal(messages.find((message) => message.id === 2)?.result?.tools?.some((tool) =>
+    tool.name === 'pulse_remember'), true);
+  const callResult = messages.find((message) => message.id === 3)?.result;
+  assert.equal(Array.isArray(callResult?.content), true);
+  return { callResult, remembered: json(callResult.content[0].text, 'native packed remember output is invalid') };
+}
+
+async function openVisibleHomeCard({ candidate, runtime, secret }) {
+  const checkedAt = new Date().toISOString();
+  const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    body: JSON.stringify({ live_readiness: {
+      schema: 'pulse.personal_live_readiness.v1', outcome: 'action_required',
+      reason_code: 'codex_hook_lifecycle_required',
+      next_action: { code: 'complete_codex_lifecycle', label: 'Complete one normal Codex turn' },
+      checked_at: checkedAt,
+    } }),
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(sessionResponse.status, 200);
+  const session = await sessionResponse.json();
+  assert.equal(session.target_url.startsWith(`${runtime.base_url}/home/s/`), true);
+  const cookie = `${session.cookie_name}=${session.cookie_value}`;
+  const pageResponse = await fetch(session.target_url, {
+    headers: { Cookie: cookie }, signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(pageResponse.status, 200);
+  const page = await pageResponse.text();
+  assert.equal(page.includes(`data-candidate-id="${candidate.candidate_id}"`), true);
+  assert.equal(page.includes(candidate.candidate.capsule.items[0].redacted_summary), true);
+  const csrf = page.match(/name="csrf_token" value="([^"]+)"/)?.[1];
+  assert.equal(typeof csrf, 'string');
+  const form = new URLSearchParams({
+    csrf_token: csrf,
+    candidate_id: candidate.candidate_id,
+    expected_version: String(candidate.version),
+  });
+  const presentResponse = await fetch(new URL('present', session.target_url), {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: runtime.base_url,
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Dest': 'empty',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: form,
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(presentResponse.status, 204, await presentResponse.text());
+}
+
+async function waitForTerminalCandidate(runtime, secret, candidateID, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+    const candidate = tray.candidates?.find((value) => value.candidate_id === candidateID);
+    if (candidate?.state === 'committed' && candidate.canonical_object_id) return candidate;
+    await new Promise((accept) => setTimeout(accept, 250));
+  }
+  throw new Error('native packed visible Memory Home card did not reach a terminal receipt');
+}
+
 const selectedTarget = targetID();
 const target = releaseTargetDefinition(selectedTarget);
 const host = process.env.PULSE_NATIVE_PACKED_HOST ?? 'codex';
@@ -222,7 +352,144 @@ try {
   assert.equal(installResult.reason_code, 'codex_lifecycle_required');
   assert.equal(installResult.host_status.hosts[0].installed, true);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
-  assert.equal(installedPluginRoot(codexHome).endsWith('/pulse/0.7.0'), true);
+  const pluginRoot = installedPluginRoot(codexHome);
+  assert.equal(pluginRoot.endsWith('/pulse/0.7.0'), true);
+
+  const { runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace);
+  const secret = readFileSync(join(runtime.data_dir, 'secret.key'), 'utf8').trim();
+  assert.match(secret, /^[a-f0-9]{64}$/);
+  const initialStatus = await productJSON(runtime, secret, '/memory/status');
+  assert.equal(initialStatus.full_retrieval, true);
+  assert.equal(initialStatus.raw_capture_enabled, false);
+  assert.equal(initialStatus.backend_llm_enabled, false);
+
+  const freshHostEnv = Object.fromEntries(
+    Object.entries(env).filter(([name]) => !name.startsWith('PULSE_') ||
+      ['PULSE_TRUST_MODE', 'PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR'].includes(name)),
+  );
+  const hookEnv = { ...freshHostEnv, PLUGIN_DATA: join(root, 'plugin-data') };
+  const firstSessionID = 'session-native-packed-first';
+  const firstTurnID = 'turn-native-packed-first';
+  const firstSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
+    eventName: 'SessionStart', root, sessionID: firstSessionID, workspace,
+    extra: { source: 'startup' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(firstSession.continue, true);
+  assert.match(firstSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
+
+  const firstPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
+    eventName: 'UserPromptSubmit', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
+    extra: { prompt: 'Do not store this raw prompt.' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(firstPrompt.continue, true);
+  const preFinalize = codexHook(pluginRoot, 'Stop', codexHookInput({
+    eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
+    extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(preFinalize.decision, 'block');
+  assert.match(preFinalize.reason, /bounded Pulse finalization pass/);
+
+  const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';
+  const memoryArguments = {
+    schema: 'pulse.memory_capsule.v1',
+    source: { host: 'codex', conversation_scope: 'current_turn', timestamp: new Date().toISOString() },
+    items: [{
+      kind: 'decision', redacted_summary: summary, confidence: 0.98,
+      evidence_hint: 'current_turn', privacy_tier: 'normal', retention: 'project',
+    }],
+    raw_input_included: false,
+  };
+  const preTool = codexHook(pluginRoot, 'PreToolUse', codexHookInput({
+    eventName: 'PreToolUse', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
+    extra: {
+      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: memoryArguments,
+      tool_use_id: 'tool-native-packed-remember',
+    },
+  }), { cwd: workspace, env: hookEnv });
+  assert.deepEqual(preTool, {});
+  const { callResult, remembered } = rememberThroughInstalledMCP(pluginRoot, memoryArguments, {
+    cwd: workspace, env: hookEnv,
+  });
+  assert.equal(remembered.status, 'candidates');
+  assert.equal(remembered.receipts.length, 1);
+  assert.equal(remembered.receipts[0].status, 'pending');
+  assert.equal(remembered.receipts[0].object_id ?? '', '');
+
+  const postTool = codexHook(pluginRoot, 'PostToolUse', codexHookInput({
+    eventName: 'PostToolUse', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
+    extra: {
+      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: memoryArguments,
+      tool_use_id: 'tool-native-packed-remember', tool_response: callResult,
+    },
+  }), { cwd: workspace, env: hookEnv });
+  assert.match(postTool.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
+  assert.match(postTool.systemMessage, /:pending/);
+  const firstStop = codexHook(pluginRoot, 'Stop', codexHookInput({
+    eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
+    extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.deepEqual(firstStop, {});
+
+  const pendingTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+  const pendingCard = pendingTray.candidates.find((candidate) =>
+    candidate.candidate_id === remembered.receipts[0].candidate_id);
+  assert.equal(pendingCard.state, 'pending');
+  assert.equal(pendingCard.grace_expires_at, '');
+  assert.equal(pendingCard.candidate.capsule.items[0].redacted_summary, summary);
+  await openVisibleHomeCard({ candidate: pendingCard, runtime, secret });
+  const terminalCard = await waitForTerminalCandidate(runtime, secret, pendingCard.candidate_id);
+  assert.equal(['created', 'updated', 'deduplicated'].includes(terminalCard.latest_receipt.status), true);
+  assert.equal(terminalCard.latest_receipt.object_id, terminalCard.canonical_object_id);
+  assert.equal(terminalCard.latest_receipt.safe_provenance.host, 'codex');
+  assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
+  const objectID = terminalCard.canonical_object_id;
+
+  const freshSessionID = 'session-native-packed-fresh';
+  const freshTurnID = 'turn-native-packed-fresh';
+  const freshSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
+    eventName: 'SessionStart', root, sessionID: freshSessionID, workspace,
+    extra: { source: 'resume' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(freshSession.continue, true);
+  assert.match(freshSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
+  assert.equal(freshSession.hookSpecificOutput.additionalContext.includes(summary), true);
+  const freshPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
+    eventName: 'UserPromptSubmit', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
+    extra: { prompt: 'Continue from the saved project decision.' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(freshPrompt.continue, true);
+
+  const lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
+  const codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify(codexLifecycle));
+  assert.equal(codexLifecycle.state, 'ready');
+  assert.equal(codexLifecycle.object_id, objectID);
+  assert.deepEqual(codexLifecycle.milestones, ['write_receipt', 'session_context', 'prompt_context']);
+
+  const recalled = await productJSON(runtime, secret, '/memory/recall', {
+    method: 'POST',
+    body: { query: summary, scope: 'project', limit: 10, privacy_ceiling: 'private' },
+  });
+  assert.equal(recalled.items.some((item) => item.id === objectID && item.summary === summary), true);
+
+  const repairPlanResult = packedPulse(tarball, ['install-plan', '--json'], {
+    cwd: workspace, env: baseEnv, timeout: 180_000,
+  });
+  const repairPlan = json(repairPlanResult.stdout, 'native packed repair plan is invalid');
+  assert.equal(repairPlan.outcome, 'ready_to_install', JSON.stringify(repairPlan));
+  const repairEnv = {
+    ...baseEnv,
+    PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(repairPlan),
+  };
+  const repaired = packedPulse(tarball, ['repair', '--json'], {
+    cwd: workspace, env: repairEnv, statuses: [0, 1], timeout: 15 * 60_000,
+  });
+  const repairResult = json(repaired.stdout, 'native packed repair result is invalid');
+  assert.equal(repairResult.outcome, 'ready', `${JSON.stringify(repairResult)}\n${repaired.stderr}`);
+  assert.equal(repairResult.host_status.hosts[0].host, 'codex');
+  assert.equal(repairResult.host_status.hosts[0].lifecycle_ready, true);
+  assert.equal(repairResult.host_status.hosts[0].verified, true);
+  assert.equal(repairResult.host_status.hosts[0].reload_required, false);
   const receipt = {
     schema: 'pulse.native_packed_product_fixture.v1',
     target_id: selectedTarget,
@@ -235,12 +502,19 @@ try {
     native_daemon: true,
     native_fixture_embedder: true,
     static_host_attached: true,
-    lifecycle_ready: false,
+    visible_memory_card: true,
+    first_memory_saved: true,
+    canonical_object_id: objectID,
+    fresh_session_context: true,
+    host_observation: true,
+    lifecycle_ready: true,
+    repair_ready: true,
+    same_object_recalled: true,
     production_ready: false,
     support_proven: false,
   };
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
-  process.stdout.write('Pulse native packed install reached the truthful reload-required boundary.\n');
+  process.stdout.write('Pulse native packed install saved one visible card and recalled it in a fresh Codex session.\n');
 } catch (error) {
   keep = true;
   process.stderr.write(`Native packed fixture root preserved at ${root}\n`);

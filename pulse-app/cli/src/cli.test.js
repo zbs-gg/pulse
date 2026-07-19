@@ -509,6 +509,24 @@ test('preflight derives resume evidence from a durable runtime journal after pro
   assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
 });
 
+test('preflight keeps a staged release generation resumable while host lifecycle completes', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-cwd.'));
+  const dataDir = join(home, 'pulse-data');
+  mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(dataDir, 'runtime', 'install-journal.json'), JSON.stringify({
+    schema: 'pulse.personal_install_journal.v1',
+    phase: 'candidate_staged',
+    manifest_digest: 'a'.repeat(64),
+  }), { mode: 0o600 });
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
+});
+
 test('init claude-code dry run prints install plan and writes nothing', () => {
   const { cwd, home, result } = run(['init', 'claude-code', '--dry-run']);
 
