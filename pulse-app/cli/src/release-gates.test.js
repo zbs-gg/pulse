@@ -65,6 +65,7 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(cli, /daemon_start_started/);
 	assert.match(cli, /transaction_complete/);
 	assert.match(cli, /runtime_provision_started/);
+	assert.match(cli, /managed_runtime_resolution_started/);
 	assert.match(cli, /<windows-path>/);
 	assert.match(cli, /defaultPlatformServices\.inspectExecutable\(resolve\(managedRuntime\.daemon\.path\)\)/);
 	assert.match(cli, /executableProof\.sha256 !== managedRuntime\.daemon\.digest/);
@@ -82,6 +83,12 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(runtimeInstaller, /preflight_release_started/);
 	assert.match(runtimeInstaller, /active_set_inspection_started/);
 	assert.match(runtimeInstaller, /activation_\$\{kind\}_started/);
+	const supervisor = readFileSync(
+		join(root, 'pulse-app', 'cli', 'src', 'local-supervisor.js'), 'utf8',
+	);
+	assert.match(supervisor, /managed runtime stage/);
+	assert.match(supervisor, /daemon_file_started/);
+	assert.match(supervisor, /daemon_identity_complete/);
 	for (const script of [
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',

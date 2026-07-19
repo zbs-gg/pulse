@@ -29,6 +29,12 @@ export class SupervisorError extends Error {
   }
 }
 
+function nativeFixtureSupervisorStage(stage) {
+  if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION !== '1') return;
+  if (typeof stage !== 'string' || !/^[a-z0-9_-]{1,96}$/.test(stage)) return;
+  process.stderr.write(`[pulse-native-fixture] managed runtime stage: ${stage}\n`);
+}
+
 function requireAbsolutePath(value, name) {
   if (typeof value !== 'string' || !isAbsolute(value)) {
     throw new SupervisorError('vault_runtime_invalid', `${name} must be absolute`);
@@ -264,20 +270,30 @@ export function resolveManagedRuntime(runtime, {
     );
   }
   const daemonRelativePath = platformServices.platform === 'win32' ? 'bin/pulse.exe' : 'bin/pulse';
+  nativeFixtureSupervisorStage('daemon_file_started');
   const daemonPath = activatedFile(daemonActivation, daemonRelativePath, platformServices, { executable: true });
+  nativeFixtureSupervisorStage('daemon_file_complete');
+  nativeFixtureSupervisorStage('model_root_started');
   const modelRoot = activatedDirectory(modelActivation, '.', platformServices);
+  nativeFixtureSupervisorStage('model_root_complete');
+  nativeFixtureSupervisorStage('support_root_started');
   const supportRoot = activatedDirectory(modelActivation, 'support', platformServices);
+  nativeFixtureSupervisorStage('support_root_complete');
+  nativeFixtureSupervisorStage('model_contract_files_started');
   activatedFile(modelActivation, 'model_int8.onnx', platformServices);
   activatedFile(modelActivation, 'pulse-model-contract.json', platformServices);
   for (const supportFile of [
     'config.json', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json',
   ]) activatedFile(modelActivation, `support/${supportFile}`, platformServices);
+  nativeFixtureSupervisorStage('model_contract_files_complete');
   const contract = managedEmbedderRuntimeContract({
     engine: 'transformers-js-onnx', platform: platformServices.platform,
   });
   let runnerPath;
   try {
+    nativeFixtureSupervisorStage('embedder_runner_started');
     runnerPath = activatedFile(embedderActivation, contract.runner_relative_path, platformServices, { executable: true });
+    nativeFixtureSupervisorStage('embedder_runner_complete');
   } catch { throw new SupervisorError('managed_embedder_portable_unavailable', 'portable managed embedder runner is unavailable'); }
   const runnerArgs = ['--model-root', modelRoot, '--support-root', supportRoot];
   const config = {
@@ -294,7 +310,9 @@ export function resolveManagedRuntime(runtime, {
     support_root: supportRoot,
     vector_contract: contract.vector_contract,
   };
+  nativeFixtureSupervisorStage('runtime_directory_started');
   ensurePrivateDirectory(runtime.data_dir, platformServices);
+  nativeFixtureSupervisorStage('runtime_directory_complete');
   const configPath = join(runtime.data_dir, 'runtime', 'managed-embedder.json');
   let managedEmbedder = {
     config_path: configPath,
@@ -317,9 +335,12 @@ export function resolveManagedRuntime(runtime, {
       owner: 'current', maxBytes: 64 * 1024 * 1024,
     })).digest('hex') } : {}),
   });
+  nativeFixtureSupervisorStage('daemon_identity_started');
+  const daemonIdentity = identity(daemonActivation, daemonPath);
+  nativeFixtureSupervisorStage('daemon_identity_complete');
   return {
     schema: 'pulse.managed_product_runtime.v1',
-    daemon: identity(daemonActivation, daemonPath),
+    daemon: daemonIdentity,
     embedder_runtime: identity(embedderActivation),
     model: identity(modelActivation),
     managed_embedder: managedEmbedder,

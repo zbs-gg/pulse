@@ -2789,15 +2789,21 @@ async function ensureManagedProductRuntime(runtime, { publishConfig = true } = {
 		throw new Error('PULSE_GO_BIN is developer-only and cannot satisfy Pulse product readiness');
 	}
 	const provisioned = await provisionPersonalRuntime(packagedPersonalRuntimeOptions(DATA_DIR));
+	nativeFixtureActivationStage('runtime_release_provisioned');
+	nativeFixtureActivationStage('product_edge_resolution_started');
 	const productEdge = resolveSignedCodexProductEdge({
 		release: provisioned.release,
 		activation: provisioned.activationSet.activations['plugin-runtime'],
 	});
+	nativeFixtureActivationStage('product_edge_resolved');
+	nativeFixtureActivationStage('managed_runtime_resolution_started');
+	const managedRuntime = resolveManagedRuntime(runtime, {
+		installRoot: join(DATA_DIR, 'artifacts'), publishConfig,
+		verifiedActivations: provisioned.activationSet.activations,
+	});
+	nativeFixtureActivationStage('managed_runtime_resolved');
 	return {
-		...resolveManagedRuntime(runtime, {
-			installRoot: join(DATA_DIR, 'artifacts'), publishConfig,
-			verifiedActivations: provisioned.activationSet.activations,
-		}),
+		...managedRuntime,
 		product_edge: productEdge,
 		verified_release: provisioned.release,
 	};
