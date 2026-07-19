@@ -2,7 +2,14 @@
 
 package main
 
-import "testing"
+import (
+	"crypto/sha256"
+	"fmt"
+	"path/filepath"
+	"testing"
+
+	"github.com/nkkmnk/pulse/internal/platform"
+)
 
 func TestAdapterTargetUsesPublicArchitectureNames(t *testing.T) {
 	for architecture, want := range map[string]string{
@@ -13,5 +20,40 @@ func TestAdapterTargetUsesPublicArchitectureNames(t *testing.T) {
 		if got := adapterTarget(architecture); got != want {
 			t.Fatalf("adapterTarget(%q) = %q, want %q", architecture, got, want)
 		}
+	}
+}
+
+func TestInspectPrivateTreeValidatesTheWholeExpectedTreeInOneOperation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private-tree")
+	runtimeRoot := filepath.Join(root, "runtime")
+	if err := platform.EnsurePrivateDirectory(runtimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("trusted runtime")
+	path := filepath.Join(runtimeRoot, "index.js")
+	if err := platform.AtomicWritePrivateFile(path, payload); err != nil {
+		t.Fatal(err)
+	}
+	entry := privateTreeEntry{
+		Path: "runtime/index.js", Bytes: int64(len(payload)),
+		SHA256: fmt.Sprintf("%x", sha256.Sum256(payload)), Executable: false,
+	}
+	proof, err := inspectPrivateTree(request{
+		Path: root, Entries: []privateTreeEntry{entry}, MaximumDepth: 32,
+		MaximumEntries: 64, MaximumTotalBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := proof.(map[string]any)
+	if result["files"] != 1 || result["bytes"] != int64(len(payload)) {
+		t.Fatalf("unexpected tree proof: %#v", result)
+	}
+	entry.SHA256 = fmt.Sprintf("%064x", 0)
+	if _, err := inspectPrivateTree(request{
+		Path: root, Entries: []privateTreeEntry{entry}, MaximumDepth: 32,
+		MaximumEntries: 64, MaximumTotalBytes: 1024,
+	}); err == nil {
+		t.Fatal("tampered digest was accepted")
 	}
 }

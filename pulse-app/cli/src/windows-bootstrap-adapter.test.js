@@ -23,6 +23,7 @@ const operations = Object.freeze([
   'inspect_executable',
   'inspect_path_identity',
   'inspect_private_state',
+  'inspect_private_tree',
   'inspect_process',
   'read_integrity_file',
   'read_private_file',
@@ -81,6 +82,9 @@ test('bundled selector verifies the exact digest and exposes the complete native
         owner: payload.owner, regular_file: true, reparse_point: false,
       };
     }
+    if (operation === 'inspect_private_tree') {
+      return { bytes: payload.entries.reduce((total, entry) => total + entry.bytes, 0), files: payload.entries.length };
+    }
     if (operation === 'inspect_process') {
       return { command: 'node.exe', identity_token: 'process-identity', pid: payload.pid, running: true };
     }
@@ -101,10 +105,14 @@ test('bundled selector verifies the exact digest and exposes the complete native
     bytes: Buffer.from('trusted'), canonical_path: `${path}\\catalog.json`, owner: 'current',
     regular_file: true, reparse_point: false,
   });
+  assert.deepEqual(adapter.inspectPrivateTree(`${path}\\runtime`, {
+    entries: [{ bytes: 7, executable: false, path: 'index.js', sha256: 'a'.repeat(64) }],
+    maximumDepth: 32, maximumEntries: 8192, maximumTotalBytes: 4096,
+  }), { bytes: 7, files: 1 });
   const release = adapter.acquirePrivateLock(`${path}\\install.lock`, { staleAfterMs: 1000, timeoutMs: 0 });
   release();
   assert.deepEqual(calls.map(({ operation }) => operation), [
-    'contract', 'inspect_private_state', 'read_integrity_file',
+    'contract', 'inspect_private_state', 'read_integrity_file', 'inspect_private_tree',
     'inspect_process', 'acquire_private_lock', 'release_private_lock',
   ]);
 });

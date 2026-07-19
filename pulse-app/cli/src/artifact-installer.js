@@ -358,6 +358,17 @@ export function validateArtifactTree(root, manifest, {
   const entries = validateTreeManifest(manifest);
   if (entries.size > maxFiles) fail('artifact_tree_too_many_files');
   const rootPath = resolve(root);
+  const batchFiles = [...entries.values()].map(({ path, bytes, sha256, executable }) => ({
+    path, bytes, sha256, executable,
+  }));
+  if (platformServices.platform === 'win32' && typeof platformServices.validatePrivateTree === 'function' &&
+      batchFiles.every((entry) => entry.bytes <= 512 * 1024 * 1024)) {
+    try {
+      return platformServices.validatePrivateTree(rootPath, {
+        files: batchFiles, maxDepth, maxEntries, maxTotalBytes,
+      });
+    } catch { fail('artifact_tree_file_invalid'); }
+  }
   assertPrivateState(rootPath, 'directory', 'artifact_tree_root_invalid', platformServices);
   const actual = [];
   const allowedDirectories = new Set(['']);
@@ -414,21 +425,31 @@ export function validateArtifactTree(root, manifest, {
 function copyManifestFiles(sourceRoot, targetRoot, treeManifest, platformServices = defaultPlatformServices) {
   const resolvedSourceRoot = resolve(sourceRoot);
   const resolvedTargetRoot = resolve(targetRoot);
+  const batchFiles = treeManifest.files.map(({ path, bytes, sha256, executable }) => ({ path, bytes, sha256, executable }));
+  const batchWindows = platformServices.platform === 'win32' && typeof platformServices.validatePrivateTree === 'function' &&
+    batchFiles.every((entry) => entry.bytes <= 512 * 1024 * 1024);
+  if (batchWindows) ensurePrivateDirectory(resolvedTargetRoot, platformServices);
   for (const entry of treeManifest.files) {
     const source = resolve(resolvedSourceRoot, entry.path);
     const target = resolve(resolvedTargetRoot, entry.path);
     if (!source.startsWith(`${resolvedSourceRoot}${sep}`) || !target.startsWith(`${resolvedTargetRoot}${sep}`)) {
       fail('artifact_tree_path_invalid');
     }
-    ensurePrivateDirectory(dirname(target), platformServices);
+    if (batchWindows) mkdirSync(dirname(target), { recursive: true });
+    else ensurePrivateDirectory(dirname(target), platformServices);
     try { copyFileSync(source, target, constants.COPYFILE_EXCL); } catch { fail('artifact_materialize_failed'); }
     if (platformServices.platform !== 'win32') chmodSync(target, entry.mode);
-    assertPrivateState(target, 'file', 'artifact_materialize_failed', platformServices);
-    if (entry.executable && platformServices.platform === 'win32') {
+    if (!batchWindows) assertPrivateState(target, 'file', 'artifact_materialize_failed', platformServices);
+    if (!batchWindows && entry.executable && platformServices.platform === 'win32') {
       let proof;
       try { proof = platformServices.inspectExecutable(resolve(target)); } catch { fail('artifact_materialize_failed'); }
       if (!proof?.executable || !proof.owner_only) fail('artifact_materialize_failed');
     }
+  }
+  if (batchWindows) {
+    try {
+      platformServices.validatePrivateTree(resolvedTargetRoot, { files: batchFiles });
+    } catch { fail('artifact_materialize_failed'); }
   }
 }
 
@@ -460,12 +481,35 @@ function parseCarrierTreeManifest(bytes) {
 }
 
 function validateCarrierDirectory(root, manifest, {
-  maxEntries = 8192, maxDepth = 32, platformServices = defaultPlatformServices,
+  maxEntries = 8192, maxDepth = 32, maxTotalBytes = 4 * 1024 * 1024 * 1024,
+  platformServices = defaultPlatformServices,
 } = {}) {
   const payload = validateTreeManifest(manifest);
   const expectedFiles = new Set([...payload.keys(), CARRIER_TREE_FILE]);
   for (const optional of OPTIONAL_CARRIER_CONTROL_FILES) {
     if (existsSync(join(root, optional))) expectedFiles.add(optional);
+  }
+  if (platformServices.platform === 'win32' && typeof platformServices.validatePrivateTree === 'function' &&
+      [...payload.values()].every((entry) => entry.bytes <= 512 * 1024 * 1024)) {
+    const controls = [];
+    for (const path of [CARRIER_TREE_FILE, ...OPTIONAL_CARRIER_CONTROL_FILES]) {
+      if (!expectedFiles.has(path)) continue;
+      let bytes;
+      try {
+        bytes = path === CARRIER_TREE_FILE ? Buffer.from(`${canonical(manifest)}\n`) :
+          platformServices.readIntegrityFile(resolve(root, path), { owner: 'current', maxBytes: 2 * 1024 * 1024 });
+      } catch { fail('artifact_carrier_entry_unsafe'); }
+      controls.push({ path, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), executable: false });
+    }
+    const files = [...payload.values()].map(({ path, bytes, sha256, executable }) => ({
+      path, bytes, sha256, executable,
+    })).concat(controls);
+    try {
+      platformServices.validatePrivateTree(resolve(root), {
+        files, maxDepth, maxEntries, maxTotalBytes: inflatedArchiveLimit(maxTotalBytes, payload.size),
+      });
+      return;
+    } catch { fail('artifact_carrier_entry_unsafe'); }
   }
   const allowedDirectories = new Set(['']);
   for (const path of expectedFiles) {
@@ -715,12 +759,13 @@ async function preflightPortableArchive(carrier, artifact, {
     for (let count = 1; count < parts.length; count += 1) allowedDirectories.add(parts.slice(0, count).join('/'));
   }
   if ([...directories].some((path) => !allowedDirectories.has(path))) fail('artifact_carrier_unexpected');
-  return { allowedDirectories, expectedByPath, expectedFiles, manifest };
+  return { allowedDirectories, archiveFiles: files, expectedByPath, expectedFiles, manifest };
 }
 
-function writePortableEntry(stream, destination, expected, platformServices) {
+function writePortableEntry(stream, destination, expected, platformServices, deferWindowsValidation = false) {
   return (async () => {
-    ensurePrivateDirectory(dirname(destination), platformServices);
+    if (deferWindowsValidation) mkdirSync(dirname(destination), { recursive: true });
+    else ensurePrivateDirectory(dirname(destination), platformServices);
     let fd;
     try {
       fd = openSync(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), expected.mode);
@@ -742,17 +787,23 @@ function writePortableEntry(stream, destination, expected, platformServices) {
       fsyncSync(fd);
     } finally { closeSync(fd); }
     if (platformServices.platform !== 'win32') chmodSync(destination, expected.mode);
-    assertPrivateState(destination, 'file', 'artifact_archive_extract_failed', platformServices);
+    if (!deferWindowsValidation) {
+      assertPrivateState(destination, 'file', 'artifact_archive_extract_failed', platformServices);
+    }
   })();
 }
 
 async function extractPortableArchive(carrier, destination, preflight, options) {
   const seen = new Set();
+  const deferWindowsValidation = options.platformServices.platform === 'win32' &&
+    typeof options.platformServices.validatePrivateTree === 'function' &&
+    [...preflight.archiveFiles.values()].every((bytes) => bytes <= 512 * 1024 * 1024);
   await walkPortableArchive(carrier, async (header, stream) => {
     validatePortableHeader(header, seen, options);
     if (header.type === 'directory') {
       if (!preflight.allowedDirectories.has(header.name)) fail('artifact_carrier_unexpected');
-      ensurePrivateDirectory(join(destination, header.name), options.platformServices);
+      if (deferWindowsValidation) mkdirSync(join(destination, header.name), { recursive: true });
+      else ensurePrivateDirectory(join(destination, header.name), options.platformServices);
       await drainPortableEntry(stream, 0);
       return;
     }
@@ -761,7 +812,7 @@ async function extractPortableArchive(carrier, destination, preflight, options) 
       bytes: header.size, mode: 0o600, executable: false,
     };
     if (header.size !== expected.bytes) fail('artifact_carrier_digest_mismatch');
-    await writePortableEntry(stream, join(destination, header.name), expected, options.platformServices);
+    await writePortableEntry(stream, join(destination, header.name), expected, options.platformServices, deferWindowsValidation);
   }, {
     maximumInflatedBytes: inflatedArchiveLimit(options.maxTotalBytes, options.maxFiles),
     timeoutMs: options.timeoutMs,
@@ -795,7 +846,7 @@ export async function materializeVerifiedPortableArchive(carrier, targetRoot, ar
   try {
     await extractPortableArchive(carrier, work, preflight, options);
     if (sha256File(carrier, platformServices).digest !== artifact.sha256) fail('artifact_carrier_digest_mismatch');
-    validateCarrierDirectory(work, preflight.manifest, { maxEntries, maxDepth, platformServices });
+    validateCarrierDirectory(work, preflight.manifest, { maxEntries, maxDepth, maxTotalBytes, platformServices });
     copyManifestFiles(work, targetRoot, preflight.manifest, platformServices);
     return { treeManifest: preflight.manifest };
   } catch (error) {

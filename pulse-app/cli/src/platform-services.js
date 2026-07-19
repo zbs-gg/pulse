@@ -260,6 +260,40 @@ export function createPlatformServices({
     });
   }
 
+  function validatePrivateTree(treePath, {
+    files, maxEntries = 8192, maxDepth = 32, maxTotalBytes = 4 * 1024 * 1024 * 1024,
+  } = {}) {
+    validatePrivatePath(treePath);
+    if (platform !== 'win32' || !Array.isArray(files) || files.length < 1 || files.length > maxEntries ||
+        !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 1_000_000 ||
+        !Number.isSafeInteger(maxDepth) || maxDepth < 1 || maxDepth > 128 ||
+        !Number.isSafeInteger(maxTotalBytes) || maxTotalBytes < 1 || maxTotalBytes > 64 * 1024 * 1024 * 1024) {
+      fail('platform_private_tree_invalid');
+    }
+    let total = 0;
+    const seen = new Set();
+    const entries = files.map((file) => {
+      if (!exactObject(file, ['bytes', 'executable', 'path', 'sha256']) || typeof file.path !== 'string' ||
+          file.path.length < 1 || file.path.length > 512 || file.path.startsWith('/') || file.path.includes('\\') ||
+          file.path.split('/').some((part) => !part || part === '.' || part === '..') || seen.has(file.path) ||
+          !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > 512 * 1024 * 1024 ||
+          typeof file.executable !== 'boolean' || !SHA256.test(file.sha256 ?? '')) {
+        fail('platform_private_tree_invalid');
+      }
+      seen.add(file.path);
+      total += file.bytes;
+      if (!Number.isSafeInteger(total) || total > maxTotalBytes) fail('platform_private_tree_invalid');
+      return { bytes: file.bytes, executable: file.executable, path: file.path, sha256: file.sha256 };
+    });
+    const proof = nativeOperation(nativeAdapter, 'inspectPrivateTree')(treePath, {
+      entries, maximumDepth: maxDepth, maximumEntries: maxEntries, maximumTotalBytes: maxTotalBytes,
+    });
+    if (!exactObject(proof, ['bytes', 'files']) || proof.bytes !== total || proof.files !== entries.length) {
+      fail('platform_private_tree_unsafe');
+    }
+    return Object.freeze(proof);
+  }
+
   function validatePrivatePath(statePath) {
     if (typeof statePath !== 'string' || !pathAPI.isAbsolute(statePath) || pathAPI.resolve(statePath) !== statePath) {
       fail('platform_private_state_invalid');
@@ -731,6 +765,7 @@ export function createPlatformServices({
     resolvePath,
     runGit,
     terminateProcess,
+    validatePrivateTree,
   });
 }
 

@@ -11,7 +11,7 @@ const RESPONSE_SCHEMA = 'pulse.windows_bootstrap_adapter.response.v1';
 const SHA256 = /^[a-f0-9]{64}$/;
 const EXPECTED_OPERATIONS = Object.freeze([
   'acquire_private_lock', 'atomic_write_private_file', 'ensure_private_directory',
-  'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_process',
+  'inspect_executable', 'inspect_path_identity', 'inspect_private_state', 'inspect_private_tree', 'inspect_process',
   'read_integrity_file', 'read_private_file', 'release_private_lock', 'remove_private_file',
   'terminate_process',
 ]);
@@ -128,6 +128,11 @@ export function loadBundledWindowsAdapter({
     target,
     inspectExecutable: (path) => call('inspect_executable', { path }),
     inspectPrivateState: (path, { kind }) => call('inspect_private_state', { kind, path }),
+    inspectPrivateTree: (path, { entries, maximumDepth, maximumEntries, maximumTotalBytes }) =>
+      call('inspect_private_tree', {
+        entries, maximum_depth: maximumDepth, maximum_entries: maximumEntries,
+        maximum_total_bytes: maximumTotalBytes, path,
+      }),
     inspectPathIdentity: (path, { kind }) => call('inspect_path_identity', { kind, path }),
     readIntegrityFile(path, { owner, maxBytes }) {
       const result = call('read_integrity_file', { maximum_bytes: maxBytes, owner, path });

@@ -33,7 +33,7 @@ const (
 
 var operations = []string{
 	"acquire_private_lock", "atomic_write_private_file", "ensure_private_directory",
-	"inspect_executable", "inspect_path_identity", "inspect_private_state", "inspect_process",
+	"inspect_executable", "inspect_path_identity", "inspect_private_state", "inspect_private_tree", "inspect_process",
 	"read_integrity_file", "read_private_file", "release_private_lock", "remove_private_file",
 	"terminate_process",
 }
@@ -50,21 +50,32 @@ func adapterTarget(architecture string) string {
 }
 
 type request struct {
-	Schema        string `json:"schema"`
-	Path          string `json:"path,omitempty"`
-	Kind          string `json:"kind,omitempty"`
-	Owner         string `json:"owner,omitempty"`
-	Bytes         []byte `json:"bytes_base64,omitempty"`
-	Encoding      string `json:"encoding,omitempty"`
-	EnsureParent  bool   `json:"ensure_parent,omitempty"`
-	Missing       bool   `json:"missing,omitempty"`
-	MinimumBytes  int64  `json:"minimum_bytes,omitempty"`
-	MaximumBytes  int64  `json:"maximum_bytes,omitempty"`
-	PID           int    `json:"pid,omitempty"`
-	IdentityToken string `json:"identity_token,omitempty"`
-	StaleAfterMS  int64  `json:"stale_after_ms,omitempty"`
-	TimeoutMS     int64  `json:"timeout_ms,omitempty"`
-	Lease         string `json:"lease,omitempty"`
+	Schema            string             `json:"schema"`
+	Path              string             `json:"path,omitempty"`
+	Kind              string             `json:"kind,omitempty"`
+	Owner             string             `json:"owner,omitempty"`
+	Bytes             []byte             `json:"bytes_base64,omitempty"`
+	Encoding          string             `json:"encoding,omitempty"`
+	EnsureParent      bool               `json:"ensure_parent,omitempty"`
+	Missing           bool               `json:"missing,omitempty"`
+	MinimumBytes      int64              `json:"minimum_bytes,omitempty"`
+	MaximumBytes      int64              `json:"maximum_bytes,omitempty"`
+	PID               int                `json:"pid,omitempty"`
+	IdentityToken     string             `json:"identity_token,omitempty"`
+	StaleAfterMS      int64              `json:"stale_after_ms,omitempty"`
+	TimeoutMS         int64              `json:"timeout_ms,omitempty"`
+	Lease             string             `json:"lease,omitempty"`
+	Entries           []privateTreeEntry `json:"entries,omitempty"`
+	MaximumDepth      int                `json:"maximum_depth,omitempty"`
+	MaximumEntries    int                `json:"maximum_entries,omitempty"`
+	MaximumTotalBytes int64              `json:"maximum_total_bytes,omitempty"`
+}
+
+type privateTreeEntry struct {
+	Path       string `json:"path"`
+	Bytes      int64  `json:"bytes"`
+	SHA256     string `json:"sha256"`
+	Executable bool   `json:"executable"`
 }
 
 type response struct {
@@ -136,6 +147,8 @@ func dispatch(operation string, value request) (any, error) {
 		}
 		return map[string]any{"canonical_path": canonicalPath(value.Path), "identity_token": info.Identity,
 			"kind": value.Kind, "reparse_point": false}, nil
+	case "inspect_private_tree":
+		return inspectPrivateTree(value)
 	case "read_integrity_file":
 		return readIntegrityFile(value)
 	case "ensure_private_directory":
@@ -215,6 +228,111 @@ func inspectPrivateState(path, kind string) (any, error) {
 	}
 	return map[string]any{"canonical_path": canonicalPath(path), "kind": kind,
 		"owner_only": true, "reparse_point": false}, nil
+}
+
+func validPrivateTreePath(value string) bool {
+	if value == "" || len(value) > 512 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func inspectPrivateTree(value request) (any, error) {
+	if value.Path == "" || !filepath.IsAbs(value.Path) || len(value.Entries) == 0 ||
+		value.MaximumEntries < len(value.Entries) || value.MaximumEntries > 1_000_000 ||
+		value.MaximumDepth < 1 || value.MaximumDepth > 128 ||
+		value.MaximumTotalBytes < 1 || value.MaximumTotalBytes > 64*1024*1024*1024 {
+		return nil, platform.ErrUnsafe
+	}
+	if _, err := platform.InspectPrivateDirectory(value.Path, false); err != nil {
+		return nil, err
+	}
+	expected := make(map[string]privateTreeEntry, len(value.Entries))
+	allowedDirectories := map[string]bool{"": true}
+	var expectedBytes int64
+	for _, entry := range value.Entries {
+		decoded, err := hex.DecodeString(entry.SHA256)
+		if !validPrivateTreePath(entry.Path) || err != nil || len(decoded) != sha256.Size ||
+			entry.SHA256 != strings.ToLower(entry.SHA256) || entry.Bytes < 0 || entry.Bytes > 512*1024*1024 {
+			return nil, platform.ErrUnsafe
+		}
+		if _, exists := expected[entry.Path]; exists {
+			return nil, platform.ErrUnsafe
+		}
+		expected[entry.Path] = entry
+		expectedBytes += entry.Bytes
+		if expectedBytes < 0 || expectedBytes > value.MaximumTotalBytes {
+			return nil, platform.ErrUnsafe
+		}
+		parts := strings.Split(entry.Path, "/")
+		for count := 1; count < len(parts); count++ {
+			allowedDirectories[strings.Join(parts[:count], "/")] = true
+		}
+	}
+	seen := make(map[string]bool, len(expected))
+	visited := 0
+	var actualBytes int64
+	err := filepath.Walk(value.Path, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(value.Path, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		visited++
+		if visited > value.MaximumEntries || strings.Count(relative, "/") > value.MaximumDepth {
+			return platform.ErrUnsafe
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return platform.ErrUnsafe
+		}
+		if info.IsDir() {
+			if !allowedDirectories[relative] {
+				return platform.ErrUnsafe
+			}
+			_, err := platform.InspectPrivateDirectory(path, false)
+			return err
+		}
+		entry, exists := expected[relative]
+		if !exists || seen[relative] || !info.Mode().IsRegular() {
+			return platform.ErrUnsafe
+		}
+		maximumBytes := entry.Bytes + 1
+		if maximumBytes < 1 {
+			maximumBytes = 1
+		}
+		data, details, err := platform.ReadPrivateFileWithInfo(path, platform.FilePolicy{
+			MaximumBytes: maximumBytes, RequireCurrentOwner: true, OwnerOnly: true,
+			SingleLink: true, Executable: entry.Executable,
+		})
+		if err != nil || details.Size != entry.Bytes || int64(len(data)) != entry.Bytes ||
+			fmt.Sprintf("%x", sha256.Sum256(data)) != entry.SHA256 {
+			return platform.ErrUnsafe
+		}
+		actualBytes += entry.Bytes
+		if actualBytes < 0 || actualBytes > value.MaximumTotalBytes {
+			return platform.ErrUnsafe
+		}
+		seen[relative] = true
+		return nil
+	})
+	if err != nil || len(seen) != len(expected) || actualBytes != expectedBytes {
+		if err != nil {
+			return nil, err
+		}
+		return nil, platform.ErrUnsafe
+	}
+	return map[string]any{"bytes": actualBytes, "files": len(seen)}, nil
 }
 
 func readIntegrityFile(value request) (any, error) {

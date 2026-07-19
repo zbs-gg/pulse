@@ -94,6 +94,9 @@ test('Windows native adapter must prove ACL ownership and reject reparse points'
     inspectPrivateState: (path, { kind }) => ({
       canonical_path: path, kind, owner_only: true, reparse_point: false,
     }),
+    inspectPrivateTree: (_path, { entries }) => ({
+      bytes: entries.reduce((total, entry) => total + entry.bytes, 0), files: entries.length,
+    }),
     inspectProcess: (pid) => ({ running: true, pid, command: 'pulse.exe -data-dir C:\\vault', identity_token: 'proc-1234' }),
     terminateProcess: (pid, options) => { terminated.push({ pid, options }); return true; },
     ensurePrivateDirectory: (path) => { privateOperations.push(['ensure', path]); },
@@ -113,6 +116,9 @@ test('Windows native adapter must prove ACL ownership and reject reparse points'
   assert.equal(services.path_delimiter, ';');
   assert.equal(services.inspectExecutable('C:\\Program Files\\Git\\cmd\\git.exe').sha256, 'a'.repeat(64));
   assert.equal(services.assertPrivateState('C:\\Users\\Pulse\\.pulse\\secret.key', { kind: 'file' }).owner_only, true);
+  assert.deepEqual(services.validatePrivateTree('C:\\Users\\Pulse\\.pulse\\runtime', {
+    files: [{ bytes: 2, executable: false, path: 'state.json', sha256: 'a'.repeat(64) }],
+  }), { bytes: 2, files: 1 });
   assert.equal(services.inspectProcess(1234).identity_token, 'proc-1234');
   assert.equal(services.terminateProcess(1234, { force: true }), true);
   assert.deepEqual(terminated, [{ pid: 1234, options: { force: true } }]);

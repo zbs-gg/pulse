@@ -620,6 +620,45 @@ test('portable archive streams the exact canonical tree without system extractio
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('Windows portable extraction defers thousands of per-file ACL calls to one native tree proof', async () => {
+  const root = sandbox();
+  const carrier = join(root, 'runtime.tar.gz');
+  const target = join(root, 'target');
+  const payload = Buffer.from('portable-runtime');
+  const manifest = treeManifest([{ path: 'runtime/index.js', bytes: payload, mode: 0o600 }]);
+  const carrierBytes = await portableArchive([
+    { path: 'runtime/', type: 'directory' },
+    { path: 'pulse-artifact-tree.json', bytes: `${canonicalArtifactJSON(manifest)}\n` },
+    { path: 'runtime/index.js', bytes: payload },
+  ]);
+  const proofs = [];
+  const windowsBatchServices = {
+    ...defaultPlatformServices,
+    platform: 'win32',
+    ensurePrivateDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
+    assertPrivateState: () => { throw new Error('per-file ACL proof must be deferred'); },
+    validatePrivateTree: (path, { files }) => {
+      for (const file of files) {
+        const bytes = readFileSync(join(path, file.path));
+        assert.equal(bytes.length, file.bytes);
+        assert.equal(digest(bytes), file.sha256);
+      }
+      const proof = { bytes: files.reduce((total, file) => total + file.bytes, 0), files: files.length };
+      proofs.push({ path, proof });
+      return proof;
+    },
+  };
+  try {
+    mkdirSync(target, { mode: 0o700 });
+    writeFileSync(carrier, carrierBytes, { mode: 0o600 });
+    await materializeVerifiedPortableArchive(carrier, target, portableArtifact(carrierBytes), undefined, {
+      platformServices: windowsBatchServices,
+    });
+    assert.deepEqual(readFileSync(join(target, 'runtime', 'index.js')), payload);
+    assert.equal(proofs.length, 2, 'one proof validates extraction and one validates the activated target tree');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('portable archive rejects paths, duplicates, links, special entries, and PAX path overrides', async () => {
   const root = sandbox();
   const target = join(root, 'target');
