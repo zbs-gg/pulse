@@ -115,6 +115,7 @@ import {
 	removeProductHostAccess,
 	removeProductLocator,
 	resolveSignedCodexProductEdge,
+	sameCodexMarketplaceRoot,
   rollbackCodexRuntimeInstall,
 	writeCodexProductLocator,
 	writeProductHostAccess,
@@ -1383,14 +1384,14 @@ function requireExactCodexMarketplace(source, codexExecutable = 'codex', knownSt
 	const before = knownStatus ?? codexMarketplaceStatus(codexExecutable);
 	if (before.error) throw new Error(before.error);
 	if (before.configured) {
-		if (!before.root || realpathSync(resolve(before.root)) !== canonicalSource) {
+		if (!before.root || !sameCodexMarketplaceRoot(before.root, canonicalSource)) {
 			throw new Error('codex_marketplace_source_conflict');
 		}
 		return before;
 	}
 	codexCommand(['plugin', 'marketplace', 'add', canonicalSource], { executable: codexExecutable });
 	const after = codexMarketplaceStatus(codexExecutable);
-	if (!after.configured || !after.root || realpathSync(resolve(after.root)) !== canonicalSource) {
+	if (!after.configured || !after.root || !sameCodexMarketplaceRoot(after.root, canonicalSource)) {
 		throw new Error('codex_plugin_source_untrusted');
 	}
 	return after;
@@ -1413,7 +1414,7 @@ function activateExactCodexProductEdge(productEdge, transaction, codexExecutable
 	const source = marketplaceSnapshot.marketplace_root;
 	let currentMarketplace = transaction.marketplace;
 	if (currentMarketplace.configured && currentMarketplace.root &&
-			realpathSync(resolve(currentMarketplace.root)) !== source) {
+			!sameCodexMarketplaceRoot(currentMarketplace.root, source)) {
 		if (!isManagedCodexMarketplaceRoot(currentMarketplace.root)) {
 			throw new Error('codex_marketplace_source_conflict');
 		}
@@ -1778,7 +1779,7 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 		if (!snapshot.ok) return false;
 		const marketplace = codexMarketplaceStatus();
 		if (!marketplace.configured || !marketplace.root ||
-			realpathSync(resolve(marketplace.root)) !== snapshot.marketplace_root) return false;
+			!sameCodexMarketplaceRoot(marketplace.root, snapshot.marketplace_root)) return false;
 		readCodexProductLocator({ codexHome: codexHomePath(), binding });
 		readProductHostAccess({ productHome: join(homedir(), '.pulse'), binding, host: 'codex' });
 		return true;
@@ -1818,7 +1819,7 @@ function inspectCodexDoctorProductGeneration({ codexReady, codexExecutable }) {
 	let marketplaceExact = false;
 	try {
 		marketplaceExact = Boolean(marketplaceSnapshot.ok && marketplace.configured && marketplace.root &&
-			realpathSync(resolve(marketplace.root)) === marketplaceSnapshot.marketplace_root);
+			sameCodexMarketplaceRoot(marketplace.root, marketplaceSnapshot.marketplace_root));
 	} catch { marketplaceExact = false; }
 	return {
 		plugin, installedRuntime, productActivation, productEdge, productActivationError,

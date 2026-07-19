@@ -110,6 +110,19 @@ export function parseCodexMarketplaceList(output, marketplace = 'zbs-gg') {
 	return { configured: false, root: undefined };
 }
 
+export function sameCodexMarketplaceRoot(left, right, { platformServices = defaultPlatformServices } = {}) {
+	try {
+		const leftPath = platformServices.resolvePath(left);
+		const rightPath = platformServices.resolvePath(right);
+		if (!platformServices.isAbsolutePath(leftPath) || !platformServices.isAbsolutePath(rightPath)) return false;
+		const leftIdentity = platformServices.inspectPathIdentity(leftPath, { kind: 'directory' });
+		const rightIdentity = platformServices.inspectPathIdentity(rightPath, { kind: 'directory' });
+		return leftIdentity.identity_token === rightIdentity.identity_token;
+	} catch {
+		return false;
+	}
+}
+
 export function codexMarketplaceDoctorCheck({ exact, marketplace, snapshot }) {
 	if (exact) return { ok: true, detail: 'exact activation-owned marketplace snapshot' };
 	if (!snapshot?.ok) {

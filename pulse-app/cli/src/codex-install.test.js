@@ -30,6 +30,7 @@ import {
 	removeProductLocator,
 	resolveSignedCodexProductEdge,
 	rollbackCodexRuntimeInstall,
+	sameCodexMarketplaceRoot,
 	writeCodexProductLocator,
 	writeProductHostAccess,
 	writeProductLocator,
@@ -143,6 +144,34 @@ test('marketplace parser exposes exact local provenance instead of accepting a f
 	assert.deepEqual(parseCodexMarketplaceList('MARKETPLACE  ROOT\nopenai  /tmp/openai\n'), {
 		configured: false, root: undefined,
 	});
+});
+
+test('marketplace roots compare filesystem identity instead of Windows path spelling', () => {
+	const identities = new Map([
+		['C:\\Users\\RUNNER~1\\marketplace', 'volume:file-id'],
+		['C:\\Users\\runneradmin\\marketplace', 'volume:file-id'],
+		['C:\\Users\\runneradmin\\other', 'volume:other-id'],
+	]);
+	const calls = [];
+	const platformServices = {
+		resolvePath: (value) => value,
+		isAbsolutePath: (value) => identities.has(value),
+		inspectPathIdentity: (path, options) => {
+			calls.push({ path, options });
+			return { identity_token: identities.get(path) };
+		},
+	};
+	assert.equal(sameCodexMarketplaceRoot(
+		'C:\\Users\\RUNNER~1\\marketplace', 'C:\\Users\\runneradmin\\marketplace', { platformServices },
+	), true);
+	assert.equal(sameCodexMarketplaceRoot(
+		'C:\\Users\\RUNNER~1\\marketplace', 'C:\\Users\\runneradmin\\other', { platformServices },
+	), false);
+	assert.equal(sameCodexMarketplaceRoot('relative', 'also-relative', { platformServices }), false);
+	assert.deepEqual(calls.map(({ options }) => options), [
+		{ kind: 'directory' }, { kind: 'directory' },
+		{ kind: 'directory' }, { kind: 'directory' },
+	]);
 });
 
 function writeSignedProductEdgeFixture(root, { releaseVersion = '0.7.0', pluginVersion = releaseVersion } = {}) {
