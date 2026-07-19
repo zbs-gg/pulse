@@ -48,7 +48,7 @@ server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
             })));
           }
         }
-        
+
         if (${k}.value === undefined) {
           if (${y} in input) {
             newResult[${y}] = undefined;
@@ -56,7 +56,7 @@ server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
         } else {
           newResult[${y}] = ${k}.value;
         }
-        
+
       `):A?p.write(`
         if (${k}.issues.length) {
           payload.issues = payload.issues.concat(${k}.issues.map(iss => ({
@@ -64,7 +64,7 @@ server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
             path: iss.path ? [${y}, ...iss.path] : [${y}]
           })));
         }
-        
+
         if (${k}.value === undefined) {
           if (${y} in input) {
             newResult[${y}] = undefined;
@@ -72,7 +72,7 @@ server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
         } else {
           newResult[${y}] = ${k}.value;
         }
-        
+
       `):p.write(`
         const ${k}_present = ${y} in input;
         if (${k}.issues.length) {

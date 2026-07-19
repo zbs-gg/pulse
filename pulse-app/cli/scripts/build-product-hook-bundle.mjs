@@ -34,7 +34,10 @@ export async function productHookBundleBytes() {
   if (result.outputFiles?.length !== 1 || result.outputFiles[0].path !== output) {
     throw new Error('product_hook_bundle_output_invalid');
   }
-  return Buffer.from(result.outputFiles[0].contents);
+  const source = Buffer.from(result.outputFiles[0].contents)
+    .toString('utf8')
+    .replace(/[ \t]+$/gm, '');
+  return Buffer.from(source, 'utf8');
 }
 
 export async function buildProductHookBundle({ check = false } = {}) {
