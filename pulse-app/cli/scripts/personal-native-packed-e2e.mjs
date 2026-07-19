@@ -454,7 +454,11 @@ try {
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
   assert.equal(installResult.outcome, 'action_required', `${JSON.stringify(installResult)}\n${installed.stderr}`);
-  assert.equal(installResult.reason_code, 'codex_lifecycle_required');
+  assert.equal(
+    installResult.reason_code,
+    'codex_lifecycle_required',
+    `${JSON.stringify(installResult)}\n${installed.stderr}`,
+  );
   assert.equal(installResult.host_status.hosts[0].installed, true);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
