@@ -20,8 +20,22 @@ local Pulse data, signing keys, API keys, or a developer `~/.codex/config.toml`.
 
 The setup installs the two locked npm dependency trees, downloads locked Go
 modules, builds the Go packages and MCP package, and checks the CLI entrypoint.
-It does not install Pulse, start a daemon, read `~/.pulse`, import chats, or run
-production signing and publication.
+It also installs and enables the native Codex Compound Engineering plugin at
+the reviewed `3.19.0` revision, so new Cloud tasks have the same `ce-plan`,
+`ce-work`, `ce-code-review`, and `lfg` skills as the desktop task. You do not
+need to add a marketplace or install those skills manually in the Cloud UI.
+
+The setup does not install Pulse, start a daemon, read `~/.pulse`, import chats,
+or run production signing and publication. It needs no environment variables
+or secrets. Codex Cloud gives the setup phase internet access and caches the
+result; using the same command as the maintenance script keeps dependency and
+plugin checks repeatable when the cached environment resumes.
+
+After the first setup, start a **new Cloud task** so Codex discovers the newly
+installed plugin skills. In that task, `ce-setup`, `ce-plan`, `ce-work`, and
+`lfg` are available by name. Compound Engineering's optional browser and AST
+helper binaries are not product prerequisites and are intentionally not bulk
+installed here.
 
 ## Start on this branch
 
@@ -37,3 +51,6 @@ codex cloud exec \
 
 Cloud source and fixture checks are useful development evidence. They do not
 replace the native macOS, Windows, and Linux product gates required by the plan.
+
+References: [Codex Cloud environments](https://developers.openai.com/codex/cloud/environments)
+and [Codex plugins](https://learn.chatgpt.com/codex/plugins).

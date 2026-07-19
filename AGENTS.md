@@ -12,8 +12,9 @@ signed artifacts. Until then, report this branch as pending publication.
 ## Codex Cloud workspace
 
 For cloud source work, run `./scripts/codex-cloud-setup.sh` as both the setup
-and maintenance script. It installs only locked development dependencies and
-builds source; it must not install Pulse, start a user daemon, inspect
+and maintenance script. It installs locked development dependencies, builds
+source, and enables the pinned native Compound Engineering 3.19.0 plugin for
+new Cloud tasks; it must not install Pulse, start a user daemon, inspect
 `~/.pulse`, or receive release/runtime secrets. Continue the active plan in
 `docs/plans/2026-07-17-001-feat-host-neutral-one-command-install-plan.md` from
 the first incomplete unit. Cloud fixture evidence never replaces the native
