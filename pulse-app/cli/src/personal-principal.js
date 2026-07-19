@@ -8,6 +8,7 @@ import { defaultPlatformServices, PlatformServicesError } from './platform-servi
 const SCHEMA = 'pulse.personal_principal.v1';
 const PRINCIPAL_ID = /^principal_[a-f0-9]{32}$/;
 const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const PRINCIPAL_LOCK_STALE_AFTER_MS = 5000;
 
 export class PersonalPrincipalError extends Error {
   constructor(code) {
@@ -40,7 +41,13 @@ function acquirePrincipalCreationLock(path, platformServices) {
   const deadline = Date.now() + 5000;
   while (true) {
     try {
-      return acquireInstallLock(path, { platformServices });
+      return acquireInstallLock(path, {
+        platformServices,
+        // A contender can observe the lock between exclusive create and the
+        // durable record write. Never quarantine that brand-new lock merely
+        // because process inspection was momentarily unavailable.
+        staleAfterMs: PRINCIPAL_LOCK_STALE_AFTER_MS,
+      });
     } catch (error) {
       if (!(error instanceof InstallJournalError) ||
           (error.code !== 'install_locked' && error.code !== 'install_lock_unsafe')) {

@@ -94,10 +94,12 @@ export function clearInstallJournal(path, { platformServices = defaultPlatformSe
   }
 }
 
-export function acquireInstallLock(lockPath, { platformServices = defaultPlatformServices } = {}) {
+export function acquireInstallLock(lockPath, {
+  platformServices = defaultPlatformServices, staleAfterMs = 0, timeoutMs = 0,
+} = {}) {
   let release;
   try {
-    release = platformServices.acquirePrivateLock(lockPath, { staleAfterMs: 0, timeoutMs: 0 });
+    release = platformServices.acquirePrivateLock(lockPath, { staleAfterMs, timeoutMs });
   } catch (error) {
     if (error instanceof PlatformServicesError) {
       if (error.code === 'platform_lock_identity_unavailable') fail('install_lock_process_identity_unavailable');

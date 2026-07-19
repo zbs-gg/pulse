@@ -68,6 +68,27 @@ test('cross-process lock fails closed for a concurrent installer and releases ex
   } finally { rmSync(setup.root, { recursive: true, force: true }); }
 });
 
+test('lock acquisition forwards a bounded stale-recovery floor to the platform', () => {
+  let received;
+  let released = false;
+  const release = acquireInstallLock('/private/install.lock', {
+    staleAfterMs: 5000,
+    timeoutMs: 250,
+    platformServices: {
+      acquirePrivateLock(path, options) {
+        received = { path, options };
+        return () => { released = true; };
+      },
+    },
+  });
+  assert.deepEqual(received, {
+    path: '/private/install.lock',
+    options: { staleAfterMs: 5000, timeoutMs: 250 },
+  });
+  release();
+  assert.equal(released, true);
+});
+
 test('a crashed installer lock is recovered only after its exact process instance is gone', () => {
   const setup = sandbox();
   try {
