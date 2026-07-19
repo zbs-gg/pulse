@@ -94,7 +94,14 @@ assert.equal(productReceipt.first_value_ms <= 60_000, true);
 assert.match(productReceipt.packed_tarball_sha256, /^[a-f0-9]{64}$/);
 assert.match(productReceipt.release_manifest_digest, /^[a-f0-9]{64}$/);
 assert.equal(Array.isArray(productReceipt.release_artifact_ids), true);
-assert.equal(productReceipt.release_artifact_ids.length, 5);
+assert.equal(productReceipt.release_artifact_ids.length, target.platform === 'darwin' ? 5 : 4);
+for (const kind of ['daemon', 'embedder-runtime', 'model', 'plugin-runtime']) {
+  assert.equal(productReceipt.release_artifact_ids.filter((id) => id.endsWith(`-${kind}`)).length, 1, kind);
+}
+assert.equal(
+  productReceipt.release_artifact_ids.filter((id) => id.endsWith('-presence-helper')).length,
+  target.platform === 'darwin' ? 1 : 0,
+);
 assert.equal(['collecting_baseline', 'estimated', 'measured'].includes(productReceipt.token_economy?.state), true);
 
 const commit = process.env.GITHUB_SHA || command('git', ['rev-parse', 'HEAD']);

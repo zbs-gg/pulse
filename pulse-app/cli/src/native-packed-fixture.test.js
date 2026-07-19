@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isAbsolute, relative, sep } from 'node:path';
 import test from 'node:test';
 
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
@@ -54,4 +55,30 @@ test('native packed fixture attestation is exact, isolated, and visibly non-prod
     plan: { ...input.plan, release: { ...input.plan.release,
       verification_profile: { fixture_id: 'native-darwin-arm64', kind: 'fixture', production: true } } },
   }), null);
+});
+
+test('native packed fixture accepts only native-proven canonical containment when path spellings differ', () => {
+  const input = fixture();
+  const aliasedCwd = '/short-form/pulse-native-packed/workspace';
+  const canonicalCwd = `${input.env.PULSE_NATIVE_PACKED_FIXTURE_ROOT}/workspace`;
+  const platformServices = {
+    inspectPathIdentity(path) {
+      return { canonical_path: path === aliasedCwd ? canonicalCwd : path };
+    },
+    isPathInside(candidate, parent) {
+      const value = relative(parent, candidate);
+      return value === '' || (value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value));
+    },
+  };
+  assert.deepEqual(nativePackedFixtureAttestation({
+    ...input,
+    cwd: aliasedCwd,
+    plan: {
+      ...input.plan,
+      detected: { workspace: { canonical_path: aliasedCwd } },
+    },
+    platformServices,
+  }), {
+    fixture_id: 'native-darwin-arm64', port: 28789, root: '/private/tmp/pulse-native-packed',
+  });
 });
