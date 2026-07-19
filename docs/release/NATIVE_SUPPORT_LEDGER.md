@@ -29,12 +29,37 @@ to the `Universal / required` check.
 
 | Target | GitHub runner | Required PR fixture | Production candidate | Public support |
 |---|---|---:|---:|---:|
-| `darwin-arm64` | `macos-26` | required, first green run pending | pending | pending |
-| `darwin-x64` | `macos-26-intel` | required, first green run pending | pending | pending |
-| `linux-arm64-gnu` | `ubuntu-24.04-arm` | required, first green run pending | pending | pending |
-| `linux-x64-gnu` | `ubuntu-24.04` | required, first green run pending | pending | pending |
-| `win32-arm64` | `windows-11-arm` | required, first green run pending | pending | pending |
-| `win32-x64` | `windows-2025` | required, first green run pending | pending | pending |
+| `darwin-arm64` | `macos-26` | passed — run `29701975544` | pending | pending |
+| `darwin-x64` | `macos-26-intel` | passed — run `29701975544` | pending | pending |
+| `linux-arm64-gnu` | `ubuntu-24.04-arm` | passed — run `29701975544` | pending | pending |
+| `linux-x64-gnu` | `ubuntu-24.04` | passed — run `29701975544` | pending | pending |
+| `win32-arm64` | `windows-11-arm` | passed — run `29701975544` | pending | pending |
+| `win32-x64` | `windows-2025` | passed — run `29701975544` | pending | pending |
+
+## First complete PR fixture
+
+The first complete six-target fixture passed on 2026-07-19 in
+[Universal run `29701975544`](https://github.com/zbs-gg/pulse/actions/runs/29701975544).
+The PR source head was `a4e04a28a8c45a997aa84b098c83dacf13e86c04`; GitHub tested merge checkout
+`95250675486d33ae38b53d63a62e941ca221fb35`. `Full product suite`, every
+native matrix job, and `Universal / required` completed successfully.
+
+Every retained receipt is `pulse.native_universal_target_evidence.v1` with
+`authority:pr-fixture`, `production:false`, and `support_claim:false`. Each
+target installed the exact packed command path, reached full retrieval, showed
+a visible first memory card, recalled the same object in a fresh Codex session,
+and finished lifecycle readiness. Token economy remains honestly labeled
+`collecting_baseline`; this fixture proves continuity, not a production release
+or a token-savings claim.
+
+| Target | Evidence artifact | First value | Packed package SHA-256 | Release manifest digest |
+|---|---|---:|---|---|
+| `darwin-arm64` | `pulse-native-darwin-arm64` | 13,058 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `c2cda1aeab2f81c32061a689e0ee2c45d524f70c60a4a4b33ba643e7ca66bcb0` |
+| `darwin-x64` | `pulse-native-darwin-x64` | 17,571 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `606be8aefc82da40fc2dca0f857489d83f3c6b100a1affeac2f8808190db74df` |
+| `linux-arm64-gnu` | `pulse-native-linux-arm64-gnu` | 12,882 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `f8a1cde14b23c19d4668fbd49e6a267826a8414dd0b3a7d9f23800f0a231ca71` |
+| `linux-x64-gnu` | `pulse-native-linux-x64-gnu` | 13,305 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `15495d2f8c4fcbdf5b22213ca7aaf453bc2dcf8abf050355e15a7204cf707964` |
+| `win32-arm64` | `pulse-native-win32-arm64` | 58,235 ms | `8a471d726e6aa888030cd3a29dd6ae180562415c6237aaeec1aab4a04609d76a` | `787e431c068664f86d8fe38984ec9d6945b15d2b3aa3328958b2092135c06a86` |
+| `win32-x64` | `pulse-native-win32-x64` | 50,337 ms | `8a471d726e6aa888030cd3a29dd6ae180562415c6237aaeec1aab4a04609d76a` | `c67348b48e438323d0b2d0ffb09685b6ab5a31716fa83c9272f40a2b20e6a808` |
 
 ## Harness calibration
 
