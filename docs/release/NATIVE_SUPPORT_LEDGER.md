@@ -22,7 +22,10 @@ none of them alone makes a target publicly supported.
 ## Native target gate
 
 The required workflow is [`.github/workflows/verify.yml`](../../.github/workflows/verify.yml).
-It has no allowed failures and aggregates to the `Universal / required` check.
+It runs the complete Go, MCP, and CLI suite on the reference macOS host, then
+builds and proves the exact packed Personal product separately on every native
+target below. It has no allowed failures and aggregates both evidence classes
+to the `Universal / required` check.
 
 | Target | GitHub runner | Required PR fixture | Production candidate | Public support |
 |---|---|---:|---:|---:|

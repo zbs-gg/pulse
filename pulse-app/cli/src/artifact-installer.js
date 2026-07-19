@@ -260,14 +260,8 @@ export async function downloadVerifiedArtifact(artifact, {
   }
   const controller = new AbortController();
   const overallTimer = setTimeout(() => controller.abort(), overallTimeoutMs);
-  overallTimer.unref?.();
-  let response;
   try {
-    response = await manualFetch(url, { headers, signal: controller.signal }, artifact, fetchImpl);
-  } catch (error) {
-    clearTimeout(overallTimer);
-    throw error;
-  }
+  const response = await manualFetch(url, { headers, signal: controller.signal }, artifact, fetchImpl);
   let append = existing > 0;
   if (append) {
     const contentRange = response.headers?.get?.('content-range') ?? '';
@@ -312,7 +306,6 @@ export async function downloadVerifiedArtifact(artifact, {
     if (error instanceof ArtifactInstallerError) throw error;
     fail('artifact_download_interrupted');
   } finally {
-    clearTimeout(overallTimer);
     closeSync(fd);
   }
   if (written !== artifact.bytes) fail('artifact_size_mismatch');
@@ -323,6 +316,9 @@ export async function downloadVerifiedArtifact(artifact, {
   assertPrivateState(verifiedPath, 'file', 'artifact_file_unsafe', platformServices);
   rmSync(metadataPath, { force: true });
   return { path: verifiedPath, resumed_from: existing, status: 'verified' };
+  } finally {
+    clearTimeout(overallTimer);
+  }
 }
 
 function safeRelativePath(path) {
@@ -637,7 +633,6 @@ async function walkPortableArchive(carrier, onEntry, {
   });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
   try {
     await pipeline(createReadStream(carrier), createGunzip(), budget, unpack, { signal: controller.signal });
   } catch (error) {

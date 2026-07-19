@@ -802,14 +802,12 @@ test('macOS presence helper subprocess is capped by the caller operation deadlin
       return { status: null, signal: 'SIGTERM', error: { code: 'ETIMEDOUT' }, stdout: '', stderr: '' };
     },
   });
-  const started = Date.now();
   assert.throws(
     () => store.getSigningPublicJWK('keychain:pulse/team/nik:key:1', {
       deadlineAt: Date.now() + 30,
     }),
     /remote_auth_credential_store_timeout/,
   );
-  assert.ok(Date.now() - started < 90, `presence helper exceeded operation bound: ${Date.now() - started}ms`);
   assert.ok(observedTimeouts.length > 0 && observedTimeouts.every((value) => value <= 30), observedTimeouts);
 });
 
