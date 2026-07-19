@@ -337,6 +337,14 @@ try {
   const baseEnv = {
     ...process.env,
     HOME: home,
+    // Node's Windows homedir() follows USERPROFILE rather than HOME. Keep all
+    // Windows install state and test authority under the clean-room root
+    // without changing how native macOS/Linux harnesses resolve their profile.
+    ...(process.platform === 'win32' ? {
+      USERPROFILE: home,
+      APPDATA: join(home, 'AppData', 'Roaming'),
+      LOCALAPPDATA: join(home, 'AppData', 'Local'),
+    } : {}),
     CODEX_HOME: codexHome,
     npm_config_cache: npmCache,
     PULSE_DATA_DIR: dataDir,

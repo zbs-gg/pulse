@@ -147,6 +147,7 @@ import {
 	provisionPersonalRuntime,
 } from './personal-runtime-installer.js';
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
+import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -1425,62 +1426,23 @@ function snapshotLocalFiles(paths) {
 
 async function acquireProductActivationLock() {
 	const directory = join(DATA_DIR, 'runtime');
-	mkdirSync(directory, { recursive: true, mode: 0o700 });
-	const path = join(directory, 'product-activation.lock');
-	const lockf = '/usr/bin/lockf';
-	if (!existsSync(lockf)) throw new Error('Pulse product activation requires the OS advisory lock service');
-	const helperSource = [
-		'process.stdout.write("pulse-product-lock-ready\\n");',
-		'process.stdin.resume();',
-		'process.stdin.on("end", () => process.exit(0));',
-		'process.stdin.on("error", () => process.exit(0));',
-	].join('');
-	const child = spawn(lockf, ['-k', '-t', '0', path, process.execPath, '-e', helperSource], {
-		stdio: ['pipe', 'pipe', 'pipe'],
-	});
-	let stderr = '';
-	child.stderr.setEncoding('utf8');
-	child.stderr.on('data', (chunk) => { stderr += chunk; });
-	await new Promise((resolveReady, rejectReady) => {
-		const timer = setTimeout(() => {
-			child.kill('SIGTERM');
-			rejectReady(new Error('Pulse product activation lock service timed out'));
-		}, 3000);
-		child.stdout.setEncoding('utf8');
-		child.stdout.once('data', (chunk) => {
-			if (!String(chunk).includes('pulse-product-lock-ready')) return;
-			clearTimeout(timer);
-			resolveReady();
-		});
-		child.once('exit', (status) => {
-			clearTimeout(timer);
-			rejectReady(new Error(status === 75
-				? 'another Pulse product activation is running'
-				: `Pulse product activation lock failed${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
-		});
-		child.once('error', (error) => {
-			clearTimeout(timer);
-			rejectReady(error);
-		});
-	});
-	chmodSync(path, 0o600);
-	let released = false;
-	return async () => {
-		if (released) return;
-		released = true;
-		child.stdin.end();
-		await new Promise((resolveExit, rejectExit) => {
-			const timer = setTimeout(() => {
-				child.kill('SIGTERM');
-				rejectExit(new Error('Pulse product activation lock did not release'));
-			}, 3000);
-			child.once('exit', (status) => {
-				clearTimeout(timer);
-				if (status === 0) resolveExit();
-				else rejectExit(new Error(`Pulse product activation lock exited ${status}`));
-			});
-		});
-	};
+	try {
+		defaultPlatformServices.ensurePrivateDirectory(directory);
+		const release = defaultPlatformServices.acquirePrivateLock(
+			join(directory, 'product-activation.lock'),
+			{ staleAfterMs: 30_000, timeoutMs: 3_000 },
+		);
+		return async () => release();
+	} catch (error) {
+		if (error instanceof PlatformServicesError) {
+			if (error.code === 'platform_lock_occupied') throw new Error('another Pulse product activation is running');
+			if (error.code === 'platform_native_adapter_unavailable') {
+				throw new Error('Pulse product activation lock service is unavailable');
+			}
+			throw new Error(`Pulse product activation lock failed:${error.code}`);
+		}
+		throw error;
+	}
 }
 
 function snapshotPluginTree(plugin) {
