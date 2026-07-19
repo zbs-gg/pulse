@@ -703,12 +703,17 @@ async function activatePersonalInstallCoreTransaction(binding) {
   const releaseVaultActivation = await acquireVaultActivationLock(resolved.runtime);
   nativeFixtureActivationStage('vault_lock_acquired');
   try {
+      nativeFixtureActivationStage('previous_daemon_inspection_started');
       const previousDaemon = inspectVaultRuntime(resolved.runtime);
+      nativeFixtureActivationStage('previous_daemon_inspected');
       if (previousDaemon.status === 'running') await assertVaultRuntimeHealthy(resolved.runtime);
+      nativeFixtureActivationStage('snapshot_started');
       const snapshots = snapshotLocalFiles(activationFilePaths(resolved.binding));
+      nativeFixtureActivationStage('snapshot_complete');
       let installedRuntime;
       let runtimeInstalled = false;
       try {
+        nativeFixtureActivationStage('runtime_provision_started');
         const managedRuntime = await ensureManagedProductRuntime(resolved.runtime, { publishConfig: false });
         nativeFixtureActivationStage('runtime_provisioned');
         if (previousDaemon.status === 'running' &&

@@ -39,6 +39,12 @@ export class PersonalRuntimeInstallerError extends Error {
 
 function fail(code) { throw new PersonalRuntimeInstallerError(code); }
 
+function nativeFixtureInstallerStage(stage) {
+  if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION !== '1') return;
+  if (typeof stage !== 'string' || !/^[a-z0-9_-]{1,96}$/.test(stage)) return;
+  process.stderr.write(`[pulse-native-fixture] runtime provision stage: ${stage}\n`);
+}
+
 function readCanonicalEnvelope(path) {
   let bytes;
   let value;
@@ -196,40 +202,55 @@ export async function provisionPersonalRuntime({
   testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
+  nativeFixtureInstallerStage('configuration_started');
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || typeof fetchImpl !== 'function') {
     fail('personal_runtime_configuration_invalid');
   }
   if (materializers !== undefined && !testMode) fail('release_test_materializer_forbidden');
   let detectedOSVersion = osVersion;
   try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
+  nativeFixtureInstallerStage('configuration_complete');
   const installRoot = join(resolve(dataDir), 'artifacts');
   const runtimeRoot = join(resolve(dataDir), 'runtime');
   const epochPath = join(runtimeRoot, 'minimum-release-epoch.json');
   const journalPath = join(runtimeRoot, 'install-journal.json');
   const lockPath = join(runtimeRoot, 'install.lock');
   if (existsSync(lockPath)) {
+    nativeFixtureInstallerStage('existing_lock_recovery_started');
     const existingLock = acquireInstallLock(lockPath, { platformServices });
     existingLock();
+    nativeFixtureInstallerStage('existing_lock_recovered');
   }
+  nativeFixtureInstallerStage('preflight_release_started');
   const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
         architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
         platform, platformServices, testMode, trustedKeys,
   });
+  nativeFixtureInstallerStage('preflight_release_complete');
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
+  nativeFixtureInstallerStage('install_lock_started');
   const releaseLock = acquireInstallLock(lockPath, { platformServices });
+  nativeFixtureInstallerStage('install_lock_acquired');
   try {
+    nativeFixtureInstallerStage('release_verification_started');
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
       architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
       platform, platformServices, testMode, trustedKeys,
     });
+    nativeFixtureInstallerStage('release_verification_complete');
     if (release.historical_only) fail('release_manifest_legacy');
     const activeSetPath = join(installRoot, 'artifact-generation-authority.json');
     const previous = previousActivationDigest(activeSetPath);
     try {
+      nativeFixtureInstallerStage('active_set_inspection_started');
       const activationSet = readActivatedArtifactSet(release, { installRoot, platformServices });
+      nativeFixtureInstallerStage('active_set_reused');
       writeInstallJournal(journalPath, journalRecord(release, previous, 'activated'), { platformServices });
       return { activationSet, release };
-    } catch { /* provision or repair the exact signed set below */ }
+    } catch {
+      nativeFixtureInstallerStage('active_set_requires_provision');
+      /* provision or repair the exact signed set below */
+    }
 
     writeInstallJournal(journalPath, journalRecord(release, previous, 'planned'), { platformServices });
     const stagingRoot = join(installRoot, 'downloads');
@@ -237,12 +258,15 @@ export async function provisionPersonalRuntime({
     writeInstallJournal(journalPath, journalRecord(release, previous, 'downloading'), { platformServices });
     for (const kind of Object.keys(release.artifacts).sort()) {
       const artifact = release.artifacts[kind];
+      nativeFixtureInstallerStage(`download_${kind}_started`);
       staged[kind] = await downloadVerifiedArtifact(artifact, { stagingRoot, fetchImpl, platformServices });
+      nativeFixtureInstallerStage(`download_${kind}_complete`);
     }
     writeInstallJournal(journalPath, journalRecord(release, previous, 'artifacts_staged'), { platformServices });
     writeInstallJournal(journalPath, journalRecord(release, previous, 'activating'), { platformServices });
     for (const kind of Object.keys(release.artifacts).sort()) {
       const artifact = release.artifacts[kind];
+      nativeFixtureInstallerStage(`activation_${kind}_started`);
       const fixture = materializers?.[kind];
       const options = {
         installRoot, platformServices, publishDerivedPointers: false,
@@ -259,12 +283,17 @@ export async function provisionPersonalRuntime({
         recoverInvalidCurrent(artifact, installRoot, platformServices);
         await activateArtifactVersion(artifact, staged[kind].path, options);
       }
+      nativeFixtureInstallerStage(`activation_${kind}_complete`);
     }
+    nativeFixtureInstallerStage('staged_set_inspection_started');
     const activationSet = readStagedArtifactSet(release, { installRoot, platformServices });
+    nativeFixtureInstallerStage('staged_set_inspection_complete');
     writeInstallJournal(journalPath, journalRecord(release, previous, 'candidate_staged'), { platformServices });
     return { activationSet, release };
   } finally {
+    nativeFixtureInstallerStage('install_lock_release_started');
     releaseLock();
+    nativeFixtureInstallerStage('install_lock_released');
   }
 }
 
