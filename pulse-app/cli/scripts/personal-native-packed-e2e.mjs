@@ -474,6 +474,13 @@ try {
   // R25 starts at a genuinely ready product, not while npm and the native
   // runtime are still being installed.
   const firstValueStartedAt = Date.now();
+  let previousFirstValueStageAt = firstValueStartedAt;
+  const firstValueStages = [];
+  const markFirstValueStage = (name) => {
+    const now = Date.now();
+    firstValueStages.push([name, now - previousFirstValueStageAt]);
+    previousFirstValueStageAt = now;
+  };
 
   const freshHostEnv = Object.fromEntries(
     Object.entries(env).filter(([name]) => !name.startsWith('PULSE_') ||
@@ -488,18 +495,21 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstSession.continue, true);
   assert.match(firstSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
+  markFirstValueStage('session_start');
 
   const firstPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
     eventName: 'UserPromptSubmit', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
     extra: { prompt: 'Do not store this raw prompt.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstPrompt.continue, true);
+  markFirstValueStage('prompt_submit');
   const preFinalize = codexHook(pluginRoot, 'Stop', codexHookInput({
     eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
     extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(preFinalize.decision, 'block');
   assert.match(preFinalize.reason, /bounded Pulse finalization pass/);
+  markFirstValueStage('stop_block');
 
   const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';
   const memoryArguments = {
@@ -519,6 +529,7 @@ try {
     },
   }), { cwd: workspace, env: hookEnv });
   assert.deepEqual(preTool, {});
+  markFirstValueStage('pre_tool');
   const { callResult, remembered } = rememberThroughInstalledMCP(pluginRoot, memoryArguments, {
     cwd: workspace, env: hookEnv,
   });
@@ -526,6 +537,7 @@ try {
   assert.equal(remembered.receipts.length, 1);
   assert.equal(remembered.receipts[0].status, 'pending');
   assert.equal(remembered.receipts[0].object_id ?? '', '');
+  markFirstValueStage('remember_mcp');
 
   const postTool = codexHook(pluginRoot, 'PostToolUse', codexHookInput({
     eventName: 'PostToolUse', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
@@ -536,11 +548,13 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.match(postTool.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
   assert.match(postTool.systemMessage, /:pending/);
+  markFirstValueStage('post_tool');
   const firstStop = codexHook(pluginRoot, 'Stop', codexHookInput({
     eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
     extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
   }), { cwd: workspace, env: hookEnv });
   assert.deepEqual(firstStop, {});
+  markFirstValueStage('stop_finalize');
 
   const pendingTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
   const pendingCard = pendingTray.candidates.find((candidate) =>
@@ -548,13 +562,16 @@ try {
   assert.equal(pendingCard.state, 'pending');
   assert.equal(pendingCard.grace_expires_at, '');
   assert.equal(pendingCard.candidate.capsule.items[0].redacted_summary, summary);
+  markFirstValueStage('pending_card');
   await openVisibleHomeCard({ candidate: pendingCard, runtime, secret });
+  markFirstValueStage('visible_card');
   const terminalCard = await waitForTerminalCandidate(runtime, secret, pendingCard.candidate_id);
   assert.equal(['created', 'updated', 'deduplicated'].includes(terminalCard.latest_receipt.status), true);
   assert.equal(terminalCard.latest_receipt.object_id, terminalCard.canonical_object_id);
   assert.equal(terminalCard.latest_receipt.safe_provenance.host, 'codex');
   assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
   const objectID = terminalCard.canonical_object_id;
+  markFirstValueStage('terminal_receipt');
   const freshSessionID = 'session-native-packed-fresh';
   const freshTurnID = 'turn-native-packed-fresh';
   const freshSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
@@ -564,14 +581,17 @@ try {
   assert.equal(freshSession.continue, true);
   assert.match(freshSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
   assert.equal(freshSession.hookSpecificOutput.additionalContext.includes(summary), true);
+  markFirstValueStage('fresh_session');
   const freshPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
     eventName: 'UserPromptSubmit', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
     extra: { prompt: 'Continue from the saved project decision.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(freshPrompt.continue, true);
+  markFirstValueStage('fresh_prompt');
 
   const firstValueMs = Date.now() - firstValueStartedAt;
-  assert.equal(firstValueMs <= 60_000, true, `native packed ready-to-recall took ${firstValueMs}ms`);
+  assert.equal(firstValueMs <= 60_000, true,
+    `native packed ready-to-recall took ${firstValueMs}ms; stages=${JSON.stringify(Object.fromEntries(firstValueStages))}`);
 
   const lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
   const codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
