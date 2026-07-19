@@ -12,9 +12,10 @@ const TREE_MAX_ENTRIES = 100_000;
 const TREE_MAX_DEPTH = 128;
 const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 // Windows process startup and ACL walks are expensive. A SessionStart still
-// proves every signed tree; this bounded receipt only reuses those digests
-// while native reads prove that locator, activation, host access, manifest,
-// workspace identity, and protected paths are unchanged.
+// proves every signed tree and writes this owner-private bounded receipt.
+// Events inside its short window avoid another native process but still bind
+// the workspace witness and rehash locator, activation, host access, manifest,
+// runtime, plugin, and daemon bytes. Any drift falls back to the native proof.
 const WINDOWS_INTEGRITY_CACHE_TTL_MS = 2 * 60 * 1000;
 const WINDOWS_INTEGRITY_CACHE_SCHEMA = 'pulse.windows_product_integrity_cache.v1';
 
@@ -66,17 +67,44 @@ function nativeExecutableDigest(proof) {
   return proof.sha256;
 }
 
-function nativePrivateState(proof, kind) {
-  if (!exactObject(proof, ['canonical_path', 'kind', 'owner_only', 'reparse_point']) ||
-      proof.kind !== kind || proof.owner_only !== true || proof.reparse_point !== false ||
-      typeof proof.canonical_path !== 'string' || !isAbsolute(proof.canonical_path)) {
-    throw new Error('Pulse product private state native proof is invalid');
-  }
-  return proof.canonical_path;
-}
-
 function bytesDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function preliminaryPrivateBytes(path, maxBytes = PRIVATE_JSON_LIMIT) {
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 ||
+      info.size < 1 || info.size > maxBytes) {
+    throw new Error('Pulse product bounded integrity receipt input is unsafe');
+  }
+  const bytes = readFileSync(path);
+  if (bytes.length !== info.size) {
+    throw new Error('Pulse product bounded integrity receipt input changed while reading');
+  }
+  return bytes;
+}
+
+function windowsWorkspaceWitness(path) {
+  const canonical = realpathSync(resolve(path));
+  const info = lstatSync(canonical, { bigint: true });
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error('Pulse workspace bounded integrity witness is unsafe');
+  }
+  return `${canonical}\0${info.dev}:${info.ino}:${info.birthtimeNs}:${info.ctimeNs}`;
+}
+
+function windowsBoundedTreeTrust() {
+  return Object.freeze({
+    assertTreeEntry(path, relative, expectedKind) {
+      const info = lstatSync(path);
+      if (info.isSymbolicLink() ||
+          (expectedKind === 'directory' ? !info.isDirectory() : !info.isFile())) {
+        throw new Error(`Pulse bounded integrity tree entry is unsafe: ${relative}`);
+      }
+      return info;
+    },
+    validateTree() {},
+  });
 }
 
 function windowsIntegrityCachePath(productHome, locatorKey, host) {
@@ -91,6 +119,7 @@ function windowsIntegrityCacheRecord(proof, host, nowMs = Date.now()) {
     host,
     locator_key: proof.locatorKey,
     workspace_identity: proof.workspaceIdentity,
+    workspace_witness: proof.workspaceWitness,
     data_dir: proof.dataDir,
     activation_path: proof.activationPath,
     host_access_path: proof.hostAccessPath,
@@ -111,7 +140,7 @@ function windowsIntegrityCacheRecord(proof, host, nowMs = Date.now()) {
 
 function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
   const keys = [
-    'schema', 'created_at_ms', 'expires_at_ms', 'host', 'locator_key', 'workspace_identity',
+    'schema', 'created_at_ms', 'expires_at_ms', 'host', 'locator_key', 'workspace_identity', 'workspace_witness',
     'data_dir', 'activation_path', 'host_access_path', 'runtime_manifest_path', 'runtime_root',
     'plugin_root', 'daemon_path', 'expected_runtime_path', 'locator_digest', 'host_access_digest',
     'activation_digest', 'runtime_manifest_digest', 'runtime_digest', 'plugin_digest', 'daemon_digest',
@@ -121,7 +150,8 @@ function validWindowsIntegrityCache(cache, expected, nowMs = Date.now()) {
       cache.created_at_ms > nowMs || cache.expires_at_ms <= nowMs ||
       cache.expires_at_ms - cache.created_at_ms !== WINDOWS_INTEGRITY_CACHE_TTL_MS ||
       cache.host !== expected.host || cache.locator_key !== expected.locatorKey ||
-      cache.workspace_identity !== expected.workspaceIdentity ||
+      typeof cache.workspace_identity !== 'string' || cache.workspace_identity.length < 1 ||
+      cache.workspace_identity.length > 1024 || cache.workspace_witness !== expected.workspaceWitness ||
       cache.data_dir !== expected.dataDir || cache.activation_path !== expected.activationPath ||
       cache.host_access_path !== expected.hostAccessPath ||
       cache.runtime_manifest_path !== expected.runtimeManifestPath || cache.runtime_root !== expected.runtimeRoot ||
@@ -218,14 +248,18 @@ function createTrustServices({
     throw new Error('Pulse product platform is unsupported');
   }
   if (platform === 'win32') {
-    const adapter = windowsAdapter ?? loadPluginWindowsAdapter({ architecture });
+    let adapter = windowsAdapter;
+    const nativeAdapter = () => {
+      adapter ??= loadPluginWindowsAdapter({ architecture });
+      return adapter;
+    };
     return Object.freeze({
       platform,
       workspaceIdentity(path) {
-        return nativeWorkspaceIdentity(adapter.inspectPathIdentity(path, { kind: 'directory' }));
+        return nativeWorkspaceIdentity(nativeAdapter().inspectPathIdentity(path, { kind: 'directory' }));
       },
       workspaceLocatorProof(locatorPath, workspacePath) {
-        const results = adapter.batch([
+        const results = nativeAdapter().batch([
           {
             operation: 'read_private_file',
             payload: {
@@ -258,55 +292,33 @@ function createTrustServices({
           const daemonPath = preliminaryDaemonPath(activationPath);
           const cachePath = windowsIntegrityCachePath(productHome, locatorKey, host);
           if (!existsSync(cachePath)) return undefined;
-          const results = adapter.batch([
-            {
-              operation: 'read_private_file',
-              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: locatorPath },
-            },
-            { operation: 'inspect_path_identity', payload: { kind: 'directory', path: workspacePath } },
-            {
-              operation: 'read_private_file',
-              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: hostAccessPath },
-            },
-            {
-              operation: 'read_private_file',
-              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: activationPath },
-            },
-            {
-              operation: 'read_private_file',
-              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: runtimeManifestPath },
-            },
-            {
-              operation: 'read_private_file',
-              payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: cachePath },
-            },
-            { operation: 'inspect_private_state', payload: { kind: 'directory', path: runtimeRoot } },
-            { operation: 'inspect_private_state', payload: { kind: 'directory', path: pluginRoot } },
-            { operation: 'inspect_private_state', payload: { kind: 'file', path: expectedRuntimePath } },
-          ]);
-          const locatorBytes = nativePrivateBytes(results[0]);
-          const workspaceIdentity = nativeWorkspaceIdentity(results[1]);
-          const hostAccessBytes = nativePrivateBytes(results[2]);
-          const activationBytes = nativePrivateBytes(results[3]);
-          const runtimeManifestBytes = nativePrivateBytes(results[4]);
-          const cacheBytes = nativePrivateBytes(results[5]);
-          nativePrivateState(results[6], 'directory');
-          nativePrivateState(results[7], 'directory');
-          nativePrivateState(results[8], 'file');
+          const locatorBytes = preliminaryPrivateBytes(locatorPath);
+          const hostAccessBytes = preliminaryPrivateBytes(hostAccessPath);
+          const activationBytes = preliminaryPrivateBytes(activationPath);
+          const runtimeManifestBytes = preliminaryPrivateBytes(runtimeManifestPath);
+          const cacheBytes = preliminaryPrivateBytes(cachePath);
+          const workspaceWitness = windowsWorkspaceWitness(workspacePath);
           const expected = {
             activationBytes, activationPath, daemonPath, dataDir, expectedRuntimePath,
             host, hostAccessBytes, hostAccessPath, locatorBytes, locatorKey, pluginRoot,
-            runtimeManifestBytes, runtimeManifestPath, runtimeRoot, workspaceIdentity,
+            runtimeManifestBytes, runtimeManifestPath, runtimeRoot, workspaceWitness,
           };
           const cache = parsePrivateJSON(cacheBytes);
           if (!validWindowsIntegrityCache(cache, expected)) return undefined;
+          const boundedTrust = windowsBoundedTreeTrust();
+          const runtimeDigest = runtimeTreeDigest(runtimeRoot, boundedTrust);
+          const pluginDigest = pluginTreeDigest(pluginRoot, boundedTrust);
+          const daemonDigest = bytesDigest(preliminaryPrivateBytes(daemonPath, 512 * 1024 * 1024));
+          if (runtimeDigest !== cache.runtime_digest || pluginDigest !== cache.plugin_digest ||
+              daemonDigest !== cache.daemon_digest) return undefined;
           return Object.freeze({
             ...expected,
             cachePath,
-            daemonDigest: cache.daemon_digest,
+            daemonDigest,
             integrityCacheHit: true,
-            pluginDigest: cache.plugin_digest,
-            runtimeDigest: cache.runtime_digest,
+            pluginDigest,
+            runtimeDigest,
+            workspaceIdentity: cache.workspace_identity,
           });
         } catch {
           return undefined;
@@ -328,7 +340,7 @@ function createTrustServices({
         const runtimeRoot = resolve(expectedRuntimePath, '..', '..');
         const runtimeManifestPath = join(runtimeRoot, 'runtime-manifest.json');
         const daemonPath = preliminaryDaemonPath(activationPath);
-        const results = adapter.batch([
+        const results = nativeAdapter().batch([
           {
             operation: 'read_private_file',
             payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: locatorPath },
@@ -382,6 +394,8 @@ function createTrustServices({
           runtimeManifestPath,
           runtimeRoot,
           workspaceIdentity: nativeWorkspaceIdentity(results[1]),
+          workspacePath,
+          workspaceWitness: windowsWorkspaceWitness(workspacePath),
         });
       },
       writeProductEnvironmentCache(proof, host) {
@@ -393,19 +407,19 @@ function createTrustServices({
         }
         const record = windowsIntegrityCacheRecord(proof, host, nowMs);
         const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
-        adapter.atomicWritePrivateFile(proof.cachePath, bytes, {
+        nativeAdapter().atomicWritePrivateFile(proof.cachePath, bytes, {
           ensureParent: true, maxBytes: PRIVATE_JSON_LIMIT,
         });
       },
       treeDigest(path, excludeRootFile) {
-        const proof = adapter.digestPrivateTree(path, {
+        const proof = nativeAdapter().digestPrivateTree(path, {
           excludeRootFile, maximumDepth: TREE_MAX_DEPTH, maximumEntries: TREE_MAX_ENTRIES,
           maximumTotalBytes: TREE_MAX_BYTES,
         });
         return nativeTreeDigest(proof);
       },
       readPrivateFile(path, maxBytes = PRIVATE_JSON_LIMIT) {
-        const bytes = adapter.readPrivateFile(path, { minBytes: 1, maxBytes });
+        const bytes = nativeAdapter().readPrivateFile(path, { minBytes: 1, maxBytes });
         if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > maxBytes) {
           throw new Error('Pulse product private state is unsafe');
         }
@@ -420,7 +434,7 @@ function createTrustServices({
         return info;
       },
       validateTree(path, entries, totalBytes) {
-        const proof = adapter.inspectPrivateTree(path, {
+        const proof = nativeAdapter().inspectPrivateTree(path, {
           entries, maximumDepth: TREE_MAX_DEPTH, maximumEntries: TREE_MAX_ENTRIES,
           maximumTotalBytes: TREE_MAX_BYTES,
         });
@@ -429,10 +443,10 @@ function createTrustServices({
         }
       },
       executableDigest(path) {
-        return nativeExecutableDigest(adapter.inspectExecutable(path));
+        return nativeExecutableDigest(nativeAdapter().inspectExecutable(path));
       },
       readPrivateFiles(requests) {
-        const results = adapter.batch(requests.map(({ path, maxBytes = PRIVATE_JSON_LIMIT }) => ({
+        const results = nativeAdapter().batch(requests.map(({ path, maxBytes = PRIVATE_JSON_LIMIT }) => ({
           operation: 'read_private_file',
           payload: { encoding: '', maximum_bytes: maxBytes, minimum_bytes: 1, path },
         })));
@@ -446,7 +460,7 @@ function createTrustServices({
         // This ordinary read supplies only the daemon path for routing the native
         // batch. The protected bytes returned below remain the sole authority.
         const daemonPath = preliminaryDaemonPath(activationPath);
-        const results = adapter.batch([
+        const results = nativeAdapter().batch([
           {
             operation: 'read_private_file',
             payload: { encoding: '', maximum_bytes: PRIVATE_JSON_LIMIT, minimum_bytes: 1, path: hostAccessPath },
@@ -486,7 +500,7 @@ function createTrustServices({
         });
       },
       productEdgeProof({ runtimeRoot, runtimeManifestPath, pluginRoot, daemonPath }) {
-        const results = adapter.batch([
+        const results = nativeAdapter().batch([
           {
             operation: 'digest_private_tree',
             payload: {
@@ -600,7 +614,12 @@ function trustedTreeDigest(root, { label, excludeRootFile, trust = createTrustSe
         visit(path, relative, depth + 1);
       } else if (preliminary.isFile()) {
         trust.assertTreeEntry(path, relative, 'file');
+        if (!Number.isSafeInteger(preliminary.size) || preliminary.size < 0 ||
+            preliminary.size > 512 * 1024 * 1024 || totalBytes + preliminary.size > TREE_MAX_BYTES) {
+          throw new Error(`${label} exceeds the trusted tree byte limit`);
+        }
         const bytes = readFileSync(path);
+        if (bytes.length !== preliminary.size) throw new Error(`${label} changed while reading: ${relative}`);
         totalBytes += bytes.length;
         if (!Number.isSafeInteger(totalBytes) || totalBytes > TREE_MAX_BYTES) {
           throw new Error(`${label} exceeds the trusted tree byte limit`);

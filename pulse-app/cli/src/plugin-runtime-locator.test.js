@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -18,6 +18,22 @@ const WINDOWS_ADAPTER_OPERATIONS = [
   'read_integrity_file', 'read_private_file', 'release_private_lock', 'remove_private_file',
   'terminate_process',
 ];
+
+function localTreeDigest(root, excludeRootFile = '') {
+  return __runtimeLocatorTest.trustedTreeDigest(root, {
+    excludeRootFile,
+    label: 'Pulse test bounded tree',
+    trust: {
+      assertTreeEntry(path, _relative, expectedKind) {
+        const info = lstatSync(path);
+        assert.equal(info.isSymbolicLink(), false);
+        assert.equal(expectedKind === 'directory' ? info.isDirectory() : info.isFile(), true);
+        return info;
+      },
+      validateTree() {},
+    },
+  });
+}
 
 test('plugin runtime locator finds the checkout root without invoking a platform Git path', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-plugin-workspace-'));
@@ -41,6 +57,7 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     const activationPath = join(root, 'activation.json');
     writeFileSync(activationPath, `${JSON.stringify({ daemon_path: file })}\n`);
     const calls = [];
+    const dynamicDigestRoots = new Set();
     const treeDigest = createHash('sha256').update('runtime.mjs').update('\0').update(bytes).update('\0').digest('hex');
     const adapter = {
       digestPrivateTree(path, options) {
@@ -72,7 +89,12 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
             return { bytes_base64: readFileSync(payload.path).toString('base64') };
           }
           if (operation === 'digest_private_tree') {
-            return { bytes: bytes.length + 3, files: 2, tree_digest: treeDigest };
+            return {
+              bytes: bytes.length + 3, files: 2,
+              tree_digest: dynamicDigestRoots.has(resolve(payload.path))
+                ? localTreeDigest(payload.path, payload.exclude_root_file)
+                : treeDigest,
+            };
           }
           if (operation === 'inspect_executable') {
             return {
@@ -132,8 +154,14 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     const productHome = join(root, 'product-home');
     const dataDir = join(root, 'data');
     const runtimeRoot = join(dataDir, 'runtime', 'codex', 'current');
-    mkdirSync(runtimeRoot, { recursive: true });
+    mkdirSync(join(runtimeRoot, 'src'), { recursive: true });
+    writeFileSync(join(runtimeRoot, 'src', 'cli.js'), 'export const ready = true;\n');
     writeFileSync(join(runtimeRoot, 'runtime-manifest.json'), '{}\n');
+    const productPluginRoot = join(root, 'product-plugin');
+    mkdirSync(productPluginRoot);
+    writeFileSync(join(productPluginRoot, 'runtime.mjs'), bytes);
+    dynamicDigestRoots.add(resolve(runtimeRoot));
+    dynamicDigestRoots.add(resolve(productPluginRoot));
     const locatorKey = __runtimeLocatorTest.workspaceDigest(root);
     const locatorPath = join(root, 'product-locators.json');
     writeFileSync(locatorPath, `${JSON.stringify({ entries: { [locatorKey]: {
@@ -145,28 +173,36 @@ test('plugin runtime locator delegates Windows private reads, trees, and executa
     const productActivationPath = join(dataDir, 'runtime', 'product-daemon.json');
     writeFileSync(productActivationPath, `${JSON.stringify({ daemon_path: file })}\n`);
     const environmentProof = trust.productEnvironmentProof({
-      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
     });
     assert.equal(environmentProof.locatorKey, locatorKey);
     assert.equal(environmentProof.workspaceIdentity, 'volume:file');
     assert.equal(environmentProof.daemonPath, file);
-    assert.equal(environmentProof.runtimeDigest, treeDigest);
+    assert.equal(environmentProof.runtimeDigest, localTreeDigest(runtimeRoot, 'runtime-manifest.json'));
     assert.deepEqual(calls.slice(4).map(([operation]) => operation), ['batch', 'batch', 'batch', 'batch', 'batch']);
     trust.writeProductEnvironmentCache(environmentProof, 'codex');
     const cachedEnvironmentProof = trust.productEnvironmentCacheProof({
-      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
     });
     assert.equal(cachedEnvironmentProof.integrityCacheHit, true);
     assert.equal(cachedEnvironmentProof.runtimeDigest, environmentProof.runtimeDigest);
     assert.equal(cachedEnvironmentProof.pluginDigest, environmentProof.pluginDigest);
     assert.equal(cachedEnvironmentProof.daemonDigest, environmentProof.daemonDigest);
-    assert.deepEqual(calls.slice(9).map(([operation]) => operation), ['write', 'batch']);
+    assert.deepEqual(calls.slice(9).map(([operation]) => operation), ['write'],
+      'a valid bounded receipt must avoid another native adapter invocation');
     trust.writeProductEnvironmentCache(environmentProof, 'codex');
     assert.equal(calls.filter(([operation]) => operation === 'write').length, 1,
       'a still-valid receipt must not spawn a second Windows writer');
+    const runtimeEntrypoint = join(runtimeRoot, 'src', 'cli.js');
+    const runtimeEntrypointBytes = readFileSync(runtimeEntrypoint);
+    writeFileSync(runtimeEntrypoint, Buffer.concat([runtimeEntrypointBytes, Buffer.from('// drift\n')]));
+    assert.equal(trust.productEnvironmentCacheProof({
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
+    }), undefined, 'runtime drift must invalidate the bounded integrity receipt without native process startup');
+    writeFileSync(runtimeEntrypoint, runtimeEntrypointBytes);
     writeFileSync(productActivationPath, `${JSON.stringify({ daemon_path: file, changed: true })}\n`);
     assert.equal(trust.productEnvironmentCacheProof({
-      host: 'codex', locatorPath, pluginRoot: root, productHome, workspacePath: root,
+      host: 'codex', locatorPath, pluginRoot: productPluginRoot, productHome, workspacePath: root,
     }), undefined, 'activation drift must invalidate the bounded integrity receipt');
   } finally {
     rmSync(root, { recursive: true, force: true });
