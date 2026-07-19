@@ -586,13 +586,15 @@ async function createPersonalBindingForInstall(principal, plan) {
     const fixtureKeyPath = process.env.PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH;
     let fixturePrivateKey;
     if (fixture) {
-      const info = lstatSync(fixtureKeyPath);
-      const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== currentUID ||
-          (info.mode & 0o077) !== 0 || info.size < 1 || info.size > 16 * 1024) {
+      let fixtureKeyBytes;
+      try {
+        fixtureKeyBytes = defaultPlatformServices.readPrivateFile(fixtureKeyPath, {
+          encoding: null, minBytes: 1, maxBytes: 16 * 1024,
+        });
+      } catch {
         throw new PersonalInstallError('synthetic_authority_forbidden');
       }
-      fixturePrivateKey = createPrivateKey(readFileSync(fixtureKeyPath));
+      fixturePrivateKey = createPrivateKey(fixtureKeyBytes);
       if (fixturePrivateKey.asymmetricKeyType !== 'ec' || fixturePrivateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
         throw new PersonalInstallError('synthetic_authority_forbidden');
       }
