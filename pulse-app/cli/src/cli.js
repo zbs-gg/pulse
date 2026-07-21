@@ -60,6 +60,13 @@ import {
 import { detectClaudeCodeCLI, detectCursorInstallation, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { selectHomeDoctorReport } from './home-doctor.js';
 import {
+  assertConsolidationExplanation,
+  assertConsolidationReport,
+  formatConsolidationExplanation,
+  formatConsolidationReport,
+  reportRequestForArgs,
+} from './consolidation-report.js';
+import {
   activateDetectedPersonalHosts,
   inspectDetectedPersonalHosts,
 } from './personal-host-adapters.js';
@@ -242,6 +249,7 @@ Usage:
   pulse delete --id <pulse:id>
   pulse wipe --confirm "wipe pulse memory"
   pulse consolidate [--threshold 0.90] [--scope session|project|long_term] [--apply]
+  pulse consolidate report [start|status|cancel|resume|explain] [--id <report-id>] [--json]
 
 Environment:
   PULSE_BASE_URL   ${DEFAULT_BASE_URL}
@@ -10262,6 +10270,24 @@ async function main() {
   }
 
   if (command === 'consolidate') {
+    if (args[1] === 'report') {
+      const request = reportRequestForArgs(args.slice(1));
+      const result = await pulseFetch(request.path, {
+        method: request.method,
+        body: request.method === 'POST' ? {} : undefined,
+      });
+      const validated = request.action === 'explain'
+        ? assertConsolidationExplanation(result)
+        : assertConsolidationReport(result);
+      if (args.includes('--json')) {
+        console.log(JSON.stringify(validated, null, 2));
+      } else if (request.action === 'explain') {
+        console.log(formatConsolidationExplanation(validated));
+      } else {
+        console.log(formatConsolidationReport(validated));
+      }
+      return;
+    }
     // Explicit, opt-in near-duplicate capsule fold (invalidate-not-delete).
     // Default is a dry run — pass --apply to actually mark near-duplicates
     // merged. Nothing is ever deleted; merged rows stay in the store.

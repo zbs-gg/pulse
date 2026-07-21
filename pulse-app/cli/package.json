@@ -10,6 +10,7 @@
   },
   "files": [
     "src/cli.js",
+    "src/consolidation-report.js",
     "src/capture-state.js",
     "src/cli-idempotency.js",
     "src/host-adapter.js",

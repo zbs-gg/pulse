@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/claude"
+	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/contextquery"
 	"github.com/nkkmnk/pulse/internal/health"
 	"github.com/nkkmnk/pulse/internal/ingest"
@@ -86,6 +89,10 @@ type Config struct {
 	// HomeBindingVerifier re-reads the signed workspace authority before every
 	// Home render or mutation so a stale daemon/session cannot survive revoke.
 	HomeBindingVerifier HomeBindingVerifier
+	// ConsolidationReports overrides the daemon-owned report lifecycle manager.
+	// When nil, Personal and Desk stores with an exact product boundary receive
+	// a private manager next to their vault automatically.
+	ConsolidationReports *consolidation.Manager
 }
 
 type BillingStatus struct {
@@ -106,6 +113,7 @@ type Server struct {
 	homeProtectedWipeItems map[string]homeProtectedWipePending
 	trayScheduleMu         sync.Mutex
 	traySchedules          map[memoryTrayScheduleKey]*memoryTrayScheduleState
+	consolidationReports   *consolidation.Manager
 }
 
 func New(cfg Config) (*Server, error) {
@@ -131,6 +139,24 @@ func New(cfg Config) (*Server, error) {
 		cfg: cfg, started: time.Now(),
 		homeProtectedWipeItems: make(map[string]homeProtectedWipePending),
 		traySchedules:          make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
+		consolidationReports:   cfg.ConsolidationReports,
+	}
+	if server.consolidationReports == nil && cfg.Store != nil &&
+		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
+		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); ok {
+			if !filepath.IsAbs(cfg.Store.DBPath()) {
+				return nil, errors.New("server: product consolidation reports require an absolute vault path")
+			}
+			key := sha256.Sum256([]byte("pulse:consolidation-report:v1:" + cfg.IPCSecret))
+			manager, err := consolidation.NewManager(consolidation.ManagerConfig{
+				RootDir: filepath.Join(filepath.Dir(cfg.Store.DBPath()), "consolidation-reports"),
+				Key:     key[:],
+			})
+			if err != nil {
+				return nil, fmt.Errorf("server: open consolidation reports: %w", err)
+			}
+			server.consolidationReports = manager
+		}
 	}
 	if cfg.HomeOrigin != "" {
 		parsedHomeOrigin, err := url.Parse(cfg.HomeOrigin)
@@ -230,6 +256,14 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
 		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+			if s.consolidationReports != nil {
+				r.Post("/memory/consolidation/reports", s.handleConsolidationReportStart)
+				r.Get("/memory/consolidation/reports/latest", s.handleConsolidationReportLatest)
+				r.Get("/memory/consolidation/reports/{id}", s.handleConsolidationReportGet)
+				r.Get("/memory/consolidation/reports/{id}/explain", s.handleConsolidationReportExplain)
+				r.Post("/memory/consolidation/reports/{id}/cancel", s.handleConsolidationReportCancel)
+				r.Post("/memory/consolidation/reports/{id}/resume", s.handleConsolidationReportResume)
+			}
 			r.Get("/memory/lifecycle-readiness", s.handleSupportedHostLifecycleReadiness)
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
 			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)

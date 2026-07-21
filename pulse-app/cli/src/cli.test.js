@@ -225,6 +225,50 @@ function withPulseStub(handler) {
   });
 }
 
+test('consolidation report CLI uses the report route without changing legacy consolidate', async () => {
+  const portableReport = {
+    schema: 'pulse.consolidation.report.v1', protocol_version: 1,
+    invocation_id: 'report_cli', phase: 'planned', input_digest: 'a'.repeat(64),
+    report_digest: 'b'.repeat(64), generation: 1,
+    destination: {
+      store_kind: 'personal', store_id: 'store_personal_cli',
+      binding_digest: 'c'.repeat(64), repository_id: 'repository_cli',
+    },
+    totals: { already_represented: 0, unique: 0, ambiguous: 0, excluded: 0 },
+    sources: [], blockers: [], reason_codes: [], next_action: 'Wait for inventory.',
+    created_at: '2026-07-21T08:00:00Z', updated_at: '2026-07-21T08:00:00Z',
+  };
+  const stub = await withPulseStub((req, body) => {
+    if (req.url === '/memory/consolidation/reports') {
+      assert.equal(req.method, 'POST');
+      assert.deepEqual(body, {});
+      return { body: portableReport };
+    }
+    if (req.url === '/memory/consolidate') {
+      assert.equal(req.method, 'POST');
+      assert.deepEqual(body, { dry_run: true, threshold: 0.91 });
+      return { body: { dry_run: true, groups: [] } };
+    }
+    return { status: 404, body: { error: 'not found' } };
+  });
+  try {
+    const reportResult = await runAsync(['consolidate', 'report'], { PULSE_BASE_URL: stub.baseUrl });
+    assert.equal(reportResult.status, 0, reportResult.stderr);
+    assert.match(reportResult.stdout, /Where memory for this project is written/);
+    assert.match(reportResult.stdout, /Report ID: report_cli/);
+
+    const legacyResult = await runAsync(['consolidate', '--threshold', '0.91'], { PULSE_BASE_URL: stub.baseUrl });
+    assert.equal(legacyResult.status, 0, legacyResult.stderr);
+    assert.match(legacyResult.stdout, /"dry_run": true/);
+    assert.match(legacyResult.stdout, /re-run with --apply/);
+    assert.deepEqual(stub.requests.map((request) => request.url), [
+      '/memory/consolidation/reports', '/memory/consolidate',
+    ]);
+  } finally {
+    await stub.close();
+  }
+});
+
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
