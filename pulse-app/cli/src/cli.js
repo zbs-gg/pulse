@@ -60,11 +60,9 @@ import {
 import { detectClaudeCodeCLI, detectCursorInstallation, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { selectHomeDoctorReport } from './home-doctor.js';
 import {
-  assertConsolidationExplanation,
-  assertConsolidationReport,
   formatConsolidationExplanation,
   formatConsolidationReport,
-  reportRequestForArgs,
+  requestConsolidationReport,
 } from './consolidation-report.js';
 import {
   activateDetectedPersonalHosts,
@@ -10271,20 +10269,16 @@ async function main() {
 
   if (command === 'consolidate') {
     if (args[1] === 'report') {
-      const request = reportRequestForArgs(args.slice(1));
-      const result = await pulseFetch(request.path, {
-        method: request.method,
-        body: request.method === 'POST' ? {} : undefined,
+      const { action, value } = await requestConsolidationReport(args.slice(1), {
+        resolved: resolveCodexMcpRuntime(process.cwd()),
+        request: boundPulseRequest,
       });
-      const validated = request.action === 'explain'
-        ? assertConsolidationExplanation(result)
-        : assertConsolidationReport(result);
       if (args.includes('--json')) {
-        console.log(JSON.stringify(validated, null, 2));
-      } else if (request.action === 'explain') {
-        console.log(formatConsolidationExplanation(validated));
+        console.log(JSON.stringify(value, null, 2));
+      } else if (action === 'explain') {
+        console.log(formatConsolidationExplanation(value));
       } else {
-        console.log(formatConsolidationReport(validated));
+        console.log(formatConsolidationReport(value));
       }
       return;
     }

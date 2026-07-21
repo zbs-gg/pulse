@@ -48,6 +48,17 @@ must show the pending card before save, the saved receipt afterwards, the
 context offered to a fresh task, its acknowledgement state, and an honest
 token state: `collecting`, `estimated`, or `measured`.
 
+To map existing local memory without importing it, run:
+
+```bash
+pulse consolidate report
+```
+
+The agent must show the same content-free report in the terminal and Memory
+Home, and state explicitly that the command did not import, merge, delete,
+publish, or clean up anything. A partial or active-conflict result is a blocker,
+not permission to repair or remove another store.
+
 The proof is one normal memory from real work, then a fresh task in the
 same project. A simulated corpus or source-checkout test is not a substitute.
 
@@ -82,6 +93,9 @@ Please audit and install Pulse Personal for this project.
    Then run `pulse home`.
 7. Help me save one visible memory, start a fresh task, and show the
    continuity and token-economy receipts in Memory Home.
+8. Run `pulse consolidate report`. Show me the destination, source classes,
+   totals, blockers, and next action. Do not import, merge, delete, publish, or
+   clean up any source.
 
 Do not import old chats, store raw transcripts, print secrets, push Personal
 memory to Git, or call fallback/synthetic evidence the product.

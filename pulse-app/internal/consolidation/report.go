@@ -267,8 +267,8 @@ func (m *Manager) Advance(invocationID string, phase Phase, totals Totals, sourc
 	report.Phase = phase
 	report.Totals = totals
 	report.Sources = cloneSources(sources)
-	report.Blockers = append([]string(nil), blockers...)
-	report.ReasonCodes = append([]string(nil), reasons...)
+	report.Blockers = cloneCodes(blockers)
+	report.ReasonCodes = cloneCodes(reasons)
 	report.NextAction = nextAction
 	report.InventoryDigest = inventoryDigest
 	if err := m.commitLocked(&report); err != nil {
@@ -608,9 +608,13 @@ func portableText(value string, maximum int) bool {
 
 func cloneReport(report Report) Report {
 	report.Sources = cloneSources(report.Sources)
-	report.Blockers = append([]string(nil), report.Blockers...)
-	report.ReasonCodes = append([]string(nil), report.ReasonCodes...)
+	report.Blockers = cloneCodes(report.Blockers)
+	report.ReasonCodes = cloneCodes(report.ReasonCodes)
 	return report
+}
+
+func cloneCodes(values []string) []string {
+	return append([]string{}, values...)
 }
 
 func cloneSources(sources []Source) []Source {

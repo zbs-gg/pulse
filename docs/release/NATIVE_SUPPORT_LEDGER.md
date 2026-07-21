@@ -10,8 +10,9 @@ none of them alone makes a target publicly supported.
    npm package, invokes the public install command shape, starts the native
    daemon and local fixture embedder, shows a Memory Home card, records a
    terminal receipt, recalls the same object in a fresh host session, repairs,
-   and uploads content-free evidence. Its receipt says `production:false` and
-   `support_claim:false`.
+   produces one byte-preserving consolidation report through CLI, MCP, and
+   Memory Home, and uploads content-free evidence. Its receipt says
+   `production:false` and `support_claim:false`.
 2. **Production candidate** — signed/notarized target artifacts, the real
    portable model quality and resource gates, npm OIDC provenance, and the
    exact registry-published candidate bytes pass the same native flow.
@@ -51,6 +52,14 @@ a visible first memory card, recalled the same object in a fresh Codex session,
 and finished lifecycle readiness. Token economy remains honestly labeled
 `collecting_baseline`; this fixture proves continuity, not a production release
 or a token-savings claim.
+
+New candidate receipts also carry a `consolidation` proof from the exact packed
+tarball. It must be `report_ready`, match across CLI, MCP, and Memory Home,
+preserve every synthetic source byte-for-byte, and state that no import, merge,
+delete, or publish authority was exercised. Historical run `29701975544`
+predates that field, so it remains continuity evidence only; a new green
+six-target run is required before the consolidation report can enter a
+production candidate.
 
 The current `first_value` boundary is the moment a fresh host session receives
 and verifies the exact saved memory (`fresh_session_context`). Prompt-context

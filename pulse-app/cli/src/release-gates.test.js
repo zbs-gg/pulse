@@ -17,9 +17,9 @@ test('published package includes every production CLI module', () => {
   assert.deepEqual(productionModules.filter((path) => !packageJSON.files.includes(path)), []);
 });
 
-test('release verification includes packed Personal clean-room, interruption, physical attestation, real MLX, Team race, and portable deployment gates', () => {
+test('release verification includes packed Personal clean-room, consolidation, interruption, physical attestation, real MLX, Team race, and portable deployment gates', () => {
   const makefile = readFileSync(join(root, 'Makefile'), 'utf8');
-  assert.match(makefile, /verify:[\s\S]*test:personal-clean-room[\s\S]*test:personal-interruption[\s\S]*test:personal-multiharness[\s\S]*test:codex-team-packaging-contract/);
+	assert.match(makefile, /verify:[\s\S]*test:personal-clean-room[\s\S]*test:personal-interruption[\s\S]*test:personal-multiharness[\s\S]*test:personal-consolidation-report[\s\S]*test:codex-team-packaging-contract/);
   assert.match(makefile, /^personal-preview-attestation:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent attest:personal-preview/m);
   assert.match(makefile, /^team-race-release:.*\n\tcd \$\(APP_DIR\) && \$\(GO\) test -race -count=1 -timeout 20m /m);
   assert.match(makefile, /^team-deploy-static-verify:/m);
@@ -38,6 +38,10 @@ test('release verification includes packed Personal clean-room, interruption, ph
   assert.equal(
     packageJSON.scripts?.['test:personal-multiharness'],
     'node scripts/personal-preview-multiharness-e2e.mjs',
+  );
+  assert.equal(
+    packageJSON.scripts?.['test:personal-consolidation-report'],
+    'node scripts/personal-consolidation-report-e2e.mjs',
   );
   assert.equal(
     packageJSON.scripts?.['attest:personal-preview'],
@@ -77,6 +81,13 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(nativePacked, /taskkill\.exe/);
 	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
 	assert.match(nativePacked, /await packedPulse\(tarball, \['install', '--json'\]/);
+	const universalTarget = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'native-universal-target.mjs'), 'utf8',
+	);
+	assert.match(universalTarget, /pulse\.personal_consolidation_report_fixture\.v1/);
+	assert.match(universalTarget, /consolidationReceipt\?\.package_sha256, productReceipt\.packed_tarball_sha256/);
+	assert.match(universalTarget, /sources_byte_preserved/);
+	assert.match(universalTarget, /mutation_authority_exercised: false/);
 	const runtimeInstaller = readFileSync(
 		join(root, 'pulse-app', 'cli', 'src', 'personal-runtime-installer.js'), 'utf8',
 	);
@@ -94,6 +105,7 @@ test('release verification includes packed Personal clean-room, interruption, ph
 		'personal-preview-clean-room.mjs',
 		'personal-preview-interruption-e2e.mjs',
 		'personal-preview-multiharness-e2e.mjs',
+		'personal-consolidation-report-e2e.mjs',
 		'personal-preview-release-attestation.mjs',
 	]) {
 		assert.notEqual(statSync(join(root, 'pulse-app', 'cli', 'scripts', script)).mode & 0o111, 0,
@@ -154,6 +166,7 @@ test('release verification includes packed Personal clean-room, interruption, ph
 	assert.match(onboarding, /pulse disconnect claude-code/);
 	assert.match(onboarding, /pulse disconnect cursor/);
 	assert.match(onboarding, /pulse disconnect codex/);
+	assert.match(onboarding, /pulse consolidate report/);
 	const releaseFixture = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'product-release-fixture.mjs'), 'utf8',
 	);

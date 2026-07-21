@@ -74,6 +74,22 @@ The ready verdict is `Pulse <host> automatic lifecycle ready.` Memory Home shows
 - token economy labeled `collecting`, `estimated`, or `measured` with its
   method and coverage, never a fabricated multiplier.
 
+### Map memory already on this computer
+
+Run one read-only report from any bound project:
+
+```bash
+pulse consolidate report
+```
+
+The same report appears in the terminal, Memory Home's **Memory ocean** section,
+and the Pulse tool available to Claude Code, Cursor, and Codex. It identifies
+the bound destination first, then shows content-free source aliases,
+classifications, counts, blockers, and one next action. It does not import,
+merge, delete, clean up, publish, or call a model. Paths and memory bodies stay
+out of the portable report. Any later import is a separate preview and a
+separate human approval.
+
 ## First-memory proof
 
 1. Do normal work in a verified Claude Code, Cursor, or Codex task.
@@ -96,6 +112,7 @@ and cannot replace it.
 - Raw transcripts and backend model calls are off by default.
 - The managed local embedder uses no model API key.
 - Old chats are imported only through a separate preview-first flow.
+- `pulse consolidate report` inventories old stores without adopting them.
 - Git-backed Team Memory receives only separately reviewed and exactly approved
   shared candidates.
 

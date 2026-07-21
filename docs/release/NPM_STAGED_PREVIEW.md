@@ -11,7 +11,8 @@ The workflow:
 2. downloads the content-addressed `pulse-npm-production-candidate` artifact
    from a successful `Production candidate` run on the same `main` commit;
 3. checks the tarball SHA-256, package identity/version/repository, production
-   receipt, all six native targets, and the referenced green `Universal` run;
+   receipt, all six native targets, each target's content-free consolidation
+   proof, and the referenced green `Universal` run;
 4. runs `npm stage publish <exact-tarball> --tag preview` through GitHub OIDC;
 5. stops. A maintainer must inspect and approve the staged bytes with npm 2FA
    before they become public.

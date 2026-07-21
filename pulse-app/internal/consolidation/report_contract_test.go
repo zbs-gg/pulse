@@ -1,12 +1,43 @@
 package consolidation
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestReportKeepsRequiredCollectionsAsJSONArrays(t *testing.T) {
+	manager, err := NewManager(ManagerConfig{
+		RootDir: filepath.Join(t.TempDir(), "reports"),
+		Key:     []byte("0123456789abcdef0123456789abcdef"),
+		NewID:   func() string { return "report_arrays" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, _, err := manager.Start(testDestination())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = manager.Advance(
+		report.InvocationID, PhaseInventory, Totals{}, []Source{}, nil, nil,
+		"Inspecting recognized local memory sources.", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, `"sources":null`) || strings.Contains(text, `"blockers":null`) {
+		t.Fatalf("required report collections must be arrays: %s", text)
+	}
+}
 
 func testDestination() Destination {
 	return Destination{

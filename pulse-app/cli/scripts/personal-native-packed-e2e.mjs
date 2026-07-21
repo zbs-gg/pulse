@@ -293,7 +293,7 @@ function codexHookInput({ eventName, root, sessionID, turnID, workspace, extra =
   };
 }
 
-function rememberThroughInstalledMCP(pluginRoot, memoryArguments, { cwd, env }) {
+function callInstalledMCP(pluginRoot, toolName, toolArguments, { cwd, env }) {
   const input = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
       protocolVersion: '2024-11-05', capabilities: {},
@@ -302,7 +302,7 @@ function rememberThroughInstalledMCP(pluginRoot, memoryArguments, { cwd, env }) 
     { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: 'pulse_remember', arguments: memoryArguments,
+      name: toolName, arguments: toolArguments,
     } },
   ].map((message) => JSON.stringify(message)).join('\n') + '\n';
   const result = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
@@ -312,10 +312,53 @@ function rememberThroughInstalledMCP(pluginRoot, memoryArguments, { cwd, env }) 
     json(line, 'native packed MCP output is invalid'));
   assert.equal(messages.find((message) => message.id === 1)?.result?.serverInfo?.name, 'pulse-mcp');
   assert.equal(messages.find((message) => message.id === 2)?.result?.tools?.some((tool) =>
-    tool.name === 'pulse_remember'), true);
+    tool.name === toolName), true, `installed MCP does not expose ${toolName}`);
   const callResult = messages.find((message) => message.id === 3)?.result;
   assert.equal(Array.isArray(callResult?.content), true);
-  return { callResult, remembered: json(callResult.content[0].text, 'native packed remember output is invalid') };
+  assert.notEqual(callResult.isError, true, callResult.content?.[0]?.text);
+  return { callResult, output: json(callResult.content[0].text, `native packed ${toolName} output is invalid`) };
+}
+
+function rememberThroughInstalledMCP(pluginRoot, memoryArguments, options) {
+  const result = callInstalledMCP(pluginRoot, 'pulse_remember', memoryArguments, options);
+  return { callResult: result.callResult, remembered: result.output };
+}
+
+function seedSyntheticConsolidationArtifacts(home) {
+  const fixtures = [
+    ['pulse-release-fixture', 'release.fixture', 'synthetic release artifact\n'],
+    ['pulse-backup-fixture', 'backup.fixture', 'synthetic backup artifact\n'],
+  ].map(([directory, name, content]) => {
+    const root = join(home, directory);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const path = join(root, name);
+    writeFileSync(path, content, { mode: 0o600 });
+    return { path, before: readFileSync(path) };
+  });
+  return fixtures;
+}
+
+async function readMemoryHomePage(runtime, secret) {
+  const checks = Object.fromEntries([
+    'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+    'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
+    'activation', 'vault', 'capture', 'retrieval', 'hooks',
+  ].map((name) => [name, { ok: true }]));
+  const liveReadiness = projectPersonalLiveReadiness(checks, new Date());
+  const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    body: JSON.stringify({ live_readiness: liveReadiness }),
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(sessionResponse.status, 200);
+  const session = await sessionResponse.json();
+  const pageResponse = await fetch(session.target_url, {
+    headers: { Cookie: `${session.cookie_name}=${session.cookie_value}` },
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(pageResponse.status, 200);
+  return pageResponse.text();
 }
 
 async function openVisibleHomeCard({ candidate, runtime, secret }) {
@@ -622,6 +665,74 @@ try {
   assert.equal(Number.isInteger(economy.pulse_tokens) && economy.pulse_tokens > 0, true);
   assert.equal('savings_percentage' in economy, false);
 
+  const sourceFixtures = seedSyntheticConsolidationArtifacts(home);
+  const consolidationStartResult = await packedPulse(tarball, [
+    'consolidate', 'report', 'start', '--json',
+  ], { cwd: workspace, env, timeout: 180_000 });
+  const consolidation = json(
+    consolidationStartResult.stdout,
+    'native packed consolidation report is invalid',
+  );
+  assert.equal(consolidation.schema, 'pulse.consolidation.report.v1');
+  assert.equal(consolidation.phase, 'report_ready');
+  assert.equal(consolidation.destination.store_id, runtime.store_id);
+  assert.equal(consolidation.destination.repository_id.length > 0, true);
+  assert.equal(consolidation.totals.excluded, 2);
+  for (const classification of ['canonical_vault', 'release_artifact', 'backup']) {
+    assert.equal(consolidation.sources.some((source) => source.classification === classification), true,
+      `missing ${classification} from packed consolidation report`);
+  }
+  for (const fixtureSource of sourceFixtures) {
+    assert.deepEqual(readFileSync(fixtureSource.path), fixtureSource.before,
+      `consolidation report changed ${basename(fixtureSource.path)}`);
+  }
+  const consolidationStatusResult = await packedPulse(tarball, [
+    'consolidate', 'report', 'status', '--json',
+  ], { cwd: workspace, env, timeout: 30_000 });
+  const consolidationStatus = json(
+    consolidationStatusResult.stdout,
+    'native packed consolidation status is invalid',
+  );
+  assert.equal(consolidationStatus.report_digest, consolidation.report_digest);
+  assert.deepEqual(consolidationStatus.totals, consolidation.totals);
+
+  const mcpConsolidation = callInstalledMCP(
+    pluginRoot,
+    'pulse_consolidation_report',
+    { action: 'status', report_id: consolidation.invocation_id },
+    { cwd: workspace, env: hookEnv },
+  ).output;
+  assert.equal(mcpConsolidation.report_digest, consolidation.report_digest);
+  assert.deepEqual(mcpConsolidation.totals, consolidation.totals);
+
+  const consolidationHome = await readMemoryHomePage(runtime, secret);
+  for (const text of [
+    'Memory ocean', 'What Pulse found on this computer', 'Where memory for this project is written',
+    'Which sources were inspected', 'canonical_vault_01', 'release_artifact_01', 'backup_01',
+  ]) assert.equal(consolidationHome.includes(text), true, `Memory Home missing ${text}`);
+  assert.equal(consolidationHome.includes(sourceFixtures[0].path), false);
+  assert.equal(consolidationHome.includes(sourceFixtures[1].path), false);
+
+  const consolidationReceipt = {
+    schema: 'pulse.personal_consolidation_report_fixture.v1',
+    content_free: true,
+    target_id: selectedTarget,
+    package_sha256: tarball.sha256,
+    report_digest: consolidation.report_digest,
+    inventory_digest: consolidation.inventory_digest,
+    phase: consolidation.phase,
+    source_classifications: consolidation.sources.map((source) => source.classification).sort(),
+    totals: consolidation.totals,
+    cli_parity: true,
+    mcp_parity: true,
+    memory_home_visible: true,
+    sources_byte_preserved: true,
+    imported: false,
+    merged: false,
+    deleted: false,
+    published: false,
+  };
+
   const repairPlanResult = await packedPulse(tarball, ['install-plan', '--json'], {
     cwd: workspace, env: baseEnv, timeout: 180_000,
   });
@@ -674,6 +785,7 @@ try {
     production_ready: false,
     support_proven: false,
   };
+  process.stdout.write(`${JSON.stringify(consolidationReceipt)}\n`);
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
   process.stdout.write('Pulse native packed install saved one visible card and recalled it in a fresh Codex session.\n');
 } catch (error) {

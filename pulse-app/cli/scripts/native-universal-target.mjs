@@ -78,9 +78,11 @@ const stdout = command(process.execPath, [npmExecPath, 'run', '--silent', 'test:
   },
 });
 process.stdout.write(`${stdout}\n`);
-const productReceipt = stdout.split(/\r?\n/).map((line) => {
+const receipts = stdout.split(/\r?\n/).map((line) => {
   try { return JSON.parse(line); } catch { return null; }
-}).find((value) => value?.schema === 'pulse.native_packed_product_fixture.v1');
+}).filter(Boolean);
+const productReceipt = receipts.find((value) => value.schema === 'pulse.native_packed_product_fixture.v1');
+const consolidationReceipt = receipts.find((value) => value.schema === 'pulse.personal_consolidation_report_fixture.v1');
 assert.equal(productReceipt?.target_id, target.target_id);
 assert.equal(productReceipt?.host, matrix.harness.host);
 for (const field of [
@@ -104,6 +106,16 @@ assert.equal(
   target.platform === 'darwin' ? 1 : 0,
 );
 assert.equal(['collecting_baseline', 'estimated', 'measured'].includes(productReceipt.token_economy?.state), true);
+assert.equal(consolidationReceipt?.target_id, target.target_id);
+assert.equal(consolidationReceipt?.package_sha256, productReceipt.packed_tarball_sha256);
+assert.equal(consolidationReceipt?.phase, 'report_ready');
+assert.deepEqual(consolidationReceipt?.source_classifications, ['backup', 'canonical_vault', 'release_artifact']);
+for (const proof of ['cli_parity', 'mcp_parity', 'memory_home_visible', 'sources_byte_preserved']) {
+  assert.equal(consolidationReceipt?.[proof], true, proof);
+}
+for (const mutation of ['imported', 'merged', 'deleted', 'published']) {
+  assert.equal(consolidationReceipt?.[mutation], false, mutation);
+}
 
 const commit = process.env.GITHUB_SHA || command('git', ['rev-parse', 'HEAD']);
 assert.match(commit, /^[a-f0-9]{40}$/);
@@ -140,6 +152,18 @@ const evidence = {
     object_id: productReceipt.canonical_object_id,
   },
   token_economy: productReceipt.token_economy,
+  consolidation: {
+    phase: consolidationReceipt.phase,
+    report_digest: consolidationReceipt.report_digest,
+    inventory_digest: consolidationReceipt.inventory_digest,
+    source_classifications: consolidationReceipt.source_classifications,
+    totals: consolidationReceipt.totals,
+    cli_parity: consolidationReceipt.cli_parity,
+    mcp_parity: consolidationReceipt.mcp_parity,
+    memory_home_visible: consolidationReceipt.memory_home_visible,
+    sources_byte_preserved: consolidationReceipt.sources_byte_preserved,
+    mutation_authority_exercised: false,
+  },
 };
 const output = exactOutputPath(argument('--out'));
 mkdirSync(dirname(output), { recursive: true, mode: 0o700 });

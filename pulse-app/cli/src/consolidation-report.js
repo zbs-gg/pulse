@@ -31,6 +31,23 @@ export function reportRequestForArgs(args) {
   throw new Error(`unknown report action: ${action}`);
 }
 
+export async function requestConsolidationReport(args, { resolved, request }) {
+  if (!resolved?.runtime || typeof request !== 'function') {
+    throw new Error('Pulse consolidation report requires a bound project runtime');
+  }
+  const route = reportRequestForArgs(args);
+  const result = await request(resolved, route.path, {
+    method: route.method,
+    body: route.method === 'POST' ? {} : undefined,
+  });
+  return {
+    action: route.action,
+    value: route.action === 'explain'
+      ? assertConsolidationExplanation(result)
+      : assertConsolidationReport(result),
+  };
+}
+
 export function assertConsolidationReport(value) {
   let encoded;
   try {

@@ -6,6 +6,7 @@ import {
   formatConsolidationExplanation,
   formatConsolidationReport,
   reportRequestForArgs,
+  requestConsolidationReport,
 } from './consolidation-report.js';
 
 function report(overrides = {}) {
@@ -42,6 +43,25 @@ test('report command routing is isolated from the legacy consolidate command', (
   assert.throws(() => reportRequestForArgs(['--threshold', '0.9']), /not a report command/);
   assert.throws(() => reportRequestForArgs(['report', 'cancel']), /requires --id/);
   assert.throws(() => reportRequestForArgs(['report', 'unknown']), /unknown report action/);
+});
+
+test('report requests use the bound project runtime and its local authority', async () => {
+  const resolved = { runtime: { store_id: 'store_personal_contract' } };
+  const calls = [];
+  const result = await requestConsolidationReport(['report'], {
+    resolved,
+    request: async (actualResolved, path, options) => {
+      calls.push({ actualResolved, path, options });
+      return report();
+    },
+  });
+  assert.deepEqual(calls, [{
+    actualResolved: resolved,
+    path: '/memory/consolidation/reports',
+    options: { method: 'POST', body: {} },
+  }]);
+  assert.equal(result.action, 'start');
+  assert.equal(result.value.invocation_id, 'report_01');
 });
 
 test('plain explanation stays content-free and actionable', () => {
