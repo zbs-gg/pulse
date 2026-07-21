@@ -487,6 +487,20 @@ async function waitForTerminalCandidate(runtime, secret, candidateID, timeoutMs 
   throw new Error('native packed visible Memory Home card did not reach a terminal receipt');
 }
 
+async function waitForProjectedCandidate(runtime, secret, candidateID, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+    const candidate = tray.candidates?.find((value) => value.candidate_id === candidateID);
+    if (candidate?.state === 'committed' && candidate.projection_status === 'complete') return candidate;
+    if (candidate?.projection_status === 'failed') {
+      throw new Error(`native packed projection failed: ${candidateID}`);
+    }
+    await new Promise((accept) => setTimeout(accept, 250));
+  }
+  throw new Error('native packed visible Memory Home card did not finish retrieval projection');
+}
+
 const selectedTarget = targetID();
 const target = releaseTargetDefinition(selectedTarget);
 const host = process.env.PULSE_NATIVE_PACKED_HOST ?? 'codex';
@@ -685,6 +699,8 @@ try {
   assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
   const objectID = terminalCard.canonical_object_id;
   markFirstValueStage('terminal_receipt');
+  await waitForProjectedCandidate(runtime, secret, pendingCard.candidate_id);
+  markFirstValueStage('retrieval_projection');
   const freshSessionID = 'session-native-packed-fresh';
   const freshTurnID = 'turn-native-packed-fresh';
   const freshSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
@@ -750,7 +766,7 @@ try {
     tarball, consolidationStarted, { cwd: workspace, env },
   );
   assert.equal(consolidation.schema, 'pulse.consolidation.report.v1');
-  assert.equal(consolidation.phase, 'report_ready');
+  assert.equal(consolidation.phase, 'report_ready', JSON.stringify(consolidation));
   assert.equal(consolidation.destination.store_id, runtime.store_id);
   assert.equal(consolidation.destination.repository_id.length > 0, true);
   assert.equal(consolidation.totals.excluded, 2);
