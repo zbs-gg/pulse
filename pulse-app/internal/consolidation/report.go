@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nkkmnk/pulse/internal/platform"
 )
 
 const (
@@ -354,14 +355,12 @@ func (m *Manager) resumeLocked(previous Report, destination Destination, newInvo
 }
 
 func (m *Manager) readResumeReceiptLocked(path string) (resumeReceipt, error) {
-	encoded, err := os.ReadFile(path)
+	encoded, err := readPrivateReportFile(path)
 	if err != nil {
 		return resumeReceipt{}, err
 	}
-	info, err := os.Lstat(path)
 	var receipt resumeReceipt
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
-		len(encoded) > maxCheckpointBytes || json.Unmarshal(encoded, &receipt) != nil {
+	if json.Unmarshal(encoded, &receipt) != nil {
 		return resumeReceipt{}, ErrCheckpointIntegrity
 	}
 	payload, err := json.Marshal(struct {
@@ -493,18 +492,8 @@ func (m *Manager) loadCheckpoints() error {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "checkpoint-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() > maxCheckpointBytes {
-			return ErrCheckpointIntegrity
-		}
-		file, err := os.Open(filepath.Join(m.rootDir, entry.Name()))
+		encoded, err := readPrivateReportFile(filepath.Join(m.rootDir, entry.Name()))
 		if err != nil {
-			return ErrCheckpointIntegrity
-		}
-		limited := io.LimitReader(file, maxCheckpointBytes+1)
-		encoded, readErr := io.ReadAll(limited)
-		closeErr := file.Close()
-		if readErr != nil || closeErr != nil || len(encoded) > maxCheckpointBytes {
 			return ErrCheckpointIntegrity
 		}
 		var envelope checkpointEnvelope
@@ -623,11 +612,9 @@ func (m *Manager) WriteSourceSidecar(invocationID string, aliases, states map[st
 	}
 	name := "aliases-" + invocationID + ".json"
 	path := filepath.Join(m.rootDir, name)
-	if existing, readErr := os.ReadFile(path); readErr == nil {
-		info, statErr := os.Lstat(path)
+	if existing, readErr := readPrivateReportFile(path); readErr == nil {
 		var current aliasSidecar
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
-			len(existing) > maxCheckpointBytes || json.Unmarshal(existing, &current) != nil {
+		if json.Unmarshal(existing, &current) != nil {
 			return ErrCheckpointIntegrity
 		}
 		currentPayload, marshalErr := json.Marshal(struct {
@@ -658,14 +645,12 @@ func (m *Manager) ReadSourceSidecar(invocationID string) (map[string]string, map
 		return nil, nil, "", ErrReportNotFound
 	}
 	path := filepath.Join(m.rootDir, "aliases-"+invocationID+".json")
-	encoded, err := os.ReadFile(path)
+	encoded, err := readPrivateReportFile(path)
 	if err != nil {
 		return nil, nil, "", ErrCheckpointIntegrity
 	}
-	info, err := os.Lstat(path)
 	var sidecar aliasSidecar
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || len(encoded) > maxCheckpointBytes ||
-		json.Unmarshal(encoded, &sidecar) != nil || sidecar.Schema != "pulse.consolidation.aliases.v2" ||
+	if json.Unmarshal(encoded, &sidecar) != nil || sidecar.Schema != "pulse.consolidation.aliases.v2" ||
 		sidecar.InvocationID != invocationID || len(sidecar.Aliases) != len(sidecar.States) ||
 		!hexDigestPattern.MatchString(sidecar.PolicyDigest) {
 		return nil, nil, "", ErrCheckpointIntegrity
@@ -781,56 +766,35 @@ func reusablePhase(phase Phase) bool {
 }
 
 func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err := platform.EnsurePrivateDirectory(path); err != nil {
 		return errors.New("consolidation: report root is not a private directory")
 	}
-	return os.Chmod(path, 0o700)
+	return nil
 }
 
 func atomicPrivateWrite(root, name string, payload []byte) error {
-	tmp := filepath.Join(root, "."+name+".tmp-"+randomSuffix())
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	remove := true
-	defer func() {
-		_ = file.Close()
-		if remove {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if _, err := file.Write(payload); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
 	final := filepath.Join(root, name)
-	if _, err := os.Lstat(final); err == nil {
+	if _, err := platform.InspectPrivateFile(final, privateReportFilePolicy()); err == nil {
 		return errors.New("consolidation: checkpoint generation already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(tmp, final); err != nil {
-		return err
+	return platform.AtomicWritePrivateFile(final, payload)
+}
+
+func privateReportFilePolicy() platform.FilePolicy {
+	return platform.FilePolicy{
+		MaximumBytes: maxCheckpointBytes, RequireCurrentOwner: true,
+		OwnerOnly: true, SingleLink: true,
 	}
-	remove = false
-	if dir, err := os.Open(root); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
+}
+
+func readPrivateReportFile(path string) ([]byte, error) {
+	encoded, err := platform.ReadPrivateFile(path, privateReportFilePolicy())
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return encoded, nil
 }
 
 func randomReportID() string { return "report_" + randomSuffix() }
