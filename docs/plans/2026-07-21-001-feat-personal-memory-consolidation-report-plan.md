@@ -79,7 +79,7 @@ Direct import is unsafe at this point. The existing archive migration path colla
 #### Release truth
 
 - R21. Dormant legacy directories, backups, code checkouts, and caches do not block npm release by themselves. An active conflicting daemon, binding, installed runtime, or MCP target—and any partial source associated with unresolved active evidence—is a blocker and must be named distinctly from cleanup candidates. The publication workflow must rerun this fail-closed preflight immediately before publishing.
-- R22. Public synthetic package gates must contain no private corpus, local path, Nikita-specific fixture, private report, provider output, or report sidecar. The real-machine acceptance run records only content-free counts, digests, classifications, and pass/fail receipts.
+- R22. Public synthetic package gates must contain no private corpus, local path, user-specific fixture, private report, provider output, or report sidecar. The real-machine acceptance run records only content-free counts, digests, classifications, and pass/fail receipts.
 - R23. This plan produces two independently completable outputs: a packaged report release candidate and a Codex-only Luna decision. The report candidate does not wait for private-corpus approval or Luna availability. Neither output claims old memory imported, duplicates merged, directories removed, aliases repaired, Team memory published, or npm bytes released.
 
 ### Key Flows
@@ -391,7 +391,7 @@ Home uses semantic landmarks/headings, native buttons, visible focus, focus rest
 - **Dependencies:** U1-U3. U4 runs independently and is required only before changing the Codex extractor default.
 - **Test scenarios:**
   1. Clean packed installs on the supported matrix produce the same report schema and leave every synthetic source unchanged.
-  2. Release artifacts contain no private paths, private reports, local model output, or Nikita-specific data.
+  2. Release artifacts contain no private paths, private reports, local model output, or user-specific data.
   3. Dormant legacy sources produce cleanup candidates but do not fail the release gate.
   4. Conflicting live daemon/store/binding/MCP evidence—or any unresolved partial source associated with a live process, registration, binding, or destination—fails closed with a stable active-conflict reason.
   5. Current-machine acceptance reproduces the dated Claude-mem delta only when the audited source fingerprints match; otherwise it records the new content-free totals and classifications while keeping all source and destination identities unchanged.

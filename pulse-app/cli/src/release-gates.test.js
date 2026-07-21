@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+
+import {
+  auditPublicPackageRoot,
+  publicMcpPackageManifest,
+} from '../scripts/public-package-audit.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -15,6 +23,128 @@ test('published package includes every production CLI module', () => {
     .map((name) => `src/${name}`)
     .sort();
   assert.deepEqual(productionModules.filter((path) => !packageJSON.files.includes(path)), []);
+});
+
+test('published package excludes repository archives and carries every advertised script', () => {
+  const cliRoot = join(root, 'pulse-app', 'cli');
+  const packageJSON = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
+  const mcpPackageJSON = JSON.parse(readFileSync(join(root, 'mcp', 'package.json'), 'utf8'));
+  assert.equal(packageJSON.author, 'ZBS GG');
+  assert.equal(mcpPackageJSON.author, 'ZBS GG');
+  assert.ok(packageJSON.files.includes('scripts'));
+
+  const advertisedScriptPaths = [...new Set(Object.values(packageJSON.scripts)
+    .flatMap((command) => [...command.matchAll(/(?:^|\s)node\s+(scripts\/[A-Za-z0-9._/-]+)/g)])
+    .map((match) => match[1]))];
+  assert.ok(advertisedScriptPaths.length > 0);
+  assert.deepEqual(
+    advertisedScriptPaths.filter((relative) => !statSync(join(cliRoot, relative)).isFile()),
+    [],
+  );
+
+  const packager = readFileSync(join(cliRoot, 'scripts', 'prepare-preview-vendor.mjs'), 'utf8');
+  assert.doesNotMatch(packager, /copyTree\(join\(pulseRoot, 'docs'/);
+  assert.doesNotMatch(packager, /copyTree\(join\(mcpRoot, 'docs'/);
+  assert.doesNotMatch(packager, /['"]AGENTS\.md['"]/);
+});
+
+test('public package audit rejects repository archives, personal paths, emails, and private keys', () => {
+  const packageRoot = mkdtempSync(join(tmpdir(), 'pulse-public-package-audit.'));
+  try {
+    mkdirSync(join(packageRoot, 'src'), { recursive: true });
+    mkdirSync(join(packageRoot, 'release'), { recursive: true });
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse"}\n');
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), 'export const ready = true;\n');
+    writeFileSync(join(packageRoot, 'release', 'pulse-release-root.pem'), [
+      '-----BEGIN PUBLIC KEY-----',
+      'MCowBQYDK2VwAyEA7QzyDphiWdg2Qljgf2fqJSxrzroxU5NJL2wplLDW9RI=',
+      '-----END PUBLIC KEY-----',
+      '',
+    ].join('\n'));
+    assert.doesNotThrow(() => auditPublicPackageRoot(packageRoot));
+
+    mkdirSync(join(packageRoot, 'docs'), { recursive: true });
+    writeFileSync(join(packageRoot, 'docs', 'internal.md'), 'internal plan\n');
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /forbidden package path/);
+    rmSync(join(packageRoot, 'docs'), { recursive: true, force: true });
+
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), 'const leaked = "/Users/real-person/private";\n');
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /personal filesystem path/);
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), 'const leaked = "person@private.invalid";\n');
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /email address/);
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), '-----BEGIN PRIVATE KEY-----\n');
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /private key/);
+
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), 'export const ready = true;\n');
+    for (const path of [
+      'src/private-report.txt',
+      'src/provider-output.txt',
+      'src/consolidation-report-sidecar.txt',
+    ]) {
+      writeFileSync(join(packageRoot, path), 'benign-looking internal output\n');
+      assert.throws(() => auditPublicPackageRoot(packageRoot), /unexpected public package path/);
+      rmSync(join(packageRoot, path), { force: true });
+    }
+
+    const syntheticTokenShapes = [
+      ['ghp_', '1234567890abcdefghijABCDEFGHIJ'].join(''),
+      ['xoxb', '1234567890', 'abcdefghijklmnop'].join('-'),
+      ['AKIA', '1234567890ABCDEF'].join(''),
+    ];
+    for (const secret of [
+      'token=z9Kq3hTm8Nx4Wp7Rv2Bc',
+      'api_key: "q8Lm4Rs7Tv2Wx9Yp"',
+      'password="n7Vp4Kx9Rm2Qs8Tz"',
+      'private-key: "m6Rt3Wq8Xp5Kv9Nz"',
+      'Authorization: Bearer AbCdEf1234567890',
+      ...syntheticTokenShapes,
+    ]) {
+      writeFileSync(join(packageRoot, 'src', 'cli.js'), `${secret}\n`);
+      assert.throws(() => auditPublicPackageRoot(packageRoot), /credential|authorization|token|access key/);
+    }
+
+    writeFileSync(join(packageRoot, 'src', 'cli.js'), [
+      'const token = "<redacted>";',
+      'const api_key = "your-example-key";',
+      'const authorization = `Bearer ${token}`;',
+      '',
+    ].join('\n'));
+    assert.doesNotThrow(() => auditPublicPackageRoot(packageRoot));
+  } finally {
+    rmSync(packageRoot, { recursive: true, force: true });
+  }
+});
+
+test('vendored MCP manifest advertises only scripts present in the public package', () => {
+  const packageRoot = mkdtempSync(join(tmpdir(), 'pulse-public-mcp-manifest.'));
+  try {
+    const nestedRoot = join(packageRoot, 'vendor', 'pulse-preview-source', 'mcp');
+    mkdirSync(join(nestedRoot, 'scripts'), { recursive: true });
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse"}\n');
+    writeFileSync(
+      join(nestedRoot, 'scripts', 'claude-connector-smoke.mjs'),
+      'export const ready = true;\n',
+    );
+    const sourcePackageJSON = JSON.parse(readFileSync(join(root, 'mcp', 'package.json'), 'utf8'));
+    const publicPackageJSON = publicMcpPackageManifest(sourcePackageJSON);
+    writeFileSync(join(nestedRoot, 'package.json'), `${JSON.stringify(publicPackageJSON, null, 2)}\n`);
+
+    assert.deepEqual(Object.keys(publicPackageJSON.scripts), [
+      'build',
+      'start',
+      'dev',
+      'smoke:claude-connector',
+      'prepack',
+      'prepublishOnly',
+    ]);
+    assert.doesNotThrow(() => auditPublicPackageRoot(packageRoot));
+
+    publicPackageJSON.scripts['smoke:missing'] = 'node scripts/missing-smoke.mjs';
+    writeFileSync(join(nestedRoot, 'package.json'), `${JSON.stringify(publicPackageJSON, null, 2)}\n`);
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /advertised package script is missing/);
+  } finally {
+    rmSync(packageRoot, { recursive: true, force: true });
+  }
 });
 
 test('release verification includes packed Personal clean-room, consolidation, interruption, physical attestation, real MLX, Team race, and portable deployment gates', () => {

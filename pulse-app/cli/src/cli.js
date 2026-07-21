@@ -4979,9 +4979,9 @@ function collectPersonCandidates(text) {
   }
   const blocked = new Set([
     'Accents', 'Action', 'Actionable', 'Actions', 'Active', 'Added', 'After', 'Agent', 'All', 'Always', 'Anthropic', 'Any', 'Applications', 'Approvals', 'Architecture', 'Archive', 'Apr', 'Asia', 'Assistant', 'Async', 'Atlas', 'Auto', 'Avoid',
-    'Bangkok', 'Bash', 'Benchmark', 'Bench', 'Bitwarden', 'Both', 'Browser', 'Build', 'Built', 'Bundle',
+    'Bash', 'Benchmark', 'Bench', 'Bitwarden', 'Both', 'Browser', 'Build', 'Built', 'Bundle',
     'Background', 'Before',
-    'Caches', 'Chat', 'ChatGPT', 'Check', 'Click', 'Claude', 'Cloudflare', 'Code', 'Codex', 'Collaboration', 'Command', 'Commit', 'Companion', 'Complete', 'Confirmed', 'Content', 'Context', 'Conversation', 'Correction', 'Create', 'Created',
+    'Caches', 'Chat', 'ChatGPT', 'Check', 'Click', 'Claude', 'Cloudflare', 'Code', 'Codex', 'Collaboration', 'Command', 'Commit', 'Companion', 'Complete', 'Confirmed', 'Content', 'Context', 'Conversation', 'Core', 'Correction', 'Create', 'Created',
     'Choose', 'Continuity', 'Conversations', 'Consulting', 'Current', 'Data', 'Decision', 'Default', 'Demo', 'Download',
     'Emo', 'Error', 'Even', 'Evidence', 'Export', 'Extraction',
     'Exit', 'Explore', 'Failed', 'File', 'Files', 'Filesystem', 'Final', 'First', 'Fix', 'Full', 'Further',
@@ -4990,21 +4990,21 @@ function collectPersonCandidates(text) {
     'Group', 'Guidance', 'Harness', 'Has', 'Hearth', 'Heart', 'Heavy', 'Hello', 'Hermes', 'History', 'However',
     'Import', 'Insight', 'Insights', 'Instead', 'Invalid',
     'June',
-    'Keep', 'Known', 'Let', 'Library', 'Live',
+    'Keep', 'Known', 'Let', 'Library', 'Live', 'Location',
     'Make', 'Making', 'Map', 'Mark', 'Marked', 'May', 'Mem', 'Memory', 'Mode', 'Module', 'Move',
     'Network', 'New', 'Newsreader', 'Not', 'Now',
-    'Obsidian', 'Only', 'Open', 'OpenAI', 'Opus', 'Output',
+    'Obsidian', 'Observations', 'Only', 'Open', 'OpenAI', 'Opus', 'Output',
     'Pages', 'Pass', 'People', 'Personal', 'Phase', 'Plan', 'Planning', 'Port', 'Preview', 'Primary', 'Privacy', 'Pro', 'Progression', 'Project', 'Prompt', 'Pulse', 'Python',
     'Process', 'Questions',
-    'Read', 'Real', 'Record', 'Remember', 'Request', 'Review', 'Run', 'Running', 'Russian',
-    'Script', 'Section', 'Server', 'Small', 'Sonnet', 'Source', 'State', 'Step',
-    'Task', 'Telegram', 'Telethon', 'Terminal', 'Test', 'Tests', 'The', 'This', 'Thread', 'Threads', 'Three', 'Ticker', 'Timestamps', 'Tool', 'Total', 'True', 'Tweaks', 'Two',
+    'Read', 'Real', 'Record', 'Remember', 'Request', 'Retrieval', 'Review', 'Run', 'Running', 'Russian',
+    'Script', 'Section', 'Server', 'Session', 'Small', 'Sonnet', 'Source', 'State', 'Step',
+    'System', 'Task', 'Telegram', 'Telethon', 'Terminal', 'Test', 'Tests', 'The', 'This', 'Thread', 'Threads', 'Three', 'Ticker', 'Timestamps', 'Tool', 'Total', 'True', 'Tweaks', 'Two',
     'Updated', 'Usage', 'Use', 'User', 'Users',
     'Verification', 'Verified', 'Verifier', 'Verify', 'Viewer',
     'Waiting', 'Worker',
     'Work', 'Write',
     'You', 'Your',
-    'Акт', 'Аудитория', 'Автор', 'Без', 'Все', 'Вместо', 'Вообще', 'Вот', 'Всё', 'Готово', 'Два', 'Движение', 'Для', 'Его', 'Если', 'Ещё', 'Жду', 'Запускаю', 'Или', 'Как', 'Карта', 'Когда', 'Курс', 'Лекция', 'Медленно', 'Мне', 'Мои', 'Назови', 'Напиши', 'Обращ', 'Один', 'Она', 'Пауза', 'Плюс', 'После', 'Пока', 'Потом', 'Потому', 'Приоритет', 'Проверю', 'Привет', 'Просто', 'Пхукет', 'Сейчас', 'Сквозная', 'Сначала', 'Тайланд', 'Теперь', 'Тематика', 'Тело', 'Тихо', 'Только', 'Три', 'Цель', 'Через', 'Что', 'Чтобы', 'Это',
+    'Акт', 'Аудитория', 'Автор', 'Без', 'Все', 'Вместо', 'Вообще', 'Вот', 'Всё', 'Готово', 'Город', 'Два', 'Движение', 'Для', 'Его', 'Если', 'Ещё', 'Жду', 'Запускаю', 'Или', 'Как', 'Карта', 'Когда', 'Курс', 'Лекция', 'Локация', 'Медленно', 'Мне', 'Мои', 'Назови', 'Напиши', 'Обращ', 'Один', 'Она', 'Пауза', 'Плюс', 'После', 'Пока', 'Потом', 'Потому', 'Приоритет', 'Проверю', 'Привет', 'Просто', 'Сейчас', 'Сквозная', 'Сначала', 'Страна', 'Теперь', 'Тематика', 'Тело', 'Тихо', 'Только', 'Три', 'Цель', 'Через', 'Что', 'Чтобы', 'Это',
   ]);
   const out = [];
   const regex = /(?:^|[^\p{L}])(\p{Lu}[\p{Ll}\p{Mn}'-]{2,})(?=$|[^\p{L}])/gu;
@@ -5023,19 +5023,36 @@ function collectPersonCandidates(text) {
 }
 
 function normalizePersonCandidate(candidate) {
-  const text = safeText(candidate, 80);
-  const aliases = new Map([
-    ['Эли', 'Элли'],
-    ['Никите', 'Никита'],
-    ['Никиты', 'Никита'],
-    ['Никиту', 'Никита'],
-    ['Никитой', 'Никита'],
-    ['Сони', 'Соня'],
-    ['Соню', 'Соня'],
-    ['Соней', 'Соня'],
-    ['Сонин', 'Соня'],
-  ]);
-  return aliases.get(text) ?? text;
+  return safeText(candidate, 80);
+}
+
+function russianPersonInflections(canonical) {
+  const name = safeText(canonical, 80);
+  if (!/^[А-ЯЁ][а-яё]{2,}$/.test(name)) return new Set();
+  if (name.endsWith('ия')) {
+    const stem = name.slice(0, -2);
+    return new Set([`${stem}ии`, `${stem}ию`, `${stem}ией`, `${stem}иею`]);
+  }
+  if (name.endsWith('я')) {
+    const stem = name.slice(0, -1);
+    return new Set([`${stem}и`, `${stem}ю`, `${stem}ей`, `${stem}ею`]);
+  }
+  if (name.endsWith('а')) {
+    const stem = name.slice(0, -1);
+    return new Set([`${stem}ы`, `${stem}и`, `${stem}е`, `${stem}у`, `${stem}ой`, `${stem}ою`]);
+  }
+  if (/[бвгджзклмнпрстфхцчшщ]$/.test(name)) {
+    return new Set([`${name}а`, `${name}у`, `${name}ом`, `${name}е`]);
+  }
+  return new Set();
+}
+
+function canonicalObservedPersonCandidate(candidate, observedCandidates) {
+  const name = safeText(candidate, 80);
+  for (const observed of observedCandidates) {
+    if (observed !== name && russianPersonInflections(observed).has(name)) return observed;
+  }
+  return name;
 }
 
 function collectEmotionCandidates(text) {
@@ -5080,7 +5097,10 @@ function addMigrationSignals(previewState, conversation) {
       previewState.redactedFragments += 1;
       continue;
     }
-    const peopleInMessage = collectPersonCandidates(safe);
+    const rawPeopleInMessage = collectPersonCandidates(safe);
+    const observedPeople = [...previewState.personCounts.keys(), ...rawPeopleInMessage];
+    const peopleInMessage = uniqueLimited(rawPeopleInMessage
+      .map((candidate) => canonicalObservedPersonCandidate(candidate, observedPeople)), 24);
     for (const candidate of peopleInMessage) {
       previewState.people.add(candidate);
       previewState.threadPeople.get(title).add(candidate);
@@ -5267,6 +5287,16 @@ function markdownMeta(markdown, key) {
   return safeText(match?.[1] ?? '', 240);
 }
 
+function markdownAliases(markdown) {
+  return uniqueLimited(
+    markdownMeta(markdown, 'Aliases')
+      .split(/[,;]/)
+      .map((item) => safeText(item, 120))
+      .filter(Boolean),
+    24,
+  );
+}
+
 function markdownLinks(markdown) {
   const section = readMarkdownSection(markdown, 'Links');
   if (!section) {
@@ -5352,6 +5382,7 @@ function peopleGraphPreview(target) {
       relevance: row.relevance,
       status: markdownMeta(markdown, 'Status'),
       handle: markdownMeta(markdown, 'Telegram'),
+      aliases: markdownAliases(markdown),
       summary,
       links: markdownLinks(markdown),
       evidence_ref: profilePath ? relativeEvidenceRef(profilePath, graphRoot) : relativeEvidenceRef(indexPath, graphRoot),
@@ -8013,56 +8044,20 @@ const GALLERY_REVIEW_ENTITIES = new Set([
   'Курс',
   'Лекция',
   'Плюс',
-  'Пхукет',
+  'Город',
+  'Локация',
   'Сквозная',
-  'Тайланд',
+  'Страна',
   'Тематика',
   'Аудитория',
 ]);
 
-const KNOWN_SINGLE_PERSON_NAMES = new Set([
-  'Anya',
-  'Daria',
-  'Dan',
-  'Drew',
-  'Egor',
-  'Elle',
-  'Elena',
-  'Ilya',
-  'Katya',
-  'Maria',
-  'Mila',
-  'Nik',
-  'Nikita',
-  'Paul',
-  'Pavel',
-  'Sonya',
-  'Vitaly',
-  'Анжелика',
-  'Аня',
-  'Виталий',
-  'Вова',
-  'Граф',
-  'Дан',
-  'Даша',
-  'Ева',
-  'Егор',
-  'Игорь',
-  'Катя',
-  'Лада',
-  'Лея',
-  'Мама',
-  'Мария',
-  'Мика',
-  'Мила',
-  'Ник',
-  'Никита',
-  'Павел',
-  'Папа',
-  'Сема',
-  'Соня',
-  'Федя',
-  'Элли',
+const GENERIC_SINGLE_WORD_REVIEW_CANDIDATES = new Set([
+  'Please',
+  'Thanks',
+  'Today',
+  'Tomorrow',
+  'Yesterday',
 ]);
 
 function isReviewEntityName(name) {
@@ -8148,6 +8143,9 @@ function isLikelyPreviewPersonCandidate(name, count, totalMessages) {
   if (!trimmed || isReviewEntityName(trimmed)) {
     return false;
   }
+  if (GENERIC_SINGLE_WORD_REVIEW_CANDIDATES.has(trimmed)) {
+    return false;
+  }
   if (!looksLikePreviewPersonName(trimmed)) {
     return false;
   }
@@ -8165,16 +8163,12 @@ function looksLikePreviewPersonName(name) {
   if (!trimmed || isTechnicalRef(trimmed)) {
     return false;
   }
-  if (KNOWN_SINGLE_PERSON_NAMES.has(trimmed)) {
-    return true;
-  }
   const words = trimmed
     .split(/\s+/)
     .map((word) => word.replace(/[(),]/g, '').trim())
     .filter(Boolean);
-  if (words.length >= 2 && words.length <= 4) {
+  if (words.length >= 1 && words.length <= 4) {
     return words.every((word) => (
-      KNOWN_SINGLE_PERSON_NAMES.has(word) ||
       /^[A-Z][a-z]{2,}$/.test(word) ||
       /^[А-ЯЁ][а-яё]{2,}$/.test(word)
     ));
@@ -8189,6 +8183,9 @@ function shouldShowReviewCandidate(name, count, totalMessages) {
   }
   if (isReviewEntityName(trimmed)) {
     return true;
+  }
+  if (GENERIC_SINGLE_WORD_REVIEW_CANDIDATES.has(trimmed)) {
+    return count > 1;
   }
   if (!looksLikePreviewPersonName(trimmed)) {
     return false;
@@ -8819,14 +8816,6 @@ function previewArray(preview, key) {
   return value.map((item) => safeText(item, 240)).filter(Boolean);
 }
 
-const PERSON_ALIAS_GROUPS = [
-  ['Nik', 'Nikita', 'Ник', 'Никита'],
-  ['Anya', 'Аня'],
-  ['Elle', 'Элли', 'Эли'],
-  ['Sonya', 'Соня'],
-  ['Fedya', 'Fedor', 'Федя', 'Фёдор'],
-];
-
 function aliasKey(value) {
   return safeText(value, 120)
     .toLowerCase()
@@ -8834,33 +8823,43 @@ function aliasKey(value) {
     .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-function aliasGroupForPerson(name) {
-  const key = aliasKey(name);
-  if (!key) {
-    return [safeText(name, 120)];
-  }
-  return PERSON_ALIAS_GROUPS.find((group) => group.some((item) => aliasKey(item) === key)) ?? [safeText(name, 120)];
-}
-
-function aliasGroupKeyForPerson(name) {
-  return aliasGroupForPerson(name).map(aliasKey).filter(Boolean).sort().join('|');
-}
-
 function isSamePersonAlias(left, right) {
   const leftKey = aliasKey(left);
   const rightKey = aliasKey(right);
-  if (!leftKey || !rightKey) {
-    return false;
-  }
-  if (leftKey === rightKey) {
-    return true;
-  }
-  const leftGroup = aliasGroupKeyForPerson(left);
-  const rightGroup = aliasGroupKeyForPerson(right);
-  return Boolean(leftGroup && rightGroup && leftGroup === rightGroup);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
-function groupImportPeople(people) {
+function configuredPersonAliases(personProfiles) {
+  const canonicalCandidatesByKey = new Map();
+  const candidateAliasesByCanonical = new Map();
+  for (const profile of Array.isArray(personProfiles) ? personProfiles : []) {
+    const canonical = safeText(profile?.name, 120);
+    if (!canonical) continue;
+    const aliases = uniqueLimited(Array.isArray(profile.aliases) ? profile.aliases : [], 24)
+      .filter((alias) => aliasKey(alias) && aliasKey(alias) !== aliasKey(canonical));
+    candidateAliasesByCanonical.set(canonical, aliases);
+    for (const name of [canonical, ...aliases]) {
+      const key = aliasKey(name);
+      if (!key) continue;
+      if (!canonicalCandidatesByKey.has(key)) canonicalCandidatesByKey.set(key, new Set());
+      canonicalCandidatesByKey.get(key).add(canonical);
+    }
+  }
+  const canonicalByKey = new Map();
+  for (const [key, candidates] of canonicalCandidatesByKey.entries()) {
+    if (candidates.size === 1) canonicalByKey.set(key, [...candidates][0]);
+  }
+  const aliasesByCanonical = new Map();
+  for (const [canonical, aliases] of candidateAliasesByCanonical.entries()) {
+    aliasesByCanonical.set(canonical, aliases.filter((alias) => (
+      canonicalCandidatesByKey.get(aliasKey(alias))?.size === 1
+    )));
+  }
+  return { canonicalByKey, aliasesByCanonical };
+}
+
+function groupImportPeople(people, personProfiles = []) {
+  const configured = configuredPersonAliases(personProfiles);
   const canonicalByGroup = new Map();
   const aliasesByCanonical = new Map();
   const canonicalByName = new Map();
@@ -8871,12 +8870,13 @@ function groupImportPeople(people) {
     if (!name) {
       continue;
     }
-    const groupKey = aliasGroupForPerson(name).map(aliasKey).filter(Boolean).sort().join('|') || aliasKey(name);
+    const canonicalFromProfile = configured.canonicalByKey.get(aliasKey(name));
+    const groupKey = aliasKey(canonicalFromProfile ?? name);
     let canonical = canonicalByGroup.get(groupKey);
     if (!canonical) {
-      canonical = name;
+      canonical = canonicalFromProfile ?? name;
       canonicalByGroup.set(groupKey, canonical);
-      aliasesByCanonical.set(canonical, []);
+      aliasesByCanonical.set(canonical, [...(configured.aliasesByCanonical.get(canonical) ?? [])]);
       groupedPeople.push(canonical);
     } else if (aliasKey(name) !== aliasKey(canonical)) {
       const aliases = aliasesByCanonical.get(canonical);
@@ -8885,6 +8885,9 @@ function groupImportPeople(people) {
       }
     }
     canonicalByName.set(name, canonical);
+    for (const alias of configured.aliasesByCanonical.get(canonical) ?? []) {
+      canonicalByName.set(alias, canonical);
+    }
   }
 
   return {
@@ -9120,7 +9123,10 @@ function buildSemanticDeltaFromPreview(preview, options = {}) {
   const confirmedProjects = confirmedReviewProjectNames(reviewDecisions, ignoredReviews);
   const peopleSource = previewArray(preview, 'people_candidates')
     .filter((name) => !ignoredReviews.has(name));
-  const grouped = groupImportPeople(splitGalleryPersonCandidates(peopleSource).confident.slice(0, 18));
+  const grouped = groupImportPeople(
+    splitGalleryPersonCandidates(peopleSource).confident.slice(0, 18),
+    preview.person_profiles,
+  );
   const people = uniqueLimited([...grouped.people, ...confirmedReviewPeople], 18);
   const relationshipCandidates = previewArray(preview, 'relationship_candidates')
     .filter((candidate) => !relationshipTouchesIgnoredReviewEntity(candidate, ignoredReviews))

@@ -1376,7 +1376,7 @@ test('hook stop writes checkpoint with open loop and state signal', async () => 
     assert.deepEqual(body.decisions, ['Pulse owns continuity.']);
     assert.deepEqual(body.open_loops, ['Harden viewer auth.']);
     assert.deepEqual(body.do_not_repeat, ['Do not pitch generic graph memory.']);
-    assert.deepEqual(body.emotional_anchors, ['The Vitaly call changed the product wedge.']);
+    assert.deepEqual(body.emotional_anchors, ['The Bob call changed the product wedge.']);
     return { body: { ok: true } };
   });
   try {
@@ -1389,7 +1389,7 @@ test('hook stop writes checkpoint with open loop and state signal', async () => 
       decisions: ['Pulse owns continuity.'],
       open_loops: ['Harden viewer auth.'],
       do_not_repeat: ['Do not pitch generic graph memory.'],
-      emotional_anchors: ['The Vitaly call changed the product wedge.'],
+      emotional_anchors: ['The Bob call changed the product wedge.'],
       state_signals: ['User wants no re-explaining.'],
     }));
 
@@ -1486,7 +1486,7 @@ test('migrate preview scans a ChatGPT export without writing raw text', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Remember Vitaly follow-up for Pulse packaging.'] },
+            content: { parts: ['Remember Bob follow-up for Pulse packaging.'] },
           },
         },
         assistant: {
@@ -1506,9 +1506,33 @@ test('migrate preview scans a ChatGPT export without writing raw text', () => {
   assert.match(result.stdout, /source: chatgpt/);
   assert.match(result.stdout, /conversations: 1/);
   assert.match(result.stdout, /messages: 2/);
-  assert.match(result.stdout, /people found: Vitaly/);
+  assert.match(result.stdout, /people found: Bob/);
   assert.match(result.stdout, /thread candidates: Garden launch/);
   assert.match(result.stdout, /raw text will not be written/);
+});
+
+test('migrate preview does not promote generic sentence starters as people', () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-generic-person-word.'));
+  writeFileSync(join(exportDir, 'conversations.json'), JSON.stringify([
+    {
+      title: 'Simple reminder',
+      mapping: {
+        user: {
+          message: {
+            author: { role: 'user' },
+            content: { parts: ['Please remind Alice about the review.'] },
+          },
+        },
+      },
+    },
+  ]));
+
+  const { result } = run(['migrate', 'preview', exportDir, '--json']);
+
+  assert.equal(result.status, 0, result.stderr);
+  const preview = JSON.parse(result.stdout);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
+  assert.deepEqual(preview.people_candidates.includes('Please'), false);
 });
 
 test('migrate preview can scan a zipped ChatGPT export directly', () => {
@@ -1521,7 +1545,7 @@ test('migrate preview can scan a zipped ChatGPT export directly', () => {
       mapping: {
         user: {
           message: {
-            content: { parts: ['Vitaly should see the one-click archive import flow.'] },
+            content: { parts: ['Bob should see the one-click archive import flow.'] },
           },
         },
       },
@@ -1542,7 +1566,7 @@ test('migrate preview can scan a zipped ChatGPT export directly', () => {
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 1);
   assert.equal(preview.archive_was_unpacked, true);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.raw_text_written, false);
 });
 
@@ -1552,7 +1576,7 @@ test('migrate preview json scans Claude-like exports and redacts secrets', () =>
     {
       name: 'Pulse Distribution',
       chat_messages: [
-        { sender: 'human', text: 'Anya should review the Pulse graph viewer.' },
+        { sender: 'human', text: 'Alice should review the Pulse graph viewer.' },
         { sender: 'assistant', text: 'Do not store /home/example/private or sk-secret in Pulse.' },
       ],
     },
@@ -1568,7 +1592,7 @@ test('migrate preview json scans Claude-like exports and redacts secrets', () =>
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
   assert.deepEqual(preview.raw_text_written, false);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.thread_candidates.includes('Pulse Distribution'), true);
 });
 
@@ -1580,7 +1604,7 @@ test('migrate preview emits human-readable relationship labels', () => {
       mapping: {
         a: {
           message: {
-            content: { parts: ['Vitaly and Anya should review the Pulse Dashboard together.'] },
+            content: { parts: ['Bob and Alice should review the Pulse Dashboard together.'] },
           },
         },
       },
@@ -1591,12 +1615,12 @@ test('migrate preview emits human-readable relationship labels', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.relationship_candidates.includes('Vitaly - mentioned in - Pulse Dashboard'), true);
-  assert.deepEqual(preview.relationship_candidates.includes('Vitaly - related to - Anya'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Bob - mentioned in - Pulse Dashboard'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Bob - related to - Alice'), true);
   assert.doesNotMatch(JSON.stringify(preview.relationship_candidates), /->|<->|mentioned_in|related_to/);
 });
 
-test('migrate preview omits alias-self relationships', () => {
+test('migrate preview does not invent alias equivalence without a curated people graph', () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-alias-self-relationships.'));
   writeFileSync(join(exportDir, 'conversations.json'), JSON.stringify([
     {
@@ -1604,7 +1628,7 @@ test('migrate preview omits alias-self relationships', () => {
       mapping: {
         a: {
           message: {
-            content: { parts: ['Nik and Ник are the same person. Anya is a separate person.'] },
+            content: { parts: ['Alex and Алекс are the same person. Alice is a separate person.'] },
           },
         },
       },
@@ -1615,9 +1639,9 @@ test('migrate preview omits alias-self relationships', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.relationship_candidates.includes('Nik - related to - Anya'), true);
-  assert.deepEqual(preview.relationship_candidates.includes('Nik - related to - Ник'), false);
-  assert.deepEqual(preview.relationship_candidates.includes('Ник - related to - Anya'), false);
+  assert.deepEqual(preview.relationship_candidates.includes('Alex - related to - Alice'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Alex - related to - Алекс'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Алекс - related to - Alice'), true);
 });
 
 test('migrate preview scans Claude conversations exports larger than the old 50MB guard', () => {
@@ -1628,7 +1652,7 @@ test('migrate preview scans Claude conversations exports larger than the old 50M
       name: 'Large Claude archive',
       ignored_padding: padding,
       chat_messages: [
-        { sender: 'human', text: 'Vitaly should verify the large Claude archive preview.' },
+        { sender: 'human', text: 'Bob should verify the large Claude archive preview.' },
       ],
     },
   ]));
@@ -1641,7 +1665,7 @@ test('migrate preview scans Claude conversations exports larger than the old 50M
   assert.equal(preview.files_skipped.length, 0);
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 1);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.raw_text_written, false);
 });
 
@@ -1653,14 +1677,14 @@ test('migrate preview keeps Claude as source when archive has unknown sidecar ch
     {
       name: 'Claude main archive',
       chat_messages: [
-        { sender: 'human', text: 'Vitaly should review the Claude main archive.' },
+        { sender: 'human', text: 'Bob should review the Claude main archive.' },
       ],
     },
   ]));
   writeFileSync(join(sidecars, 'sidecar.json'), JSON.stringify({
     name: 'Design sidecar',
     messages: [
-      { text: 'Anya appears in a sidecar chat without host metadata.' },
+      { text: 'Alice appears in a sidecar chat without host metadata.' },
     ],
   }));
 
@@ -1671,8 +1695,8 @@ test('migrate preview keeps Claude as source when archive has unknown sidecar ch
   assert.equal(preview.source, 'claude');
   assert.equal(preview.conversations, 2);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
 });
 
 test('migrate preview fails clearly for a missing archive path', () => {
@@ -1700,7 +1724,7 @@ create_time: 2025-09-01T10:00:00Z
 # Title: Pulse MCP people graph
 
 >[!nexus_user] **User** - 2025-09-01 10:00
-> This raw Nexus sentence must stay hidden. Vitaly and Anya should inspect the people graph.
+> This raw Nexus sentence must stay hidden. Bob and Alice should inspect the people graph.
 
 >[!nexus_agent] **Assistant** - 2025-09-01 10:01
 > Pulse should keep the graph preview gentle and structured.
@@ -1730,8 +1754,8 @@ provider: chatgpt
   assert.equal(preview.files_scanned, 1);
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.people_candidates.includes('Oldperson'), false);
   assert.deepEqual(preview.review_candidates.includes('Qwen'), false);
   assert.deepEqual(preview.thread_candidates.includes('Pulse MCP people graph'), true);
@@ -1750,7 +1774,7 @@ test('migrate preview scans Codex JSONL session files', () => {
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Ask Vitaly about the Pulse graph migrator.' }],
+        content: [{ type: 'input_text', text: 'Ask Bob about the Pulse graph migrator.' }],
       },
     }),
     JSON.stringify({
@@ -1771,7 +1795,7 @@ test('migrate preview scans Codex JSONL session files', () => {
   assert.equal(preview.source, 'codex');
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.people_candidates.includes('Keep'), false);
   assert.deepEqual(preview.raw_text_written, false);
 });
@@ -1786,7 +1810,7 @@ test('migrate preview filters harness words from person candidates', () => {
       role: 'user',
       content: [{
         type: 'input_text',
-          text: 'Filesystem Network Approvals Default However Planning Task Agent Read Bash Updated Users-nikshilov Check Сейчас Use Phase Output File Opus Sonnet Asia Bangkok Error Usage May Mem Hello Record Create Failed Invalid Full After Command Work Async Pro Pages Один Когда Три Сначала Только Потом Telegram Hermes Atlas Both Pass Python Project Bundle Confirmed Not Architecture Extraction Test Tests Russian Complete Correction Live Source All Conversation Added Verified Verify Section Waiting Apr June Prompt Server Context Heart Chat Demo Companion Evidence First Script Gateway Build Cloudflare Final Fix Run Running Files Port Worker Created History Primary Hearth Bitwarden Library Caches Applications Bench Content Map Module Акт Готово Просто Жду Через Всё После Пауза Запускаю Два Проверю Его Мне Цель Для Тихо Ещё Медленно Привет Карта Мои Напиши Приоритет Или Чтобы Now. Vitaly should review Pulse. Vitaly is the real person here.',
+          text: 'Filesystem Network Approvals Default However Planning Task Agent Read Bash Updated Users-example Check Сейчас Use Phase Output File Opus Sonnet Asia Location Error Usage May Mem Hello Record Create Failed Invalid Full After Command Work Async Pro Pages Один Когда Три Сначала Только Потом Telegram Hermes Atlas Both Pass Python Project Bundle Confirmed Not Architecture Extraction Test Tests Russian Complete Correction Live Source All Conversation Added Verified Verify Section Waiting Apr June Prompt Server Context Heart Chat Demo Companion Evidence First Script Gateway Build Cloudflare Final Fix Run Running Files Port Worker Created History Primary Hearth Bitwarden Library Caches Applications Bench Content Map Module Акт Готово Просто Жду Через Всё После Пауза Запускаю Два Проверю Его Мне Цель Для Тихо Ещё Медленно Привет Карта Мои Напиши Приоритет Или Чтобы Now. Bob should review Pulse. Bob is the real person here.',
       }],
     },
   }),
@@ -1795,7 +1819,7 @@ test('migrate preview filters harness words from person candidates', () => {
       payload: {
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'output_text', text: 'Vitaly remains the relevant person candidate.' }],
+        content: [{ type: 'output_text', text: 'Bob remains the relevant person candidate.' }],
       },
     }),
   ].join('\n'));
@@ -1804,11 +1828,11 @@ test('migrate preview filters harness words from person candidates', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.equal(preview.people_candidates[0], 'Vitaly');
-  for (const noise of ['Filesystem', 'Network', 'Approvals', 'Default', 'However', 'Planning', 'Task', 'Agent', 'Read', 'Bash', 'Import', 'Keep', 'Graph', 'Viewer', 'Preview', 'Updated', 'Users-nikshilov', 'Check', 'Сейчас', 'Use', 'Phase', 'Output', 'File', 'Opus', 'Sonnet', 'Asia', 'Bangkok', 'Error', 'Usage', 'May', 'Mem', 'Hello', 'Record', 'Create', 'Failed', 'Invalid', 'Full', 'After', 'Command', 'Work', 'Async', 'Pro', 'Pages', 'Один', 'Когда', 'Три', 'Сначала', 'Только', 'Потом', 'Telegram', 'Hermes', 'Atlas', 'Both', 'Pass', 'Python', 'Project', 'Bundle', 'Confirmed', 'Not', 'Architecture', 'Extraction', 'Test', 'Tests', 'Russian', 'Complete', 'Correction', 'Live', 'Source', 'All', 'Conversation', 'Added', 'Verified', 'Verify', 'Section', 'Waiting', 'Apr', 'June', 'Prompt', 'Server', 'Context', 'Heart', 'Chat', 'Demo', 'Companion', 'Evidence', 'First', 'Script', 'Gateway', 'Build', 'Cloudflare', 'Final', 'Fix', 'Run', 'Running', 'Files', 'Port', 'Worker', 'Created', 'History', 'Primary', 'Hearth', 'Bitwarden', 'Library', 'Caches', 'Applications', 'Bench', 'Content', 'Map', 'Module', 'Акт', 'Готово', 'Просто', 'Жду', 'Через', 'Всё', 'После', 'Пауза', 'Запускаю', 'Два', 'Проверю', 'Его', 'Мне', 'Цель', 'Для', 'Тихо', 'Ещё', 'Медленно', 'Привет', 'Карта', 'Мои', 'Напиши', 'Приоритет', 'Или', 'Чтобы', 'Now']) {
+  assert.equal(preview.people_candidates[0], 'Bob');
+  for (const noise of ['Filesystem', 'Network', 'Approvals', 'Default', 'However', 'Planning', 'Task', 'Agent', 'Read', 'Bash', 'Import', 'Keep', 'Graph', 'Viewer', 'Preview', 'Updated', 'Users-example', 'Check', 'Сейчас', 'Use', 'Phase', 'Output', 'File', 'Opus', 'Sonnet', 'Asia', 'Location', 'Error', 'Usage', 'May', 'Mem', 'Hello', 'Record', 'Create', 'Failed', 'Invalid', 'Full', 'After', 'Command', 'Work', 'Async', 'Pro', 'Pages', 'Один', 'Когда', 'Три', 'Сначала', 'Только', 'Потом', 'Telegram', 'Hermes', 'Atlas', 'Both', 'Pass', 'Python', 'Project', 'Bundle', 'Confirmed', 'Not', 'Architecture', 'Extraction', 'Test', 'Tests', 'Russian', 'Complete', 'Correction', 'Live', 'Source', 'All', 'Conversation', 'Added', 'Verified', 'Verify', 'Section', 'Waiting', 'Apr', 'June', 'Prompt', 'Server', 'Context', 'Heart', 'Chat', 'Demo', 'Companion', 'Evidence', 'First', 'Script', 'Gateway', 'Build', 'Cloudflare', 'Final', 'Fix', 'Run', 'Running', 'Files', 'Port', 'Worker', 'Created', 'History', 'Primary', 'Hearth', 'Bitwarden', 'Library', 'Caches', 'Applications', 'Bench', 'Content', 'Map', 'Module', 'Акт', 'Готово', 'Просто', 'Жду', 'Через', 'Всё', 'После', 'Пауза', 'Запускаю', 'Два', 'Проверю', 'Его', 'Мне', 'Цель', 'Для', 'Тихо', 'Ещё', 'Медленно', 'Привет', 'Карта', 'Мои', 'Напиши', 'Приоритет', 'Или', 'Чтобы', 'Now']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should be filtered`);
   }
-  assert.deepEqual(preview.fun_fact_candidates.some((fact) => /^Vitaly appeared/.test(fact)), true);
+  assert.deepEqual(preview.fun_fact_candidates.some((fact) => /^Bob appeared/.test(fact)), true);
 });
 
 test('migrate preview keeps repeated generic words out of review candidates', () => {
@@ -1822,7 +1846,7 @@ test('migrate preview keeps repeated generic words out of review candidates', ()
           message: {
             content: {
               parts: [
-                'Google Data Step Background Real Process Before Total Two Three Choose Privacy Avoid Built Автор Explore Guidance Heavy Аудитория Курс Тематика Conversations Benchmark Consulting should not become review entities. Vitaly is real.',
+                'Google Data Step Background Real Process Before Total Two Three Choose Privacy Avoid Built Автор Explore Guidance Heavy Аудитория Курс Тематика Conversations Benchmark Consulting should not become review entities. Bob is real.',
               ],
             },
           },
@@ -1835,7 +1859,7 @@ test('migrate preview keeps repeated generic words out of review candidates', ()
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   for (const noise of ['Google', 'Data', 'Step', 'Background', 'Real', 'Process', 'Before', 'Total', 'Two', 'Three', 'Choose', 'Privacy', 'Avoid', 'Built', 'Автор', 'Explore', 'Guidance', 'Heavy', 'Аудитория', 'Курс', 'Тематика', 'Conversations', 'Benchmark', 'Consulting']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should not be a person`);
     assert.equal(preview.review_candidates.includes(noise), false, `${noise} should not be review queue noise`);
@@ -1850,7 +1874,7 @@ test('migrate preview scans Claude Code JSONL project files', () => {
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-session',
-      content: { text: 'Anya should review the beautiful Pulse people viewer.' },
+      content: { text: 'Alice should review the beautiful Pulse people viewer.' },
     }),
     JSON.stringify({
       type: 'assistant',
@@ -1868,7 +1892,7 @@ test('migrate preview scans Claude Code JSONL project files', () => {
   assert.equal(preview.source, 'claude-code');
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.thread_candidates.length, 1);
 });
 
@@ -1882,7 +1906,7 @@ test('migrate preview hides technical session ids and noisy inflections from hum
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: technicalSession,
       content: {
-        text: 'Эли напомнила Никите: Назови движение иначе. Browser Connector Telethon Cron Timestamps True Move Core System Session Retrieval Observations are tools, not people. Никита and Vitaly are the actual people here.',
+        text: 'Мария напомнила Александру: Назови движение иначе. Browser Connector Telethon Cron Timestamps True Move Core System Session Retrieval Observations are tools, not people. Александр and Bob are the actual people here.',
       },
     }),
     JSON.stringify({
@@ -1890,7 +1914,7 @@ test('migrate preview hides technical session ids and noisy inflections from hum
       operation: 'message',
       timestamp: '2026-06-03T00:02:00Z',
       sessionId: technicalSession,
-      content: [{ type: 'text', text: 'Элли and Vitaly should remain human candidates; Обращ, Движение, Browser, Connector, Telethon, Core, and System should not.' }],
+      content: [{ type: 'text', text: 'Мария and Bob should remain human candidates; Обращ, Движение, Browser, Connector, Telethon, Core, and System should not.' }],
     }),
   ].join('\n'));
 
@@ -1900,10 +1924,10 @@ test('migrate preview hides technical session ids and noisy inflections from hum
   assert.doesNotMatch(result.stdout, new RegExp(technicalSession));
   const preview = JSON.parse(result.stdout);
   assert.equal(preview.source, 'claude-code');
-  assert.deepEqual(preview.people_candidates.includes('Элли'), true);
-  assert.deepEqual(preview.people_candidates.includes('Никита'), true);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  for (const noise of ['Эли', 'Никите', 'Назови', 'Движение', 'Обращ', 'Browser', 'Connector', 'Telethon', 'Cron', 'Timestamps', 'True', 'Move', 'Core', 'System', 'Session', 'Retrieval', 'Observations']) {
+  assert.deepEqual(preview.people_candidates.includes('Мария'), true);
+  assert.deepEqual(preview.people_candidates.includes('Александр'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  for (const noise of ['Марии', 'Александру', 'Назови', 'Движение', 'Обращ', 'Browser', 'Connector', 'Telethon', 'Cron', 'Timestamps', 'True', 'Move', 'Core', 'System', 'Session', 'Retrieval', 'Observations']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should not be a promoted person`);
     assert.equal(preview.review_candidates.includes(noise), false, `${noise} should not be review noise`);
   }
@@ -1923,7 +1947,7 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
             author: { role: 'user' },
             content: {
               parts: [
-                'Remember Vitaly and Anya are reviewing Pulse. Qwen, Cartographer, Cinema, and Dossier are not people. Nik felt relief after the archive migrator plan.',
+                'Remember Bob and Alice are reviewing Pulse. Qwen, Cartographer, Cinema, and Dossier are not people. Alex felt relief after the archive migrator plan.',
               ],
             },
           },
@@ -1970,8 +1994,8 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.match(html, /person-card/);
   assert.match(html, /Evidence/);
   assert.match(html, /Related continuity/);
-  assert.match(html, /Vitaly/);
-  assert.match(html, /Anya/);
+  assert.match(html, /Bob/);
+  assert.match(html, /Alice/);
   assert.match(html, /Needs your decision/);
   assert.match(html, /Qwen/);
   assert.match(html, /Cartographer/);
@@ -1987,12 +2011,12 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.doesNotMatch(html, /Cartographer appeared in \d+ safe preview signal/);
   assert.doesNotMatch(html, /Cinema appeared in \d+ safe preview signal/);
   assert.doesNotMatch(html, /Dossier appeared in \d+ safe preview signal/);
-  assert.match(html, /Vitaly appeared in 1 bounded source snippet/);
-  assert.match(html, /Vitaly - mentioned in - Garden launch/);
-  assert.doesNotMatch(html, /Vitaly -&gt; Garden launch|Vitaly &lt;-&gt; Anya/);
+  assert.match(html, /Bob appeared in 1 bounded source snippet/);
+  assert.match(html, /Bob - mentioned in - Garden launch/);
+  assert.doesNotMatch(html, /Bob -&gt; Garden launch|Bob &lt;-&gt; Alice/);
   assert.match(html, /relief/i);
   assert.match(html, /Raw chat text was not written/);
-  assert.doesNotMatch(html, /Nik felt relief after the archive migrator plan/);
+  assert.doesNotMatch(html, /Alex felt relief after the archive migrator plan/);
   assert.doesNotMatch(html, /fun facts/i);
   assert.doesNotMatch(html, /people, memories, emotions, relationships/i);
   assert.doesNotMatch(html, /safe message signals/i);
@@ -2007,7 +2031,7 @@ test('migrate preview json exposes staged import flow', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Remember Vitaly should inspect the Pulse MCP developer preview before public claims.'] },
+            content: { parts: ['Remember Bob should inspect the Pulse MCP developer preview before public claims.'] },
           },
         },
         assistant: {
@@ -2040,7 +2064,7 @@ test('migrate preview json exposes staged import flow', () => {
   const { result } = run(['migrate', 'preview', exportDir, '--json']);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.doesNotMatch(result.stdout, /Remember Vitaly should inspect|Decision: keep import/);
+  assert.doesNotMatch(result.stdout, /Remember Bob should inspect|Decision: keep import/);
   const preview = JSON.parse(result.stdout);
   assert.equal(preview.flow, 'pulse.import_preview.v2');
   assert.equal(preview.source_scan.status, 'scanned');
@@ -2059,7 +2083,7 @@ test('migrate preview json exposes staged import flow', () => {
 	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.source_snippets >= 0), true);
 	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.structured_candidates >= 1), true);
 	assert.equal(preview.candidate_threads.every((thread) => thread.token_economy === undefined), true);
-  assert.equal(preview.candidate_threads.some((thread) => thread.people_found.includes('Vitaly')), true);
+  assert.equal(preview.candidate_threads.some((thread) => thread.people_found.includes('Bob')), true);
   assert.ok(Array.isArray(preview.pulse_insights));
   assert.equal(preview.pulse_insights.length >= 1, true);
   const distributionInsight = preview.pulse_insights.find((insight) => insight.thread_title === 'Pulse MCP distribution');
@@ -2068,7 +2092,7 @@ test('migrate preview json exposes staged import flow', () => {
   assert.equal(distributionInsight.privacy_tier, 'private');
   assert.match(distributionInsight.title, /Why this may matter now/);
   assert.match(distributionInsight.summary, /Pulse MCP distribution/);
-  assert.equal(distributionInsight.reasons.some((reason) => /Vitaly.*Pulse MCP distribution|Pulse MCP distribution.*Vitaly/i.test(reason)), true);
+  assert.equal(distributionInsight.reasons.some((reason) => /Bob.*Pulse MCP distribution|Pulse MCP distribution.*Bob/i.test(reason)), true);
   assert.equal(distributionInsight.reasons.some((reason) => /1 related person found/i.test(reason)), true);
   assert.doesNotMatch(JSON.stringify(distributionInsight), /1 people found/i);
   assert.match(distributionInsight.suggested_next_step, /Review this thread before import/);
@@ -2099,7 +2123,7 @@ test('migrate preview HTML follows source-to-gate flow with local review actions
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly and Anya should review Cartographer before the import gate.'] },
+            content: { parts: ['Bob and Alice should review Cartographer before the import gate.'] },
           },
         },
         assistant: {
@@ -2191,7 +2215,7 @@ test('migrate preview can write HTML and commit-ready JSON together', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should inspect the Pulse people profile preview before import.'] },
+            content: { parts: ['Bob should inspect the Pulse people profile preview before import.'] },
           },
         },
       },
@@ -2218,7 +2242,7 @@ test('migrate preview can write HTML and commit-ready JSON together', () => {
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.raw_text_written, false);
   assert.equal(preview.html_path, htmlPath);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   const html = readFileSync(htmlPath, 'utf8');
   assert.match(html, /Import gate/);
   assert.match(html, /Nothing is imported until/);
@@ -2260,7 +2284,7 @@ test('migrate preview-latest finds newest host archive in downloads', () => {
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should be found from the newest ChatGPT archive.'] },
+            content: { parts: ['Bob should be found from the newest ChatGPT archive.'] },
           },
         },
       },
@@ -2290,9 +2314,9 @@ test('migrate preview-latest finds newest host archive in downloads', () => {
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'chatgpt');
   assert.match(preview.next, new RegExp(`pulse migrate commit ${jsonPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --confirm "import pulse graph"`));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.people_candidates.includes('Oldperson'), false);
-  assert.match(readFileSync(htmlPath, 'utf8'), /Vitaly/);
+  assert.match(readFileSync(htmlPath, 'utf8'), /Bob/);
 });
 
 test('migrate preview-latest preserves host label for Claude archives', () => {
@@ -2304,7 +2328,7 @@ test('migrate preview-latest preserves host label for Claude archives', () => {
     {
       name: 'Claude archive export',
       messages: [
-        { sender: 'human', text: 'Vitaly should review the Claude archive preview.' },
+        { sender: 'human', text: 'Bob should review the Claude archive preview.' },
       ],
     },
   ]));
@@ -2354,7 +2378,7 @@ test('migrate wait-latest waits for host archive then previews it', { timeout: 1
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should appear after Pulse waits for the archive download.'] },
+            content: { parts: ['Bob should appear after Pulse waits for the archive download.'] },
           },
         },
       },
@@ -2389,7 +2413,7 @@ test('migrate wait-latest waits for host archive then previews it', { timeout: 1
   assert.match(result.stdout, /migration HTML preview/);
   assert.match(result.stdout, /migration JSON preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Import gate/);
 });
 
@@ -2406,7 +2430,7 @@ test('migrate request opens host archive page then waits for download preview', 
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should appear after Pulse opens the archive request page.'] },
+            content: { parts: ['Bob should appear after Pulse opens the archive request page.'] },
           },
         },
       },
@@ -2441,7 +2465,7 @@ test('migrate request opens host archive page then waits for download preview', 
   assert.match(result.stdout, /waiting for chatgpt archive/);
   assert.match(result.stdout, /migration HTML preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Open the memory viewer/);
 });
 
@@ -2456,7 +2480,7 @@ test('migrate request defaults to browser preview files', { timeout: 10000 }, as
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Anya should see the default Pulse preview without extra flags.'] },
+            content: { parts: ['Alice should see the default Pulse preview without extra flags.'] },
           },
         },
       },
@@ -2494,7 +2518,7 @@ test('migrate request defaults to browser preview files', { timeout: 10000 }, as
   assert.equal(existsSync(jsonPath), true);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.html_path, htmlPath);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Import structured continuity/);
 });
 
@@ -2507,30 +2531,31 @@ function writePeopleGraphFixture() {
     '',
     '| Name | Role | Close | Relevant | File |',
     '|------|------|-------|----------|------|',
-    '| Vitaly Dubinin | founder and warm product reviewer | 4 | pulse-distribution | vitaly.md |',
-    '| Nikita Androsov | AI governance connector | 3 | work | nikita-androsov.md |',
+    '| Bob Example | founder and warm product reviewer | 4 | pulse-distribution | bob-example.md |',
+    '| Carol Example | AI governance connector | 3 | work | carol-example.md |',
   ].join('\n'));
-  writeFileSync(join(peopleDir, 'vitaly.md'), [
-    '# Vitaly Dubinin',
+  writeFileSync(join(peopleDir, 'bob-example.md'), [
+    '# Bob Example',
     '',
     '**Status:** warm contact after product call',
-    '**Telegram:** @vitaly',
+    '**Telegram:** @bob_example',
+    '**Aliases:** Robert Example, Боб Example',
     '',
     '## Summary',
-    'Vitaly call changed the Pulse wedge toward memory and continuity instead of generic companion positioning.',
+    'Bob call changed the Pulse wedge toward memory and continuity instead of generic companion positioning.',
     '',
     '## Links',
     '- source:memory/contacts/personal-contacts.md',
     '- Introduced Pulse packaging critique',
     '- Can review first public MCP bundle',
   ].join('\n'));
-  writeFileSync(join(peopleDir, 'nikita-androsov.md'), [
-    '# Nikita Androsov',
+  writeFileSync(join(peopleDir, 'carol-example.md'), [
+    '# Carol Example',
     '',
     '**Status:** useful AI governance bridge',
     '',
     '## Summary',
-    'Nikita can connect the AI governance course context to Pulse distribution.',
+    'Alexander can connect the AI governance course context to Pulse distribution.',
   ].join('\n'));
   return graphDir;
 }
@@ -2548,33 +2573,34 @@ test('migrate preview-people-graph reads curated real people before archive cand
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'people-graph');
   assert.equal(preview.source_kind, 'curated_people_graph');
-  assert.deepEqual(preview.people_candidates, ['Vitaly Dubinin', 'Nikita Androsov']);
+  assert.deepEqual(preview.people_candidates, ['Bob Example', 'Carol Example']);
   assert.deepEqual(preview.review_candidates, []);
   assert.equal(preview.raw_text_written, false);
   assert.match(preview.next, /pulse migrate commit/);
   assert.equal(Array.isArray(preview.person_profiles), true);
-  const vitaly = preview.person_profiles.find((profile) => profile.name === 'Vitaly Dubinin');
-  assert.ok(vitaly, JSON.stringify(preview.person_profiles));
-  assert.equal(vitaly.role, 'founder and warm product reviewer');
-  assert.equal(vitaly.closeness, 4);
-  assert.equal(vitaly.relevance, 'pulse-distribution');
-  assert.equal(vitaly.status, 'warm contact after product call');
-  assert.equal(vitaly.evidence_ref, 'people/vitaly.md');
-  assert.match(vitaly.summary, /Pulse wedge/);
-  assert.deepEqual(vitaly.links.includes('Can review first public MCP bundle'), true);
-  assert.deepEqual(preview.relationship_candidates.some((item) => /source:memory|people\/vitaly\.md/.test(item)), false);
-  assert.doesNotMatch(JSON.stringify(preview), /Qwen|Cinema|Sonya|raw transcript/i);
+  const bobProfile = preview.person_profiles.find((profile) => profile.name === 'Bob Example');
+  assert.ok(bobProfile, JSON.stringify(preview.person_profiles));
+  assert.equal(bobProfile.role, 'founder and warm product reviewer');
+  assert.equal(bobProfile.closeness, 4);
+  assert.equal(bobProfile.relevance, 'pulse-distribution');
+  assert.equal(bobProfile.status, 'warm contact after product call');
+  assert.equal(bobProfile.evidence_ref, 'people/bob-example.md');
+  assert.deepEqual(bobProfile.aliases, ['Robert Example', 'Боб Example']);
+  assert.match(bobProfile.summary, /Pulse wedge/);
+  assert.deepEqual(bobProfile.links.includes('Can review first public MCP bundle'), true);
+  assert.deepEqual(preview.relationship_candidates.some((item) => /source:memory|people\/bob-example\.md/.test(item)), false);
+  assert.doesNotMatch(JSON.stringify(preview), /Qwen|Cinema|Sophie|raw transcript/i);
 
   const html = readFileSync(htmlPath, 'utf8');
   assert.match(html, /Real people graph/);
   assert.match(html, /Curated people/);
-  assert.match(html, /Vitaly Dubinin/);
+  assert.match(html, /Bob Example/);
   assert.match(html, /founder and warm product reviewer/);
   assert.match(html, /warm contact after product call/);
   assert.match(html, /Personal contacts/);
-  assert.doesNotMatch(html, /source:memory|people\/vitaly\.md/);
+  assert.doesNotMatch(html, /source:memory|people\/bob-example\.md/);
   assert.match(html, /pulse-distribution/);
-  assert.doesNotMatch(html, /Qwen|Cinema|Sonya/);
+  assert.doesNotMatch(html, /Qwen|Cinema|Sophie/);
 });
 
 test('migrate request previews local Codex history with default browser files', async () => {
@@ -2587,7 +2613,7 @@ test('migrate request previews local Codex history with default browser files', 
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Vitaly should inspect local Codex memory relationships.' }],
+        content: [{ type: 'input_text', text: 'Bob should inspect local Codex memory relationships.' }],
       },
     }),
   ].join('\n'));
@@ -2609,7 +2635,7 @@ test('migrate request previews local Codex history with default browser files', 
   assert.match(result.stdout, new RegExp(`opened browser: ${htmlPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'codex');
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /People found/);
 });
 
@@ -2623,7 +2649,7 @@ test('migrate request previews local Claude Code history with default browser fi
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-local-request',
-      content: { text: 'Anya should inspect local Claude Code memory profiles.' },
+      content: { text: 'Alice should inspect local Claude Code memory profiles.' },
     }),
   ].join('\n'));
 
@@ -2643,7 +2669,7 @@ test('migrate request previews local Claude Code history with default browser fi
   assert.match(result.stdout, /migration JSON preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'claude-code');
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Open the memory viewer/);
 });
 
@@ -2664,7 +2690,7 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
             author: { role: 'user' },
             content: {
               parts: [
-                'Remember Vitaly and Anya are reviewing Pulse. Nik felt relief after the archive migrator plan.',
+                'Remember Bob and Alice are reviewing Pulse. Alex felt relief after the archive migrator plan.',
               ],
             },
           },
@@ -2730,12 +2756,12 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
     assert.deepEqual(viewerData.graph_profile.emotions.includes('relief'), true);
     const profiles = viewerData.graph_profile.person_profiles;
     assert.equal(Array.isArray(profiles), true);
-    const vitaly = profiles.find((profile) => profile.name === 'Vitaly');
-    assert.ok(vitaly, JSON.stringify(profiles));
-    assert.match(vitaly.summary, /Person candidate/);
-    assert.match(vitaly.facts.join('\n'), /Vitaly appeared in 1 bounded source snippet/);
-    assert.match(vitaly.relationships.join('\n'), /Vitaly mentioned in Garden launch/);
-    assert.match(vitaly.memories.join('\n'), /Pulse archive import preview committed/);
+    const bobProfile = profiles.find((profile) => profile.name === 'Bob');
+    assert.ok(bobProfile, JSON.stringify(profiles));
+    assert.match(bobProfile.summary, /Person candidate/);
+    assert.match(bobProfile.facts.join('\n'), /Bob appeared in 1 bounded source snippet/);
+    assert.match(bobProfile.relationships.join('\n'), /Bob mentioned in Garden launch/);
+    assert.match(bobProfile.memories.join('\n'), /Pulse archive import preview committed/);
 
     const viewerResp = await fetch(`${pulse.baseUrl}/viewer?key=${pulse.secret}&thread_id=archive-import`);
     if (viewerResp.status !== 200) {
@@ -2746,7 +2772,7 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
     assert.match(viewerHTML, /graph-profile-cards/);
     assert.match(viewerHTML, /graph-emotions/);
     assert.match(viewerHTML, /person_profiles/);
-    assert.doesNotMatch(JSON.stringify(viewerData), /Nik felt relief after the archive migrator plan/);
+    assert.doesNotMatch(JSON.stringify(viewerData), /Alex felt relief after the archive migrator plan/);
   } finally {
     await pulse.stop();
   }
@@ -2794,13 +2820,13 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     source: 'chatgpt',
     conversations: 1,
     messages: 2,
-    people_candidates: ['Vitaly', 'Qwen', 'Cinema', 'Anya'],
+    people_candidates: ['Bob', 'Qwen', 'Cinema', 'Alice'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 2 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Garden launch', 'Vitaly <-> Anya', 'Qwen <-> Cinema'],
+    relationship_candidates: ['Bob -> Garden launch', 'Bob <-> Alice', 'Qwen <-> Cinema'],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 safe preview signal',
+      'Bob appeared in 1 safe preview signal',
       'Qwen appeared in 1 safe preview signal',
       'Cinema appeared in 1 safe preview signal',
     ],
@@ -2815,10 +2841,10 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     assert.equal(body.source.conversation_scope, 'project_context');
     assert.equal(body.source.thread_id, 'archive-import');
     assert.match(body.source.timestamp, /^\d{4}-\d{2}-\d{2}T/);
-    assert.deepEqual(body.nodes.map((node) => node.canonical_name), ['Vitaly', 'Anya', 'Garden launch']);
+    assert.deepEqual(body.nodes.map((node) => node.canonical_name), ['Bob', 'Alice', 'Garden launch']);
     assert.deepEqual(body.nodes.map((node) => node.kind), ['person', 'person', 'project']);
     assert.deepEqual(body.edges.map((edge) => edge.kind), ['mentioned_in', 'related_to']);
-    assert.deepEqual(body.facts.map((fact) => fact.text), ['Vitaly appeared in 1 safe preview signal']);
+    assert.deepEqual(body.facts.map((fact) => fact.text), ['Bob appeared in 1 safe preview signal']);
     assert.deepEqual([...body.nodes, ...body.edges, ...body.facts, ...body.events].map((item) => item.privacy_tier), [
       'private',
       'private',
@@ -2831,7 +2857,7 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     ]);
     assert.match(body.events[0].title, /Pulse archive import preview/);
     assert.match(body.continuity.summary, /Imported safe Pulse archive preview/);
-    assert.doesNotMatch(JSON.stringify(body), /Nik felt relief after the archive migrator plan|raw chat|PULSE_API_KEY|secret\.key/);
+    assert.doesNotMatch(JSON.stringify(body), /Alex felt relief after the archive migrator plan|raw chat|PULSE_API_KEY|secret\.key/);
     return {
       body: {
         ok: true,
@@ -2878,7 +2904,7 @@ test('migrate commit fails closed on a rejected terminal receipt', async () => {
     source: 'chatgpt',
     conversations: 1,
     messages: 2,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 2 safe message signals'],
     relationship_candidates: [],
@@ -2918,13 +2944,13 @@ test('migrate commit applies persisted review decisions from reviewed JSON', asy
     source: 'chatgpt',
     conversations: 1,
     messages: 3,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 3 source snippets'],
-    relationship_candidates: ['Vitaly -> Garden launch', 'Qwen -> Garden launch', 'Cartographer -> Garden launch'],
+    relationship_candidates: ['Bob -> Garden launch', 'Qwen -> Garden launch', 'Cartographer -> Garden launch'],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Qwen appeared in 1 bounded source snippet',
     ],
     review_decisions: {
@@ -2937,9 +2963,9 @@ test('migrate commit applies persisted review decisions from reviewed JSON', asy
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const names = body.nodes.map((node) => node.canonical_name);
-    assert.deepEqual(names, ['Vitaly', 'Garden launch', 'Cartographer']);
+    assert.deepEqual(names, ['Bob', 'Garden launch', 'Cartographer']);
     assert.equal(JSON.stringify(body).includes('Qwen'), false);
-    assert.deepEqual(body.facts.map((fact) => fact.text), ['Vitaly appeared in 1 bounded source snippet']);
+    assert.deepEqual(body.facts.map((fact) => fact.text), ['Bob appeared in 1 bounded source snippet']);
     return { body: { ok: true } };
   });
   try {
@@ -2972,17 +2998,17 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     source: 'chatgpt',
     conversations: 1,
     messages: 4,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 4 source snippets'],
     relationship_candidates: [
-      'Vitaly -> Garden launch',
+      'Bob -> Garden launch',
       'Cartographer -> Garden launch',
       'Qwen -> Garden launch',
     ],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
       'Qwen appeared in 1 bounded source snippet',
     ],
@@ -2996,10 +3022,10 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const names = body.nodes.map((node) => node.canonical_name);
-    assert.deepEqual(names, ['Vitaly', 'Garden launch', 'Cartographer']);
+    assert.deepEqual(names, ['Bob', 'Garden launch', 'Cartographer']);
     assert.equal(JSON.stringify(body).includes('Qwen'), false);
     assert.deepEqual(body.facts.map((fact) => fact.text), [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
     ]);
     const nodeByName = new Map(body.nodes.map((node) => [node.canonical_name, node.client_id]));
@@ -3010,7 +3036,7 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     )), JSON.stringify(body.edges));
     assert.ok(body.edges.some((edge) => (
       edge.kind === 'mentioned_in' &&
-      edge.from === nodeByName.get('Vitaly') &&
+      edge.from === nodeByName.get('Bob') &&
       edge.to === nodeByName.get('Garden launch')
     )), JSON.stringify(body.edges));
     return { body: { ok: true } };
@@ -3045,7 +3071,7 @@ test('migrate commit materializes Pulse insights without ignored review leakage'
     source: 'chatgpt',
     conversations: 1,
     messages: 5,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: [
@@ -3053,12 +3079,12 @@ test('migrate commit materializes Pulse insights without ignored review leakage'
       'Codex entity hygiene session: 2 source snippets',
     ],
     relationship_candidates: [
-      'Vitaly -> Garden launch',
+      'Bob -> Garden launch',
       'Cartographer -> Garden launch',
       'Qwen -> Garden launch',
     ],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
       'Qwen appeared in 1 bounded source snippet',
     ],
@@ -3157,10 +3183,10 @@ test('migrate commit allows explicit privacy override for developer smoke', asyn
     source: 'chatgpt',
     conversations: 1,
     messages: 2,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 2 safe message signals'],
-    relationship_candidates: ['Vitaly -> Garden launch'],
+    relationship_candidates: ['Bob -> Garden launch'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -3223,15 +3249,19 @@ test('migrate commit groups obvious person aliases before graph import', async (
     source: 'chatgpt',
     conversations: 3,
     messages: 12,
-    people_candidates: ['Nik', 'Nikita', 'Никита', 'Anya'],
+    people_candidates: ['Alex', 'Alexander', 'Александр', 'Alice'],
+    person_profiles: [{
+      name: 'Alex',
+      aliases: ['Alexander', 'Александр'],
+    }],
     thread_candidates: ['Pulse Dashboard'],
     memory_candidates: ['Pulse Dashboard: 12 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Nikita -> Pulse Dashboard', 'Никита -> Pulse Dashboard', 'Anya -> Pulse Dashboard'],
+    relationship_candidates: ['Alexander -> Pulse Dashboard', 'Александр -> Pulse Dashboard', 'Alice -> Pulse Dashboard'],
     fun_fact_candidates: [
-      'Nikita appeared in 8 safe preview signals',
-      'Никита appeared in 5 safe preview signals',
-      'Anya appeared in 2 safe preview signals',
+      'Alexander appeared in 8 safe preview signals',
+      'Александр appeared in 5 safe preview signals',
+      'Alice appeared in 2 safe preview signals',
     ],
     raw_text_written: false,
   }));
@@ -3239,8 +3269,8 @@ test('migrate commit groups obvious person aliases before graph import', async (
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const people = body.nodes.filter((node) => node.kind === 'person');
-    assert.deepEqual(people.map((node) => node.canonical_name), ['Nik', 'Anya']);
-    assert.deepEqual(people[0].aliases, ['Nikita', 'Никита']);
+    assert.deepEqual(people.map((node) => node.canonical_name), ['Alex', 'Alice']);
+    assert.deepEqual(people[0].aliases, ['Alexander', 'Александр']);
     assert.equal(body.edges.filter((edge) => edge.from === people[0].client_id).length, 1);
     assert.equal(body.facts.filter((fact) => fact.node === people[0].client_id).length, 2);
     assert.doesNotMatch(JSON.stringify(body), /raw chat|PULSE_API_KEY|secret\.key/);
@@ -3268,6 +3298,53 @@ test('migrate commit groups obvious person aliases before graph import', async (
   }
 });
 
+test('migrate commit removes aliases shared by multiple curated people', async () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-ambiguous-alias.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    ok: true,
+    source: 'people-graph',
+    conversations: 1,
+    messages: 2,
+    people_candidates: ['Alice Smith', 'Bob Jones'],
+    person_profiles: [
+      { name: 'Alice Smith', aliases: ['Alex'] },
+      { name: 'Bob Jones', aliases: ['Alex'] },
+    ],
+    thread_candidates: [],
+    memory_candidates: [],
+    relationship_candidates: [],
+    raw_text_written: false,
+  }));
+  const stub = await withPulseStub((req, body) => {
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/graph/delta');
+    const people = body.nodes.filter((node) => node.kind === 'person');
+    assert.deepEqual(people.map((node) => node.canonical_name), ['Alice Smith', 'Bob Jones']);
+    assert.deepEqual(people.map((node) => node.aliases), [[], []]);
+    return { body: { ok: true } };
+  });
+  try {
+    const result = await runAsync([
+      'migrate',
+      'commit',
+      previewPath,
+      '--confirm',
+      'import pulse graph',
+    ], {
+      PULSE_BASE_URL: stub.baseUrl,
+      PULSE_THREAD_ID: 'archive-import',
+      PULSE_PROJECT_ID: 'pulse-migration',
+      PULSE_SESSION_ID: 'pulse-migration:test',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(stub.requests.length, 1);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('migrate commit keeps relationship target topics as graph nodes', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-relationship-target.'));
   const previewPath = join(exportDir, 'preview.json');
@@ -3276,15 +3353,15 @@ test('migrate commit keeps relationship target topics as graph nodes', async () 
     source: 'chatgpt',
     conversations: 4,
     messages: 16,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: [
       'Thread A', 'Thread B', 'Thread C', 'Thread D',
       'Thread E', 'Thread F', 'Thread G', 'Thread H',
     ],
     memory_candidates: ['Important hidden topic: 16 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Important hidden topic'],
-    fun_fact_candidates: ['Vitaly appeared in 4 safe preview signals'],
+    relationship_candidates: ['Bob -> Important hidden topic'],
+    fun_fact_candidates: ['Bob appeared in 4 safe preview signals'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -3323,7 +3400,7 @@ test('migrate commit materializes memory candidates as timeline events', async (
     source: 'chatgpt',
     conversations: 3,
     messages: 9,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Pulse Dashboard', 'Graph Cleanup'],
     memory_candidates: [
       'Pulse Dashboard: 5 safe message signals',
@@ -3331,8 +3408,8 @@ test('migrate commit materializes memory candidates as timeline events', async (
       'Viewer polish: 1 safe message signal',
     ],
     emotion_candidates: ['relief', 'excitement'],
-    relationship_candidates: ['Vitaly -> Pulse Dashboard'],
-    fun_fact_candidates: ['Vitaly appeared in 3 safe preview signals'],
+    relationship_candidates: ['Bob -> Pulse Dashboard'],
+    fun_fact_candidates: ['Bob appeared in 3 safe preview signals'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -3374,12 +3451,12 @@ test('migrate commit can open the memory viewer after import', async () => {
     source: 'chatgpt',
     conversations: 1,
     messages: 1,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 1 safe message signal'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Garden launch'],
-    fun_fact_candidates: ['Vitaly appeared in 1 safe preview signal'],
+    relationship_candidates: ['Bob -> Garden launch'],
+    fun_fact_candidates: ['Bob appeared in 1 safe preview signal'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -3528,7 +3605,7 @@ test('migrate start opens archive pages and builds local previews in one command
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Vitaly should inspect the one command Pulse start flow. Qwen and Cartographer are tool names, not people.' }],
+        content: [{ type: 'input_text', text: 'Bob should inspect the one command Pulse start flow. Qwen and Cartographer are tool names, not people.' }],
       },
     }),
   ].join('\n'));
@@ -3538,7 +3615,7 @@ test('migrate start opens archive pages and builds local previews in one command
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-start',
-      content: { text: 'Anya should inspect the one command Pulse start flow.' },
+      content: { text: 'Alice should inspect the one command Pulse start flow.' },
     }),
   ].join('\n'));
 
@@ -3645,8 +3722,8 @@ test('migrate start opens archive pages and builds local previews in one command
   assert.match(galleryHTML, /Emotional anchors/);
   assert.match(galleryHTML, /Open loops/);
   assert.doesNotMatch(galleryHTML, /Fun facts/i);
-  assert.match(galleryHTML, /Vitaly/);
-  assert.match(galleryHTML, /Anya/);
+  assert.match(galleryHTML, /Bob/);
+  assert.match(galleryHTML, /Alice/);
   assert.match(galleryHTML, /Needs your decision/);
   assert.match(galleryHTML, /Qwen/);
   assert.match(galleryHTML, /Cartographer/);
@@ -3673,7 +3750,7 @@ test('migrate start puts curated people graph above local archive previews', asy
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Sonya and Qwen are fiction/model review noise. Vitaly is real.' }],
+        content: [{ type: 'input_text', text: 'Sophie and Qwen are fiction/model review noise. Bob is real.' }],
       },
     }),
   ].join('\n'));
@@ -3697,12 +3774,12 @@ test('migrate start puts curated people graph above local archive previews', asy
   const galleryHTML = readFileSync(join(outDir, 'pulse-memory-gallery.html'), 'utf8');
   assert.match(galleryHTML, /Real people graph/);
   assert.match(galleryHTML, /Curated people graph/);
-  assert.match(galleryHTML, /Vitaly Dubinin/);
+  assert.match(galleryHTML, /Bob Example/);
   assert.match(galleryHTML, /founder and warm product reviewer/);
   assert.match(galleryHTML, /pulse-distribution/);
   assert.match(galleryHTML, /Codex/);
   assert.ok(galleryHTML.indexOf('People Graph') < galleryHTML.indexOf('Codex'));
-  assert.ok(galleryHTML.indexOf('Vitaly Dubinin') < galleryHTML.indexOf('Sonya'));
+  assert.ok(galleryHTML.indexOf('Bob Example') < galleryHTML.indexOf('Sophie'));
   assert.doesNotMatch(galleryHTML, /<h3>Qwen<\/h3>/);
   const preview = JSON.parse(readFileSync(join(outDir, 'pulse-people-graph-preview.json'), 'utf8'));
   assert.equal(preview.source_kind, 'curated_people_graph');
@@ -3721,7 +3798,7 @@ test('migrate start watch previews arrived remote archive and keeps waiting path
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should inspect the Pulse watch flow preview.'] },
+            content: { parts: ['Bob should inspect the Pulse watch flow preview.'] },
           },
         },
       },
@@ -3757,7 +3834,7 @@ test('migrate start watch previews arrived remote archive and keeps waiting path
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /Preview ready/);
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /Not ready yet/);
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /http-equiv="refresh" content="5"/);
-  assert.deepEqual(JSON.parse(readFileSync(join(outDir, 'pulse-chatgpt-preview.json'), 'utf8')).people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(JSON.parse(readFileSync(join(outDir, 'pulse-chatgpt-preview.json'), 'utf8')).people_candidates.includes('Bob'), true);
 });
 
 test('migrate guide fails clearly for unknown sources', () => {

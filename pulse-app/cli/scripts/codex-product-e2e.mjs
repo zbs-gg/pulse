@@ -33,6 +33,7 @@ import {
 	parseCodexMarketplaceList,
 	resolveSignedCodexProductEdge,
 } from '../src/codex-install.js';
+import { auditPublicPackageRoot } from './public-package-audit.mjs';
 import {
 	canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
 } from '../src/release-manifest.js';
@@ -333,6 +334,8 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const packedPackageJSON = JSON.parse(readFileSync(join(packedPackageRoot, 'package.json'), 'utf8'));
 	assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
 	assert.equal(packedPackageJSON.version, '0.7.0');
+	const publicPackageAudit = auditPublicPackageRoot(packedPackageRoot);
+	assert.equal(publicPackageAudit.content_free, true);
 	Object.assign(productEvidence, {
 		package_version: packedPackageJSON.version,
 		packed_tarball_sha256: tarballDigest.sha256,

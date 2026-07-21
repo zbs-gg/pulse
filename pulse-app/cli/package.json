@@ -3,7 +3,7 @@
   "version": "0.7.0",
   "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
   "license": "AGPL-3.0-only",
-  "author": "Nikita Shilov",
+  "author": "ZBS GG",
   "type": "module",
   "bin": {
     "pulse": "src/cli.js"
