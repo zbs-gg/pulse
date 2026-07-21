@@ -1,7 +1,7 @@
 # GPT-5.6-Luna extractor gate
 
-Date: 2026-07-21  
-Scope: Codex host extraction only  
+Date: 2026-07-21
+Scope: Codex host extraction only
 Status: synthetic compatibility passed; private quality gate not authorized and not run
 
 ## Decision
