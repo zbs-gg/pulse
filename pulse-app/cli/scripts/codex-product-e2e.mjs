@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync,
 	  closeSync,
+	  copyFileSync,
 	  existsSync,
 	  fstatSync,
 	  lstatSync,
@@ -35,7 +36,9 @@ import {
 import {
 	canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
 } from '../src/release-manifest.js';
-import { writeSyntheticReleaseFixture } from './product-release-fixture.mjs';
+import {
+	writeSyntheticReleaseCatalogFixture, writeSyntheticReleaseFixture,
+} from './product-release-fixture.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -298,7 +301,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		keyID: releaseKeyID(releasePublicKey),
 	};
 	const realInputs = requireRealMLX ? await prepareRealMLXInputs(root) : null;
-	let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 8, { realInputs });
+	const productReleaseFixture = (daemonFixtureBytes, epoch, options = {}) => realInputs
+		? writeSyntheticReleaseFixture(root, releaseKey, daemonFixtureBytes, epoch, { realInputs, ...options })
+		: writeSyntheticReleaseCatalogFixture(root, daemonFixtureBytes, epoch, options);
+	let releaseFixture = await productReleaseFixture(readFileSync(unhealthyDaemon), 8);
 	const productEvidence = realInputs ? {
 		authority: 'synthetic-test', production_install_proof: false,
 		package_source: 'npm-pack', system_go_exposed: false, system_python_exposed: false,
@@ -350,6 +356,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	symlinkSync(process.execPath, join(tools, 'node'));
 	symlinkSync(codexExecutable, join(tools, 'codex'));
 	symlinkSync('/usr/bin/git', join(tools, 'git'));
+	const isolatedBin = join(home, '.local', 'bin');
+	mkdirSync(isolatedBin, { recursive: true, mode: 0o700 });
+	copyFileSync(realpathSync(codexExecutable), join(isolatedBin, 'codex'));
+	chmodSync(join(isolatedBin, 'codex'), 0o700);
   const env = {
     ...process.env,
     HOME: home,
@@ -363,7 +373,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
 		PULSE_RELEASE_TEST_MODE: '1',
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
-		PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	};
@@ -385,7 +395,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(personalPlan.detected.hosts.some((host) => host.host === 'codex' && host.activation_target), true);
 	assert.equal(personalPlan.release.artifacts.length, 5);
 	assert.equal(personalPlan.release.total_download_bytes > 0, true);
-	assert.deepEqual(personalPlan.release.origins, ['https://releases.zbs.gg']);
+	assert.deepEqual(personalPlan.release.origins, ['https://fixtures.invalid']);
 	const rejectedPublicInstall = run(process.execPath, [packedCLI, 'install', '--json'], {
 		cwd: workspace, env, status: 1,
 	});
@@ -402,7 +412,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	]), bindingPaths);
 
 	const failedConnect = run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env, status: 1, timeout: 30_000,
+		cwd: workspace, env, status: 1, timeout: 120_000,
 	});
 	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /managed full-retrieval smoke|did not become ready/);
 	const pluginAfterFailure = run('codex', ['plugin', 'list', '--marketplace', 'zbs-gg'], { cwd: workspace, env });
@@ -411,9 +421,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
 	assert.equal(existsSync(join(codexHome, 'pulse', 'product-locators.json')), false);
 	const healthyDaemonBytes = Buffer.concat([daemonBytes, Buffer.from('\nPULSE_HEALTHY_AFTER_FAILED_ACTIVATION\n')]);
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, healthyDaemonBytes, 8, { realInputs });
+	releaseFixture = await productReleaseFixture(healthyDaemonBytes, 8);
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
@@ -439,7 +450,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const configuredMarketplaces = run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout;
 	const signedEdge = resolveSignedCodexProductEdge({
 		release: {
-			schema: 'pulse.verified_release_manifest.v1',
+			schema: 'pulse.verified_release_manifest.v2',
 			manifest_digest: committedRelease.record.manifest_digest,
 			version: committedRelease.record.version,
 			epoch: committedRelease.record.epoch,
@@ -860,14 +871,15 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	const marketplaceBeforeFailedManagedUpgrade = parseCodexMarketplaceList(
 		run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout,
 	).root;
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(unhealthyDaemon), 9, { realInputs });
+	releaseFixture = await productReleaseFixture(readFileSync(unhealthyDaemon), 9);
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
 	const failedManagedUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env, status: 1, timeout: 30_000,
+		cwd: workspace, env, status: 1, timeout: 120_000,
 	});
 	assert.match(
 		`${failedManagedUpgrade.stdout}${failedManagedUpgrade.stderr}`,
@@ -900,9 +912,10 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout,
 	).root), realpathSync(marketplaceBeforeFailedManagedUpgrade),
 	'failed managed upgrade must restore the previous marketplace provenance');
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, healthyDaemonBytes, 8, { realInputs });
+	releaseFixture = await productReleaseFixture(healthyDaemonBytes, 8);
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
@@ -911,9 +924,10 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	const receiptBv1 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
 	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// multi-workspace-runtime-v2\n`);
 	const daemonV2Bytes = Buffer.concat([healthyDaemonBytes, Buffer.from('\nPULSE_MULTI_WORKSPACE_V2\n')]);
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonV2Bytes, 8, { realInputs });
+	releaseFixture = await productReleaseFixture(daemonV2Bytes, 8);
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});

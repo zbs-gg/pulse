@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 
@@ -99,13 +99,24 @@ export async function runProductHookWorker(host, environment = process.env, depe
 }
 
 export const __productHookEntrypointTest = Object.freeze({
+  invokedAsMain,
   productHookWitnessPaths,
   recoverProductBindingAuthority,
   requiresProductBindingRecovery,
   syntheticHookDiagnostic,
 });
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) &&
+function invokedAsMain(entrypoint = process.argv[1], moduleURL = import.meta.url, dependencies = {}) {
+  if (!entrypoint) return false;
+  const canonical = dependencies.realpath ?? realpathSync;
+  try {
+    return canonical(resolve(entrypoint)) === canonical(fileURLToPath(moduleURL));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain() &&
     process.argv[2] === '--pulse-hook-worker') {
   await runProductHookWorker(process.argv[3]);
 }

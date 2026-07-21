@@ -126,7 +126,7 @@ import {
 	writeProductHostAccess,
 	writeProductLocator,
 } from './codex-install.js';
-import { codexHookExecutionDigest, validateHookReadiness } from './host-adapter.js';
+import { codexHookContractDigest, validateHookReadiness } from './host-adapter.js';
 import {
 	acquireVaultActivationLock,
 	boundPulseRequest,
@@ -1931,7 +1931,10 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
   if (plugin.path && installedRuntime.ok) {
     try {
       hookReadiness = validateHookReadiness(
-				codexHookExecutionDigest(plugin.path, productActivation?.runtime_path ?? installedRuntime.path),
+				codexHookContractDigest(
+					productActivation?.plugin_tree_digest,
+					productActivation?.runtime_tree_digest,
+				),
         safeReadJSON(join(DATA_DIR, 'codex-hook-readiness.json')),
         binding ? {
           binding_digest: binding.binding_digest,

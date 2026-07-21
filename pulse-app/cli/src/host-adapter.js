@@ -472,24 +472,16 @@ export function hookBundleDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export function codexHookExecutionDigest(pluginRoot, runtimePath) {
-	const hash = createHash('sha256');
-	for (const relative of [
-		'.codex-plugin/plugin.json', '.mcp.json', 'runtime-locator.mjs', 'windows-platform-adapter.mjs',
-		'hook-worker-client.mjs', 'hooks/hooks.json', 'hooks/pulse-hook.mjs', 'mcp/server.mjs',
-	]) {
-    hash.update(relative);
-    hash.update('\x00');
-    hash.update(readFileSync(join(pluginRoot, relative)));
-    hash.update('\x00');
-  }
-	const runtime = JSON.parse(readFileSync(join(normalize(runtimePath), '..', '..', 'runtime-manifest.json'), 'utf8'));
-	if (runtime?.schema !== 'pulse.codex_runtime.v2' || !/^[a-f0-9]{64}$/.test(runtime.tree_digest ?? '')) {
-    throw new Error('Codex runtime manifest is invalid');
-  }
-  hash.update('runtime-tree-digest\x00');
-  hash.update(runtime.tree_digest);
-  return hash.digest('hex');
+export function codexHookContractDigest(pluginTreeDigest, runtimeTreeDigest) {
+	if (![pluginTreeDigest, runtimeTreeDigest].every((value) => /^[a-f0-9]{64}$/.test(value ?? ''))) {
+		throw new Error('Codex hook contract identity is invalid');
+	}
+	return createHash('sha256')
+		.update('pulse-codex-hook-contract-v2\x00')
+		.update(pluginTreeDigest)
+		.update('\x00')
+		.update(runtimeTreeDigest)
+		.digest('hex');
 }
 
 export function validateHookReadiness(source, receipt, expected = {}) {

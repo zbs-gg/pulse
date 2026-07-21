@@ -43,6 +43,18 @@ test('synthetic worker diagnostics expose only stable content-free error codes',
   assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic(new Error('/private/path leaked')), 'hook_failure_unclassified');
 });
 
+test('worker entrypoint accepts filesystem aliases only after canonical identity matches', () => {
+  const alias = '/var/folders/fixture/product-hook-entrypoint.bundle.js';
+  const canonical = '/private/var/folders/fixture/product-hook-entrypoint.bundle.js';
+  const realpath = (path) => path === alias ? canonical : path;
+  assert.equal(__productHookEntrypointTest.invokedAsMain(
+    alias, `file://${canonical}`, { realpath },
+  ), true);
+  assert.equal(__productHookEntrypointTest.invokedAsMain(
+    '/var/folders/fixture/other.js', `file://${canonical}`, { realpath },
+  ), false);
+});
+
 test('product hook entrypoint rejects an unknown host before authority or runtime work', async () => {
   let recovered = false;
   await assert.rejects(

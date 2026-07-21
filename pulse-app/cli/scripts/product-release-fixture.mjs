@@ -1,4 +1,5 @@
 import { createHash, sign } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -7,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 
 import { includeRuntimePath, normalizePrivateTree } from '../src/codex-install.js';
 import { canonicalReleaseJSON } from '../src/release-manifest.js';
+import { buildAndInstallTargetFixture } from './target-release-fixture.mjs';
+import { releaseTargetDefinition } from './release-builder-core.mjs';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptRoot, '..');
 const repoRoot = resolve(cliRoot, '..', '..');
+let portableFixtureGeneration = 0;
 
 function treeManifest(files) {
   return {
@@ -110,11 +114,13 @@ function tinySafetensors(salt = 0) {
 }
 
 function managedEmbedHelperFixture() {
-  return Buffer.from(`
+  return Buffer.from(`#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
-const model = process.argv[process.argv.indexOf('--model-file') + 1];
-const support = process.argv[process.argv.indexOf('--support-dir') + 1];
+const value = (name) => process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : null;
+const modelRoot = value('--model-root');
+const support = value('--support-root') || value('--support-dir');
+const model = value('--model-file') || (modelRoot && modelRoot + '/model_int8.onnx');
 fs.readFileSync(model); fs.readFileSync(support + '/config.json'); fs.readFileSync(support + '/tokenizer.json');
 process.stdout.write(JSON.stringify({dimensions:1024,id:'__startup__',model:'bge-m3',normalized:true,ok:true,pooling:'cls',protocol:1,schema:'pulse.embedder.ready.v1'})+'\\n');
 const lines = readline.createInterface({ input: process.stdin });
@@ -131,6 +137,76 @@ const lines = readline.createInterface({ input: process.stdin });
   process.stdout.write(JSON.stringify({embeddings,id:request.id,schema:'pulse.embedder.response.v1'})+'\\n');
 } })().catch(() => process.exit(3));
 `);
+}
+
+function currentTargetID() {
+  const architecture = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : null;
+  if (!architecture) throw new Error('synthetic product target is unsupported');
+  if (process.platform === 'darwin') return `darwin-${architecture}`;
+  if (process.platform === 'win32') return `win32-${architecture}`;
+  if (process.platform === 'linux' && process.report?.getReport()?.header?.glibcVersionRuntime) {
+    return `linux-${architecture}-gnu`;
+  }
+  throw new Error('synthetic product target is unsupported');
+}
+
+export async function writeSyntheticReleaseCatalogFixture(root, daemonBytes, epoch, {
+  pluginRuntimeMarker,
+} = {}) {
+  if (!Buffer.isBuffer(daemonBytes) || daemonBytes.length < 1) {
+    throw new Error('synthetic product daemon is invalid');
+  }
+  const targetID = currentTargetID();
+  const outputRoot = join(root, 'release-catalog-fixtures', `${epoch}-${portableFixtureGeneration++}`);
+  const fixture = await buildAndInstallTargetFixture({
+    buildDaemon: ({ outputRoot: daemonRoot }) => {
+      const executable = join(daemonRoot, 'bin', process.platform === 'win32' ? 'pulse.exe' : 'pulse');
+      mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
+      writeFileSync(executable, daemonBytes, { mode: 0o700 });
+      chmodSync(executable, 0o700);
+    },
+    buildEmbedder: ({ outputRoot: embedderRoot, runnerName }) => {
+      const target = releaseTargetDefinition(targetID);
+      const executable = join(embedderRoot, 'bin', runnerName);
+      const result = spawnSync('go', ['build', '-trimpath', '-o', executable, './cmd/pulse-fixture-embedder'], {
+        cwd: join(repoRoot, 'pulse-app'),
+        encoding: 'utf8',
+        env: { ...process.env, CGO_ENABLED: '0', GOARCH: target.goarch, GOOS: target.goos },
+        timeout: 180_000,
+      });
+      if (result.status !== 0) {
+        throw new Error(`synthetic product embedder build failed: ${result.stderr || result.stdout || result.error?.message || result.status}`);
+      }
+      chmodSync(executable, 0o700);
+    },
+    buildPluginRuntime: ({ outputRoot: pluginRoot }) => {
+      writeProductEdgeFixture(pluginRoot);
+      if (pluginRuntimeMarker !== undefined) {
+        if (typeof pluginRuntimeMarker !== 'string' || !/^[a-z0-9-]{1,64}$/.test(pluginRuntimeMarker)) {
+          throw new Error('synthetic plugin runtime marker is invalid');
+        }
+        const hookPath = join(pluginRoot, 'marketplace', 'plugins', 'pulse', 'hooks', 'pulse-hook.mjs');
+        writeFileSync(hookPath, Buffer.concat([
+          readFileSync(hookPath), Buffer.from(`\n// fixture:${pluginRuntimeMarker}\n`),
+        ]), { mode: 0o600 });
+      }
+    },
+    epoch,
+    nativeTargetID: targetID,
+    now: new Date(),
+    outputRoot,
+    targetID,
+  });
+  const materializerPath = join(outputRoot, 'release-test-materializers.json');
+  writeFileSync(materializerPath, `${canonicalReleaseJSON({
+    artifacts: {}, schema: 'pulse.release_test_materializers.v1',
+  })}\n`, { mode: 0o600 });
+  return {
+    assetsRoot: fixture.installer.asset_root,
+    manifestPath: fixture.installer.manifest_path,
+    materializerPath,
+    rootPath: fixture.installer.root_key_path,
+  };
 }
 
 function managedEmbedRuntimeFixture() {

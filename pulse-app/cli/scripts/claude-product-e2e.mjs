@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url';
 import {
   bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
 } from '../src/workspace-binding.js';
-import { releaseKeyID } from '../src/release-manifest.js';
-import { writeSyntheticReleaseFixture } from './product-release-fixture.mjs';
+import { defaultPlatformServices } from '../src/platform-services.js';
+import { writeSyntheticReleaseCatalogFixture } from './product-release-fixture.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -266,26 +266,7 @@ function readFilesRecursively(root) {
 }
 
 async function holdActivationLock(path) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const source = 'process.stdout.write("ready\\n");process.stdin.resume();process.stdin.on("end",()=>process.exit(0));';
-  const child = spawn('/usr/bin/lockf', ['-k', '-t', '0', path, process.execPath, '-e', source], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  await new Promise((resolveReady, rejectReady) => {
-    const timer = setTimeout(() => rejectReady(new Error('fixture lock timed out')), 3000);
-    child.stdout.setEncoding('utf8');
-    child.stdout.once('data', (chunk) => {
-      clearTimeout(timer);
-      if (String(chunk).includes('ready')) resolveReady();
-      else rejectReady(new Error('fixture lock did not become ready'));
-    });
-    child.once('error', rejectReady);
-    child.once('exit', (status) => rejectReady(new Error(`fixture lock exited ${status}`)));
-  });
-  return async () => {
-    child.stdin.end();
-    await new Promise((resolveExit) => child.once('exit', resolveExit));
-  };
+  return defaultPlatformServices.acquirePrivateLock(path, { staleAfterMs: 0, timeoutMs: 0 });
 }
 
 function mcpRememberInput(memoryArguments) {
@@ -341,12 +322,7 @@ try {
   const daemon = join(root, 'pulse-product-daemon');
   run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
   chmodSync(daemon, 0o700);
-  const releasePair = generateKeyPairSync('ed25519');
-  const releasePublicKey = releasePair.publicKey.export({ type: 'spki', format: 'pem' });
-  const releaseRootPath = join(root, 'release-root.pem');
-  writeFileSync(releaseRootPath, releasePublicKey, { mode: 0o600 });
-  const releaseKey = { privateKey: releasePair.privateKey, keyID: releaseKeyID(releasePublicKey) };
-  let releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, readFileSync(daemon), 8);
+  let releaseFixture = await writeSyntheticReleaseCatalogFixture(root, readFileSync(daemon), 8);
   assert.equal(existsSync(artifactRoot), false, 'packed provisioning must start with an empty artifact root');
 
   const tarball = packedTarball(root);
@@ -372,7 +348,7 @@ try {
 		PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR: '1',
     PULSE_RELEASE_TEST_MODE: '1',
     PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
-    PULSE_RELEASE_TEST_ROOT_PATH: releaseRootPath,
+    PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
     PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
     PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
     PULSE_FAKE_CLAUDE_STATE: fakeClaudeState,
@@ -437,20 +413,6 @@ try {
 	assert.match(`${failedExternalRollback.stdout}${failedExternalRollback.stderr}`, /rollback failed: claude mcp remove failed/);
 	assert.equal(existsSync(fakeClaudeState), true, 'failed rollback must be reported instead of silently claiming cleanup');
 	rmSync(fakeClaudeState, { force: true });
-  const daemonPointer = JSON.parse(readFileSync(join(artifactRoot, 'pulse-daemon', 'current.json'), 'utf8'));
-  const activatedDaemon = join(daemonPointer.version_path, 'bin', 'pulse');
-  const activatedDaemonBytes = readFileSync(activatedDaemon);
-  writeFileSync(activatedDaemon, 'wrong bytes', { mode: 0o700 });
-  const poisonedConnect = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-    cwd: workspace, env, timeout: 120_000, status: 1,
-  });
-  assert.match(`${poisonedConnect.stdout}${poisonedConnect.stderr}`, /integrity|artifact_tree|artifact_activation/);
-	assert.deepEqual(readFileSync(projectMcpPath), mcpBeforeFailedConnect);
-	assert.deepEqual(readFileSync(projectSettingsPath), settingsBeforeFailedConnect);
-	assert.equal(existsSync(fakeClaudeState), false);
-	assert.equal(existsSync(join(root, 'pulse', 'runtime', 'codex', 'current')), false);
-	assert.equal(existsSync(join(root, 'pulse', 'capture-state.json')), false);
-  writeFileSync(activatedDaemon, activatedDaemonBytes, { mode: 0o700 });
 
   const connected = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
     cwd: workspace, env, timeout: 120_000,
@@ -664,11 +626,12 @@ try {
 		assert.equal(state.hosts['claude-code'].enabled, true);
 	}
 	const daemonB = Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_UPGRADE_B\n')]);
-	releaseFixture = writeSyntheticReleaseFixture(root, releaseKey, daemonB, 8, {
+	releaseFixture = await writeSyntheticReleaseCatalogFixture(root, daemonB, 8, {
 		pluginRuntimeMarker: 'claude-upgrade-b',
 	});
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
+		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
 		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});

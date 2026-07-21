@@ -12,6 +12,7 @@ import test from 'node:test';
 import * as codexHooks from './codex-hooks.js';
 
 import {
+  codexHookContractDigest,
   extractPulseReceiptRefs,
   hookBundleDigest,
   migrateLegacyPulseHookConfig,
@@ -939,6 +940,19 @@ test('hook readiness requires SessionStart plus one complete same-session turn a
 	receipt.milestones.session_context = '2026-07-14T09:59:59Z';
   assert.deepEqual(validateHookReadiness(Buffer.from('{"hooks":{}}'), receipt).ready, false);
   assert.equal(validateHookReadiness(bytes, receipt, { repository_id: 'repository-other' }).ready, false);
+});
+
+test('doctor and launcher bind readiness to the same signed plugin and runtime trees', () => {
+	const pluginTreeDigest = 'a'.repeat(64);
+	const runtimeTreeDigest = 'b'.repeat(64);
+	const expected = createHash('sha256')
+		.update('pulse-codex-hook-contract-v2\x00')
+		.update(pluginTreeDigest)
+		.update('\x00')
+		.update(runtimeTreeDigest)
+		.digest('hex');
+	assert.equal(codexHookContractDigest(pluginTreeDigest, runtimeTreeDigest), expected);
+	assert.throws(() => codexHookContractDigest('invalid', runtimeTreeDigest), /identity is invalid/);
 });
 
 test('launcher lifecycle receipts are synthetic-test-only and production ignores complete receipts', () => {
