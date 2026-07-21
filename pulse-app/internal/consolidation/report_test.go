@@ -100,13 +100,13 @@ func TestInventoryIsReadOnlyAndSeparatesDeterministicOverlap(t *testing.T) {
 		`CREATE TABLE schema_versions (version INTEGER PRIMARY KEY)`,
 		`INSERT INTO schema_versions VALUES (32)`,
 		`CREATE TABLE observations (id INTEGER PRIMARY KEY, project TEXT, text TEXT)`,
-		`INSERT INTO observations VALUES (1, 'pulse', 'Use scoped project memory.')`,
+		`INSERT INTO observations VALUES (1, 'repository_inventory', 'Use scoped project memory.')`,
 		`CREATE TABLE session_summaries (
 			id INTEGER PRIMARY KEY, project TEXT, request TEXT, investigated TEXT,
 			learned TEXT, completed TEXT, next_steps TEXT, notes TEXT
 		)`,
 		`INSERT INTO session_summaries VALUES
-			(7, 'pulse', 'Find old memory', NULL, 'A distinct Claude summary.', NULL, NULL, NULL)`,
+			(7, 'repository_inventory', 'Find old memory', NULL, 'A distinct Claude summary.', NULL, NULL, NULL)`,
 		`CREATE TABLE user_prompts (id INTEGER PRIMARY KEY, prompt_text TEXT)`,
 		`INSERT INTO user_prompts VALUES (1, 'raw prompt excluded')`,
 	)
@@ -231,6 +231,166 @@ func TestInventoryResourceLimitStopsWithoutRetryOrMutation(t *testing.T) {
 	}
 	if report.Phase != PhasePartial || !containsCode(report.ReasonCodes, "resource_limit") {
 		t.Fatalf("resource limit not surfaced once: %#v", report)
+	}
+}
+
+func TestClaudeMemForeignProjectsAreAmbiguousNotUnique(t *testing.T) {
+	home := t.TempDir()
+	canonical := filepath.Join(home, ".pulse", "current.db")
+	claudeMem := filepath.Join(home, ".claude-mem", "claude-mem.db")
+	createSQLiteFixture(t, canonical,
+		`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+		`INSERT INTO observations VALUES (1, 'claude-mem', 'claude-mem:obs:1', 'Foreign text')`,
+	)
+	createSQLiteFixture(t, claudeMem,
+		`CREATE TABLE schema_versions (version INTEGER PRIMARY KEY)`,
+		`INSERT INTO schema_versions VALUES (32)`,
+		`CREATE TABLE observations (id INTEGER PRIMARY KEY, project TEXT, text TEXT)`,
+		`INSERT INTO observations VALUES (1, 'repository_other', 'Foreign text')`,
+		`CREATE TABLE session_summaries (
+			id INTEGER PRIMARY KEY, project TEXT, request TEXT, investigated TEXT,
+			learned TEXT, completed TEXT, next_steps TEXT, notes TEXT
+		)`,
+		`INSERT INTO session_summaries VALUES (2, '', 'Unknown project', NULL, NULL, NULL, NULL, NULL)`,
+	)
+	manager, engine, destination := newInventoryFixture(t, home, canonical, DefaultLimits())
+	started, _, _ := manager.Start(destination)
+	report, err := engine.Run(context.Background(), started.InvocationID, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeSource := sourceByClass(t, report, ClassificationClaudeMem)
+	if report.Totals.Ambiguous != 2 || report.Totals.Unique != 0 || report.Totals.AlreadyRepresented != 0 ||
+		claudeSource.Counts["project_destination_ambiguity"] != 2 || claudeSource.Counts["review_required"] != 2 {
+		t.Fatalf("foreign projects affected scoped overlap: totals=%#v source=%#v", report.Totals, claudeSource)
+	}
+	portable, _ := reportJSON(report)
+	if strings.Contains(portable, "repository_other") || strings.Contains(portable, "Unknown project") {
+		t.Fatalf("project isolation leaked private project data: %s", portable)
+	}
+}
+
+func TestPulseOptionalTableSchemaDriftIsPartialUnsupportedSchema(t *testing.T) {
+	home := t.TempDir()
+	canonical := filepath.Join(home, ".pulse", "current.db")
+	createSQLiteFixture(t, canonical,
+		`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+		`CREATE TABLE memory_tray_candidates (candidate_id TEXT PRIMARY KEY)`,
+	)
+	manager, engine, destination := newInventoryFixture(t, home, canonical, DefaultLimits())
+	started, _, _ := manager.Start(destination)
+	report, err := engine.Run(context.Background(), started.InvocationID, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := sourceByClass(t, report, ClassificationCanonicalVault)
+	if report.Phase != PhasePartial || source.ReasonCode != "unsupported_schema" ||
+		!containsCode(report.ReasonCodes, "unsupported_schema") {
+		t.Fatalf("optional schema drift was hidden: %#v", report)
+	}
+}
+
+func TestPulseCurrentExtractionJobsSchemaCountsPendingWork(t *testing.T) {
+	home := t.TempDir()
+	canonical := filepath.Join(home, ".pulse", "current.db")
+	createSQLiteFixture(t, canonical,
+		`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+		`CREATE TABLE extraction_jobs (
+			id INTEGER PRIMARY KEY,
+			observation_ids TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending','running','done','failed','dlq')),
+			attempts INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO extraction_jobs (id, observation_ids, state, created_at, updated_at) VALUES
+			(1, '[]', 'pending', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z'),
+			(2, '[]', 'running', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z'),
+			(3, '[]', 'done', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
+	)
+	manager, engine, destination := newInventoryFixture(t, home, canonical, DefaultLimits())
+	started, _, _ := manager.Start(destination)
+	report, err := engine.Run(context.Background(), started.InvocationID, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := sourceByClass(t, report, ClassificationCanonicalVault)
+	if report.Phase != PhaseReportReady || source.Counts["pending_extraction"] != 2 {
+		t.Fatalf("current extraction_jobs schema was not counted: %#v", report)
+	}
+}
+
+func TestInventoryBudgetsAggregateRowsWorkingMemoryAndElapsedTime(t *testing.T) {
+	t.Run("aggregate item rows", func(t *testing.T) {
+		home := t.TempDir()
+		canonical := filepath.Join(home, ".pulse", "current.db")
+		createSQLiteFixture(t, canonical,
+			`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+			`INSERT INTO observations VALUES (1, 'x', 'one', 'one')`,
+			`CREATE TABLE memory_capsules (id TEXT PRIMARY KEY, redacted_summary TEXT)`,
+			`INSERT INTO memory_capsules VALUES ('capsule_1', 'two')`,
+		)
+		limits := DefaultLimits()
+		limits.MaxRowsPerSource = 1
+		manager, engine, destination := newInventoryFixture(t, home, canonical, limits)
+		started, _, _ := manager.Start(destination)
+		report, err := engine.Run(context.Background(), started.InvocationID, destination)
+		if err != nil || report.Phase != PhasePartial || !containsCode(report.ReasonCodes, "resource_limit") {
+			t.Fatalf("aggregate row limit not enforced: report=%#v err=%v", report, err)
+		}
+	})
+
+	t.Run("working memory", func(t *testing.T) {
+		home := t.TempDir()
+		canonical := filepath.Join(home, ".pulse", "current.db")
+		createSQLiteFixture(t, canonical,
+			`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+			`INSERT INTO observations VALUES (1, 'x', 'one', 'one')`,
+		)
+		limits := DefaultLimits()
+		limits.MaxWorkingBytes = 1
+		manager, engine, destination := newInventoryFixture(t, home, canonical, limits)
+		started, _, _ := manager.Start(destination)
+		report, err := engine.Run(context.Background(), started.InvocationID, destination)
+		if err != nil || report.Phase != PhasePartial || !containsCode(report.ReasonCodes, "resource_limit") {
+			t.Fatalf("working-memory limit not enforced: report=%#v err=%v", report, err)
+		}
+	})
+
+	t.Run("elapsed", func(t *testing.T) {
+		home := t.TempDir()
+		canonical := filepath.Join(home, ".pulse", "current.db")
+		createSQLiteFixture(t, canonical,
+			`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+		)
+		limits := DefaultLimits()
+		limits.MaxElapsed = time.Nanosecond
+		manager, engine, destination := newInventoryFixture(t, home, canonical, limits)
+		started, _, _ := manager.Start(destination)
+		report, err := engine.Run(context.Background(), started.InvocationID, destination)
+		if err != nil || report.Phase != PhasePartial || !containsCode(report.ReasonCodes, "resource_limit") {
+			t.Fatalf("elapsed limit not enforced: report=%#v err=%v", report, err)
+		}
+	})
+}
+
+func TestInventoryCommitsContentFreeProgressPerSource(t *testing.T) {
+	home := t.TempDir()
+	canonical := filepath.Join(home, ".pulse", "current.db")
+	legacy := filepath.Join(home, ".pulse-local", "legacy.db")
+	createSQLiteFixture(t, canonical,
+		`CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY, store_id TEXT)`, pulseObservationSchema(),
+	)
+	createSQLiteFixture(t, legacy, pulseObservationSchema())
+	manager, engine, destination := newInventoryFixture(t, home, canonical, DefaultLimits())
+	started, _, _ := manager.Start(destination)
+	report, err := engine.Run(context.Background(), started.InvocationID, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// start + inventory + one generation per completed source + dedupe + ready
+	if report.Generation < 6 || len(report.Sources) != 2 {
+		t.Fatalf("per-source progress was not committed: %#v", report)
 	}
 }
 

@@ -38,6 +38,13 @@ type ContextQueryAPI interface {
 	Query(context.Context, contextquery.ContextQueryRequest) (*contextquery.ContextResult, error)
 }
 
+// ConsolidationInventory is the daemon-owned read-only scan surface. Keeping
+// this small lets the server own job lifetime without exposing Engine internals.
+type ConsolidationInventory interface {
+	Run(context.Context, string, consolidation.Destination) (consolidation.Report, error)
+	EnsureFresh(string) (consolidation.Report, error)
+}
+
 // HomePresence is retained as an optional compatibility dependency for
 // protected native-confirmation flows. Opening ordinary Memory Home never
 // consumes it and never upgrades a browser session into enhanced proof.
@@ -96,7 +103,10 @@ type Config struct {
 	// ConsolidationInventory overrides the recognized-source read-only engine.
 	// It is primarily a test seam; production derives fixed roots from the
 	// current user home and exact bound vault path.
-	ConsolidationInventory *consolidation.Engine
+	ConsolidationInventory ConsolidationInventory
+	// ConsolidationJobTimeout bounds daemon-owned scans independently from the
+	// initiating HTTP request. Zero selects the product default.
+	ConsolidationJobTimeout time.Duration
 }
 
 type BillingStatus struct {
@@ -109,16 +119,25 @@ type BillingStatus struct {
 
 // Server wraps the chi router.
 type Server struct {
-	cfg                    Config
-	started                time.Time
-	homeSessions           *viewerSessionManager
-	homePresentation       *MemoryPresentationService
-	homeProtectedWipeMu    sync.Mutex
-	homeProtectedWipeItems map[string]homeProtectedWipePending
-	trayScheduleMu         sync.Mutex
-	traySchedules          map[memoryTrayScheduleKey]*memoryTrayScheduleState
-	consolidationReports   *consolidation.Manager
-	consolidationInventory *consolidation.Engine
+	cfg                      Config
+	started                  time.Time
+	homeSessions             *viewerSessionManager
+	homePresentation         *MemoryPresentationService
+	homeProtectedWipeMu      sync.Mutex
+	homeProtectedWipeItems   map[string]homeProtectedWipePending
+	trayScheduleMu           sync.Mutex
+	traySchedules            map[memoryTrayScheduleKey]*memoryTrayScheduleState
+	consolidationReports     *consolidation.Manager
+	consolidationInventory   ConsolidationInventory
+	consolidationUnavailable string
+	consolidationJobTimeout  time.Duration
+	consolidationCtx         context.Context
+	consolidationCancel      context.CancelFunc
+	consolidationCloseOnce   sync.Once
+	consolidationJobsMu      sync.Mutex
+	consolidationJobs        map[string]context.CancelFunc
+	consolidationJobsWG      sync.WaitGroup
+	consolidationClosing     bool
 }
 
 func New(cfg Config) (*Server, error) {
@@ -140,12 +159,23 @@ func New(cfg Config) (*Server, error) {
 	if cfg.EnhancedPresenceAuthorizer == nil {
 		cfg.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
 	}
+	if cfg.ConsolidationJobTimeout == 0 {
+		cfg.ConsolidationJobTimeout = 16 * time.Minute
+	}
+	if cfg.ConsolidationJobTimeout < time.Second || cfg.ConsolidationJobTimeout > 30*time.Minute {
+		return nil, errors.New("server: ConsolidationJobTimeout must be between 1s and 30m")
+	}
+	consolidationCtx, consolidationCancel := context.WithCancel(context.Background())
 	server := &Server{
 		cfg: cfg, started: time.Now(),
-		homeProtectedWipeItems: make(map[string]homeProtectedWipePending),
-		traySchedules:          make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
-		consolidationReports:   cfg.ConsolidationReports,
-		consolidationInventory: cfg.ConsolidationInventory,
+		homeProtectedWipeItems:  make(map[string]homeProtectedWipePending),
+		traySchedules:           make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
+		consolidationReports:    cfg.ConsolidationReports,
+		consolidationInventory:  cfg.ConsolidationInventory,
+		consolidationJobTimeout: cfg.ConsolidationJobTimeout,
+		consolidationCtx:        consolidationCtx,
+		consolidationCancel:     consolidationCancel,
+		consolidationJobs:       make(map[string]context.CancelFunc),
 	}
 	if server.consolidationReports == nil && cfg.Store != nil &&
 		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
@@ -159,10 +189,21 @@ func New(cfg Config) (*Server, error) {
 				Key:     key[:],
 			})
 			if err != nil {
-				return nil, fmt.Errorf("server: open consolidation reports: %w", err)
+				if errors.Is(err, consolidation.ErrCheckpointIntegrity) {
+					// A rotated IPC secret or corrupt report-only checkpoint must
+					// never make the bound memory vault unavailable. Leave the
+					// bundle untouched for owner inspection and fail this feature
+					// closed with a stable diagnostic.
+					server.consolidationUnavailable = "checkpoint_integrity_failure"
+				} else {
+					consolidationCancel()
+					return nil, fmt.Errorf("server: open consolidation reports: %w", err)
+				}
 			}
-			server.consolidationReports = manager
-			if server.consolidationInventory == nil {
+			if manager != nil {
+				server.consolidationReports = manager
+			}
+			if manager != nil && server.consolidationInventory == nil {
 				homeDir, homeErr := os.UserHomeDir()
 				if homeErr != nil || !filepath.IsAbs(homeDir) {
 					return nil, errors.New("server: consolidation inventory requires an absolute user home")
@@ -216,6 +257,20 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	return server, nil
+}
+
+// Close stops daemon-owned consolidation jobs. It is safe to call more than
+// once and should run before closing the bound vault.
+func (s *Server) Close() {
+	s.consolidationCloseOnce.Do(func() {
+		s.consolidationJobsMu.Lock()
+		s.consolidationClosing = true
+		if s.consolidationCancel != nil {
+			s.consolidationCancel()
+		}
+		s.consolidationJobsMu.Unlock()
+		s.consolidationJobsWG.Wait()
+	})
 }
 
 // Handler returns the local-only root http.Handler with auth middleware.
@@ -275,7 +330,7 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
 		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
-			if s.consolidationReports != nil {
+			if s.consolidationReports != nil || s.consolidationUnavailable != "" {
 				r.Post("/memory/consolidation/reports", s.handleConsolidationReportStart)
 				r.Get("/memory/consolidation/reports/latest", s.handleConsolidationReportLatest)
 				r.Get("/memory/consolidation/reports/{id}", s.handleConsolidationReportGet)

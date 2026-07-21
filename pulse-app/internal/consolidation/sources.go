@@ -41,6 +41,7 @@ type Limits struct {
 	MaxRowsTotal       int64
 	MaxBytesPerSource  int64
 	MaxBytesTotal      int64
+	MaxWorkingBytes    int64
 	MaxElapsed         time.Duration
 }
 
@@ -49,7 +50,8 @@ func DefaultLimits() Limits {
 		MaxRegistryEntries: 512, MaxSources: 512,
 		MaxRowsPerSource: 2_000_000, MaxRowsTotal: 5_000_000,
 		MaxBytesPerSource: 8 << 30, MaxBytesTotal: 16 << 30,
-		MaxElapsed: 15 * time.Minute,
+		MaxWorkingBytes: 512 << 20,
+		MaxElapsed:      15 * time.Minute,
 	}
 }
 
@@ -98,6 +100,7 @@ type inspectedSource struct {
 	partialReason  string
 	stale          bool
 	canonical      bool
+	workingBytes   int64
 }
 
 func NewEngine(cfg EngineConfig) (*Engine, error) {
@@ -112,7 +115,8 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}
 	if cfg.Limits.MaxRegistryEntries < 1 || cfg.Limits.MaxSources < 1 ||
 		cfg.Limits.MaxRowsPerSource < 1 || cfg.Limits.MaxRowsTotal < 1 ||
-		cfg.Limits.MaxBytesPerSource < 1 || cfg.Limits.MaxBytesTotal < 1 || cfg.Limits.MaxElapsed <= 0 {
+		cfg.Limits.MaxBytesPerSource < 1 || cfg.Limits.MaxBytesTotal < 1 ||
+		cfg.Limits.MaxWorkingBytes < 1 || cfg.Limits.MaxElapsed <= 0 {
 		return nil, errors.New("consolidation: invalid inventory limits")
 	}
 	return &Engine{
@@ -137,9 +141,20 @@ func (e *Engine) Run(ctx context.Context, invocationID string, destination Desti
 		e.mu.Unlock()
 	}()
 	started := e.clock()
+	ctx, cancel := context.WithTimeout(ctx, e.limits.MaxElapsed)
+	defer cancel()
+	checkpoint, err := e.manager.Get(invocationID)
+	if err != nil {
+		return Report{}, err
+	}
+	resumeSources := checkpoint.Sources
+	resumeReasons := []string{adapterPulseV1, adapterClaudeMemV1, normalizationV1, dedupeV1, scrubberV1, fingerprintKeyV1}
+	if len(resumeSources) > 0 {
+		resumeReasons = append(resumeReasons, "resume_from_committed_generation")
+	}
 	if _, err := e.manager.Advance(
-		invocationID, PhaseInventory, Totals{}, []Source{}, nil,
-		[]string{adapterPulseV1, adapterClaudeMemV1, normalizationV1, dedupeV1, scrubberV1, fingerprintKeyV1},
+		invocationID, PhaseInventory, Totals{}, resumeSources, nil,
+		resumeReasons,
 		"Inspecting recognized local memory sources.", "",
 	); err != nil {
 		return Report{}, err
@@ -147,10 +162,18 @@ func (e *Engine) Run(ctx context.Context, invocationID string, destination Desti
 
 	candidates, discoveryPartial := e.discover()
 	inspected := make([]inspectedSource, 0, len(candidates))
-	var totalRows, totalBytes int64
+	checkpointInventory := func() error {
+		assignAliases(inspected)
+		_, err := e.manager.Advance(
+			invocationID, PhaseInventory, Totals{}, portableSources(inspected), nil,
+			resumeReasons, "Inspecting recognized local memory sources.", "",
+		)
+		return err
+	}
+	var totalRows, totalBytes, totalWorkingBytes int64
 	for _, candidate := range candidates {
 		if err := e.checkContinue(ctx, invocationID, started); err != nil {
-			return e.finishInterrupted(invocationID, inspected, err)
+			return e.finishInterrupted(invocationID, destination, inspected, err)
 		}
 		if len(inspected) >= e.limits.MaxSources {
 			discoveryPartial = "resource_limit"
@@ -159,10 +182,16 @@ func (e *Engine) Run(ctx context.Context, invocationID string, destination Desti
 		info, err := os.Lstat(candidate.path)
 		if err != nil {
 			inspected = append(inspected, partialSource(candidate, "source_disappeared"))
+			if err := checkpointInventory(); err != nil {
+				return Report{}, err
+			}
 			continue
 		}
 		if info.Size() > e.limits.MaxBytesPerSource || totalBytes+info.Size() > e.limits.MaxBytesTotal {
 			inspected = append(inspected, partialSource(candidate, "resource_limit"))
+			if err := checkpointInventory(); err != nil {
+				return Report{}, err
+			}
 			discoveryPartial = "resource_limit"
 			break
 		}
@@ -171,17 +200,37 @@ func (e *Engine) Run(ctx context.Context, invocationID string, destination Desti
 		if candidate.artifact {
 			source = inspectArtifact(candidate, info, e.manager)
 		} else {
-			source = e.inspectDatabase(ctx, candidate)
+			source = e.inspectDatabase(
+				ctx, candidate,
+				minInt64(e.limits.MaxRowsPerSource, e.limits.MaxRowsTotal-totalRows),
+				e.limits.MaxWorkingBytes-totalWorkingBytes,
+			)
 		}
 		sourceRows := source.counts["source_rows"]
 		if sourceRows > e.limits.MaxRowsPerSource || totalRows+sourceRows > e.limits.MaxRowsTotal {
 			source = partialSource(candidate, "resource_limit")
 			discoveryPartial = "resource_limit"
 			inspected = append(inspected, source)
+			if err := checkpointInventory(); err != nil {
+				return Report{}, err
+			}
 			break
 		}
 		totalRows += sourceRows
+		if source.workingBytes > e.limits.MaxWorkingBytes-totalWorkingBytes {
+			source = partialSource(candidate, "resource_limit")
+			discoveryPartial = "resource_limit"
+			inspected = append(inspected, source)
+			if err := checkpointInventory(); err != nil {
+				return Report{}, err
+			}
+			break
+		}
+		totalWorkingBytes += source.workingBytes
 		inspected = append(inspected, source)
+		if err := checkpointInventory(); err != nil {
+			return Report{}, err
+		}
 	}
 
 	assignAliases(inspected)
@@ -203,7 +252,7 @@ func (e *Engine) Run(ctx context.Context, invocationID string, destination Desti
 		return Report{}, err
 	}
 
-	totals := computeDeterministicOverlap(inspected)
+	totals := e.computeDeterministicOverlap(destination, inspected)
 	reasons := []string{adapterPulseV1, adapterClaudeMemV1, normalizationV1, dedupeV1, scrubberV1, fingerprintKeyV1}
 	blockers := make([]string, 0)
 	phase := PhaseReportReady
@@ -253,19 +302,26 @@ func (e *Engine) checkContinue(ctx context.Context, invocationID string, started
 	return nil
 }
 
-func (e *Engine) finishInterrupted(invocationID string, inspected []inspectedSource, cause error) (Report, error) {
+func (e *Engine) finishInterrupted(invocationID string, destination Destination, inspected []inspectedSource, cause error) (Report, error) {
 	report, getErr := e.manager.Get(invocationID)
 	if getErr == nil && report.Phase == PhaseCanceled {
 		return report, nil
 	}
 	reason := "inventory_interrupted"
-	if cause.Error() == "resource_limit" {
+	if cause.Error() == "resource_limit" || errors.Is(cause, context.DeadlineExceeded) {
 		reason = "resource_limit"
 	}
 	return e.manager.Advance(
 		invocationID, PhasePartial, Totals{}, portableSources(inspected), []string{"inventory_partial"},
-		[]string{reason}, "Fix the reported source issue and resume the report.", e.inventoryDigest(Destination{}, inspected),
+		[]string{reason}, "Fix the reported source issue and resume the report.", e.inventoryDigest(destination, inspected),
 	)
+}
+
+func minInt64(left, right int64) int64 {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func (e *Engine) discover() ([]sourceCandidate, string) {
@@ -506,7 +562,7 @@ func portableSources(inspected []inspectedSource) []Source {
 	return out
 }
 
-func computeDeterministicOverlap(sources []inspectedSource) Totals {
+func (e *Engine) computeDeterministicOverlap(destination Destination, sources []inspectedSource) Totals {
 	stable := make(map[string]string)
 	content := make(map[string]string)
 	for _, source := range sources {
@@ -526,6 +582,12 @@ func computeDeterministicOverlap(sources []inspectedSource) Totals {
 			continue
 		}
 		for _, item := range source.items {
+			if source.classification == ClassificationClaudeMem && item.projectKey != e.projectKey(destination.RepositoryID) {
+				totals.Ambiguous++
+				source.counts["project_destination_ambiguity"]++
+				source.counts["review_required"]++
+				continue
+			}
 			if priorFingerprint, ok := stable[item.stableKey]; ok {
 				if priorFingerprint == item.fingerprint {
 					totals.AlreadyRepresented++
@@ -549,6 +611,23 @@ func computeDeterministicOverlap(sources []inspectedSource) Totals {
 		}
 	}
 	return totals
+}
+
+func (e *Engine) projectKey(repositoryID string) string {
+	return e.manager.mac([]byte("project-v1\x1f" + normalizeContent(repositoryID)))
+}
+
+func appendInventoryItem(source *inspectedSource, item inventoryItem, maxWorkingBytes int64) error {
+	// Account conservatively for the item plus its eventual stable/content map
+	// entries. This keeps the live heap bounded without exposing raw content.
+	const itemOverhead = int64(512)
+	itemBytes := itemOverhead + int64(len(item.stableKey)+len(item.fingerprint)+len(item.projectKey))
+	if maxWorkingBytes < 0 || itemBytes > maxWorkingBytes-source.workingBytes {
+		return errors.New("resource_limit")
+	}
+	source.items = append(source.items, item)
+	source.workingBytes += itemBytes
+	return nil
 }
 
 func (e *Engine) inventoryDigest(destination Destination, inspected []inspectedSource) string {

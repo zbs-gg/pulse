@@ -134,7 +134,7 @@ func (s *Server) handleHomeConsolidationResume(w http.ResponseWriter, r *http.Re
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id")); err != nil {
+	if _, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id"), r.Header.Get("Idempotency-Key")); err != nil {
 		writeConsolidationReportError(w, err)
 		return
 	}

@@ -1151,6 +1151,16 @@ export function createPulseMcpServer(
           report_id: { type: 'string', pattern: '^report_[A-Za-z0-9._-]{1,128}$' },
         },
         required: ['action'],
+        allOf: [
+          {
+            if: { properties: { action: { enum: ['explain', 'cancel', 'resume'] } } },
+            then: { required: ['report_id'] },
+          },
+          {
+            if: { properties: { action: { const: 'start' } } },
+            then: { not: { required: ['report_id'] } },
+          },
+        ],
         additionalProperties: false,
       },
     },
@@ -1434,6 +1444,9 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
     }
     if (['explain', 'cancel', 'resume'].includes(String(action)) && reportId === undefined) {
       throw new Error(`pulse_consolidation_report ${String(action)} requires report_id`);
+    }
+    if (action === 'start' && reportId !== undefined) {
+      throw new Error('pulse_consolidation_report start does not accept report_id');
     }
     let path = '/memory/consolidation/reports';
     let method: 'GET' | 'POST' = 'POST';

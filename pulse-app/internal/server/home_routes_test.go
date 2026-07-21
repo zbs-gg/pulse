@@ -66,13 +66,17 @@ func TestMemoryHomeConsolidationStartUsesExistingSessionAndCSRFBoundary(t *testi
 	if started.Code != http.StatusNoContent {
 		t.Fatalf("consolidation start status=%d body=%s", started.Code, started.Body.String())
 	}
-	report, err := srv.consolidationReports.Latest(consolidation.Destination{
+	destination := consolidation.Destination{
 		StoreKind: string(vault.StoreKind()), StoreID: vault.StoreID(),
 		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository_pulse",
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
+	report := waitForConsolidationPhase(t, consolidation.PhaseReportReady, func() consolidation.Report {
+		current, currentErr := srv.consolidationReports.Latest(destination)
+		if currentErr != nil {
+			t.Fatal(currentErr)
+		}
+		return current
+	})
 	if report.Phase != consolidation.PhaseReportReady || report.Totals.Unique != 0 {
 		t.Fatalf("unexpected content-free Home report: %#v", report)
 	}
@@ -1177,6 +1181,7 @@ func newHomeRouteFixture(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(srv.Close)
 	return srv, vault
 }
 

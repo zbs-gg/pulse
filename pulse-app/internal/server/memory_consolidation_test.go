@@ -74,9 +74,13 @@ func TestConsolidationReportRouteRunsReadOnlyInventoryForBoundVault(t *testing.T
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
+		srv.Close()
 		_ = vault.Close()
 	})
 	report := decodeConsolidationReport(t, pulseJSON(t, ts, http.MethodPost, "/memory/consolidation/reports", map[string]any{}))
+	report = waitForConsolidationPhase(t, consolidation.PhaseReportReady, func() consolidation.Report {
+		return decodeConsolidationReport(t, pulseJSON(t, ts, http.MethodGet, "/memory/consolidation/reports/"+report.InvocationID, nil))
+	})
 	if report.Phase != consolidation.PhaseReportReady || report.Totals.Unique != 1 || report.InventoryDigest == "" {
 		t.Fatalf("inventory report mismatch: %#v", report)
 	}

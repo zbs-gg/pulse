@@ -13,6 +13,8 @@ import (
 
 const consolidationReportRequestMaxBytes = 64 << 10
 
+var errConsolidationReportsUnavailable = errors.New("consolidation reports unavailable")
+
 type consolidationReportExplanation struct {
 	Schema       string   `json:"schema"`
 	InvocationID string   `json:"invocation_id"`
@@ -64,7 +66,10 @@ func (s *Server) handleConsolidationReportStart(w http.ResponseWriter, r *http.R
 	writeJSON(w, report)
 }
 
-func (s *Server) startConsolidationReport(ctx context.Context) (consolidation.Report, error) {
+func (s *Server) startConsolidationReport(_ context.Context) (consolidation.Report, error) {
+	if s.consolidationUnavailable != "" || s.consolidationReports == nil {
+		return consolidation.Report{}, errConsolidationReportsUnavailable
+	}
 	destination, ok := s.consolidationDestination()
 	if !ok {
 		return consolidation.Report{}, consolidation.ErrInvalidAuthority
@@ -87,8 +92,7 @@ func (s *Server) startConsolidationReport(ctx context.Context) (consolidation.Re
 	}
 	if s.consolidationInventory != nil && (report.Phase == consolidation.PhasePlanned ||
 		report.Phase == consolidation.PhaseInventory || report.Phase == consolidation.PhaseDeterministicDedupe) {
-		report, err = s.consolidationInventory.Run(ctx, report.InvocationID, destination)
-		if err != nil {
+		if err := s.scheduleConsolidationReport(report.InvocationID, destination); err != nil {
 			return consolidation.Report{}, err
 		}
 	}
@@ -96,6 +100,10 @@ func (s *Server) startConsolidationReport(ctx context.Context) (consolidation.Re
 }
 
 func (s *Server) handleConsolidationReportLatest(w http.ResponseWriter, _ *http.Request) {
+	if s.consolidationUnavailable != "" || s.consolidationReports == nil {
+		writeConsolidationReportError(w, errConsolidationReportsUnavailable)
+		return
+	}
 	destination, ok := s.consolidationDestination()
 	if !ok {
 		http.Error(w, "consolidation destination unavailable", http.StatusServiceUnavailable)
@@ -117,6 +125,9 @@ func (s *Server) handleConsolidationReportLatest(w http.ResponseWriter, _ *http.
 }
 
 func (s *Server) reportForCurrentDestination(invocationID string) (consolidation.Report, error) {
+	if s.consolidationUnavailable != "" || s.consolidationReports == nil {
+		return consolidation.Report{}, errConsolidationReportsUnavailable
+	}
 	report, err := s.consolidationReports.Get(invocationID)
 	if err != nil {
 		return consolidation.Report{}, err
@@ -170,6 +181,7 @@ func (s *Server) handleConsolidationReportCancel(w http.ResponseWriter, r *http.
 		writeConsolidationReportError(w, err)
 		return
 	}
+	s.cancelConsolidationJob(id)
 	writeJSON(w, report)
 }
 
@@ -177,7 +189,7 @@ func (s *Server) handleConsolidationReportResume(w http.ResponseWriter, r *http.
 	if !decodeEmptyConsolidationRequest(w, r) {
 		return
 	}
-	report, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id"))
+	report, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id"), r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		writeConsolidationReportError(w, err)
 		return
@@ -185,7 +197,7 @@ func (s *Server) handleConsolidationReportResume(w http.ResponseWriter, r *http.
 	writeJSON(w, report)
 }
 
-func (s *Server) resumeConsolidationReport(ctx context.Context, invocationID string) (consolidation.Report, error) {
+func (s *Server) resumeConsolidationReport(_ context.Context, invocationID, idempotencyKey string) (consolidation.Report, error) {
 	if _, err := s.reportForCurrentDestination(invocationID); err != nil {
 		return consolidation.Report{}, err
 	}
@@ -193,14 +205,78 @@ func (s *Server) resumeConsolidationReport(ctx context.Context, invocationID str
 	if !ok {
 		return consolidation.Report{}, consolidation.ErrInvalidAuthority
 	}
-	report, err := s.consolidationReports.Resume(invocationID, destination)
+	var report consolidation.Report
+	var err error
+	if idempotencyKey == "" {
+		report, err = s.consolidationReports.Resume(invocationID, destination)
+	} else {
+		report, err = s.consolidationReports.ResumeIdempotent(invocationID, destination, idempotencyKey)
+	}
 	if err != nil {
 		return consolidation.Report{}, err
 	}
 	if s.consolidationInventory != nil {
-		return s.consolidationInventory.Run(ctx, report.InvocationID, destination)
+		if err := s.scheduleConsolidationReport(report.InvocationID, destination); err != nil {
+			return consolidation.Report{}, err
+		}
 	}
 	return report, nil
+}
+
+func (s *Server) scheduleConsolidationReport(invocationID string, destination consolidation.Destination) error {
+	if s.consolidationInventory == nil {
+		return nil
+	}
+	s.consolidationJobsMu.Lock()
+	if s.consolidationClosing {
+		s.consolidationJobsMu.Unlock()
+		return errConsolidationReportsUnavailable
+	}
+	if _, running := s.consolidationJobs[invocationID]; running {
+		s.consolidationJobsMu.Unlock()
+		return nil
+	}
+	jobCtx, cancel := context.WithTimeout(s.consolidationCtx, s.consolidationJobTimeout)
+	s.consolidationJobs[invocationID] = cancel
+	s.consolidationJobsWG.Add(1)
+	s.consolidationJobsMu.Unlock()
+
+	go func() {
+		defer s.consolidationJobsWG.Done()
+		defer func() {
+			cancel()
+			s.consolidationJobsMu.Lock()
+			delete(s.consolidationJobs, invocationID)
+			s.consolidationJobsMu.Unlock()
+		}()
+		if _, err := s.consolidationInventory.Run(jobCtx, invocationID, destination); err != nil {
+			s.finishFailedConsolidationJob(invocationID)
+		}
+	}()
+	return nil
+}
+
+func (s *Server) finishFailedConsolidationJob(invocationID string) {
+	report, err := s.consolidationReports.Get(invocationID)
+	if err != nil || report.Phase == consolidation.PhaseCanceled ||
+		report.Phase == consolidation.PhaseReportReady || report.Phase == consolidation.PhasePartial ||
+		report.Phase == consolidation.PhaseStale {
+		return
+	}
+	_, _ = s.consolidationReports.Advance(
+		invocationID, consolidation.PhasePartial, consolidation.Totals{}, report.Sources,
+		[]string{"inventory_partial"}, []string{"inventory_interrupted"},
+		"Fix the reported source issue and resume the report.", report.InventoryDigest,
+	)
+}
+
+func (s *Server) cancelConsolidationJob(invocationID string) {
+	s.consolidationJobsMu.Lock()
+	cancel := s.consolidationJobs[invocationID]
+	s.consolidationJobsMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func writeConsolidationReportError(w http.ResponseWriter, err error) {
@@ -211,6 +287,12 @@ func writeConsolidationReportError(w http.ResponseWriter, err error) {
 		http.Error(w, "consolidation report lifecycle conflict", http.StatusConflict)
 	case errors.Is(err, consolidation.ErrInvalidAuthority):
 		http.Error(w, "consolidation destination changed", http.StatusConflict)
+	case errors.Is(err, consolidation.ErrIdempotencyConflict):
+		http.Error(w, "consolidation idempotency conflict", http.StatusConflict)
+	case errors.Is(err, consolidation.ErrInvalidIdempotency):
+		http.Error(w, "invalid consolidation idempotency key", http.StatusBadRequest)
+	case errors.Is(err, errConsolidationReportsUnavailable):
+		http.Error(w, "consolidation report unavailable", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "consolidation report unavailable", http.StatusInternalServerError)
 	}

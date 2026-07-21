@@ -72,6 +72,16 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
       consolidation.inputSchema.properties.action.enum,
       ['start', 'status', 'explain', 'cancel', 'resume'],
     );
+    assert.deepEqual(consolidation.inputSchema.allOf, [
+      {
+        if: { properties: { action: { enum: ['explain', 'cancel', 'resume'] } } },
+        then: { required: ['report_id'] },
+      },
+      {
+        if: { properties: { action: { const: 'start' } } },
+        then: { not: { required: ['report_id'] } },
+      },
+    ]);
     assert.equal(consolidation.inputSchema.properties.destination, undefined);
     assert.match(consolidation.description, /read-only local memory-source report/);
     const result = messages.find((message) => message.id === 3)?.result;

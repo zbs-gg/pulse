@@ -318,6 +318,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	if err != nil {
 		return err
 	}
+	defer srv.Close()
 
 	httpSrv := &http.Server{
 		Addr:              addr,

@@ -20,6 +20,7 @@ func (e *Engine) inspectClaudeMemSource(
 	tx *sql.Tx,
 	source inspectedSource,
 	tables map[string]bool,
+	rowBudget, workingBudget int64,
 ) (inspectedSource, error) {
 	var schemaVersion int
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_versions").Scan(&schemaVersion); err != nil {
@@ -47,22 +48,30 @@ func (e *Engine) inspectClaudeMemSource(
 	}
 
 	observationCount, err := countQuery(ctx, tx, "SELECT COUNT(*) FROM observations")
-	if err != nil || observationCount > e.limits.MaxRowsPerSource {
+	if err != nil || observationCount > rowBudget {
 		return source, errors.New("resource_limit")
 	}
 	summaryCount, err := countQuery(ctx, tx, "SELECT COUNT(*) FROM session_summaries")
-	if err != nil || observationCount+summaryCount > e.limits.MaxRowsPerSource {
+	if err != nil || observationCount+summaryCount > rowBudget {
 		return source, errors.New("resource_limit")
 	}
 	source.counts["source_rows"] = observationCount + summaryCount
 	source.counts["structured_candidates"] = observationCount + summaryCount
 	if tables["user_prompts"] {
-		source.counts["excluded_material"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM user_prompts")
+		count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM user_prompts")
+		if err != nil {
+			return source, err
+		}
+		source.counts["excluded_material"] += count
 	}
 	if tables["pending_messages"] {
-		source.counts["pending_extraction"] += mustCountOrZero(
+		count, err := schemaCountQuery(
 			ctx, tx, "SELECT COUNT(*) FROM pending_messages WHERE status IN ('pending','processing')",
 		)
+		if err != nil {
+			return source, err
+		}
+		source.counts["pending_extraction"] += count
 	}
 	for table := range tables {
 		lower := strings.ToLower(table)
@@ -71,16 +80,20 @@ func (e *Engine) inspectClaudeMemSource(
 		}
 	}
 
-	items, err := e.readClaudeMemItems(ctx, tx, "observations", "obs", observationFields)
+	items, itemBytes, err := e.readClaudeMemItems(ctx, tx, "observations", "obs", observationFields, workingBudget)
 	if err != nil {
 		return source, err
 	}
 	source.items = append(source.items, items...)
-	items, err = e.readClaudeMemItems(ctx, tx, "session_summaries", "summary", summaryFields)
+	source.workingBytes += itemBytes
+	items, itemBytes, err = e.readClaudeMemItems(
+		ctx, tx, "session_summaries", "summary", summaryFields, workingBudget-source.workingBytes,
+	)
 	if err != nil {
 		return source, err
 	}
 	source.items = append(source.items, items...)
+	source.workingBytes += itemBytes
 	source.classification = ClassificationClaudeMem
 	source.reasonCode = claudeMemAdapterManifest
 	return source, nil
@@ -91,23 +104,31 @@ func (e *Engine) readClaudeMemItems(
 	tx *sql.Tx,
 	table, stableKind string,
 	contentColumns []string,
-) ([]inventoryItem, error) {
+	workingBudget int64,
+) ([]inventoryItem, int64, error) {
+	if workingBudget < 1 {
+		return nil, 0, errors.New("resource_limit")
+	}
 	selectColumns := append([]string{"id", "project"}, contentColumns...)
 	query := fmt.Sprintf("SELECT %s FROM %s ORDER BY id LIMIT ?", strings.Join(selectColumns, ", "), table)
 	rows, err := tx.QueryContext(ctx, query, e.limits.MaxRowsPerSource+1)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]inventoryItem, 0)
+	var workingBytes int64
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		values := make([]sql.NullString, len(selectColumns))
 		destinations := make([]any, len(values))
 		for index := range values {
 			destinations[index] = &values[index]
 		}
 		if err := rows.Scan(destinations...); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		id := values[0].String
 		project := values[1].String
@@ -121,13 +142,19 @@ func (e *Engine) readClaudeMemItems(
 		if id == "" || normalized == "" {
 			continue
 		}
-		items = append(items, inventoryItem{
+		item := inventoryItem{
 			stableKey:   "claude-mem:" + stableKind + ":" + id,
 			fingerprint: e.contentFingerprint(normalized),
 			projectKey:  e.manager.mac([]byte("project-v1\x1f" + normalizeContent(project))),
-		})
+		}
+		probe := inspectedSource{workingBytes: workingBytes}
+		if err := appendInventoryItem(&probe, item, workingBudget); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+		workingBytes = probe.workingBytes
 	}
-	return items, rows.Err()
+	return items, workingBytes, rows.Err()
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {

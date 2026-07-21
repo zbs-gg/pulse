@@ -39,8 +39,10 @@ type statusResponse struct {
 	// FullRetrieval is true only when the state-aware retrieval engine is
 	// running with an embedder. False means fallback memory only — callers
 	// must not present this as full Pulse.
-	FullRetrieval bool   `json:"full_retrieval"`
-	Embedder      string `json:"embedder,omitempty"`
+	FullRetrieval                 bool   `json:"full_retrieval"`
+	Embedder                      string `json:"embedder,omitempty"`
+	ConsolidationReportsAvailable bool   `json:"consolidation_reports_available"`
+	ConsolidationReportsState     string `json:"consolidation_reports_state"`
 }
 
 func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
@@ -127,19 +129,27 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		embedder = s.cfg.Retrieval.EmbedderModel()
 	}
 	captureEnabled, captureState := readCaptureState(s.cfg.Store.DBPath())
+	consolidationState := "unavailable"
+	if s.consolidationUnavailable != "" {
+		consolidationState = s.consolidationUnavailable
+	} else if s.consolidationReports != nil {
+		consolidationState = "ready"
+	}
 	writeJSON(w, statusResponse{
-		BillingMode:       billing.Mode,
-		Host:              billing.Host,
-		BackendLLMEnabled: billing.BackendLLMEnabled,
-		RawCaptureEnabled: billing.RawCaptureEnabled,
-		StoragePath:       billing.StoragePath,
-		Schema:            store.MemoryCapsuleSchema,
-		ItemCount:         storeStatus.ItemCount,
-		LastWrite:         storeStatus.LastWrite,
-		CaptureEnabled:    captureEnabled,
-		CaptureState:      captureState,
-		FullRetrieval:     fullRetrieval,
-		Embedder:          embedder,
+		BillingMode:                   billing.Mode,
+		Host:                          billing.Host,
+		BackendLLMEnabled:             billing.BackendLLMEnabled,
+		RawCaptureEnabled:             billing.RawCaptureEnabled,
+		StoragePath:                   billing.StoragePath,
+		Schema:                        store.MemoryCapsuleSchema,
+		ItemCount:                     storeStatus.ItemCount,
+		LastWrite:                     storeStatus.LastWrite,
+		CaptureEnabled:                captureEnabled,
+		CaptureState:                  captureState,
+		FullRetrieval:                 fullRetrieval,
+		Embedder:                      embedder,
+		ConsolidationReportsAvailable: s.consolidationReports != nil && s.consolidationUnavailable == "",
+		ConsolidationReportsState:     consolidationState,
 	})
 }
 

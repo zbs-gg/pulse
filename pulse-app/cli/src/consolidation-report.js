@@ -10,11 +10,24 @@ const SENSITIVE = /(?:token\s*=|api[_-]?key|authorization\s*:|begin private key|
 
 export function reportRequestForArgs(args) {
   if (args[0] !== 'report') throw new Error('not a report command');
-  const action = args[1] ?? 'start';
-  const idIndex = args.indexOf('--id');
-  const id = idIndex >= 0 ? args[idIndex + 1] : undefined;
+  const tail = args.slice(1);
+  const action = tail[0] && !tail[0].startsWith('--') ? tail.shift() : 'start';
+  let id;
+  for (let index = 0; index < tail.length; index += 1) {
+    const option = tail[index];
+    if (option === '--json') continue;
+    if (option !== '--id') throw new Error(`unknown report option: ${option}`);
+    if (id !== undefined) throw new Error('duplicate report id');
+    const value = tail[index + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error('report --id requires <report-id>');
+    id = value;
+    index += 1;
+  }
   if (id !== undefined && !ID_PATTERN.test(id)) throw new Error('invalid report id');
-  if (action === 'start') return { action, method: 'POST', path: '/memory/consolidation/reports' };
+  if (action === 'start') {
+    if (id !== undefined) throw new Error('pulse consolidate report start does not accept --id');
+    return { action, method: 'POST', path: '/memory/consolidation/reports' };
+  }
   if (action === 'status') {
     return id
       ? { action, method: 'GET', path: `/memory/consolidation/reports/${id}` }

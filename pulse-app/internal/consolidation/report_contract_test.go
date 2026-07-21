@@ -124,6 +124,13 @@ func TestManagerCancelTargetsInvocationAndResumeUsesCommittedGeneration(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	old, err = manager.Advance(old.InvocationID, PhaseInventory, Totals{}, []Source{{
+		Alias: "canonical_vault_01", Classification: ClassificationCanonicalVault,
+		ReasonCode: "signed_bound_destination", Counts: map[string]int64{"source_rows": 1},
+	}}, nil, []string{"adapter_pulse_v1"}, "One source inspected.", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	canceled, err := manager.Cancel(old.InvocationID)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +144,10 @@ func TestManagerCancelTargetsInvocationAndResumeUsesCommittedGeneration(t *testi
 	}
 	if resumed.InvocationID != "report_new" || resumed.Phase != PhasePlanned || resumed.Generation <= canceled.Generation {
 		t.Fatalf("resume did not create replacement generation: %#v", resumed)
+	}
+	if len(resumed.Sources) != 1 || resumed.Sources[0].Alias != "canonical_vault_01" ||
+		!containsCode(resumed.ReasonCodes, "resume_from_committed_generation") {
+		t.Fatalf("resume did not carry the last committed content-free generation: %#v", resumed)
 	}
 	if _, err := manager.Cancel(old.InvocationID); err != ErrStaleInvocation {
 		t.Fatalf("stale cancel err=%v", err)
@@ -157,6 +168,47 @@ func TestManagerCancelTargetsInvocationAndResumeUsesCommittedGeneration(t *testi
 	}
 	if latest.InvocationID != resumed.InvocationID || latest.Generation != resumed.Generation {
 		t.Fatalf("reopen ignored latest committed generation: %#v", latest)
+	}
+}
+
+func TestManagerIdempotentResumeReplaysAfterRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "reports")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	manager, err := NewManager(ManagerConfig{
+		RootDir: root, Key: key, NewID: func() string { return "report_original" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _, err := manager.Start(testDestination())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Cancel(original.InvocationID); err != nil {
+		t.Fatal(err)
+	}
+	const idempotencyKey = "mcp_0123456789abcdef0123456789abcdef"
+	first, err := manager.ResumeIdempotent(original.InvocationID, testDestination(), idempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewManager(ManagerConfig{RootDir: root, Key: key, NewID: func() string { return "unused" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := reopened.ResumeIdempotent(original.InvocationID, testDestination(), idempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.InvocationID != first.InvocationID || replayed.ReportDigest != first.ReportDigest {
+		t.Fatalf("durable resume replay changed result: first=%#v replayed=%#v", first, replayed)
+	}
+	if _, err := reopened.Cancel(first.InvocationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.ResumeIdempotent(first.InvocationID, testDestination(), idempotencyKey); err != ErrIdempotencyConflict {
+		t.Fatalf("divergent idempotency reuse err=%v", err)
 	}
 }
 

@@ -193,6 +193,30 @@ function installedPluginRoot(codexHome) {
   return join(versionsRoot, versions[0]);
 }
 
+function nativeCodexExecutable(executable) {
+  const resolved = realpathSync(executable);
+  if (!resolved.endsWith('.js')) return resolved;
+  const optionalPackages = join(resolve(dirname(resolved), '..'), 'node_modules', '@openai');
+  if (!existsSync(optionalPackages)) throw new Error('native packed Codex optional package is unavailable');
+  const candidates = [];
+  const visit = (directory, depth = 0) => {
+    if (depth > 6) return;
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) visit(path, depth + 1);
+      else if (info.isFile() && name === 'codex' && path.includes(`${join('vendor', '')}`) &&
+          path.includes(`${join('bin', '')}`)) candidates.push(path);
+    }
+  };
+  visit(optionalPackages);
+  if (candidates.length !== 1) {
+    throw new Error(`native packed Codex binary selection is ambiguous: ${candidates.length}`);
+  }
+  return realpathSync(candidates[0]);
+}
+
 function exposeCodexToIsolatedHome(home) {
   const configured = process.env.PULSE_NATIVE_PACKED_CODEX_EXECUTABLE;
   let executable = configured;
@@ -222,8 +246,9 @@ function exposeCodexToIsolatedHome(home) {
   const destination = join(bin, 'codex');
   // Runner-managed global npm trees may be group-writable. Production host
   // discovery correctly rejects that; the clean-room harness therefore uses
-  // an exact private copy instead of weakening the executable policy.
-  copyFileSync(realpathSync(executable), destination);
+  // an exact private native binary instead of a JS launcher whose optional
+  // package would disappear when copied away from its npm tree.
+  copyFileSync(nativeCodexExecutable(executable), destination);
   chmodSync(destination, 0o700);
   return realpathSync(destination);
 }
@@ -333,9 +358,50 @@ function seedSyntheticConsolidationArtifacts(home) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const path = join(root, name);
     writeFileSync(path, content, { mode: 0o600 });
-    return { path, before: readFileSync(path) };
+    return { path };
   });
   return fixtures;
+}
+
+function snapshotConsolidationSources(paths) {
+  return paths.filter((path) => existsSync(path)).map((path) => {
+    const info = lstatSync(path);
+    assert.equal(info.isFile(), true, `consolidation source is not a file: ${basename(path)}`);
+    return {
+      path,
+      bytes: readFileSync(path),
+      size: info.size,
+      mode: info.mode & 0o777,
+      modified: info.mtimeMs,
+    };
+  });
+}
+
+function assertConsolidationSourcesPreserved(snapshots) {
+  for (const snapshot of snapshots) {
+    const info = lstatSync(snapshot.path);
+    assert.equal(info.isFile(), true, `consolidation source changed type: ${basename(snapshot.path)}`);
+    assert.equal(info.size, snapshot.size, `consolidation source changed size: ${basename(snapshot.path)}`);
+    assert.equal(info.mode & 0o777, snapshot.mode, `consolidation source changed mode: ${basename(snapshot.path)}`);
+    assert.equal(info.mtimeMs, snapshot.modified, `consolidation source changed mtime: ${basename(snapshot.path)}`);
+    assert.deepEqual(readFileSync(snapshot.path), snapshot.bytes,
+      `consolidation source changed bytes: ${basename(snapshot.path)}`);
+  }
+  return true;
+}
+
+async function waitForPackedConsolidationReport(tarball, report, options) {
+  const deadline = Date.now() + 180_000;
+  let current = report;
+  while (!['report_ready', 'partial', 'stale', 'canceled'].includes(current.phase)) {
+    if (Date.now() >= deadline) throw new Error(`native packed consolidation report timed out in ${current.phase}`);
+    await new Promise((accept) => setTimeout(accept, 100));
+    const result = await packedPulse(tarball, [
+      'consolidate', 'report', 'status', '--id', current.invocation_id, '--json',
+    ], { ...options, timeout: 30_000 });
+    current = json(result.stdout, 'native packed consolidation status is invalid');
+  }
+  return current;
 }
 
 async function readMemoryHomePage(runtime, secret) {
@@ -666,12 +732,22 @@ try {
   assert.equal('savings_percentage' in economy, false);
 
   const sourceFixtures = seedSyntheticConsolidationArtifacts(home);
+  const canonicalDatabase = join(runtime.data_dir, 'pulse.db');
+  const sourceSnapshots = snapshotConsolidationSources([
+    canonicalDatabase, `${canonicalDatabase}-wal`, `${canonicalDatabase}-shm`,
+    ...sourceFixtures.map((fixtureSource) => fixtureSource.path),
+  ]);
+  assert.equal(sourceSnapshots.some((snapshot) => snapshot.path === canonicalDatabase), true,
+    'native packed consolidation proof did not snapshot the canonical database');
   const consolidationStartResult = await packedPulse(tarball, [
     'consolidate', 'report', 'start', '--json',
   ], { cwd: workspace, env, timeout: 180_000 });
-  const consolidation = json(
+  const consolidationStarted = json(
     consolidationStartResult.stdout,
     'native packed consolidation report is invalid',
+  );
+  const consolidation = await waitForPackedConsolidationReport(
+    tarball, consolidationStarted, { cwd: workspace, env },
   );
   assert.equal(consolidation.schema, 'pulse.consolidation.report.v1');
   assert.equal(consolidation.phase, 'report_ready');
@@ -682,10 +758,7 @@ try {
     assert.equal(consolidation.sources.some((source) => source.classification === classification), true,
       `missing ${classification} from packed consolidation report`);
   }
-  for (const fixtureSource of sourceFixtures) {
-    assert.deepEqual(readFileSync(fixtureSource.path), fixtureSource.before,
-      `consolidation report changed ${basename(fixtureSource.path)}`);
-  }
+  const sourcesBytePreserved = assertConsolidationSourcesPreserved(sourceSnapshots);
   const consolidationStatusResult = await packedPulse(tarball, [
     'consolidate', 'report', 'status', '--json',
   ], { cwd: workspace, env, timeout: 30_000 });
@@ -726,7 +799,7 @@ try {
     cli_parity: true,
     mcp_parity: true,
     memory_home_visible: true,
-    sources_byte_preserved: true,
+    sources_byte_preserved: sourcesBytePreserved,
     imported: false,
     merged: false,
     deleted: false,

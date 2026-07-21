@@ -73,10 +73,21 @@ function gitRepository(root) {
 
 function verifiedRelease() {
   return {
-    schema: 'pulse.verified_release_manifest.v1',
+    schema: 'pulse.verified_release_manifest.v2',
     version: '0.7.0',
     epoch: 7,
     manifest_digest: 'a'.repeat(64),
+    catalog_schema: 'pulse.personal_preview.release_catalog.v2',
+    capabilities: ['presence-helper'],
+    historical_only: false,
+    target_id: 'darwin-arm64',
+    verification_profile: {
+      gatekeeper: true,
+      kind: 'apple',
+      notarized: true,
+      stapled: false,
+      team_id: '44N4NZ86S5',
+    },
     artifacts: Object.fromEntries([
       ['daemon', 10], ['embedder-runtime', 20], ['model', 30], ['plugin-runtime', 40], ['presence-helper', 50],
     ].map(([kind, bytes]) => [kind, {

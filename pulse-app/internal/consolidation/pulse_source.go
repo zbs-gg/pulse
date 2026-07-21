@@ -26,13 +26,20 @@ type fileSnapshot struct {
 	walModified int64
 }
 
-func (e *Engine) inspectDatabase(ctx context.Context, candidate sourceCandidate) inspectedSource {
+func (e *Engine) inspectDatabase(
+	ctx context.Context,
+	candidate sourceCandidate,
+	rowBudget, workingBudget int64,
+) inspectedSource {
 	base := inspectedSource{
 		path: candidate.path, classification: candidate.hint,
 		reasonCode: "recognized_database", counts: map[string]int64{}, canonical: candidate.canonical,
 	}
 	if candidate.canonical {
 		base.classification = ClassificationCanonicalVault
+	}
+	if rowBudget < 1 || workingBudget < 1 {
+		return partialSource(candidate, "resource_limit")
 	}
 
 	lease, before, err := openReadLease(candidate.path, e.homeDir)
@@ -102,12 +109,12 @@ func (e *Engine) inspectDatabase(ctx context.Context, candidate sourceCandidate)
 		if !tables["store_identity"] {
 			return partialSource(candidate, "unsupported_schema")
 		}
-		base, err = e.inspectPulseSource(ctx, tx, base, tables)
+		base, err = e.inspectPulseSource(ctx, tx, base, tables, rowBudget, workingBudget)
 	case tables["schema_versions"] && tables["observations"] && tables["session_summaries"]:
-		base, err = e.inspectClaudeMemSource(ctx, tx, base, tables)
+		base, err = e.inspectClaudeMemSource(ctx, tx, base, tables, rowBudget, workingBudget)
 	case tables["observations"] || tables["memory_capsules"] || tables["private_memory_objects"]:
 		base.classification = ClassificationLegacyPulseDB
-		base, err = e.inspectPulseSource(ctx, tx, base, tables)
+		base, err = e.inspectPulseSource(ctx, tx, base, tables, rowBudget, workingBudget)
 	default:
 		return partialSource(candidate, "unsupported_schema")
 	}
@@ -285,29 +292,48 @@ func sqliteTables(ctx context.Context, tx *sql.Tx) (map[string]bool, error) {
 	return tables, rows.Err()
 }
 
-func (e *Engine) inspectPulseSource(ctx context.Context, tx *sql.Tx, source inspectedSource, tables map[string]bool) (inspectedSource, error) {
+func (e *Engine) inspectPulseSource(
+	ctx context.Context,
+	tx *sql.Tx,
+	source inspectedSource,
+	tables map[string]bool,
+	rowBudget, workingBudget int64,
+) (inspectedSource, error) {
 	counts := source.counts
+	addRows := func(count int64) error {
+		if count < 0 || count > rowBudget-counts["source_rows"] {
+			return errors.New("resource_limit")
+		}
+		counts["source_rows"] += count
+		return nil
+	}
 	if tables["observations"] {
 		count, err := countQuery(ctx, tx, "SELECT COUNT(*) FROM observations")
 		if err != nil {
 			return source, err
 		}
-		counts["source_rows"] += count
-		if count > e.limits.MaxRowsPerSource {
-			return source, errors.New("resource_limit")
+		if err := addRows(count); err != nil {
+			return source, err
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT source_id, COALESCE(content_text, '') FROM observations ORDER BY id LIMIT ?", e.limits.MaxRowsPerSource+1)
+		rows, err := tx.QueryContext(ctx, "SELECT source_id, COALESCE(content_text, '') FROM observations ORDER BY id LIMIT ?", rowBudget+1)
 		if err != nil {
 			return source, err
 		}
 		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return source, err
+			}
 			var stableKey, content string
 			if err := rows.Scan(&stableKey, &content); err != nil {
 				rows.Close()
 				return source, err
 			}
 			if normalized := normalizeContent(content); normalized != "" {
-				source.items = append(source.items, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)})
+				if err := appendInventoryItem(&source, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)}, workingBudget); err != nil {
+					rows.Close()
+					return source, err
+				}
 			} else {
 				counts["excluded_material"]++
 			}
@@ -322,18 +348,28 @@ func (e *Engine) inspectPulseSource(ctx context.Context, tx *sql.Tx, source insp
 			return source, err
 		}
 		counts["structured_candidates"] += count
-		rows, err := tx.QueryContext(ctx, "SELECT id, redacted_summary FROM memory_capsules ORDER BY id LIMIT ?", e.limits.MaxRowsPerSource+1)
+		if err := addRows(count); err != nil {
+			return source, err
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT id, redacted_summary FROM memory_capsules ORDER BY id LIMIT ?", rowBudget+1)
 		if err != nil {
 			return source, err
 		}
 		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return source, err
+			}
 			var stableKey, content string
 			if err := rows.Scan(&stableKey, &content); err != nil {
 				rows.Close()
 				return source, err
 			}
 			if normalized := normalizeContent(content); normalized != "" {
-				source.items = append(source.items, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)})
+				if err := appendInventoryItem(&source, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)}, workingBudget); err != nil {
+					rows.Close()
+					return source, err
+				}
 			}
 		}
 		if err := rows.Close(); err != nil {
@@ -341,29 +377,47 @@ func (e *Engine) inspectPulseSource(ctx context.Context, tx *sql.Tx, source insp
 		}
 	}
 	if tables["memory_tray_candidates"] {
-		counts["structured_candidates"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM memory_tray_candidates WHERE state IN ('pending','committing')")
+		count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM memory_tray_candidates WHERE state IN ('pending','committing')")
+		if err != nil {
+			return source, err
+		}
+		counts["structured_candidates"] += count
 	}
 	if tables["private_memory_objects"] {
-		counts["approved_canonical"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM private_memory_objects WHERE lifecycle='active'")
+		activeObjects, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM private_memory_objects WHERE lifecycle='active'")
+		if err != nil {
+			return source, err
+		}
+		counts["approved_canonical"] += activeObjects
 		counts["retrieval_visible"] += counts["approved_canonical"]
 		if tables["memory_tray_candidates"] {
+			if err := addRows(activeObjects); err != nil {
+				return source, err
+			}
 			rows, err := tx.QueryContext(ctx, `
 				SELECT object.object_id, candidate.payload_json
 				  FROM private_memory_objects object
 				  JOIN memory_tray_candidates candidate ON candidate.candidate_id=object.created_from_candidate_id
 				 WHERE object.lifecycle='active'
-				 ORDER BY object.object_id LIMIT ?`, e.limits.MaxRowsPerSource+1)
+				 ORDER BY object.object_id LIMIT ?`, rowBudget+1)
 			if err != nil {
 				return source, err
 			}
 			for rows.Next() {
+				if err := ctx.Err(); err != nil {
+					rows.Close()
+					return source, err
+				}
 				var stableKey, payload string
 				if err := rows.Scan(&stableKey, &payload); err != nil {
 					rows.Close()
 					return source, err
 				}
 				if normalized := normalizeContent(memoryTextFromJSON(payload)); normalized != "" {
-					source.items = append(source.items, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)})
+					if err := appendInventoryItem(&source, inventoryItem{stableKey: stableKey, fingerprint: e.contentFingerprint(normalized)}, workingBudget); err != nil {
+						rows.Close()
+						return source, err
+					}
 				}
 			}
 			if err := rows.Close(); err != nil {
@@ -372,21 +426,37 @@ func (e *Engine) inspectPulseSource(ctx context.Context, tx *sql.Tx, source insp
 		}
 	}
 	if tables["extraction_jobs"] {
-		counts["pending_extraction"] = mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM extraction_jobs WHERE status IN ('pending','processing')")
+		count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM extraction_jobs WHERE state IN ('pending','running')")
+		if err != nil {
+			return source, err
+		}
+		counts["pending_extraction"] = count
 	}
 	for _, table := range []string{"continuity_observations", "continuity_checkpoints", "continuity_delivery_receipts"} {
 		if tables[table] {
-			counts["continuity_records"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			if err != nil {
+				return source, err
+			}
+			counts["continuity_records"] += count
 		}
 	}
 	for _, table := range []string{"entities", "relations", "facts", "events", "private_semantic_projection_rows"} {
 		if tables[table] {
-			counts["graph_projections"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			if err != nil {
+				return source, err
+			}
+			counts["graph_projections"] += count
 		}
 	}
 	for _, table := range []string{"event_embeddings", "entity_embeddings", "atomic_fact_embeddings"} {
 		if tables[table] {
-			counts["embeddings"] += mustCountOrZero(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			count, err := schemaCountQuery(ctx, tx, "SELECT COUNT(*) FROM "+table)
+			if err != nil {
+				return source, err
+			}
+			counts["embeddings"] += count
 		}
 	}
 	if source.canonical {
@@ -399,18 +469,21 @@ func (e *Engine) inspectPulseSource(ctx context.Context, tx *sql.Tx, source insp
 
 func countQuery(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {
 	var count int64
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil || count < 0 {
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return 0, err
+	}
+	if count < 0 {
+		return 0, errors.New("invalid_count")
 	}
 	return count, nil
 }
 
-func mustCountOrZero(ctx context.Context, tx *sql.Tx, query string) int64 {
+func schemaCountQuery(ctx context.Context, tx *sql.Tx, query string) (int64, error) {
 	count, err := countQuery(ctx, tx, query)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("unsupported_schema: %w", err)
 	}
-	return count
+	return count, nil
 }
 
 func normalizeContent(value string) string {
@@ -457,6 +530,9 @@ func safeInspectionReason(err error) string {
 		return "inspection_failed"
 	}
 	message := strings.ToLower(err.Error())
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "resource_limit"
+	}
 	for _, reason := range []string{
 		"resource_limit", "unsafe_file_type", "owner_mismatch", "source_changed",
 		"unsafe_wal", "active_wal", "source_locked", "read_only_unavailable", "integrity_failed", "unsupported_schema",

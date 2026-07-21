@@ -46,12 +46,15 @@ var (
 	ErrStaleInvocation     = errors.New("consolidation: stale invocation")
 	ErrReportNotResumable  = errors.New("consolidation: report is not resumable")
 	ErrCheckpointIntegrity = errors.New("consolidation: checkpoint integrity failure")
+	ErrIdempotencyConflict = errors.New("consolidation: idempotency key conflict")
+	ErrInvalidIdempotency  = errors.New("consolidation: invalid idempotency key")
 
-	hexDigestPattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	reportIDPattern   = regexp.MustCompile(`^report_[a-zA-Z0-9._-]{1,128}$`)
-	storeIDPattern    = regexp.MustCompile(`^store_[a-z0-9][a-z0-9_]{2,127}$`)
-	repositoryPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,255}$`)
-	codePattern       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
+	hexDigestPattern   = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	reportIDPattern    = regexp.MustCompile(`^report_[a-zA-Z0-9._-]{1,128}$`)
+	storeIDPattern     = regexp.MustCompile(`^store_[a-z0-9][a-z0-9_]{2,127}$`)
+	repositoryPattern  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,255}$`)
+	codePattern        = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
+	idempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 )
 
 type Destination struct {
@@ -104,6 +107,15 @@ type ManagerConfig struct {
 type checkpointEnvelope struct {
 	Report    Report `json:"report"`
 	Integrity string `json:"integrity"`
+}
+
+type resumeReceipt struct {
+	Schema             string `json:"schema"`
+	KeyDigest          string `json:"key_digest"`
+	BindingDigest      string `json:"binding_digest"`
+	PreviousInvocation string `json:"previous_invocation"`
+	ResultInvocation   string `json:"result_invocation"`
+	Integrity          string `json:"integrity"`
 }
 
 type Manager struct {
@@ -234,14 +246,138 @@ func (m *Manager) Resume(invocationID string, destination Destination) (Report, 
 		return Report{}, ErrReportNotResumable
 	}
 	newInvocationID := m.newID()
+	return m.resumeLocked(previous, destination, newInvocationID)
+}
+
+// ResumeIdempotent binds one caller key to the resume action, source report,
+// and destination authority. The private receipt is written before the new
+// report checkpoint so a response-loss retry can safely finish or replay the
+// same transition after a process restart.
+func (m *Manager) ResumeIdempotent(invocationID string, destination Destination, idempotencyKey string) (Report, error) {
+	if err := validateDestination(destination); err != nil {
+		return Report{}, err
+	}
+	if !idempotencyPattern.MatchString(idempotencyKey) {
+		return Report{}, ErrInvalidIdempotency
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	inputDigest := m.inputDigest(destination)
+	keyDigest := m.mac([]byte("resume-key-v1\x1f" + idempotencyKey))
+	bindingDigest := m.mac([]byte("resume-binding-v1\x1f" + invocationID + "\x1f" + inputDigest))
+	receiptPath := filepath.Join(m.rootDir, "resume-"+keyDigest+".json")
+	if receipt, err := m.readResumeReceiptLocked(receiptPath); err == nil {
+		if receipt.KeyDigest != keyDigest || receipt.BindingDigest != bindingDigest ||
+			receipt.PreviousInvocation != invocationID {
+			return Report{}, ErrIdempotencyConflict
+		}
+		if report, ok := m.byInvocation[receipt.ResultInvocation]; ok {
+			return cloneReport(report), nil
+		}
+		previous, ok := m.byInvocation[invocationID]
+		if !ok {
+			return Report{}, ErrReportNotFound
+		}
+		return m.resumeLocked(previous, destination, receipt.ResultInvocation)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Report{}, err
+	}
+
+	previous, ok := m.byInvocation[invocationID]
+	if !ok {
+		return Report{}, ErrReportNotFound
+	}
+	if previous.InputDigest != inputDigest || m.latest[inputDigest].InvocationID != invocationID {
+		return Report{}, ErrStaleInvocation
+	}
+	if previous.Phase != PhaseCanceled && previous.Phase != PhasePartial {
+		return Report{}, ErrReportNotResumable
+	}
+	resultInvocation := "report_" + keyDigest[:32]
+	receipt := resumeReceipt{
+		Schema: "pulse.consolidation.resume_receipt.v1", KeyDigest: keyDigest,
+		BindingDigest: bindingDigest, PreviousInvocation: invocationID,
+		ResultInvocation: resultInvocation,
+	}
+	payload, err := json.Marshal(struct {
+		Schema             string `json:"schema"`
+		KeyDigest          string `json:"key_digest"`
+		BindingDigest      string `json:"binding_digest"`
+		PreviousInvocation string `json:"previous_invocation"`
+		ResultInvocation   string `json:"result_invocation"`
+	}{receipt.Schema, receipt.KeyDigest, receipt.BindingDigest, receipt.PreviousInvocation, receipt.ResultInvocation})
+	if err != nil {
+		return Report{}, err
+	}
+	receipt.Integrity = m.mac(payload)
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		return Report{}, err
+	}
+	if err := atomicPrivateWrite(m.rootDir, filepath.Base(receiptPath), encoded); err != nil {
+		return Report{}, err
+	}
+	return m.resumeLocked(previous, destination, resultInvocation)
+}
+
+func (m *Manager) resumeLocked(previous Report, destination Destination, newInvocationID string) (Report, error) {
+	inputDigest := m.inputDigest(destination)
+	if previous.InputDigest != inputDigest || m.latest[inputDigest].InvocationID != previous.InvocationID {
+		return Report{}, ErrStaleInvocation
+	}
+	if previous.Phase != PhaseCanceled && previous.Phase != PhasePartial {
+		return Report{}, ErrReportNotResumable
+	}
 	if !reportIDPattern.MatchString(newInvocationID) {
 		return Report{}, errors.New("consolidation: generated invalid report id")
 	}
+	if existing, ok := m.byInvocation[newInvocationID]; ok {
+		if existing.InputDigest != inputDigest {
+			return Report{}, ErrIdempotencyConflict
+		}
+		return cloneReport(existing), nil
+	}
 	report := m.newReport(destination, inputDigest, newInvocationID)
+	// Carry only the last committed content-free inventory projection. The
+	// engine revalidates and rescans every carried source before using it, so a
+	// resume cannot reuse stale private fingerprints or destination authority.
+	report.Sources = cloneSources(previous.Sources)
+	report.Totals = previous.Totals
+	report.InventoryDigest = previous.InventoryDigest
+	report.ReasonCodes = []string{"resume_from_committed_generation"}
+	report.NextAction = "Revalidate the committed source generation and continue inventory."
 	if err := m.commitLocked(&report); err != nil {
 		return Report{}, err
 	}
 	return cloneReport(report), nil
+}
+
+func (m *Manager) readResumeReceiptLocked(path string) (resumeReceipt, error) {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return resumeReceipt{}, err
+	}
+	info, err := os.Lstat(path)
+	var receipt resumeReceipt
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+		len(encoded) > maxCheckpointBytes || json.Unmarshal(encoded, &receipt) != nil {
+		return resumeReceipt{}, ErrCheckpointIntegrity
+	}
+	payload, err := json.Marshal(struct {
+		Schema             string `json:"schema"`
+		KeyDigest          string `json:"key_digest"`
+		BindingDigest      string `json:"binding_digest"`
+		PreviousInvocation string `json:"previous_invocation"`
+		ResultInvocation   string `json:"result_invocation"`
+	}{receipt.Schema, receipt.KeyDigest, receipt.BindingDigest, receipt.PreviousInvocation, receipt.ResultInvocation})
+	if err != nil || receipt.Schema != "pulse.consolidation.resume_receipt.v1" ||
+		!hexDigestPattern.MatchString(receipt.KeyDigest) || !hexDigestPattern.MatchString(receipt.BindingDigest) ||
+		!reportIDPattern.MatchString(receipt.PreviousInvocation) || !reportIDPattern.MatchString(receipt.ResultInvocation) ||
+		!hmac.Equal([]byte(receipt.Integrity), []byte(m.mac(payload))) {
+		return resumeReceipt{}, ErrCheckpointIntegrity
+	}
+	return receipt, nil
 }
 
 // Advance is the daemon-owned extension seam used by the inventory engine.

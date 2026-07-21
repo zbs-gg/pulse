@@ -37,12 +37,17 @@ function report(overrides = {}) {
 test('report command routing is isolated from the legacy consolidate command', () => {
   assert.deepEqual(reportRequestForArgs(['report']), { action: 'start', method: 'POST', path: '/memory/consolidation/reports' });
   assert.deepEqual(reportRequestForArgs(['report', 'status']), { action: 'status', method: 'GET', path: '/memory/consolidation/reports/latest' });
+  assert.deepEqual(reportRequestForArgs(['report', '--json']), { action: 'start', method: 'POST', path: '/memory/consolidation/reports' });
   assert.deepEqual(reportRequestForArgs(['report', 'cancel', '--id', 'report_01']), {
     action: 'cancel', method: 'POST', path: '/memory/consolidation/reports/report_01/cancel',
   });
   assert.throws(() => reportRequestForArgs(['--threshold', '0.9']), /not a report command/);
   assert.throws(() => reportRequestForArgs(['report', 'cancel']), /requires --id/);
   assert.throws(() => reportRequestForArgs(['report', 'unknown']), /unknown report action/);
+  assert.throws(() => reportRequestForArgs(['report', 'status', '--id']), /requires <report-id>/);
+  assert.throws(() => reportRequestForArgs(['report', 'status', '--id', 'report_01', '--id', 'report_02']), /duplicate report id/);
+  assert.throws(() => reportRequestForArgs(['report', 'start', '--id', 'report_01']), /does not accept --id/);
+  assert.throws(() => reportRequestForArgs(['report', 'status', '--wat']), /unknown report option/);
 });
 
 test('report requests use the bound project runtime and its local authority', async () => {
