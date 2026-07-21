@@ -49,6 +49,9 @@ export function assertConsolidationReport(value) {
   if (!/^[a-f0-9]{64}$/.test(value.input_digest ?? '') || !/^[a-f0-9]{64}$/.test(value.report_digest ?? '')) {
     throw new Error('Pulse consolidation report digest is invalid');
   }
+  if (value.inventory_digest !== undefined && !/^[a-f0-9]{64}$/.test(value.inventory_digest)) {
+    throw new Error('Pulse consolidation inventory digest is invalid');
+  }
   if (!value.destination || !['personal', 'desk'].includes(value.destination.store_kind) ||
       !STORE_ID_PATTERN.test(value.destination.store_id ?? '') ||
       !/^[a-f0-9]{64}$/.test(value.destination.binding_digest ?? '') ||

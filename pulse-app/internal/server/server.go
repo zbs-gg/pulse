@@ -93,6 +93,10 @@ type Config struct {
 	// When nil, Personal and Desk stores with an exact product boundary receive
 	// a private manager next to their vault automatically.
 	ConsolidationReports *consolidation.Manager
+	// ConsolidationInventory overrides the recognized-source read-only engine.
+	// It is primarily a test seam; production derives fixed roots from the
+	// current user home and exact bound vault path.
+	ConsolidationInventory *consolidation.Engine
 }
 
 type BillingStatus struct {
@@ -114,6 +118,7 @@ type Server struct {
 	trayScheduleMu         sync.Mutex
 	traySchedules          map[memoryTrayScheduleKey]*memoryTrayScheduleState
 	consolidationReports   *consolidation.Manager
+	consolidationInventory *consolidation.Engine
 }
 
 func New(cfg Config) (*Server, error) {
@@ -140,6 +145,7 @@ func New(cfg Config) (*Server, error) {
 		homeProtectedWipeItems: make(map[string]homeProtectedWipePending),
 		traySchedules:          make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
 		consolidationReports:   cfg.ConsolidationReports,
+		consolidationInventory: cfg.ConsolidationInventory,
 	}
 	if server.consolidationReports == nil && cfg.Store != nil &&
 		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
@@ -156,6 +162,19 @@ func New(cfg Config) (*Server, error) {
 				return nil, fmt.Errorf("server: open consolidation reports: %w", err)
 			}
 			server.consolidationReports = manager
+			if server.consolidationInventory == nil {
+				homeDir, homeErr := os.UserHomeDir()
+				if homeErr != nil || !filepath.IsAbs(homeDir) {
+					return nil, errors.New("server: consolidation inventory requires an absolute user home")
+				}
+				inventory, inventoryErr := consolidation.NewEngine(consolidation.EngineConfig{
+					Manager: manager, HomeDir: homeDir, CanonicalPath: cfg.Store.DBPath(), CanonicalDB: cfg.Store.DB(),
+				})
+				if inventoryErr != nil {
+					return nil, fmt.Errorf("server: open consolidation inventory: %w", inventoryErr)
+				}
+				server.consolidationInventory = inventory
+			}
 		}
 	}
 	if cfg.HomeOrigin != "" {

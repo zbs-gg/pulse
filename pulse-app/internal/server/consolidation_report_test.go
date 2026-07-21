@@ -30,7 +30,14 @@ func newConsolidationReportServer(t *testing.T) (*httptest.Server, consolidation
 	if err := vault.ConfigureContinuityDeliveryAuthority(binding, repository); err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(Config{IPCSecret: "secret", Store: vault})
+	manager, err := consolidation.NewManager(consolidation.ManagerConfig{
+		RootDir: filepath.Join(filepath.Dir(vault.DBPath()), "report-test"),
+		Key:     []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{IPCSecret: "secret", Store: vault, ConsolidationReports: manager})
 	if err != nil {
 		t.Fatal(err)
 	}

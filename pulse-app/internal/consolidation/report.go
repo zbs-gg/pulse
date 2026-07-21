@@ -82,6 +82,7 @@ type Report struct {
 	Phase           Phase       `json:"phase"`
 	InputDigest     string      `json:"input_digest"`
 	ReportDigest    string      `json:"report_digest"`
+	InventoryDigest string      `json:"inventory_digest,omitempty"`
 	Generation      uint64      `json:"generation"`
 	Destination     Destination `json:"destination"`
 	Totals          Totals      `json:"totals"`
@@ -245,9 +246,10 @@ func (m *Manager) Resume(invocationID string, destination Destination) (Report, 
 
 // Advance is the daemon-owned extension seam used by the inventory engine.
 // It never accepts destination authority from a caller.
-func (m *Manager) Advance(invocationID string, phase Phase, totals Totals, sources []Source, blockers, reasons []string, nextAction string) (Report, error) {
+func (m *Manager) Advance(invocationID string, phase Phase, totals Totals, sources []Source, blockers, reasons []string, nextAction, inventoryDigest string) (Report, error) {
 	if !validPhase(phase) || !validTotals(totals) || !validSources(sources) ||
-		!validCodes(blockers, 32) || !validCodes(reasons, 32) || !portableText(nextAction, 4096) {
+		!validCodes(blockers, 32) || !validCodes(reasons, 32) || !portableText(nextAction, 4096) ||
+		(inventoryDigest != "" && !hexDigestPattern.MatchString(inventoryDigest)) {
 		return Report{}, errors.New("consolidation: invalid report update")
 	}
 	m.mu.Lock()
@@ -259,12 +261,45 @@ func (m *Manager) Advance(invocationID string, phase Phase, totals Totals, sourc
 	if m.latest[report.InputDigest].InvocationID != invocationID {
 		return Report{}, ErrStaleInvocation
 	}
+	if report.Phase == PhaseCanceled || report.Phase == PhaseStale || report.Phase == PhaseReportReady {
+		return Report{}, ErrReportNotResumable
+	}
 	report.Phase = phase
 	report.Totals = totals
 	report.Sources = cloneSources(sources)
 	report.Blockers = append([]string(nil), blockers...)
 	report.ReasonCodes = append([]string(nil), reasons...)
 	report.NextAction = nextAction
+	report.InventoryDigest = inventoryDigest
+	if err := m.commitLocked(&report); err != nil {
+		return Report{}, err
+	}
+	return cloneReport(report), nil
+}
+
+func (m *Manager) MarkStale(invocationID, reason string) (Report, error) {
+	if !codePattern.MatchString(reason) {
+		return Report{}, errors.New("consolidation: invalid stale reason")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	report, ok := m.byInvocation[invocationID]
+	if !ok {
+		return Report{}, ErrReportNotFound
+	}
+	if m.latest[report.InputDigest].InvocationID != invocationID {
+		return Report{}, ErrStaleInvocation
+	}
+	if report.Phase == PhaseStale {
+		return cloneReport(report), nil
+	}
+	if report.Phase != PhaseReportReady && report.Phase != PhasePartial {
+		return Report{}, ErrReportNotResumable
+	}
+	report.Phase = PhaseStale
+	report.ReasonCodes = uniqueSortedCodes(append(report.ReasonCodes, reason))
+	report.Blockers = uniqueSortedCodes(append(report.Blockers, "source_state_changed"))
+	report.NextAction = "Start a fresh report because a source or policy changed."
 	if err := m.commitLocked(&report); err != nil {
 		return Report{}, err
 	}
@@ -384,12 +419,141 @@ func validateDestination(destination Destination) error {
 func validateLoadedReport(report Report) error {
 	if report.Schema != ReportSchema || report.ProtocolVersion != ProtocolVersion || !reportIDPattern.MatchString(report.InvocationID) ||
 		!hexDigestPattern.MatchString(report.InputDigest) || !hexDigestPattern.MatchString(report.ReportDigest) ||
+		(report.InventoryDigest != "" && !hexDigestPattern.MatchString(report.InventoryDigest)) ||
 		report.Generation == 0 || !validPhase(report.Phase) || !validTotals(report.Totals) ||
 		!validSources(report.Sources) || !validCodes(report.Blockers, 32) ||
 		!validCodes(report.ReasonCodes, 32) || !portableText(report.NextAction, 4096) {
 		return ErrCheckpointIntegrity
 	}
 	return validateDestination(report.Destination)
+}
+
+type aliasSidecar struct {
+	Schema       string            `json:"schema"`
+	InvocationID string            `json:"invocation_id"`
+	Aliases      map[string]string `json:"aliases"`
+	States       map[string]string `json:"states"`
+	PolicyDigest string            `json:"policy_digest"`
+	Integrity    string            `json:"integrity"`
+}
+
+// WriteAliasSidecar stores owner-local path resolution separately from the
+// portable report. Paths never enter Report, logs, MCP, or terminal output.
+func (m *Manager) WriteAliasSidecar(invocationID string, aliases map[string]string) error {
+	states := make(map[string]string, len(aliases))
+	for alias, path := range aliases {
+		states[alias] = m.mac([]byte("untracked-source-v1\x1f" + filepath.Clean(path)))
+	}
+	return m.WriteSourceSidecar(invocationID, aliases, states, m.mac([]byte("report-policy-v1")))
+}
+
+// WriteSourceSidecar binds each owner-only alias to a content-free local file
+// state digest. It allows a ready report to become stale without rescanning or
+// exposing a path through the portable contract.
+func (m *Manager) WriteSourceSidecar(invocationID string, aliases, states map[string]string, policyDigest string) error {
+	if !reportIDPattern.MatchString(invocationID) || len(aliases) > 512 || len(states) != len(aliases) ||
+		!hexDigestPattern.MatchString(policyDigest) {
+		return errors.New("consolidation: invalid alias sidecar")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byInvocation[invocationID]; !ok {
+		return ErrReportNotFound
+	}
+	clean := make(map[string]string, len(aliases))
+	for alias, path := range aliases {
+		if !codePattern.MatchString(alias) || !filepath.IsAbs(path) || !hexDigestPattern.MatchString(states[alias]) {
+			return errors.New("consolidation: invalid alias sidecar")
+		}
+		clean[alias] = filepath.Clean(path)
+	}
+	payload, err := json.Marshal(struct {
+		Schema       string            `json:"schema"`
+		InvocationID string            `json:"invocation_id"`
+		Aliases      map[string]string `json:"aliases"`
+		States       map[string]string `json:"states"`
+		PolicyDigest string            `json:"policy_digest"`
+	}{"pulse.consolidation.aliases.v2", invocationID, clean, states, policyDigest})
+	if err != nil {
+		return err
+	}
+	sidecar := aliasSidecar{
+		Schema: "pulse.consolidation.aliases.v2", InvocationID: invocationID,
+		Aliases: clean, States: states, PolicyDigest: policyDigest, Integrity: m.mac(payload),
+	}
+	encoded, err := json.Marshal(sidecar)
+	if err != nil || len(encoded) > maxCheckpointBytes {
+		return errors.New("consolidation: alias sidecar too large")
+	}
+	name := "aliases-" + invocationID + ".json"
+	path := filepath.Join(m.rootDir, name)
+	if existing, readErr := os.ReadFile(path); readErr == nil {
+		info, statErr := os.Lstat(path)
+		var current aliasSidecar
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+			len(existing) > maxCheckpointBytes || json.Unmarshal(existing, &current) != nil {
+			return ErrCheckpointIntegrity
+		}
+		currentPayload, marshalErr := json.Marshal(struct {
+			Schema       string            `json:"schema"`
+			InvocationID string            `json:"invocation_id"`
+			Aliases      map[string]string `json:"aliases"`
+			States       map[string]string `json:"states"`
+			PolicyDigest string            `json:"policy_digest"`
+		}{current.Schema, current.InvocationID, current.Aliases, current.States, current.PolicyDigest})
+		if marshalErr != nil || current.Schema != sidecar.Schema || current.InvocationID != sidecar.InvocationID ||
+			!hmac.Equal([]byte(current.Integrity), []byte(m.mac(currentPayload))) || string(currentPayload) != string(payload) {
+			return ErrCheckpointIntegrity
+		}
+		return nil
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	return atomicPrivateWrite(m.rootDir, name, encoded)
+}
+
+func (m *Manager) ReadSourceSidecar(invocationID string) (map[string]string, map[string]string, string, error) {
+	if !reportIDPattern.MatchString(invocationID) {
+		return nil, nil, "", ErrReportNotFound
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byInvocation[invocationID]; !ok {
+		return nil, nil, "", ErrReportNotFound
+	}
+	path := filepath.Join(m.rootDir, "aliases-"+invocationID+".json")
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, "", ErrCheckpointIntegrity
+	}
+	info, err := os.Lstat(path)
+	var sidecar aliasSidecar
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || len(encoded) > maxCheckpointBytes ||
+		json.Unmarshal(encoded, &sidecar) != nil || sidecar.Schema != "pulse.consolidation.aliases.v2" ||
+		sidecar.InvocationID != invocationID || len(sidecar.Aliases) != len(sidecar.States) ||
+		!hexDigestPattern.MatchString(sidecar.PolicyDigest) {
+		return nil, nil, "", ErrCheckpointIntegrity
+	}
+	payload, err := json.Marshal(struct {
+		Schema       string            `json:"schema"`
+		InvocationID string            `json:"invocation_id"`
+		Aliases      map[string]string `json:"aliases"`
+		States       map[string]string `json:"states"`
+		PolicyDigest string            `json:"policy_digest"`
+	}{sidecar.Schema, sidecar.InvocationID, sidecar.Aliases, sidecar.States, sidecar.PolicyDigest})
+	if err != nil || !hmac.Equal([]byte(sidecar.Integrity), []byte(m.mac(payload))) {
+		return nil, nil, "", ErrCheckpointIntegrity
+	}
+	aliases := make(map[string]string, len(sidecar.Aliases))
+	states := make(map[string]string, len(sidecar.States))
+	for alias, path := range sidecar.Aliases {
+		if !codePattern.MatchString(alias) || !filepath.IsAbs(path) || !hexDigestPattern.MatchString(sidecar.States[alias]) {
+			return nil, nil, "", ErrCheckpointIntegrity
+		}
+		aliases[alias] = path
+		states[alias] = sidecar.States[alias]
+	}
+	return aliases, states, sidecar.PolicyDigest, nil
 }
 
 func validTotals(totals Totals) bool {

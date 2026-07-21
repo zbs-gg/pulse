@@ -65,6 +65,28 @@ func (s *Server) handleConsolidationReportStart(w http.ResponseWriter, r *http.R
 		writeConsolidationReportError(w, err)
 		return
 	}
+	if s.consolidationInventory != nil && report.Phase == consolidation.PhaseReportReady {
+		report, err = s.consolidationInventory.EnsureFresh(report.InvocationID)
+		if err != nil {
+			writeConsolidationReportError(w, err)
+			return
+		}
+		if report.Phase == consolidation.PhaseStale {
+			report, _, err = s.consolidationReports.Start(destination)
+			if err != nil {
+				writeConsolidationReportError(w, err)
+				return
+			}
+		}
+	}
+	if s.consolidationInventory != nil && (report.Phase == consolidation.PhasePlanned ||
+		report.Phase == consolidation.PhaseInventory || report.Phase == consolidation.PhaseDeterministicDedupe) {
+		report, err = s.consolidationInventory.Run(r.Context(), report.InvocationID, destination)
+		if err != nil {
+			writeConsolidationReportError(w, err)
+			return
+		}
+	}
 	writeJSON(w, report)
 }
 
@@ -79,6 +101,13 @@ func (s *Server) handleConsolidationReportLatest(w http.ResponseWriter, _ *http.
 		writeConsolidationReportError(w, err)
 		return
 	}
+	if s.consolidationInventory != nil {
+		report, err = s.consolidationInventory.EnsureFresh(report.InvocationID)
+		if err != nil {
+			writeConsolidationReportError(w, err)
+			return
+		}
+	}
 	writeJSON(w, report)
 }
 
@@ -90,6 +119,12 @@ func (s *Server) reportForCurrentDestination(invocationID string) (consolidation
 	destination, ok := s.consolidationDestination()
 	if !ok || report.Destination != destination {
 		return consolidation.Report{}, consolidation.ErrInvalidAuthority
+	}
+	if s.consolidationInventory != nil {
+		report, err = s.consolidationInventory.EnsureFresh(invocationID)
+		if err != nil {
+			return consolidation.Report{}, err
+		}
 	}
 	return report, nil
 }
