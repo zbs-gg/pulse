@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nkkmnk/pulse/internal/consolidation"
 )
 
 const (
@@ -146,6 +148,7 @@ type MemoryHomeData struct {
 	Context         MemoryHomeContext           `json:"context"`
 	Economy         MemoryHomeEconomy           `json:"economy"`
 	NextTaskPreview *MemoryHomeNextTaskPreview  `json:"next_task_preview,omitempty"`
+	Consolidation   *consolidation.Report       `json:"consolidation,omitempty"`
 }
 
 type MemoryHomeProjectionInput struct {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -55,39 +56,43 @@ func (s *Server) handleConsolidationReportStart(w http.ResponseWriter, r *http.R
 	if !decodeEmptyConsolidationRequest(w, r) {
 		return
 	}
-	destination, ok := s.consolidationDestination()
-	if !ok {
-		http.Error(w, "consolidation destination unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	report, _, err := s.consolidationReports.Start(destination)
+	report, err := s.startConsolidationReport(r.Context())
 	if err != nil {
 		writeConsolidationReportError(w, err)
 		return
 	}
+	writeJSON(w, report)
+}
+
+func (s *Server) startConsolidationReport(ctx context.Context) (consolidation.Report, error) {
+	destination, ok := s.consolidationDestination()
+	if !ok {
+		return consolidation.Report{}, consolidation.ErrInvalidAuthority
+	}
+	report, _, err := s.consolidationReports.Start(destination)
+	if err != nil {
+		return consolidation.Report{}, err
+	}
 	if s.consolidationInventory != nil && report.Phase == consolidation.PhaseReportReady {
 		report, err = s.consolidationInventory.EnsureFresh(report.InvocationID)
 		if err != nil {
-			writeConsolidationReportError(w, err)
-			return
+			return consolidation.Report{}, err
 		}
 		if report.Phase == consolidation.PhaseStale {
 			report, _, err = s.consolidationReports.Start(destination)
 			if err != nil {
-				writeConsolidationReportError(w, err)
-				return
+				return consolidation.Report{}, err
 			}
 		}
 	}
 	if s.consolidationInventory != nil && (report.Phase == consolidation.PhasePlanned ||
 		report.Phase == consolidation.PhaseInventory || report.Phase == consolidation.PhaseDeterministicDedupe) {
-		report, err = s.consolidationInventory.Run(r.Context(), report.InvocationID, destination)
+		report, err = s.consolidationInventory.Run(ctx, report.InvocationID, destination)
 		if err != nil {
-			writeConsolidationReportError(w, err)
-			return
+			return consolidation.Report{}, err
 		}
 	}
-	writeJSON(w, report)
+	return report, nil
 }
 
 func (s *Server) handleConsolidationReportLatest(w http.ResponseWriter, _ *http.Request) {
@@ -172,22 +177,30 @@ func (s *Server) handleConsolidationReportResume(w http.ResponseWriter, r *http.
 	if !decodeEmptyConsolidationRequest(w, r) {
 		return
 	}
-	id := chi.URLParam(r, "id")
-	if _, err := s.reportForCurrentDestination(id); err != nil {
-		writeConsolidationReportError(w, err)
-		return
-	}
-	destination, ok := s.consolidationDestination()
-	if !ok {
-		http.Error(w, "consolidation destination unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	report, err := s.consolidationReports.Resume(id, destination)
+	report, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeConsolidationReportError(w, err)
 		return
 	}
 	writeJSON(w, report)
+}
+
+func (s *Server) resumeConsolidationReport(ctx context.Context, invocationID string) (consolidation.Report, error) {
+	if _, err := s.reportForCurrentDestination(invocationID); err != nil {
+		return consolidation.Report{}, err
+	}
+	destination, ok := s.consolidationDestination()
+	if !ok {
+		return consolidation.Report{}, consolidation.ErrInvalidAuthority
+	}
+	report, err := s.consolidationReports.Resume(invocationID, destination)
+	if err != nil {
+		return consolidation.Report{}, err
+	}
+	if s.consolidationInventory != nil {
+		return s.consolidationInventory.Run(ctx, report.InvocationID, destination)
+	}
+	return report, nil
 }
 
 func writeConsolidationReportError(w http.ResponseWriter, err error) {

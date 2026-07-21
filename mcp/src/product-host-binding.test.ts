@@ -65,6 +65,15 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
     const tools = messages.find((message) => message.id === 2)?.result?.tools;
     const remember = tools.find((tool: { name: string }) => tool.name === 'pulse_remember');
     assert.deepEqual(remember.inputSchema.properties.source.properties.host, { type: 'string', const: host });
+    const consolidation = tools.find((tool: { name: string }) => tool.name === 'pulse_consolidation_report');
+    assert.ok(consolidation, `${host} must expose the same consolidation report tool`);
+    assert.deepEqual(consolidation.inputSchema.required, ['action']);
+    assert.deepEqual(
+      consolidation.inputSchema.properties.action.enum,
+      ['start', 'status', 'explain', 'cancel', 'resume'],
+    );
+    assert.equal(consolidation.inputSchema.properties.destination, undefined);
+    assert.match(consolidation.description, /read-only local memory-source report/);
     const result = messages.find((message) => message.id === 3)?.result;
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /source host does not match the bound harness/);

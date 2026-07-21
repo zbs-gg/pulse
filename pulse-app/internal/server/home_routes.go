@@ -82,10 +82,63 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/tray/{id}/commit", s.handleHomeTrayCommit)
 		r.Post("/unassigned/{id}/assign", s.handleHomeUnassignedAssign)
 		r.Post("/unassigned/{id}/delete", s.handleHomeUnassignedDelete)
+		r.Post("/consolidation/start", s.handleHomeConsolidationStart)
+		r.Post("/consolidation/{id}/cancel", s.handleHomeConsolidationCancel)
+		r.Post("/consolidation/{id}/resume", s.handleHomeConsolidationResume)
 		r.Post("/protected/wipe/begin", s.handleHomeProtectedWipeBegin)
 		r.Post("/protected/wipe/complete", s.handleHomeProtectedWipeComplete)
 	})
 	return r
+}
+
+func (s *Server) handleHomeConsolidationStart(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) || s.consolidationReports == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.startConsolidationReport(r.Context()); err != nil {
+		writeConsolidationReportError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeConsolidationCancel(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) || s.consolidationReports == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if _, err := s.reportForCurrentDestination(id); err != nil {
+		writeConsolidationReportError(w, err)
+		return
+	}
+	if _, err := s.consolidationReports.Cancel(id); err != nil {
+		writeConsolidationReportError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeConsolidationResume(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) || s.consolidationReports == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.resumeConsolidationReport(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeConsolidationReportError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleHomeProtectedWipeBegin(w http.ResponseWriter, r *http.Request) {

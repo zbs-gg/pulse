@@ -37,6 +37,10 @@ import type {
   GatewaySecurityEventInput,
   TeamPrincipalContext,
 } from './principal-context.js';
+import {
+  validateConsolidationExplanation,
+  validateConsolidationReport,
+} from './lifecycle-contracts.js';
 
 export {
   ENROLLMENT_REGISTRY_SCHEMA,
@@ -1137,6 +1141,20 @@ export function createPulseMcpServer(
       },
     },
     {
+      name: 'pulse_consolidation_report',
+      description:
+        'Start or inspect the read-only local memory-source report for the current signed project binding. This tool cannot choose a destination, import, merge, delete, clean up, publish, or reveal local paths.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['start', 'status', 'explain', 'cancel', 'resume'] },
+          report_id: { type: 'string', pattern: '^report_[A-Za-z0-9._-]{1,128}$' },
+        },
+        required: ['action'],
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'pulse_forget',
       description: 'Delete one host-extracted Pulse memory capsule item by id. Does not delete continuity checkpoints or graph rows.',
       inputSchema: {
@@ -1167,7 +1185,7 @@ export function createPulseMcpServer(
       ];
     const localTools = PRODUCT_HOST_ADAPTER
       ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
-      : tools;
+      : tools.filter((tool) => tool.name !== 'pulse_consolidation_report');
     let productTools = PRODUCT_UNASSIGNED_REASON
       ? localTools.filter((tool) => tool.name === 'pulse_remember')
       : localTools;
@@ -1402,6 +1420,38 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   if (name === 'pulse_status') {
     const out = await pulseFetch('/memory/status', undefined, 'GET');
     return jsonText(redactStatusForMcp(out));
+  }
+
+  if (name === 'pulse_consolidation_report') {
+    if (!PRODUCT_HOST_ADAPTER) throw new Error('Consolidation reports require an installed Personal or Desk product binding');
+    const action = args?.action;
+    const reportId = args?.report_id;
+    if (!['start', 'status', 'explain', 'cancel', 'resume'].includes(String(action))) {
+      throw new Error('invalid consolidation report action');
+    }
+    if (reportId !== undefined && !/^report_[A-Za-z0-9._-]{1,128}$/.test(String(reportId))) {
+      throw new Error('invalid consolidation report id');
+    }
+    if (['explain', 'cancel', 'resume'].includes(String(action)) && reportId === undefined) {
+      throw new Error(`pulse_consolidation_report ${String(action)} requires report_id`);
+    }
+    let path = '/memory/consolidation/reports';
+    let method: 'GET' | 'POST' = 'POST';
+    if (action === 'status') {
+      method = 'GET';
+      path = reportId === undefined
+        ? '/memory/consolidation/reports/latest'
+        : `/memory/consolidation/reports/${String(reportId)}`;
+    } else if (action === 'explain') {
+      method = 'GET';
+      path = `/memory/consolidation/reports/${String(reportId)}/explain`;
+    } else if (action === 'cancel' || action === 'resume') {
+      path = `/memory/consolidation/reports/${String(reportId)}/${String(action)}`;
+    }
+    const out = await pulseFetch(path, method === 'POST' ? {} : undefined, method, invocationKey);
+    return jsonText(action === 'explain'
+      ? validateConsolidationExplanation(out)
+      : validateConsolidationReport(out));
   }
 
   if (name === 'pulse_tray') {

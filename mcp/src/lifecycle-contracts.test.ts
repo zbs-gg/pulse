@@ -11,9 +11,47 @@ import {
   validateBindingDecision,
   validateCommonsProvenance,
   validateContextLease,
+  validateConsolidationExplanation,
+  validateConsolidationReport,
   validateMandatoryApplication,
   validateWriteReceipt,
 } from './lifecycle-contracts.js';
+
+function consolidationReport(overrides: Record<string, unknown> = {}) {
+  return {
+    schema: 'pulse.consolidation.report.v1', protocol_version: 1,
+    invocation_id: 'report_contract', phase: 'report_ready',
+    input_digest: 'a'.repeat(64), report_digest: 'b'.repeat(64), inventory_digest: 'c'.repeat(64), generation: 4,
+    destination: {
+      store_kind: 'personal', store_id: 'store_personal_contract',
+      binding_digest: 'd'.repeat(64), repository_id: 'repository_contract',
+    },
+    totals: { already_represented: 1, unique: 2, ambiguous: 3, excluded: 4 },
+    sources: [{
+      alias: 'claude_mem_01', classification: 'claude_mem', reason_code: 'claude_mem_schema_21_32_v1',
+      counts: { source_rows: 6, unique_material: 2 },
+    }],
+    blockers: [], reason_codes: ['adapter_claude_mem_v1'],
+    next_action: 'Review unique and ambiguous source counts.',
+    created_at: '2026-07-21T10:00:00Z', updated_at: '2026-07-21T10:01:00Z',
+    ...overrides,
+  };
+}
+
+test('consolidation contract is identical and content-free for every local harness', () => {
+  for (const _host of ['codex', 'claude-code', 'cursor']) {
+    assert.equal(validateConsolidationReport(consolidationReport()).report_digest, 'b'.repeat(64));
+  }
+  assert.throws(() => validateConsolidationReport(consolidationReport({ raw_path: '/Users/private/pulse.db' })), /invalid_consolidation_report/);
+  assert.throws(() => validateConsolidationReport(consolidationReport({ next_action: 'token=ghp_private' })), /unsafe_consolidation_report/);
+  assert.throws(() => validateConsolidationReport(consolidationReport({
+    destination: { store_kind: 'personal', store_id: 'store_attacker', binding_digest: 'bad', repository_id: 'repository_contract' },
+  })), /invalid_consolidation_destination/);
+  assert.equal(validateConsolidationExplanation({
+    schema: 'pulse.consolidation.explanation.v1', invocation_id: 'report_contract', phase: 'partial',
+    reason_codes: ['active_wal'], blockers: ['claude_mem_01_partial'], next_action: 'Close the source and retry.',
+  }).phase, 'partial');
+});
 
 const base = {
   session_id: 'sess-1',

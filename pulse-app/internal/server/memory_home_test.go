@@ -7,10 +7,55 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/userpresence"
 )
+
+func TestRenderMemoryHomeShowsConsolidationSeparatelyFromCanonicalCount(t *testing.T) {
+	report := consolidation.Report{
+		Schema: consolidation.ReportSchema, ProtocolVersion: consolidation.ProtocolVersion,
+		InvocationID: "report_home", Phase: consolidation.PhaseReportReady,
+		InputDigest: strings.Repeat("a", 64), ReportDigest: strings.Repeat("b", 64),
+		InventoryDigest: strings.Repeat("c", 64), Generation: 4,
+		Destination: consolidation.Destination{
+			StoreKind: "personal", StoreID: "store_personal_home",
+			BindingDigest: strings.Repeat("d", 64), RepositoryID: "repository_home",
+		},
+		Totals: consolidation.Totals{AlreadyRepresented: 1200, Unique: 45, Ambiguous: 3, Excluded: 88},
+		Sources: []consolidation.Source{
+			{Alias: "canonical_vault_01", Classification: consolidation.ClassificationCanonicalVault, ReasonCode: "signed_bound_destination", Counts: map[string]int64{"source_rows": 3}},
+			{Alias: "claude_mem_01", Classification: consolidation.ClassificationClaudeMem, ReasonCode: "claude_mem_schema_21_32_v1", Counts: map[string]int64{"source_rows": 1248}},
+			{Alias: "backup_01", Classification: consolidation.ClassificationBackup, ReasonCode: "non_memory_artifact", Counts: map[string]int64{"excluded_material": 1}},
+		},
+		Blockers: []string{}, NextAction: "Review unique and ambiguous source counts before any later import plan.",
+		CreatedAt: "2026-07-21T10:00:00Z", UpdatedAt: "2026-07-21T10:01:00Z",
+	}
+	html, err := renderMemoryHomeHTML(memoryHomePage{
+		Data: store.MemoryHomeData{
+			Schema:   store.MemoryHomeDataSchema,
+			Boundary: store.MemoryHomeBoundary{StoreKind: "personal", StoreID: "store_personal_home", RepositoryID: "repository_home"},
+			Memories: store.MemoryHomeMemories{ActiveCount: 3}, Consolidation: &report,
+		},
+		CSRFToken: "csrf-home",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"What Pulse found on this computer", "Where memory for this project is written",
+		"Which sources were inspected", "Already represented", "1200", "Unique", "45", "Needs review", "3",
+		"canonical_vault_01", "claude_mem_01", "backup_01", "Saved memories", ">3<",
+	} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("Home missing %q", expected)
+		}
+	}
+	if strings.Contains(html, strings.Repeat("d", 64)) || strings.Contains(html, "/Users/") {
+		t.Fatal("Home leaked binding or local path through consolidation")
+	}
+}
 
 func TestBuildMemoryHomeUsesServerSideProductBoundaryAndSafeNextTaskPreview(t *testing.T) {
 	t.Parallel()

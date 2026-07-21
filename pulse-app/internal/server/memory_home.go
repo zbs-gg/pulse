@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/unassigned"
 	"github.com/nkkmnk/pulse/internal/userpresence"
@@ -57,6 +59,24 @@ func (s *Server) buildMemoryHome(
 	}
 	if data.Readiness.ReasonCode == liveReadiness.ReasonCode {
 		data.Readiness.CheckedAt = checkedAt
+	}
+	if s.consolidationReports != nil {
+		destination := consolidation.Destination{
+			StoreKind: data.Boundary.StoreKind, StoreID: data.Boundary.StoreID,
+			BindingDigest: data.Boundary.BindingDigest, RepositoryID: data.Boundary.RepositoryID,
+		}
+		report, reportErr := s.consolidationReports.Latest(destination)
+		if reportErr == nil {
+			if s.consolidationInventory != nil {
+				report, reportErr = s.consolidationInventory.EnsureFresh(report.InvocationID)
+			}
+			if reportErr == nil {
+				data.Consolidation = &report
+			}
+		}
+		if reportErr != nil && !errors.Is(reportErr, consolidation.ErrReportNotFound) {
+			return store.MemoryHomeData{}, reportErr
+		}
 	}
 	return data, nil
 }
@@ -153,26 +173,34 @@ type memoryHomePage struct {
 
 type memoryHomeTemplateData struct {
 	memoryHomePage
-	StoreLabel            string
-	StatusTitle           string
-	StatusDetail          string
-	StatusTone            string
-	MemoryCount           string
-	ContextState          string
-	ContextHost           string
-	EconomyValue          string
-	EconomyDetail         string
-	HasLatestMemory       bool
-	HasNextPreview        bool
-	HasPending            bool
-	HasUnassigned         bool
-	HasUnassignedActivity bool
-	HasAttempts           bool
-	HasContext            bool
-	HasProtectedActions   bool
-	CanProtectedWipe      bool
-	EstimatedPercent      string
-	Attempts              []store.MemoryHomeAttempt
+	StoreLabel               string
+	StatusTitle              string
+	StatusDetail             string
+	StatusTone               string
+	MemoryCount              string
+	ContextState             string
+	ContextHost              string
+	EconomyValue             string
+	EconomyDetail            string
+	HasLatestMemory          bool
+	HasNextPreview           bool
+	HasPending               bool
+	HasUnassigned            bool
+	HasUnassignedActivity    bool
+	HasAttempts              bool
+	HasContext               bool
+	HasProtectedActions      bool
+	CanProtectedWipe         bool
+	EstimatedPercent         string
+	Attempts                 []store.MemoryHomeAttempt
+	HasConsolidation         bool
+	ConsolidationCanonical   []consolidation.Source
+	ConsolidationImports     []consolidation.Source
+	ConsolidationArtifacts   []consolidation.Source
+	ConsolidationSourceCount int
+	ConsolidationAction      string
+	ConsolidationActionLabel string
+	ConsolidationHealthLabel string
 }
 
 func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
@@ -195,6 +223,22 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		CanProtectedWipe:      profileAuthorizes(page.EnhancedPresenceProfile, userpresence.ActionVaultWipe),
 		Attempts:              attempts,
 	}
+	if page.Data.Consolidation != nil {
+		view.HasConsolidation = true
+		view.ConsolidationCanonical, view.ConsolidationImports, view.ConsolidationArtifacts =
+			memoryHomeConsolidationGroups(page.Data.Consolidation.Sources, 24)
+		view.ConsolidationSourceCount = len(page.Data.Consolidation.Sources)
+		view.ConsolidationHealthLabel = strings.ReplaceAll(string(page.Data.Consolidation.Phase), "_", " ")
+		switch page.Data.Consolidation.Phase {
+		case consolidation.PhaseCanceled:
+			view.ConsolidationAction, view.ConsolidationActionLabel = "resume", "Resume this report"
+		case consolidation.PhasePlanned, consolidation.PhaseInventory, consolidation.PhaseDeterministicDedupe,
+			consolidation.PhaseCancelRequested:
+			view.ConsolidationAction, view.ConsolidationActionLabel = "cancel", "Cancel this scan"
+		case consolidation.PhasePartial, consolidation.PhaseStale:
+			view.ConsolidationAction, view.ConsolidationActionLabel = "start", "Start a fresh report"
+		}
+	}
 	view.StatusTitle, view.StatusDetail, view.StatusTone = memoryHomeReadinessCopy(page.Data.Readiness)
 	view.ContextState = memoryHomeContextCopy(page.Data.Context)
 	if page.Data.Context.LatestDelivery != nil {
@@ -206,6 +250,27 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		return "", err
 	}
 	return output.String(), nil
+}
+
+func memoryHomeConsolidationGroups(
+	sources []consolidation.Source,
+	limit int,
+) (canonical, imports, artifacts []consolidation.Source) {
+	for _, source := range sources {
+		if len(canonical)+len(imports)+len(artifacts) >= limit {
+			break
+		}
+		switch source.Classification {
+		case consolidation.ClassificationCanonicalVault:
+			canonical = append(canonical, source)
+		case consolidation.ClassificationCache, consolidation.ClassificationBackup,
+			consolidation.ClassificationReleaseArtifact, consolidation.ClassificationCodeCheckout:
+			artifacts = append(artifacts, source)
+		default:
+			imports = append(imports, source)
+		}
+	}
+	return canonical, imports, artifacts
 }
 
 func profileHasValidProtectedActions(profile userpresence.EnhancedPresenceProfile) bool {
@@ -434,6 +499,23 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .memory-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } .memory { min-height:150px; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--paper); } .memory .meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; color:var(--muted); font-size:12px; }
     .preview { padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; }
     .authority-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    .ocean { padding:clamp(22px,4vw,34px); border:1px solid var(--line); border-radius:22px; background:var(--paper); }
+    .ocean-head { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; }
+    .ocean-head p { max-width:650px; margin-top:8px; }
+    .ocean-state { flex:0 0 auto; padding:7px 11px; border-radius:999px; background:var(--blue-soft); color:var(--blue); font-weight:700; text-transform:capitalize; }
+    .ocean-answers { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:22px; }
+    .ocean-answer { min-width:0; padding:18px; border:1px solid var(--line); border-radius:15px; background:#fff; }
+    .ocean-answer strong { display:block; margin-bottom:6px; }
+    .ocean-answer code { overflow-wrap:anywhere; }
+    .ocean-totals { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:12px; }
+    .ocean-total { padding:16px 18px; border-radius:15px; background:var(--green-soft); }
+    .ocean-total strong { display:block; font-size:28px; line-height:1; margin-top:6px; }
+    .ocean-next { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-top:18px; padding-top:18px; border-top:1px solid var(--line); }
+    .source-groups { margin-top:18px; }
+    .source-group { margin-top:14px; }
+    .source-row { display:grid; grid-template-columns:minmax(150px,.8fr) minmax(160px,1fr) auto; gap:14px; align-items:center; padding:11px 0; border-bottom:1px solid var(--line); }
+    .source-row:last-child { border-bottom:0; }
+    .source-row small { color:var(--muted); }
     .protected-wipe { margin-top:14px; padding:22px; border:1px solid #d7b4b0; border-radius:18px; background:var(--red-soft); }
     .protected-wipe h3 { margin-bottom:8px; } .protected-wipe .warning { margin-top:10px; color:var(--ink); }
     .protected-wipe-review,.protected-wipe-receipt { margin-top:16px; padding:16px; border:1px solid #ca9b96; border-radius:14px; background:var(--paper); outline-offset:4px; }
@@ -446,7 +528,9 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       .topbar { display:grid; grid-template-columns:1fr auto; align-items:start; margin-bottom:40px; }
       .boundary { grid-column:1 / -1; grid-row:2; }
       .logout { grid-column:2; grid-row:1; }
-      .hero,.metrics,.memory-list { grid-template-columns:1fr; }
+      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals { grid-template-columns:1fr; }
+      .ocean-head,.ocean-next { align-items:flex-start; flex-direction:column; }
+      .source-row { grid-template-columns:1fr; gap:4px; }
       .section-head { flex-direction:column; align-items:flex-start; gap:8px; }
       .section-head p { max-width:100%; }
     }
@@ -476,6 +560,41 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{if .ContextHost}} via {{.ContextHost}}{{end}}{{else}}Waiting for a fresh task{{end}}</small></div>
     <div class="metric"><span>Token economy</span><span class="value">{{.EconomyValue}}</span><small>{{.EconomyDetail}}{{if .EstimatedPercent}} · {{.EstimatedPercent}}{{end}}</small></div>
   </div>
+
+  <section id="memory-ocean" aria-labelledby="memory-ocean-title">
+    <div class="ocean">
+      {{if .HasConsolidation}}
+      <div class="ocean-head">
+        <div><div class="eyebrow">Memory ocean</div><h2 id="memory-ocean-title">What Pulse found on this computer</h2><p>This report only reads recognized local sources. It does not import, merge, delete, publish, or change the project destination.</p></div>
+        <div class="ocean-state" role="status" aria-live="polite">{{.ConsolidationHealthLabel}}</div>
+      </div>
+      <div class="ocean-answers">
+        <div class="ocean-answer"><strong>Where memory for this project is written</strong><p>{{.Data.Consolidation.Destination.StoreKind}} store <code>{{.Data.Consolidation.Destination.StoreID}}</code> for <code>{{.Data.Consolidation.Destination.RepositoryID}}</code></p></div>
+        <div class="ocean-answer"><strong>Which sources were inspected</strong><p>{{.ConsolidationSourceCount}} recognized source entries. Local paths stay private in the owner-only sidecar.</p></div>
+      </div>
+      <div class="ocean-totals" aria-label="Consolidation totals">
+        <div class="ocean-total">Already represented<strong>{{.Data.Consolidation.Totals.AlreadyRepresented}}</strong></div>
+        <div class="ocean-total">Unique<strong>{{.Data.Consolidation.Totals.Unique}}</strong></div>
+        <div class="ocean-total">Needs review<strong>{{.Data.Consolidation.Totals.Ambiguous}}</strong></div>
+      </div>
+      <div class="ocean-next">
+        <div><strong>Next</strong><p>{{.Data.Consolidation.NextAction}}</p>{{if .Data.Consolidation.Blockers}}<p class="receipt">Active blockers: {{range $index,$value := .Data.Consolidation.Blockers}}{{if $index}}, {{end}}<code>{{$value}}</code>{{end}}</p>{{end}}</div>
+        {{if eq .ConsolidationAction "start"}}<form method="post" action="consolidation/start" data-home-mutation data-home-pending-label="Starting a fresh read-only report…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="primary">{{.ConsolidationActionLabel}}</button></form>{{end}}
+        {{if eq .ConsolidationAction "cancel"}}<form method="post" action="consolidation/{{.Data.Consolidation.InvocationID}}/cancel" data-home-mutation data-home-pending-label="Canceling this report…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button>{{.ConsolidationActionLabel}}</button></form>{{end}}
+        {{if eq .ConsolidationAction "resume"}}<form method="post" action="consolidation/{{.Data.Consolidation.InvocationID}}/resume" data-home-mutation data-home-pending-label="Resuming the read-only report…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="primary">{{.ConsolidationActionLabel}}</button></form>{{end}}
+      </div>
+      <details class="source-groups"><summary>Inspect grouped source counts</summary>
+        {{if .ConsolidationCanonical}}<div class="source-group"><h3>Canonical destination</h3>{{range .ConsolidationCanonical}}<div class="source-row"><code>{{.Alias}}</code><span>{{.Classification}}</span><small>{{.ReasonCode}} · {{index .Counts "source_rows"}} source rows</small></div>{{end}}</div>{{end}}
+        {{if .ConsolidationImports}}<div class="source-group"><h3>Import candidates</h3>{{range .ConsolidationImports}}<div class="source-row"><code>{{.Alias}}</code><span>{{.Classification}}</span><small>{{.ReasonCode}} · {{index .Counts "source_rows"}} source rows</small></div>{{end}}</div>{{end}}
+        {{if .ConsolidationArtifacts}}<div class="source-group"><h3>Non-memory artifacts</h3>{{range .ConsolidationArtifacts}}<div class="source-row"><code>{{.Alias}}</code><span>{{.Classification}}</span><small>{{.ReasonCode}}</small></div>{{end}}</div>{{end}}
+      </details>
+      <p class="receipt">Report <code>{{.Data.Consolidation.InvocationID}}</code> · digest <code>{{.Data.Consolidation.ReportDigest}}</code></p>
+      {{else}}
+      <div class="ocean-head"><div><div class="eyebrow">Memory ocean</div><h2 id="memory-ocean-title">See all recognized local memory sources</h2><p>Pulse has not created a consolidation report for this project yet. The scan is read-only and keeps local paths out of the portable result.</p></div><div class="ocean-state">Not started</div></div>
+      <div class="ocean-next"><p>No memory source will be imported or deleted.</p><form method="post" action="consolidation/start" data-home-mutation data-home-pending-label="Inspecting recognized local sources…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="primary">Create read-only report</button></form></div>
+      {{end}}
+    </div>
+  </section>
 
   <section id="authority-profile">
     <div class="section-head"><div><div class="eyebrow">Security boundary</div><h2>Protected actions</h2></div><p>Ordinary memory and Memory Home do not require enhanced verification. This profile controls only destructive vault and binding actions.</p></div>

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 	"github.com/nkkmnk/pulse/internal/userpresence"
@@ -35,6 +36,47 @@ func (value *homeBindingVerifierStub) Verify(_ context.Context, _, _ string) err
 type warmingProductTestEmbedder struct{ productTestEmbedder }
 
 func (warmingProductTestEmbedder) Ready() bool { return false }
+
+func TestMemoryHomeConsolidationStartUsesExistingSessionAndCSRFBoundary(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	homeDir := t.TempDir()
+	inventory, err := consolidation.NewEngine(consolidation.EngineConfig{
+		Manager: srv.consolidationReports, HomeDir: homeDir,
+		CanonicalPath: vault.DBPath(), CanonicalDB: vault.DB(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.consolidationInventory = inventory
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	missingCSRF := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingCSRF, homeMutationRequest(srv, session, "consolidation/start", url.Values{}))
+	if missingCSRF.Code != http.StatusForbidden {
+		t.Fatalf("consolidation start without CSRF status=%d body=%s", missingCSRF.Code, missingCSRF.Body.String())
+	}
+
+	started := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(started, homeMutationRequest(srv, session, "consolidation/start", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+	}))
+	if started.Code != http.StatusNoContent {
+		t.Fatalf("consolidation start status=%d body=%s", started.Code, started.Body.String())
+	}
+	report, err := srv.consolidationReports.Latest(consolidation.Destination{
+		StoreKind: string(vault.StoreKind()), StoreID: vault.StoreID(),
+		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository_pulse",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Phase != consolidation.PhaseReportReady || report.Totals.Unique != 0 {
+		t.Fatalf("unexpected content-free Home report: %#v", report)
+	}
+}
 
 type homeEnhancedPresenceAuthorizerStub struct {
 	profile userpresence.EnhancedPresenceProfile
