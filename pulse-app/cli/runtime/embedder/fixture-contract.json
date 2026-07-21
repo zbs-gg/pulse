@@ -1,0 +1,12 @@
+{
+  "case": {
+    "cls_prefix": [3.0, 4.0],
+    "dimension": 1024,
+    "expected_prefix": [0.6, 0.8],
+    "non_cls_prefix": [1000.0, -1000.0],
+    "zero_tail": 1022
+  },
+  "meaning": "This proves the deterministic CLS-plus-L2 implementation contract only. It is not a model quality result.",
+  "pooling": "cls",
+  "schema": "pulse.embedder.fixture_contract.v1"
+}

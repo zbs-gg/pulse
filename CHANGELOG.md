@@ -2,6 +2,34 @@
 
 All notable changes to Pulse.
 
+## Unreleased
+
+### Added
+
+- **Synthetic team-remote foundation** — dedicated marked team stores,
+  distinct human/agent/service identities, OAuth resource-server checks,
+  request-bound principal assertions, canonical scopes, idempotent writes,
+  pre-filtered reads, metadata-only audit, generation-fenced projections, and
+  contribution-aware deletion. Team responses never fall back to local data.
+- **Explicit Owner approval and activation boundary** — recent browser step-up
+  is bound to one store, team, action, target, and one-time nonce. Synthetic
+  public activation is explicit; real-content activation remains blocked.
+- **Versioned team metadata tools** — authenticated status, scoped object
+  inspection, own-actions audit, deletion, and deletion-status contracts.
+
+### Security
+
+- The CLI sends `X-Pulse-Key` only to an exact loopback base; a configurable
+  remote URL can receive an OAuth bearer but never the daemon IPC secret.
+- Team mode rejects legacy routes, tools, auth shortcuts, unscoped storage,
+  local fallback, and direct MCP Owner administration.
+
+### Boundary
+
+- This is a synthetic-data security foundation, not a hosted service,
+  production release, real two-member pilot, Viewer, or Krisp connector. See
+  `docs/TEAM_REMOTE_PILOT.md` before connecting any real content.
+
 ## 0.6.7 — 2026-07-04
 
 ### Added

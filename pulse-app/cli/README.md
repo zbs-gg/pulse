@@ -1,5 +1,9 @@
 # @zbs-gg/pulse
 
+Host-neutral Personal support in this branch is pending the matching signed
+preview publication. Do not read the current npm tag as containing these
+changes unless `install-plan --json` reports `pulse.personal_install_plan.v2`.
+
 ## Copy this to your AI agent
 
 ```text
@@ -12,21 +16,25 @@ backend OpenAI, Anthropic, or Cohere keys by default.
 
 Please:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
-2. Check: npm view @zbs-gg/pulse dist-tags
-3. Explain which harness path fits my setup.
+2. Check: npm view @zbs-gg/pulse dist-tags --json
+   Host-neutral Personal requires preview 0.7.0 or newer and install-plan v2.
+3. Check for Apple Silicon, Node 20+, a Git project, and Claude Code, Cursor,
+   or Codex.
 4. Explain what Pulse writes and how I can erase it.
 5. Ask me for confirmation before installing anything.
 6. After I confirm, install:
-   - Claude Code full local preview:
-     npx @zbs-gg/pulse@preview init claude-code
-     pulse doctor
-     pulse demo
+   - Personal Pulse:
+     npx -y @zbs-gg/pulse@preview install
+     pulse doctor claude-code  # when detected
+     pulse doctor cursor       # when detected
+     pulse doctor codex        # when detected
+     pulse home
    - Other MCP-compatible hosts:
      configure the host to run:
      npx -y @zbs-gg/pulse@preview mcp
      and tell me this is Safe Mode/fallback, not the full state-aware engine.
-7. Show me what Pulse remembered, what the next agent will receive, and how to
-   wipe/disconnect it.
+7. Save one visible memory, start a fresh task, and show me its Memory
+   Home receipts and honest collecting/estimated/measured token state.
 
 Important: no old-chat import without separate confirmation; no raw
 transcripts; no secrets in output; stop and explain if anything looks unsafe.
@@ -41,20 +49,21 @@ retrieves the right remembered episode for *this* moment — not just the
 closest text match — shows **why** that memory surfaced, shows what it will
 tell your next agent, and wipes on one command.
 
-This is the one package: installer/CLI (`init`, `doctor`, `demo`, `viewer`)
+This is the one package: installer/CLI (`install`, `repair`, `doctor`, `home`)
 plus the MCP server (`pulse mcp`, bundled prebuilt).
 
-Status: developer preview. Local-first, Claude Code-first. Not production.
+Status: developer preview. Local-first across Claude Code, Cursor, and Codex.
+Not production.
 
 ## Compatible harnesses
 
 | Harness | Current support | Recommended path |
 |---|---|---|
-| Claude Code | Primary full Local Preview. | `npx @zbs-gg/pulse@preview init claude-code` |
+| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity; pending matching signed preview. | Install after publication |
+| Claude Code | Native Personal plugin and lifecycle through the shared Core and vault; pending matching signed preview. | Install after publication |
 | Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | Native local plugin and lifecycle through the shared Core; no Cursor CLI required; pending matching signed preview. | Install after publication |
 | Windsurf | MCP-compatible Safe Mode today. | `npx -y @zbs-gg/pulse@preview mcp` |
-| Codex / OpenAI local agents | MCP-compatible when local MCP commands are supported. | Agent-audited `npx -y @zbs-gg/pulse@preview mcp` |
 | Gemini CLI | MCP-compatible when local MCP command servers are supported. | Agent-audited `npx -y @zbs-gg/pulse@preview mcp` |
 | LangChain / CrewAI / custom agents | Framework integration surface. | Run `pulse mcp` and call its tools |
 | ChatGPT app / Claude Directory / Pulse Cloud | Future surfaces, not shipped in this preview. | Not available yet |
@@ -64,17 +73,25 @@ Status: developer preview. Local-first, Claude Code-first. Not production.
 </p>
 
 
-## Install — Pulse Local Preview
+## Install — Personal Pulse
 
 ```bash
-npx @zbs-gg/pulse@preview init claude-code
-pulse doctor
-pulse demo
+npx -y @zbs-gg/pulse@preview install
+pulse doctor claude-code  # when detected
+pulse doctor cursor       # when detected
+pulse doctor codex        # when detected
+pulse home
 ```
 
-`pulse doctor` gives a binary, honest verdict: "Pulse Local Preview ready."
-or "Pulse MCP fallback is ready. Full retrieval is not enabled." The demo
-runs only on the full engine — it never fakes results on fallback.
+The Personal path does not require Go, Python, Make, Docker, a model API key,
+or manual configuration editing. The wizard verifies the complete signed
+release, resumes interrupted downloads, provisions Core once, activates every
+detected compatible native plugin, and opens Memory Home. It stops rather than silently falling back when production
+authority or full retrieval is unavailable.
+
+Only `Pulse <host> automatic lifecycle ready.` means that host is ready. The
+real proof is one normal memory shown before save and then offered to a fresh
+task with provenance, retrieval reasons, and receipts in Memory Home.
 
 ### What `pulse demo` proves
 
@@ -90,9 +107,8 @@ shows the three things generic memory tools don't:
 
 `pulse demo --clean` removes the whole demo store.
 
-Requirements: Node 20+, Go toolchain (preview builds from source), Claude
-Code CLI, and an embedder — local MLX on Apple Silicon, or a Cohere key in
-`~/.pulse/cohere-key.txt` (external embedding API; doctor reports it).
+`pulse demo` remains an optional isolated explainer. It cannot substitute for
+the real first-memory proof above.
 
 ## Safe Mode — fallback, not the product
 
@@ -109,10 +125,58 @@ inspect/wipe and keyword recall. No benchmark claim applies to this mode.
   default, and the store rejects transcript/secret/path-like content.
 - No backend model API keys by default; no backend LLM calls.
 - No old-chat import by default — ingest is explicit and consent-first.
-- Memory is local and inspectable; wipe requires an exact confirmation
-  phrase. Leave anytime: `pulse wipe`, `claude mcp remove pulse`.
+- Personal memory is local and project-bound; it never enters Git without a
+  separate exact shared-memory approval.
+- Disconnect preserves memory: use `pulse disconnect claude-code`,
+  `pulse disconnect cursor`, or `pulse disconnect codex`. Whole-vault wipe is
+  separately protected by fresh macOS presence.
 
 Docs, agent install script, and source: https://github.com/zbs-gg/pulse
 (see `AGENTS.md` — written for AI agents asked to vet this install).
+
+## Team remote boundary
+
+Team remote is a separate synthetic foundation, not another Local Preview
+install target. The CLI never sends the local `X-Pulse-Key` to a configurable
+remote base; that header is allowed only for an exact loopback host. The
+default-off Owner operator contour uses a separate least-privilege
+`pulse:owner` credential, fresh browser step-up, and exact two-phase HTTPS
+approval for member and project administration; it never upgrades the
+installed read-only credential. A root-controlled IdP profile, accepted Owner
+enrollment, and a verified deployment are still required, so this is not a
+claim that real team onboarding is live in the public preview. See
+[`docs/TEAM_REMOTE_PILOT.md`](../../docs/TEAM_REMOTE_PILOT.md).
+
+Before using the Owner CLI, a deployment operator must create the exact
+root-owned, operator-readable profile documented in
+[`deploy/team/README.md`](../../deploy/team/README.md) at
+`/etc/pulse-team/team-owner-profile.json`. The profile contains no client secret;
+it pins the public Owner client, expected human subject, issuer endpoints, exact
+`/mcp` audience, and scopes
+`openid offline_access pulse:connect pulse:owner`. The bounded operator flow
+then begins as follows:
+
+```bash
+pulse team owner login --profile /etc/pulse-team/team-owner-profile.json
+# A human operator installs the emitted request into the protected deployment registry.
+pulse team owner member create --profile /etc/pulse-team/team-owner-profile.json --issuer https://issuer.example/ --subject user-id --role member
+pulse team owner binding create --profile /etc/pulse-team/team-owner-profile.json --issuer https://issuer.example/ --subject user-id --client-id codex-user
+pulse team owner project create --profile /etc/pulse-team/team-owner-profile.json --name "Project Atlas"
+pulse team owner project grant --profile /etc/pulse-team/team-owner-profile.json --project-id project_... --principal-id principal_... --access write
+pulse team owner project revoke-grant --profile /etc/pulse-team/team-owner-profile.json --grant-id grant_...
+```
+
+The first login emits a separate enrollment request. This package does not yet
+install or approve that request: the deployment operator must verify its digest
+and atomically update the service-owned registry. A second login reports that
+acceptance is unverified rather than claiming readiness. Every mutation starts
+its own platform-WebAuthn browser flow; the ID-token nonce is bound to the exact
+canonical action and random challenge, and the resulting assertion ID is
+consumed durably once. Mutation commands return opaque IDs and audit metadata,
+never the supplied subject, issuer, or project name. The composed acceptance
+gate exercises the production authorization core with synthetic HTTP,
+CLI-built approval bytes, DPoP, and signed tokens; it does not claim external
+TLS, live IdP behavior, protected registry installation, native helper
+execution, or a packaged fresh-machine CLI install.
 
 AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available (`COMMERCIAL.md`).

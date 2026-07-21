@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,8 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nkkmnk/pulse/internal/claude"
 	"github.com/nkkmnk/pulse/internal/config"
@@ -24,18 +30,42 @@ import (
 	"github.com/nkkmnk/pulse/internal/health"
 	"github.com/nkkmnk/pulse/internal/model"
 	"github.com/nkkmnk/pulse/internal/outbox"
+	"github.com/nkkmnk/pulse/internal/platform"
 	"github.com/nkkmnk/pulse/internal/prompt"
 	"github.com/nkkmnk/pulse/internal/providers/anthropic"
 	"github.com/nkkmnk/pulse/internal/providers/openaicompat"
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/server"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/teamauth"
+	"github.com/nkkmnk/pulse/internal/teamjobs"
+	"github.com/nkkmnk/pulse/internal/teamread"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 const (
 	defaultAddr  = "127.0.0.1:18789"
 	defaultModel = "claude-opus-4-6"
 	defaultAlias = "anthropic/opus"
+
+	teamWriterLeaseTTL              = 60 * time.Second
+	teamWriterRenewalInterval       = 20 * time.Second
+	teamHandlerQuiesceTimeout       = 5 * time.Second
+	teamBackgroundPeerJoinTimeout   = 250 * time.Millisecond
+	teamDeletionLeaseTTL            = 30 * time.Second
+	teamDeletionPollInterval        = time.Second
+	teamDeletionBaseBackoff         = time.Second
+	teamDeletionMaxBackoff          = 5 * time.Minute
+	teamProjectionLeaseTTL          = 30 * time.Second
+	teamProjectionPollInterval      = time.Second
+	teamProjectionHeartbeatInterval = 10 * time.Second
+	teamProjectionBaseBackoff       = time.Second
+	teamProjectionMaxBackoff        = 5 * time.Minute
+)
+
+var (
+	errTeamWriterLeaseChanged          = errors.New("team writer lease changed during renewal")
+	errTeamBackgroundWorkerStopTimeout = errors.New("team background workers did not stop before timeout")
 )
 
 func main() {
@@ -55,15 +85,79 @@ func main() {
 }
 
 func run(dataDir, addr string) error {
-	cfg, err := config.Load(dataDir)
+	switch os.Getenv("PULSE_RUNTIME_MODE") {
+	case "", "local-stdio", "development-http":
+		return runLocal(dataDir, addr)
+	case "personal-local":
+		return runProductLocal(dataDir, addr, config.VaultPersonal)
+	case "desk-local":
+		return runProductLocal(dataDir, addr, config.VaultDesk)
+	case "team-remote":
+		return runTeam(dataDir, addr)
+	default:
+		return errors.New("unsupported PULSE_RUNTIME_MODE")
+	}
+}
+
+func runLocal(dataDir, addr string) error {
+	return runLocalVault(dataDir, addr, "", "")
+}
+
+func runProductLocal(dataDir, addr string, kind config.VaultKind) error {
+	if !isLoopbackListenAddress(addr) {
+		return errors.New("product local vault must bind to a loopback address")
+	}
+	storeID := strings.TrimSpace(os.Getenv("PULSE_VAULT_STORE_ID"))
+	if storeID == "" || storeID != os.Getenv("PULSE_VAULT_STORE_ID") {
+		return errors.New("product local vault requires exact PULSE_VAULT_STORE_ID")
+	}
+	return runLocalVault(dataDir, addr, kind, storeID)
+}
+
+func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) error {
+	var cfg *config.Config
+	var err error
+	if kind == "" {
+		cfg, err = config.Load(dataDir)
+	} else {
+		cfg, err = config.LoadVault(dataDir, kind, storeID)
+	}
 	if err != nil {
 		return err
 	}
-	s, err := store.Open(cfg.DBPath)
+	var s *store.Store
+	if kind == "" {
+		s, err = store.Open(cfg.DBPath)
+	} else {
+		s, err = store.OpenVault(cfg.DBPath, store.StoreKind(kind), storeID)
+	}
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	var homeBindingVerifier server.HomeBindingVerifier
+	if kind != "" {
+		bindingDigest := os.Getenv("PULSE_BINDING_DIGEST")
+		repositoryID := os.Getenv("PULSE_REPOSITORY_ID")
+		policyEpoch, policyErr := strconv.ParseInt(os.Getenv("PULSE_POLICY_EPOCH"), 10, 64)
+		resolverEpoch, resolverErr := strconv.ParseInt(os.Getenv("PULSE_RESOLVER_EPOCH"), 10, 64)
+		if policyErr != nil || resolverErr != nil || resolverEpoch < 1 {
+			return errors.New("product local vault requires valid runtime authority epochs")
+		}
+		if err := s.ConfigureProductRuntimeAuthority(bindingDigest, policyEpoch, resolverEpoch); err != nil {
+			return fmt.Errorf("configure product runtime authority: %w", err)
+		}
+		if err := s.ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID); err != nil {
+			return fmt.Errorf("configure continuity delivery authority: %w", err)
+		}
+		homeBindingVerifier, err = server.NewCommandHomeBindingVerifier(
+			os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE"), os.Getenv("PULSE_PRODUCT_AUTHORITY_HELPER"),
+			os.Getenv("PULSE_PRODUCT_WORKSPACE"), resolverEpoch,
+		)
+		if err != nil {
+			return fmt.Errorf("configure live product binding verifier: %w", err)
+		}
+	}
 
 	ob := outbox.New(s.DB(), 30*time.Second)
 
@@ -97,9 +191,13 @@ func run(dataDir, addr string) error {
 
 	// Wire Phase G hybrid retrieval engine. Cohere key is optional — when
 	// absent we leave Retrieval=nil so /retrieve returns 503 instead of 404.
-	retrievalEngine, err := initRetrieval(s, dataDir)
+	retrievalEngine, err := initRetrieval(s, dataDir, kind != "")
 	if err != nil {
-		// Log but don't fail startup — retrieval is opt-in.
+		if kind != "" {
+			return fmt.Errorf("managed retrieval init: %w", err)
+		}
+		// Development retrieval is opt-in, so a broken optional dependency
+		// does not stop the rest of the developer daemon.
 		slog.Warn("retrieval init failed; /retrieve will return 503", "error", err)
 	}
 	var contextQuery server.ContextQueryAPI
@@ -117,29 +215,6 @@ func run(dataDir, addr string) error {
 			// explicitly asks for fiction (book work).
 			DefaultDomains: []string{"real"},
 		})
-	}
-
-	// Capsule → event projection backfill (default ON; PULSE_CAPSULE_EVENTS=off
-	// disables). Idempotent: only capsules never projected (event_id IS NULL,
-	// privacy_tier='normal') gain a linked event. With an embedder wired the
-	// new events are embed-indexed immediately; otherwise they stay dark until
-	// an embedder is configured. Env wiring only — no billing / network-path
-	// change (the optional embed call uses the already-configured embedder).
-	if docs, err := s.BackfillCapsuleEvents(); err != nil {
-		slog.Warn("capsule event backfill failed", "error", err)
-	} else if len(docs) > 0 {
-		slog.Info("capsule events backfilled", "count", len(docs))
-		if retrievalEngine != nil && retrievalEngine.EmbedderReady() {
-			indexDocs := make([]retrieve.IndexEventDoc, len(docs))
-			for i, d := range docs {
-				indexDocs[i] = retrieve.IndexEventDoc{EventID: d.EventID, Text: d.Text}
-			}
-			backfillCtx, cancelBackfill := context.WithTimeout(context.Background(), 60*time.Second)
-			if err := retrievalEngine.EmbedAndIndexEvents(backfillCtx, indexDocs); err != nil {
-				slog.Warn("capsule event embed-index failed", "error", err)
-			}
-			cancelBackfill()
-		}
 	}
 
 	// Claim resolution (default OFF). Enabled only when an embedder is wired and
@@ -190,8 +265,35 @@ func run(dataDir, addr string) error {
 	// process lifetime.
 	healthProvider := health.NewFixtureProvider(time.Now())
 
+	billingHost := strings.TrimSpace(os.Getenv("PULSE_HOST"))
+	if billingHost != "codex" && billingHost != "claude-code" && billingHost != "pulse-product" {
+		billingHost = "pulse-product"
+	}
+	homeOrigin := ""
+	unassignedInboxPath := ""
+	var homePresence server.HomePresence
+	var enhancedPresenceAuthorizer userpresence.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
+	if kind != "" {
+		homeOrigin = "http://" + addr
+		userHome, homeErr := os.UserHomeDir()
+		if homeErr != nil || !filepath.IsAbs(userHome) {
+			return fmt.Errorf("configure unassigned inbox: user home unavailable")
+		}
+		unassignedInboxPath = filepath.Join(userHome, ".pulse", "supervisor", "unassigned-inbox.json")
+		presenceGate, err := userpresence.NewGate(userpresence.NewPlatformProver(), time.Now)
+		if err != nil {
+			return fmt.Errorf("configure Memory Home OS presence: %w", err)
+		}
+		homePresence = presenceGate
+		inspectionCtx, cancelInspection := context.WithTimeout(context.Background(), 5*time.Second)
+		enhancedPresenceAuthorizer = userpresence.NewPlatformEnhancedAuthorizer(
+			inspectionCtx, time.Now, rand.Reader,
+		)
+		cancelInspection()
+	}
 	srv, err := server.New(server.Config{
 		IPCSecret:    cfg.IPCSecret,
+		StartupNonce: os.Getenv("PULSE_STARTUP_NONCE"),
 		Outbox:       ob,
 		Builder:      builder,
 		Claude:       cc,
@@ -199,18 +301,24 @@ func run(dataDir, addr string) error {
 		Store:        s,
 		Billing: server.BillingStatus{
 			Mode:              pulseMode(localAutoMode),
-			Host:              "claude-code",
+			Host:              billingHost,
 			BackendLLMEnabled: backendLLMEnabled,
 			RawCaptureEnabled: rawCaptureEnabled,
 			StoragePath:       cfg.DBPath,
 		},
-		Retrieval:    retrievalEngine,
-		ContextQuery: contextQuery,
-		Health:       healthProvider,
+		Retrieval:                  retrievalEngine,
+		ContextQuery:               contextQuery,
+		Health:                     healthProvider,
+		HomeOrigin:                 homeOrigin,
+		HomePresence:               homePresence,
+		EnhancedPresenceAuthorizer: enhancedPresenceAuthorizer,
+		UnassignedInboxPath:        unassignedInboxPath,
+		HomeBindingVerifier:        homeBindingVerifier,
 	})
 	if err != nil {
 		return err
 	}
+	defer srv.Close()
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -227,12 +335,18 @@ func run(dataDir, addr string) error {
 		defer reaperWG.Done()
 		reaperLoop(reaperCtx, ob)
 	}()
+	reaperWG.Add(1)
+	go func() {
+		defer reaperWG.Done()
+		backfillCapsuleEvents(reaperCtx, s, retrievalEngine)
+	}()
 
-	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir)
+	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir,
+		"vault_kind", s.StoreKind(), "store_id", s.StoreID())
 
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -262,6 +376,509 @@ func run(dataDir, addr string) error {
 	reaperWG.Wait()
 
 	return runErr
+}
+
+func backfillCapsuleEvents(ctx context.Context, s *store.Store, engine *retrieve.Engine) {
+	projected := 0
+	for ctx.Err() == nil {
+		docs, err := s.BackfillCapsuleEventsBatch(500)
+		if err != nil {
+			slog.Warn("capsule event backfill failed", "error", err)
+			return
+		}
+		projected += len(docs)
+		if len(docs) < 500 {
+			break
+		}
+	}
+	if projected > 0 {
+		slog.Info("capsule events backfilled", "count", projected)
+	}
+	if ctx.Err() != nil || engine == nil || !engine.EmbedderReady() {
+		return
+	}
+	persisted := 0
+	consecutiveFailures := 0
+	for ctx.Err() == nil {
+		docs, err := s.UnindexedHostEventDocs(500)
+		if err != nil {
+			slog.Warn("capsule event embed-index list failed", "error", err)
+			return
+		}
+		if len(docs) == 0 {
+			break
+		}
+		indexDocs := make([]retrieve.IndexEventDoc, len(docs))
+		for i, doc := range docs {
+			indexDocs[i] = retrieve.IndexEventDoc{EventID: doc.EventID, Text: doc.Text}
+		}
+		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		committed, embedErr := engine.EmbedAndPersistEvents(batchCtx, indexDocs)
+		cancel()
+		persisted += committed
+		if embedErr != nil {
+			consecutiveFailures++
+			slog.Warn("capsule event embed-index failed", "error", embedErr, "committed", committed,
+				"attempt", consecutiveFailures)
+			if consecutiveFailures >= 3 {
+				break
+			}
+			delay := time.Duration(consecutiveFailures) * 100 * time.Millisecond
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+			case <-timer.C:
+			}
+			continue
+		}
+		consecutiveFailures = 0
+		if len(docs) < 500 {
+			break
+		}
+	}
+	if persisted > 0 {
+		reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := engine.Reload(reloadCtx)
+		cancel()
+		if err != nil {
+			slog.Warn("capsule event embed-index reload failed", "error", err)
+		}
+	}
+}
+
+func runTeam(dataDir, addr string) error {
+	if !isLoopbackListenAddress(addr) {
+		return errors.New("team-remote daemon must bind to a loopback address")
+	}
+	cfg, err := config.LoadTeam(dataDir)
+	if err != nil {
+		return err
+	}
+	ownerAdminOnly := os.Getenv("PULSE_TEAM_OWNER_ADMIN_ONLY")
+	if ownerAdminOnly != "" && ownerAdminOnly != "1" {
+		return errors.New("PULSE_TEAM_OWNER_ADMIN_ONLY must be unset or 1")
+	}
+	if ownerAdminOnly == "1" {
+		return runTeamOwnerAdmin(cfg, addr)
+	}
+	if cfg.TeamBootstrapRoot == nil || cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" {
+		return errors.New("team-remote requires pinned bootstrap root and expected store identity")
+	}
+
+	s, err := store.OpenTeam(cfg.DBPath, store.TeamOpenOptions{ExpectedBootstrapRoot: *cfg.TeamBootstrapRoot})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if _, err := s.CheckSyntheticTeamReadiness(context.Background(), store.TeamReadinessOptions{
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		ReaderVersion:   teamauth.SchemaVersion,
+		WriterVersion:   teamauth.SchemaVersion,
+	}); err != nil {
+		return fmt.Errorf("team-remote store readiness: %w", err)
+	}
+
+	keyring, err := server.LoadPrincipalVerifyKeyringFromEnv()
+	if err != nil {
+		return err
+	}
+	writerID, err := newTeamWriterID()
+	if err != nil {
+		return errors.New("team-remote writer identity unavailable")
+	}
+	lease, err := s.AcquireTeamWriterLease(context.Background(), store.TeamWriterLeaseRequest{
+		WriterID: writerID, WriterVersion: teamauth.SchemaVersion, TTL: teamWriterLeaseTTL,
+	})
+	if err != nil {
+		return fmt.Errorf("team-remote writer lease: %w", err)
+	}
+	releaseLease := true
+	defer func() {
+		if !releaseLease {
+			slog.Warn("team writer lease left to expire because request quiescence or ownership was not proven")
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.ReleaseTeamWriterLease(releaseCtx, lease.WriterID, lease.Token); err != nil {
+			slog.Warn("team writer lease release failed")
+		}
+	}()
+	verifier, err := server.NewPrincipalVerifier(server.PrincipalVerifierConfig{
+		Store:           s,
+		Keyring:         keyring,
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		WriterLease:     &lease,
+	})
+	if err != nil {
+		return err
+	}
+	ownerStepUpVerifier, err := server.NewOwnerStepUpVerifier(server.OwnerStepUpVerifierConfig{
+		Store: s, Keyring: keyring, ExpectedRoot: *cfg.TeamBootstrapRoot,
+	})
+	if err != nil {
+		return err
+	}
+	ownerAdminServer, err := server.NewOwnerAdminServer(server.OwnerAdminServerConfig{
+		IPCSecret: cfg.IPCSecret, Store: s, StepUpVerifier: ownerStepUpVerifier,
+		WriterLease: &lease,
+	})
+	if err != nil {
+		return err
+	}
+	publicationAirlock, err := newSyntheticTeamPublicationAirlock(
+		s, cfg, lease, ownerStepUpVerifier,
+	)
+	if err != nil {
+		return err
+	}
+	teamEmbedder, _, err := teamEmbedderFromEnv()
+	if err != nil {
+		return fmt.Errorf("team embedding dependency: %w", err)
+	}
+	if closer, ok := teamEmbedder.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				slog.Warn("team embedding dependency close failed")
+			}
+		}()
+	}
+
+	teamServer, err := server.NewTeam(server.TeamServerConfig{
+		IPCSecret:         cfg.IPCSecret,
+		Store:             s,
+		PrincipalVerifier: verifier,
+		ReadService: teamread.New(
+			s, retrieve.NewTeamRetrievalEngine(retrieve.TeamRetrievalConfig{Embedder: teamEmbedder}),
+		),
+		ExpectedStoreID: cfg.ExpectedTeamStoreID,
+		ExpectedTeamID:  cfg.ExpectedTeamID,
+		WriterLease:     lease,
+	})
+	if err != nil {
+		return err
+	}
+	deletionWorker, err := teamjobs.NewDeletionWorker(teamjobs.DeletionWorkerConfig{
+		Store: s,
+		Writer: store.TeamWriterLeaseIdentity{
+			WriterID: lease.WriterID, Token: lease.Token,
+		},
+		ClaimLimit: 16, ReapLimit: 64, LeaseTTL: teamDeletionLeaseTTL,
+		PollInterval: teamDeletionPollInterval,
+		BaseBackoff:  teamDeletionBaseBackoff, MaxBackoff: teamDeletionMaxBackoff,
+	})
+	if err != nil {
+		return err
+	}
+	embeddingProcessor, err := newTeamEmbeddingProjectionProcessor(s, teamEmbedder)
+	if err != nil {
+		return err
+	}
+	projectionProcessor, err := teamjobs.NewStoreProjectionProcessor(s, embeddingProcessor)
+	if err != nil {
+		return err
+	}
+	projectionWorker, err := teamjobs.NewProjectionWorker(teamjobs.ProjectionWorkerConfig{
+		Store: s, Processor: projectionProcessor,
+		Writer: store.TeamWriterLeaseIdentity{
+			WriterID: lease.WriterID, Token: lease.Token,
+		},
+		ProjectionKind: "", ClaimLimit: 1, LeaseTTL: teamProjectionLeaseTTL,
+		PollInterval:      teamProjectionPollInterval,
+		HeartbeatInterval: teamProjectionHeartbeatInterval,
+		WorkerInstanceID:  lease.WriterID + "-projection",
+		BaseBackoff:       teamProjectionBaseBackoff, MaxBackoff: teamProjectionMaxBackoff,
+	})
+	if err != nil {
+		return err
+	}
+	listener, err := listenTeamDaemon(addr)
+	if err != nil {
+		return fmt.Errorf("team-remote listen: %w", err)
+	}
+	defer listener.Close()
+
+	httpSrv := &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           composeTeamRuntimeHandler(teamServer.Handler(), ownerAdminServer.Handler(), publicationAirlock),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
+	defer signal.Stop(sigCh)
+	slog.Info("pulse team daemon listening", "addr", listener.Addr().String())
+	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
+		Signals:    sigCh,
+		RenewLease: func(ctx context.Context) error { return renewTeamWriterLease(ctx, s, lease) },
+		RunBackgroundWorkers: func(ctx context.Context) error {
+			return runTeamBackgroundWorkers(ctx, teamBackgroundPeerJoinTimeout,
+				teamRuntimeWorker{Name: "deletion", Run: deletionWorker.Run},
+				teamRuntimeWorker{Name: "projection", Run: projectionWorker.Run},
+			)
+		},
+		ShutdownTimeout: 10 * time.Second,
+		QuiesceTimeout:  teamHandlerQuiesceTimeout,
+	})
+	releaseLease = runtimeResult.ReleaseLease
+	return runtimeResult.Err
+}
+
+func newTeamEmbeddingProjectionProcessor(
+	projectionStore teamjobs.TeamEmbeddingProjectionStore,
+	embedder retrieve.Embedder,
+) (*teamjobs.TeamEmbeddingProjectionProcessor, error) {
+	if embedder == nil {
+		return nil, nil
+	}
+	return teamjobs.NewTeamEmbeddingProjectionProcessor(projectionStore, embedder)
+}
+
+func runTeamOwnerAdmin(cfg *config.Config, addr string) error {
+	if cfg == nil || cfg.TeamBootstrapRoot == nil {
+		return errors.New("team owner administration requires a pinned bootstrap root")
+	}
+	s, err := store.OpenTeam(cfg.DBPath, store.TeamOpenOptions{ExpectedBootstrapRoot: *cfg.TeamBootstrapRoot})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	keyring, err := server.LoadPrincipalVerifyKeyringFromEnv()
+	if err != nil {
+		return err
+	}
+	stepUpVerifier, err := server.NewOwnerStepUpVerifier(server.OwnerStepUpVerifierConfig{
+		Store: s, Keyring: keyring, ExpectedRoot: *cfg.TeamBootstrapRoot,
+	})
+	if err != nil {
+		return err
+	}
+	identity, err := s.ResolveOwnerStepUpIdentity(context.Background(), *cfg.TeamBootstrapRoot)
+	if err != nil {
+		return err
+	}
+	var lease *store.TeamWriterLease
+	releaseLease := true
+	if !identity.Bootstrap {
+		if cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" ||
+			cfg.ExpectedTeamStoreID != identity.StoreID || cfg.ExpectedTeamID != identity.TeamID {
+			return errors.New("post-bootstrap owner administration requires exact expected store identity")
+		}
+		if _, err := s.CheckTeamReadiness(context.Background(), store.TeamReadinessOptions{
+			ExpectedStoreID: cfg.ExpectedTeamStoreID, ExpectedTeamID: cfg.ExpectedTeamID,
+			ReaderVersion: teamauth.SchemaVersion, WriterVersion: teamauth.SchemaVersion,
+		}); err != nil {
+			return fmt.Errorf("team owner store readiness: %w", err)
+		}
+		writerID, err := newTeamWriterID()
+		if err != nil {
+			return errors.New("team owner writer identity unavailable")
+		}
+		acquired, err := s.AcquireTeamWriterLease(context.Background(), store.TeamWriterLeaseRequest{
+			WriterID: writerID, WriterVersion: teamauth.SchemaVersion, TTL: teamWriterLeaseTTL,
+		})
+		if err != nil {
+			return fmt.Errorf("team owner writer lease: %w", err)
+		}
+		lease = &acquired
+		defer func() {
+			if !releaseLease {
+				slog.Warn("team owner writer lease left to expire because request quiescence or ownership was not proven")
+				return
+			}
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.ReleaseTeamWriterLease(releaseCtx, acquired.WriterID, acquired.Token); err != nil {
+				slog.Warn("team owner writer lease release failed")
+			}
+		}()
+	}
+	ownerServer, err := server.NewOwnerAdminServer(server.OwnerAdminServerConfig{
+		IPCSecret: cfg.IPCSecret, Store: s, StepUpVerifier: stepUpVerifier, WriterLease: lease,
+	})
+	if err != nil {
+		return err
+	}
+	listener, err := listenTeamDaemon(addr)
+	if err != nil {
+		return fmt.Errorf("team owner listen: %w", err)
+	}
+	defer listener.Close()
+	httpSrv := &http.Server{
+		Addr: listener.Addr().String(), Handler: ownerServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, platform.ShutdownSignals()...)
+	defer signal.Stop(sigCh)
+	renewLease := func(ctx context.Context) error {
+		if lease == nil {
+			<-ctx.Done()
+			return nil
+		}
+		return renewTeamWriterLease(ctx, s, *lease)
+	}
+	runtimeResult := serveTeamRuntime(httpSrv, listener, teamRuntimeOptions{
+		Signals: sigCh, RenewLease: renewLease,
+		ShutdownTimeout: 10 * time.Second, QuiesceTimeout: teamHandlerQuiesceTimeout,
+	})
+	if lease != nil {
+		releaseLease = runtimeResult.ReleaseLease
+	}
+	return runtimeResult.Err
+}
+
+func composeTeamRuntimeHandler(teamHandler, ownerHandler http.Handler, airlock ...http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/team/v1/owner/", ownerHandler)
+	if len(airlock) == 1 && airlock[0] != nil {
+		mux.Handle(server.TeamPublicationAirlockRoutePath, airlock[0])
+	}
+	mux.Handle("/", teamHandler)
+	return mux
+}
+
+func newSyntheticTeamPublicationAirlock(
+	teamStore *store.Store,
+	cfg *config.Config,
+	lease store.TeamWriterLease,
+	stepUpVerifier *server.OwnerStepUpVerifier,
+) (http.Handler, error) {
+	deploymentID := os.Getenv("PULSE_TEAM_PUBLICATION_DEPLOYMENT_ID")
+	projectID := os.Getenv("PULSE_TEAM_SHARED_PROJECT_ID")
+	origin := os.Getenv("PULSE_TEAM_AIRLOCK_ORIGIN")
+	candidatePath := os.Getenv("PULSE_TEAM_AIRLOCK_SYNTHETIC_CANDIDATE_FILE")
+	syntheticOnly := os.Getenv("PULSE_TEAM_PUBLICATION_SYNTHETIC_ONLY")
+	values := []string{deploymentID, projectID, origin, candidatePath, syntheticOnly}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+		if strings.TrimSpace(value) != value {
+			return nil, errors.New("team publication Airlock configuration contains surrounding whitespace")
+		}
+	}
+	if configured == 0 {
+		return nil, nil
+	}
+	if configured != len(values) || syntheticOnly != "1" || teamStore == nil || cfg == nil ||
+		stepUpVerifier == nil || cfg.ExpectedTeamStoreID == "" || cfg.ExpectedTeamID == "" {
+		return nil, errors.New("team publication Airlock requires a complete synthetic-only configuration")
+	}
+	if err := teamStore.ConfigureTeamPublicationTarget(store.TeamPublicationTarget{
+		DeploymentID: deploymentID, ProjectID: projectID, SyntheticOnly: true,
+	}); err != nil {
+		return nil, fmt.Errorf("team publication target: %w", err)
+	}
+	canonical, err := readTeamCredentialFile(candidatePath, 64<<10)
+	if err != nil {
+		return nil, errors.New("team publication Airlock candidate is unavailable or unsafe")
+	}
+	candidate, err := server.ParseTeamPublicationAirlockCandidate([]byte(canonical))
+	if err != nil || candidate.StoreID != cfg.ExpectedTeamStoreID || candidate.TeamID != cfg.ExpectedTeamID {
+		return nil, errors.New("team publication Airlock candidate does not match the pinned Team")
+	}
+	owner, err := teamStore.ResolveOwnerStepUpIdentity(context.Background(), *cfg.TeamBootstrapRoot)
+	if err != nil || owner.Bootstrap || owner.StoreID != cfg.ExpectedTeamStoreID ||
+		owner.TeamID != cfg.ExpectedTeamID || owner.OwnerPrincipalID == "" || owner.ClientKey == "" {
+		return nil, errors.New("team publication Airlock Owner identity is unavailable")
+	}
+	airlockServer, err := server.NewTeamPublicationAirlockServer(server.TeamPublicationAirlockServerConfig{
+		Store:                     teamStore,
+		ExpectedOrigin:            origin,
+		Candidate:                 candidate,
+		ApprovingOwnerPrincipalID: owner.OwnerPrincipalID,
+		ApprovingClientKey:        owner.ClientKey,
+		StepUpVerifier:            stepUpVerifier,
+		WriterLeaseProvider: server.TeamPublicationWriterLeaseProviderFunc(
+			func(context.Context) (store.TeamWriterLeaseIdentity, error) {
+				return store.TeamWriterLeaseIdentity{WriterID: lease.WriterID, Token: lease.Token}, nil
+			},
+		),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return airlockServer.Handler(), nil
+}
+
+type teamWriterLeaseRenewer interface {
+	AcquireTeamWriterLease(context.Context, store.TeamWriterLeaseRequest) (store.TeamWriterLease, error)
+}
+
+func renewTeamWriterLease(ctx context.Context, renewer teamWriterLeaseRenewer, lease store.TeamWriterLease) error {
+	return renewTeamWriterLeaseAtInterval(ctx, renewer, lease, teamWriterRenewalInterval)
+}
+
+func renewTeamWriterLeaseAtInterval(ctx context.Context, renewer teamWriterLeaseRenewer, lease store.TeamWriterLease, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			renewed, err := renewer.AcquireTeamWriterLease(ctx, store.TeamWriterLeaseRequest{
+				WriterID: lease.WriterID, WriterVersion: teamauth.SchemaVersion,
+				Token: lease.Token, TTL: teamWriterLeaseTTL,
+			})
+			if err != nil {
+				return err
+			}
+			if renewed.StoreID != lease.StoreID || renewed.TeamID != lease.TeamID ||
+				renewed.WriterID != lease.WriterID || renewed.WriterVersion != lease.WriterVersion ||
+				renewed.Token != lease.Token {
+				return errTeamWriterLeaseChanged
+			}
+		}
+	}
+}
+
+func newTeamWriterID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "team-daemon-" + hex.EncodeToString(value[:]), nil
+}
+
+func isLoopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func listenTeamDaemon(addr string) (net.Listener, error) {
+	if !isLoopbackListenAddress(addr) {
+		return nil, errors.New("team-remote daemon must bind to a loopback address")
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		_ = listener.Close()
+		return nil, errors.New("team-remote daemon resolved to a non-loopback address")
+	}
+	return listener, nil
 }
 
 func pulseMode(localAuto bool) string {
@@ -345,17 +962,123 @@ func embedderFromEnv() (retrieve.Embedder, string, error) {
 	return nil, "", nil
 }
 
-func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
-	embedder, name, err := embedderFromEnv()
+// teamEmbedderFromEnv deliberately ignores the Personal/Local Preview
+// COHERE_API_KEY and ~/.pulse/cohere-key.txt discovery paths. A Commons
+// deployment must receive a separately provisioned credential file or a
+// separately named local helper configuration; otherwise Team readiness stays
+// degraded instead of silently sending shared content through a personal
+// dependency.
+func teamEmbedderFromEnv() (retrieve.Embedder, string, error) {
+	keyPath := os.Getenv("PULSE_TEAM_COHERE_KEY_FILE")
+	if strings.TrimSpace(keyPath) != keyPath {
+		return nil, "", errors.New("PULSE_TEAM_COHERE_KEY_FILE must not contain surrounding whitespace")
+	}
+	if keyPath != "" {
+		key, err := readTeamCredentialFile(keyPath, 4096)
+		if err != nil {
+			return nil, "", errors.New("team Cohere credential file is unavailable or unsafe")
+		}
+		key = strings.TrimSpace(key)
+		if key == "" || strings.ContainsAny(key, "\r\n\x00") {
+			return nil, "", errors.New("team Cohere credential file is invalid")
+		}
+		client := embed.NewCohere(key, "", "")
+		return client, client.Model(), nil
+	}
+
+	pythonExe := os.Getenv("PULSE_TEAM_LOCAL_EMBED_PYTHON")
+	helperPath := os.Getenv("PULSE_TEAM_LOCAL_EMBED_HELPER")
+	modelPath := os.Getenv("PULSE_TEAM_LOCAL_EMBED_MODEL")
+	configured := 0
+	for _, value := range []string{pythonExe, helperPath, modelPath} {
+		if value != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil, "", nil
+	}
+	if configured != 3 {
+		return nil, "", errors.New("team local embedding dependency must set python, helper, and model together")
+	}
+	if err := validateTeamEmbeddingFile(pythonExe, true); err != nil {
+		return nil, "", errors.New("team local embedding python is unavailable or unsafe")
+	}
+	if err := validateTeamEmbeddingFile(helperPath, false); err != nil {
+		return nil, "", errors.New("team local embedding helper is unavailable or unsafe")
+	}
+	if strings.TrimSpace(modelPath) != modelPath || !filepath.IsAbs(modelPath) {
+		return nil, "", errors.New("team local embedding model path is invalid")
+	}
+	modelInfo, err := os.Stat(modelPath)
+	if err != nil || (!modelInfo.Mode().IsRegular() && !modelInfo.IsDir()) {
+		return nil, "", errors.New("team local embedding model is unavailable")
+	}
+	client := embed.NewLocal(pythonExe, helperPath, modelPath, "bge-m3-mlx-fp16")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		return nil, "", errors.New("team local embedding dependency failed to start")
+	}
+	return client, client.Model(), nil
+}
+
+func validateTeamEmbeddingFile(path string, executable bool) error {
+	if strings.TrimSpace(path) != path || !filepath.IsAbs(path) {
+		return errors.New("invalid path")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	if executable && info.Mode().Perm()&0111 == 0 {
+		return errors.New("not executable")
+	}
+	return nil
+}
+
+func readTeamCredentialFile(path string, maximum int64) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
+		return "", errors.New("invalid team credential path")
+	}
+	if _, supported := platform.CurrentUserID(); !supported {
+		return "", fmt.Errorf("team credential security: %w", platform.ErrUnsupported)
+	}
+	value, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MaximumBytes: maximum, RequireCurrentOwner: true, AllowRootOwner: true, OwnerOnly: true, SingleLink: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("unsafe team credential file: %w", err)
+	}
+	return string(value), nil
+}
+
+func initRetrieval(s *store.Store, dataDir string, productLocal bool) (*retrieve.Engine, error) {
+	var (
+		embedder retrieve.Embedder
+		name     string
+		err      error
+	)
+	if productLocal {
+		embedder, name, err = managedEmbedderFromConfig()
+	} else {
+		embedder, name, err = embedderFromEnv()
+	}
 	if err != nil {
 		return nil, err
 	}
 	if embedder == nil {
+		if productLocal {
+			return nil, errors.New("managed embedder is required in product-local mode")
+		}
 		slog.Info("retrieval: no embedder configured (set COHERE_API_KEY for Cohere, or ensure local mlx_embed_helper.py + bge-m3 model are present); /retrieve and /context/query will respond 503")
 		return nil, nil
 	}
 
-	expander := expanderFromEnv(dataDir)
+	var expander retrieve.Expander
+	if !productLocal {
+		expander = expanderFromEnv(dataDir)
+	}
 
 	engine := retrieve.New(retrieve.Config{
 		Store:            s,
@@ -371,6 +1094,206 @@ func initRetrieval(s *store.Store, dataDir string) (*retrieve.Engine, error) {
 	}
 	slog.Info("retrieval: engine initialized", "embedder", name, "expander", expander != nil)
 	return engine, nil
+}
+
+const (
+	managedEmbedderConfigSchemaV1   = "pulse.managed_embedder.config.v1"
+	managedEmbedderConfigSchemaV2   = "pulse.managed_embedder.config.v2"
+	managedEmbedderProtocol         = 1
+	managedEmbedderMaximumArgs      = 8
+	managedEmbedderMaximumArgBytes  = 4096
+	managedEmbedderMaximumArgsBytes = 16 * 1024
+)
+
+type managedVectorContract struct {
+	Dimensions   int    `json:"dimensions"`
+	Model        string `json:"model"`
+	Normalized   bool   `json:"normalized"`
+	Opset        int    `json:"opset"`
+	Pooling      string `json:"pooling"`
+	Quantization string `json:"quantization"`
+	Revision     string `json:"revision"`
+	Source       string `json:"source"`
+}
+
+type managedEmbedderDiskConfig struct {
+	EmbedderRuntimeActivationDigest string                `json:"embedder_runtime_activation_digest"`
+	EmbedderRuntimeTreeDigest       string                `json:"embedder_runtime_tree_digest"`
+	Engine                          string                `json:"engine"`
+	ModelActivationDigest           string                `json:"model_activation_digest"`
+	ModelRoot                       string                `json:"model_root"`
+	ModelTreeDigest                 string                `json:"model_tree_digest"`
+	Protocol                        int                   `json:"protocol"`
+	RunnerArgs                      []string              `json:"runner_args"`
+	RunnerPath                      string                `json:"runner_path"`
+	Schema                          string                `json:"schema"`
+	SupportRoot                     string                `json:"support_root"`
+	VectorContract                  managedVectorContract `json:"vector_contract"`
+}
+
+func managedEmbedderFromConfig() (retrieve.Embedder, string, error) {
+	config, err := loadManagedEmbedderConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	client := embed.NewManagedLocal(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		_ = client.Close()
+		return nil, "", fmt.Errorf("start managed embedder: %w", err)
+	}
+	return client, client.Model(), nil
+}
+
+func loadManagedEmbedderConfig() (embed.ManagedLocalConfig, error) {
+	path := os.Getenv("PULSE_MANAGED_EMBEDDER_CONFIG")
+	if path == "" || strings.TrimSpace(path) != path || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config path is missing or invalid")
+	}
+	data, err := readOwnerOnlyRegularFile(path, 16*1024)
+	if err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config open: %w", err)
+	}
+	var header struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config decode: %w", err)
+	}
+	if header.Schema == managedEmbedderConfigSchemaV1 {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config v1 is historical and not ready for universal retrieval")
+	}
+	if header.Schema != managedEmbedderConfigSchemaV2 {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config contract mismatch")
+	}
+	var disk managedEmbedderDiskConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&disk); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder config decode: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config decode: trailing JSON")
+	}
+	if disk.Schema != managedEmbedderConfigSchemaV2 || disk.Protocol != managedEmbedderProtocol ||
+		disk.Engine != "transformers-js-onnx" ||
+		disk.VectorContract.Model != "bge-m3" || disk.VectorContract.Source != "BAAI/bge-m3" ||
+		disk.VectorContract.Revision != "5617a9f61b028005a4858fdac845db406aefb181" ||
+		disk.VectorContract.Dimensions != 1024 || disk.VectorContract.Pooling != "cls" ||
+		!disk.VectorContract.Normalized || disk.VectorContract.Opset != 17 ||
+		disk.VectorContract.Quantization != "dynamic-int8" {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder config contract mismatch")
+	}
+	for label, digest := range map[string]string{
+		"embedder runtime activation": disk.EmbedderRuntimeActivationDigest,
+		"embedder runtime tree":       disk.EmbedderRuntimeTreeDigest,
+		"model activation":            disk.ModelActivationDigest,
+		"model tree":                  disk.ModelTreeDigest,
+	} {
+		if !validManagedDigest(digest) {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder %s digest is invalid", label)
+		}
+	}
+	for label, value := range map[string]string{
+		"runner": disk.RunnerPath, "model root": disk.ModelRoot, "support root": disk.SupportRoot,
+	} {
+		if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsRune(value, '\x00') {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder %s path is not absolute and clean", label)
+		}
+	}
+	if len(disk.RunnerArgs) == 0 || len(disk.RunnerArgs) > managedEmbedderMaximumArgs {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder runner args are outside the bounded contract")
+	}
+	totalArgBytes := 0
+	for index, argument := range disk.RunnerArgs {
+		totalArgBytes += len(argument)
+		if argument == "" || len(argument) > managedEmbedderMaximumArgBytes || !utf8.ValidString(argument) ||
+			strings.ContainsRune(argument, '\x00') || strings.ContainsAny(argument, "\r\n") || strings.Contains(argument, "://") {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner arg %d is invalid", index)
+		}
+		if filepath.IsAbs(argument) && !managedPathInside(disk.ModelRoot, argument) &&
+			!managedPathInside(disk.SupportRoot, argument) {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner arg %d escapes verified roots", index)
+		}
+	}
+	if totalArgBytes > managedEmbedderMaximumArgsBytes {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder runner args exceed the bounded contract")
+	}
+	if !managedPathInside(disk.ModelRoot, disk.SupportRoot) || disk.ModelRoot == disk.SupportRoot {
+		return embed.ManagedLocalConfig{}, errors.New("managed embedder support root must be inside the verified model root")
+	}
+	if err := validateManagedArtifactPath(disk.RunnerPath, true, false); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder runner: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.ModelRoot, false, true); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model root: %w", err)
+	}
+	if err := validateManagedArtifactPath(disk.SupportRoot, false, true); err != nil {
+		return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support root: %w", err)
+	}
+	for _, name := range []string{"model_int8.onnx", "pulse-model-contract.json"} {
+		if err := validateManagedArtifactPath(filepath.Join(disk.ModelRoot, name), false, false); err != nil {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder model %s: %w", name, err)
+		}
+	}
+	for _, name := range []string{"config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"} {
+		if err := validateManagedArtifactPath(filepath.Join(disk.SupportRoot, name), false, false); err != nil {
+			return embed.ManagedLocalConfig{}, fmt.Errorf("managed embedder support %s: %w", name, err)
+		}
+	}
+	return embed.ManagedLocalConfig{
+		Schema: disk.Schema, Protocol: disk.Protocol, Engine: disk.Engine,
+		RunnerPath: disk.RunnerPath, RunnerArgs: append([]string(nil), disk.RunnerArgs...),
+		ModelRoot: disk.ModelRoot, SupportRoot: disk.SupportRoot,
+		VectorContract: embed.ManagedVectorContract{
+			Model: disk.VectorContract.Model, Source: disk.VectorContract.Source,
+			Revision: disk.VectorContract.Revision, Dimensions: disk.VectorContract.Dimensions,
+			Pooling: disk.VectorContract.Pooling, Normalized: disk.VectorContract.Normalized,
+			Opset: disk.VectorContract.Opset, Quantization: disk.VectorContract.Quantization,
+		},
+		EmbedderRuntimeActivationDigest: disk.EmbedderRuntimeActivationDigest,
+		EmbedderRuntimeTreeDigest:       disk.EmbedderRuntimeTreeDigest,
+		ModelActivationDigest:           disk.ModelActivationDigest, ModelTreeDigest: disk.ModelTreeDigest,
+	}, nil
+}
+
+func managedPathInside(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) &&
+		!filepath.IsAbs(relative)
+}
+
+func validManagedDigest(value string) bool {
+	if len(value) != 64 || value == strings.Repeat("0", 64) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func readOwnerOnlyRegularFile(path string, maximum int64) ([]byte, error) {
+	if path == "" || !filepath.IsAbs(path) || maximum < 1 {
+		return nil, errors.New("invalid path")
+	}
+	data, err := platform.ReadPrivateFile(path, platform.FilePolicy{
+		MaximumBytes: maximum, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("file must be owner-only: %w", err)
+	}
+	return data, nil
+}
+
+func validateManagedArtifactPath(path string, executable, directory bool) error {
+	return platform.ValidatePrivatePath(path, platform.FilePolicy{
+		RequireCurrentOwner: true, NoUntrustedWrite: true, Directory: directory, Executable: executable,
+	})
 }
 
 // expanderFromEnv returns a query-expansion client when

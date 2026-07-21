@@ -13,17 +13,31 @@ about. Local-first, state-aware memory for any AI agent.
 
 ![Pulse demo — same question, three states, three memories, with reasons](docs/assets/pulse-demo.gif)
 
-## Quickstart
+## Host-neutral Personal quickstart (pending signed preview publication)
+
+This branch prepares the Claude Code + Cursor + Codex installer. The command
+below is a current-support path only after `npm view @zbs-gg/pulse dist-tags
+--json` points `preview` at a release whose `install-plan --json` reports
+`pulse.personal_install_plan.v2` and all three `supported_hosts`. Until then,
+the published preview does not inherit this branch's claims.
 
 ```bash
-npx @zbs-gg/pulse@preview init claude-code   # full engine, Claude Code
-pulse doctor                                 # which mode this machine gets
-pulse demo                                   # see it: one question, three states, three memories
+npx -y @zbs-gg/pulse@preview install # detects Claude Code, Cursor, and Codex
+pulse doctor claude-code             # run only for detected hosts
+pulse doctor cursor
+pulse doctor codex
+pulse home                           # memories, continuity, token evidence
 ```
 
-Full local engine on Apple Silicon / with an embedder. On other hosts, see
-[Safe Mode](#safe-mode--fallback-not-the-product) — the compatibility fallback,
-**not** the engine.
+The release target is macOS, Windows, and GNU/Linux on arm64 and x64, with
+Node 20+, a Git project, and any one of Claude Code, Cursor, or Codex. Pulse
+detects every compatible host already installed and connects them to one
+shared local Core and vault. It needs no Go, Python, Make, Docker, model API
+key, or manual configuration editing. A target is public support only when its
+exact native and production evidence is green in the
+[support ledger](docs/release/NATIVE_SUPPORT_LEDGER.md). On unsupported hosts,
+[Safe Mode](#safe-mode--fallback-not-the-product) remains a separately labeled
+compatibility fallback, **not** the engine.
 
 ![What the next agent session receives — the Pulse continuity pack](docs/assets/continuity-pack.png)
 
@@ -47,19 +61,22 @@ Please install it carefully:
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check the npm package:
    npm view @zbs-gg/pulse dist-tags
-   The preview tag should be 0.6.7 or newer for this README.
-3. Tell me which harness path fits my setup:
-   - Claude Code full local preview; or
-   - MCP/Safe Mode for Cursor, Windsurf, Claude Desktop/local MCP clients,
-     Codex/OpenAI agents, Gemini CLI, or another MCP-compatible host.
+   The host-neutral Personal path requires preview 0.7.0 or newer and
+   `pulse.personal_install_plan.v2` with all three supported hosts.
+3. Check that this exact OS/architecture is green in
+   docs/release/NATIVE_SUPPORT_LEDGER.md, with Node 20+, a Git project, and at
+   least one of Claude Code, Cursor, or Codex. Otherwise explain Safe Mode
+   separately.
 4. Explain in plain English what Pulse will write, where memory is stored,
    what does NOT happen by default, and how I can erase it.
 5. Ask me for confirmation before installing anything.
 6. After I confirm, install the best supported path.
-   For Claude Code full local preview:
-     npx @zbs-gg/pulse@preview init claude-code
-     pulse doctor
-     pulse demo
+   For Personal Pulse:
+     npx -y @zbs-gg/pulse@preview install
+     pulse doctor claude-code  # when detected
+     pulse doctor cursor       # when detected
+     pulse doctor codex        # when detected
+     pulse home
    For MCP/Safe Mode:
      configure the host to run:
      npx -y @zbs-gg/pulse@preview mcp
@@ -70,8 +87,8 @@ Please install it carefully:
    - whether raw transcript capture is off;
    - what Pulse remembered;
    - what my next agent/session will receive;
-   - the viewer URL if available;
-   - the wipe/disconnect commands.
+   - the Memory Home receipt and honest collecting/estimated/measured token state;
+   - the repair/disconnect commands.
 
 Important:
 - do not import old chats without separate confirmation;
@@ -88,7 +105,8 @@ retrieves the right remembered episode for *this* moment — not just the
 closest text match — shows **why** that memory surfaced, shows what it will
 tell your next agent, and wipes on one command.
 
-Status: developer preview. Local-first, Claude Code-first. Not production,
+Status: developer preview. Host-neutral Claude Code, Cursor, and Codex support
+is pending the matching signed preview publication. Not production,
 not a consumer app yet.
 
 If you are an agent asked to evaluate or install Pulse: read
@@ -122,27 +140,39 @@ legacy and should not be the default install path.
 
 | Harness | Current support | Recommended path |
 |---|---|---|
-| Claude Code | Primary target. Full Local Preview plus MCP/hooks/doctor/demo. | `npx @zbs-gg/pulse@preview init claude-code` |
+| Codex / OpenAI local agents | Native Personal plugin, lifecycle, Memory Home, and continuity through the shared Core; pending matching signed preview. | Install after publication |
+| Claude Code | Native Personal plugin and lifecycle through the same shared Core and vault; pending matching signed preview. | Install after publication |
 | Claude Desktop / local Claude MCP clients | MCP-compatible Safe Mode today. Full connector/store path is not shipped. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
-| Cursor | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
+| Cursor | Native local plugin and lifecycle through the same shared Core and vault; no Cursor CLI required; pending matching signed preview. | Install after publication |
 | Windsurf | MCP-compatible Safe Mode today. Full install automation is not first-class yet. | Configure command: `npx -y @zbs-gg/pulse@preview mcp` |
-| Codex / OpenAI local agents | MCP-compatible when the host can run local MCP commands. Not a ChatGPT Store app. | Ask the agent to audit this repo and configure `npx -y @zbs-gg/pulse@preview mcp` |
 | Gemini CLI | MCP-compatible if the CLI/harness supports local MCP command servers. Not first-class installer yet. | Use the same MCP command after agent audit |
 | LangChain / CrewAI / custom agents | Integration surface, not a consumer installer. | Run Pulse MCP locally and call its tools from your framework |
 | ChatGPT app / Claude Directory / Pulse Cloud | Future distribution surfaces. | Not shipped in this preview |
 
-_"MCP-compatible" means protocol-level only. End-to-end install is verified on Claude Code; on the other hosts the MCP tools speak the protocol but the full install/onboarding is not E2E-tested yet._
+_"MCP-compatible" means protocol-level only. The current synthetic matrix
+covers orchestration contracts; physical clean-machine attestation owns the
+one-command product claim._
 
-## Install — Pulse Local Preview
+Native OS/architecture and harness claims are tracked separately in the
+[release support ledger](docs/release/NATIVE_SUPPORT_LEDGER.md). A green PR
+fixture is required engineering evidence, not permission to call unpublished
+or unsigned bytes production support.
+
+## Install — Personal Pulse
 
 ```bash
-npx @zbs-gg/pulse@preview init claude-code
-pulse doctor
-pulse demo
+npx -y @zbs-gg/pulse@preview install
+pulse doctor claude-code  # when detected
+pulse doctor cursor       # when detected
+pulse doctor codex        # when detected
+pulse home
 ```
 
-`pulse doctor` tells you honestly which mode this machine gets. `pulse demo`
-runs only on the full engine — it never fakes the result on fallback.
+The wizard shows the exact plan before consent, downloads only signed release
+artifacts, provisions Core once, attaches every detected compatible harness,
+survives interruption, and opens Memory Home. A normal memory must then be
+shown, saved, and offered to a fresh task in a verified harness. See the complete
+[Personal onboarding](docs/PERSONAL_PULSE_ONBOARDING.md).
 
 ### What the demo proves
 
@@ -173,10 +203,9 @@ Then: `pulse demo --clean` removes the whole demo store.
 
 | Mode | What you get | Needs |
 |---|---|---|
-| Pulse Local Preview | state-aware retrieval, why-this-surfaced reasons, viewer, resume injection | Node 20+, Go toolchain (preview builds from source), Claude Code CLI, an embedder (one of the two below) |
-| — local embeddings | fully local retrieval path | Apple Silicon, 16GB+ RAM (32GB comfortable), bge-m3 model on disk (~2GB), MLX python env |
-| — API embeddings | easier setup, smaller RAM | Cohere API key (`~/.pulse/cohere-key.txt`) — embedding calls leave the machine, and doctor says so |
-| Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 18+, nothing else |
+| Personal Pulse | managed local state-aware retrieval, visible writes, Memory Home, fresh-task continuity | Apple Silicon, Node 20+, Git project, and Claude Code, Cursor, or Codex |
+| Claude Code Local Preview | older source-built preview path | Node 20+, Go toolchain, Claude Code CLI, configured embedder |
+| Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 20+, nothing else |
 
 Numbers are conservative estimates; `pulse doctor` reports the real state of
 your machine and refuses to call fallback "Pulse ready".
@@ -210,9 +239,23 @@ paper/bench, not reproduced in this repository.
   Cohere *embedding* option, doctor reports `external embedding API: on`.
 - Raw transcript capture is off by default — structured capsules only.
 - Memory is local and inspectable; wipe needs an exact confirmation phrase.
-- `pulse doctor` is the source of truth: if full retrieval is off it says
+- `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`
+  is the product source of truth: if full retrieval is off it says
   "Pulse MCP fallback is ready. Full retrieval is not enabled." — never
   "Pulse ready".
+
+## Team Remote Foundation
+
+This repository is also developing a separate, fail-closed team-remote mode.
+It uses a dedicated team database, distinct human and agent identities,
+current-request authorization, scoped retrieval, metadata-only audit, and no
+local fallback. It does not turn Local Preview into a shared store.
+
+The current team work is a synthetic-data foundation, not an available cloud
+product or a completed customer pilot. See
+[`docs/TEAM_REMOTE_PILOT.md`](docs/TEAM_REMOTE_PILOT.md) for the exact boundary,
+activation gate, interfaces, and the remaining work before Nikita, Dima, Krisp,
+or any real team content can be connected.
 
 ## Direction: Material Graph
 

@@ -1,6 +1,9 @@
 package contextquery
 
-import "github.com/nkkmnk/pulse/internal/retrieve"
+import (
+	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
+)
 
 const SchemaVersion = "pulse.context.v1"
 
@@ -63,18 +66,19 @@ type ContextFact struct {
 }
 
 type ContextEvent struct {
-	ID           int64   `json:"id"`
-	Kind         string  `json:"kind"`
-	Title        string  `json:"title"`
-	Summary      string  `json:"summary"`
-	Score        float64 `json:"score"`
-	Confidence   float64 `json:"confidence"`
-	Provenance   string  `json:"provenance"`
-	EvidenceIDs  []int64 `json:"evidence_ids"`
-	SourceScope  string  `json:"source_scope"`
-	PrivacyFloor string  `json:"privacy_floor"`
-	DoNotProbe   bool    `json:"do_not_probe"`
-	Domain       string  `json:"domain"`
+	ID            int64                          `json:"id"`
+	Kind          string                         `json:"kind"`
+	Title         string                         `json:"title"`
+	Summary       string                         `json:"summary"`
+	Score         float64                        `json:"score"`
+	Confidence    float64                        `json:"confidence"`
+	Provenance    string                         `json:"provenance"`
+	EvidenceIDs   []int64                        `json:"evidence_ids"`
+	SourceScope   string                         `json:"source_scope"`
+	PrivacyFloor  string                         `json:"privacy_floor"`
+	DoNotProbe    bool                           `json:"do_not_probe"`
+	Domain        string                         `json:"domain"`
+	ProjectMemory *store.GitTeamMemoryProvenance `json:"project_memory,omitempty"`
 }
 
 type ContextEntity struct {

@@ -1,0 +1,50 @@
+[
+  {
+    "name": "ordinary multilingual",
+    "content": "Команда использует Pulse для решений.",
+    "tags": ["Pulse", "команда"],
+    "accept": true
+  },
+  {
+    "name": "temporary path",
+    "content": "Read /tmp/pulse/private.txt.",
+    "tags": ["pilot"],
+    "accept": false
+  },
+  {
+    "name": "workspace path",
+    "content": "Read /workspace/pulse/private.txt.",
+    "tags": ["pilot"],
+    "accept": false
+  },
+  {
+    "name": "generic secret marker",
+    "content": "The secret plan is copied here.",
+    "tags": ["pilot"],
+    "accept": false
+  },
+  {
+    "name": "token assignment",
+    "content": "Use token=not-a-real-token.",
+    "tags": ["pilot"],
+    "accept": false
+  },
+  {
+    "name": "private source reference",
+    "content": "Use memory_1234567890 as evidence.",
+    "tags": ["pilot"],
+    "accept": false
+  },
+  {
+    "name": "unsorted tags",
+    "content": "Use the reviewed rule.",
+    "tags": ["zeta", "alpha"],
+    "accept": false
+  },
+  {
+    "name": "mixed script token",
+    "content": "Pulsе uses a Cyrillic e.",
+    "tags": ["pilot"],
+    "accept": false
+  }
+]

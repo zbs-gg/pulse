@@ -8,9 +8,12 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -21,6 +24,29 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { StandaloneStore } from './standalone.js';
+import type { VerifiedOAuthIdentity } from './oauth-resource.js';
+import type { TeamCapability } from './team-contracts.js';
+import {
+  assertTeamRemoteStaticConfig,
+  resolveRuntimeMode,
+  type RuntimeMode,
+} from './runtime-mode.js';
+import { assertTruthfulDeletionReceipt, assertTruthfulWriteResponse, mcpRequestIdempotencyKey } from './write-receipts.js';
+import type {
+  BoundTeamDomain,
+  GatewaySecurityEventInput,
+  TeamPrincipalContext,
+} from './principal-context.js';
+import {
+  validateConsolidationExplanation,
+  validateConsolidationReport,
+} from './lifecycle-contracts.js';
+
+export {
+  ENROLLMENT_REGISTRY_SCHEMA,
+  INSTALLATION_ENROLLMENT_REGISTRY_JSON_SCHEMA,
+  validateInstallationEnrollmentRegistry,
+} from './sender-constrained-auth.js';
 
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
@@ -29,9 +55,71 @@ const PULSE_DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 
 const VERSION = '0.4.1';
 const args = process.argv.slice(2);
+const HTTP_REQUESTED = args.includes('--http');
+const RUNTIME_MODE = resolveRuntimeMode(process.env.PULSE_RUNTIME_MODE, HTTP_REQUESTED);
 
 type EngineMode = 'auto' | 'daemon' | 'standalone';
 const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
+const PRODUCT_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex' ||
+  process.env.PULSE_HOST_ADAPTER === 'claude-code' ||
+  process.env.PULSE_HOST_ADAPTER === 'cursor';
+const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
+  ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code' | 'cursor'
+  : undefined;
+const PRODUCT_TEAM_BINDING = PRODUCT_HOST_ADAPTER && process.env.PULSE_PRODUCT_BINDING_MODE === 'team';
+const PRODUCT_UNASSIGNED_REASON = PRODUCT_HOST_ADAPTER &&
+  (process.env.PULSE_PRODUCT_UNASSIGNED === 'binding_missing' || process.env.PULSE_PRODUCT_UNASSIGNED === 'workspace_not_git')
+  ? process.env.PULSE_PRODUCT_UNASSIGNED
+  : undefined;
+
+async function assertProductBindingCurrent(): Promise<void> {
+  if (!PRODUCT_HOST_ADAPTER) return;
+  const moduleURL = process.env.PULSE_HOST_AUTHORITY_MODULE ?? '';
+  const expectedWorkspace = process.env.PULSE_HOST_WORKSPACE ?? '';
+  if (!moduleURL.startsWith('file:') || expectedWorkspace === '') {
+    throw new Error('Pulse host binding authority is unavailable; restart this task');
+  }
+  const authority = await import(moduleURL) as {
+    inspectProductWorkspaceBinding(options: { cwd: string }): {
+      status: 'bound' | 'unassigned';
+      reason?: string;
+      workspace?: { canonical_path: string };
+    };
+    resolveProductWorkspaceBinding(options: { cwd: string }): {
+      binding_digest: string;
+      resolver_epoch: number;
+      workspace: { canonical_path: string };
+    };
+  };
+  if (PRODUCT_UNASSIGNED_REASON) {
+    const inspected = authority.inspectProductWorkspaceBinding({ cwd: process.cwd() });
+    if (inspected.status !== 'unassigned' || inspected.reason !== PRODUCT_UNASSIGNED_REASON ||
+        !inspected.workspace || realpathSync(inspected.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
+        realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
+      throw new Error('Pulse unassigned workspace state changed; restart this task');
+    }
+    return;
+  }
+  const current = authority.resolveProductWorkspaceBinding({ cwd: process.cwd() });
+  if (current.binding_digest !== process.env.PULSE_BINDING_DIGEST ||
+      current.resolver_epoch !== Number(process.env.PULSE_RESOLVER_EPOCH) ||
+      realpathSync(current.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
+      realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
+    throw new Error('Pulse workspace binding changed or was revoked; restart this task');
+  }
+}
+if (RUNTIME_MODE === 'team-remote') {
+  assertTeamRemoteStaticConfig({
+    args,
+    authIssuer: process.env.PULSE_REMOTE_AUTH_ISSUER ?? '',
+    daemonBaseURL: PULSE_BASE_URL,
+    engineMode: ENGINE_MODE,
+    env: process.env,
+    host: argValue('--host') ?? process.env.PULSE_MCP_HOST ?? '127.0.0.1',
+    nodeVersion: process.versions.node,
+    publicBaseURL: trimTrailingSlash(process.env.PULSE_REMOTE_PUBLIC_BASE_URL ?? ''),
+  });
+}
 // In auto mode the first daemon connection failure locks the process into the
 // standalone lite store; a daemon that answered once is never silently
 // downgraded, so one process never splits writes across two stores.
@@ -39,7 +127,7 @@ let resolvedEngine: 'daemon' | 'standalone' | null =
   ENGINE_MODE === 'auto' ? null : ENGINE_MODE;
 // Gate serializing tool calls while the engine is still unresolved.
 let firstCallGate: Promise<void> | null = null;
-const standaloneStore = new StandaloneStore(PULSE_DATA_DIR);
+let standaloneStore: StandaloneStore | null = null;
 
 function parseEngineMode(value: string | undefined): EngineMode {
   if (value === undefined || value === '' || value === 'auto') {
@@ -134,6 +222,20 @@ interface MemoryCapsule {
   raw_input_included: false;
 }
 
+interface HostTurnContext {
+  schema: string;
+  host: 'codex' | 'claude-code' | 'cursor';
+  session_id: string;
+  turn_id: string;
+  workspace: string;
+  source_event_key: string;
+  idempotency_key: string;
+  binding_digest: string;
+  policy_epoch: number;
+  resolver_epoch: number;
+  expires_at: string;
+}
+
 interface RecallBody {
   query: string;
   scope?: 'session' | 'project' | 'user';
@@ -180,6 +282,153 @@ interface SemanticDeltaBody {
   raw_input_included: false;
 }
 
+const SHARED_SOURCE_REF_SCHEMA = {
+  type: 'object',
+  properties: {
+    source_id: { type: 'string' },
+    version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  },
+  required: ['source_id', 'version_digest'],
+  additionalProperties: false,
+};
+
+const SHARED_WARNING_SCHEMA = {
+  type: 'object',
+  properties: {
+    code: { type: 'string', enum: ['weak_evidence', 'confidentiality', 'over_broad', 'contradiction', 'unclear_scope'] },
+    summary: { type: 'string', minLength: 1, maxLength: 240 },
+  },
+  required: ['code', 'summary'],
+  additionalProperties: false,
+};
+
+const SHARED_CANDIDATE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['fact', 'decision', 'preference', 'project_state', 'open_loop', 'correction', 'do_not_repeat'] },
+    statement: { type: 'string', minLength: 1, maxLength: 1200 },
+    audience: { type: 'string', const: 'project' },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    source_references: { type: 'array', minItems: 1, maxItems: 1, items: SHARED_SOURCE_REF_SCHEMA },
+    advisory_warnings: { type: 'array', maxItems: 4, items: SHARED_WARNING_SCHEMA },
+  },
+  required: ['kind', 'statement', 'audience', 'confidence', 'source_references', 'advisory_warnings'],
+  additionalProperties: false,
+};
+
+export const GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS = [
+  {
+    name: 'pulse_source_register',
+    description: 'Register the current version of one repository-local text or Markdown source. Pulse stores metadata only; source bytes stay ephemeral.',
+    inputSchema: {
+      type: 'object', properties: { locator: { type: 'string', minLength: 1, maxLength: 512 } },
+      required: ['locator'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_source_window',
+    description: 'Read one bounded, safety-filtered ephemeral window from a registered repository-local source for active-harness extraction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        locator: { type: 'string', minLength: 1, maxLength: 512 },
+        cursor: { type: 'integer', minimum: 0 },
+        max_bytes: { type: 'integer', minimum: 64, maximum: 32768 },
+        expected_version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      },
+      required: ['locator', 'cursor', 'max_bytes'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_source_status',
+    description: 'Inspect content-free registration and processing state for one project source.',
+    inputSchema: {
+      type: 'object', properties: { source_id: { type: 'string' } },
+      required: ['source_id'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_stage',
+    description: 'Stage bounded project-memory candidates extracted by the active harness. This cannot approve or publish them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source_id: { type: 'string' },
+        source_version_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        candidates: { type: 'array', minItems: 1, maxItems: 20, items: SHARED_CANDIDATE_SCHEMA },
+        raw_input_included: { type: 'boolean', const: false },
+      },
+      required: ['source_id', 'source_version_digest', 'candidates', 'raw_input_included'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_inspect',
+    description: 'Inspect one staged or terminal shared-memory review batch and its current candidate versions.',
+    inputSchema: {
+      type: 'object', properties: { batch_id: { type: 'string' } },
+      required: ['batch_id'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_edit',
+    description: 'Edit one staged candidate by expected version. Any prior card presentation is invalidated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidate_id: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+        candidate: SHARED_CANDIDATE_SCHEMA,
+      },
+      required: ['candidate_id', 'expected_version', 'candidate'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_reject',
+    description: 'Reject one staged candidate by expected version. Rejected content never enters shared retrieval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidate_id: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+        reason_code: { type: 'string', const: 'user_rejected' },
+      },
+      required: ['candidate_id', 'expected_version', 'reason_code'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_cards',
+    description: 'Render the exact canonical human-readable card block for one staged batch. The next trusted Stop hook must observe this block before exact ok can approve it.',
+    inputSchema: {
+      type: 'object', properties: {
+        batch_id: { type: 'string' },
+        approver_label: { type: 'string', minLength: 1, maxLength: 80 },
+      },
+      required: ['batch_id', 'approver_label'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_publish',
+    description: 'Consume one trusted exact-ok approval lease, write the exact displayed objects under pulse-memory/, and create only a local path-limited Git commit. Never pushes or opens a PR.',
+    inputSchema: {
+      type: 'object', properties: {
+        approval_lease_id: { type: 'string' },
+        approver_label: { type: 'string', minLength: 1, maxLength: 80 },
+      },
+      required: ['approval_lease_id', 'approver_label'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'pulse_shared_sync',
+    description: 'Index only the committed pulse-memory/ pack from the current local Git HEAD into this checkout\'s existing state-aware Pulse engine. Uncommitted files and remotes are ignored.',
+    inputSchema: {
+      type: 'object', properties: {}, required: [], additionalProperties: false,
+    },
+  },
+];
+
+const GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES = new Set(
+  GIT_TEAM_MEMORY_PRODUCT_TOOL_DESCRIPTORS.map(({ name }) => name),
+);
+
 interface DevOAuthCode {
   clientId: string;
   redirectUri: string;
@@ -197,6 +446,7 @@ async function pulseFetch<T>(
   path: string,
   body?: unknown,
   method = 'POST',
+  idempotencyKey?: string,
 ): Promise<T> {
   const url = `${PULSE_BASE_URL.replace(/\/$/, '')}${path}`;
   const headers: Record<string, string> = {
@@ -206,6 +456,9 @@ async function pulseFetch<T>(
   if (apiKey) {
     headers['X-Pulse-Key'] = apiKey;
   }
+	if (method !== 'GET') {
+		headers['Idempotency-Key'] = idempotencyKey ?? `mcp_${randomUUID().replaceAll('-', '')}`;
+	}
   const resp = await fetch(url, {
     method,
     headers,
@@ -223,6 +476,121 @@ async function pulseFetch<T>(
   return (await resp.json()) as T;
 }
 
+function productRuntimeResolution() {
+  return {
+    binding: {
+      binding_digest: process.env.PULSE_BINDING_DIGEST ?? '',
+      resolver_epoch: Number(process.env.PULSE_RESOLVER_EPOCH),
+      workspace: { canonical_path: process.env.PULSE_HOST_WORKSPACE ?? '' },
+    },
+    runtime: { data_dir: PULSE_DATA_DIR },
+  };
+}
+
+interface ProductRuntimeModule {
+  stageUnassignedProductCandidate(
+    host: 'codex' | 'claude-code' | 'cursor',
+    input: unknown,
+    idempotencyKey: string,
+  ): unknown;
+  consumeHostToolLease(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code' | 'cursor',
+    name: string,
+    input: unknown,
+  ): HostTurnContext;
+  writeHostFinalizeMarker(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    event: HostTurnContext,
+    host: 'codex' | 'claude-code' | 'cursor',
+    result: unknown,
+  ): unknown;
+  callBoundTeamTool(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code' | 'cursor',
+    name: string,
+    input: unknown,
+  ): Promise<unknown>;
+  callBoundLocalProductTool(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code' | 'cursor',
+    name: string,
+    input: unknown,
+  ): Promise<unknown>;
+}
+
+async function productRuntimeModule(): Promise<ProductRuntimeModule> {
+  const moduleURL = process.env.PULSE_HOST_RUNTIME_MODULE ?? '';
+  if (!moduleURL.startsWith('file:') || !PRODUCT_HOST) {
+    throw new Error('Pulse tool lease authority is unavailable; restart this task');
+  }
+  return await import(moduleURL) as ProductRuntimeModule;
+}
+
+async function consumeProductTurnContext(toolInput: unknown): Promise<HostTurnContext> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  return runtime.consumeHostToolLease(
+    productRuntimeResolution(), PRODUCT_HOST, 'pulse_remember', toolInput,
+  );
+}
+
+function assertProductRememberSourceHost(toolInput: unknown): void {
+  if (!PRODUCT_HOST) return;
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+  const source = (toolInput as Record<string, unknown>).source;
+  if (!source || typeof source !== 'object' || Array.isArray(source) ||
+      (source as Record<string, unknown>).host !== PRODUCT_HOST) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+}
+
+function productFinalizeBody(capsule: MemoryCapsule, context: HostTurnContext): Record<string, unknown> {
+  const timestamp = new Date().toISOString();
+  return {
+    schema: 'pulse.turn_finalize.v1',
+    host: context.host,
+    session_id: context.session_id,
+    turn_id: context.turn_id,
+    source_event_key: context.source_event_key,
+    idempotency_key: context.idempotency_key,
+    binding_digest: context.binding_digest,
+    policy_epoch: context.policy_epoch,
+    resolver_epoch: context.resolver_epoch,
+    candidates: capsule.items.map((item) => ({
+      kind: 'memory_capsule',
+      capsule: {
+        schema: 'pulse.memory_capsule.v1',
+        source: { host: context.host, conversation_scope: 'current_turn', timestamp },
+        items: [item],
+        raw_input_included: false,
+      },
+    })),
+  };
+}
+
+async function writeProductFinalizeMarker(context: HostTurnContext, value: unknown): Promise<void> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  runtime.writeHostFinalizeMarker(productRuntimeResolution(), context, PRODUCT_HOST, value);
+}
+
+async function callProductTeamTool(name: string, input: unknown): Promise<unknown> {
+  if (!PRODUCT_HOST || !PRODUCT_TEAM_BINDING) throw new Error('Pulse Team binding is unavailable');
+  const runtime = await productRuntimeModule();
+  return runtime.callBoundTeamTool(productRuntimeResolution(), PRODUCT_HOST, name, input);
+}
+
+async function callProductLocalTool(name: string, input: unknown): Promise<unknown> {
+  if (!PRODUCT_HOST || !GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES.has(name)) {
+    throw new Error('Pulse local product tool is unavailable');
+  }
+  const runtime = await productRuntimeModule();
+  return runtime.callBoundLocalProductTool(productRuntimeResolution(), PRODUCT_HOST, name, input);
+}
+
 function jsonText(value: unknown) {
   return {
     content: [
@@ -232,6 +600,33 @@ function jsonText(value: unknown) {
       },
     ],
   };
+}
+
+function exactProductTeamDomainToolResult(
+  error: unknown,
+  isAllowedCode: (value: unknown) => boolean,
+): { isError: true; content: [{ type: 'text'; text: string }] } | null {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return null;
+  const candidate = error as Record<string, unknown>;
+  if (candidate.name !== 'TeamRemoteDomainError' || candidate.code !== 'domain_error' ||
+      !isAllowedCode(candidate.domainCode)) return null;
+  const result = candidate.toolResult;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const record = result as Record<string, unknown>;
+  if (Object.keys(record).sort().join('\0') !== 'content\0isError' || record.isError !== true ||
+      !Array.isArray(record.content) || record.content.length !== 1) return null;
+  const item = record.content[0];
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const text = item as Record<string, unknown>;
+  if (Object.keys(text).sort().join('\0') !== 'text\0type' || text.type !== 'text' ||
+      typeof text.text !== 'string') return null;
+  let payload: unknown;
+  try { payload = JSON.parse(text.text); } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const body = payload as Record<string, unknown>;
+  if (Object.keys(body).sort().join('\0') !== 'error\0fallback' ||
+      body.error !== candidate.domainCode || body.fallback !== false) return null;
+  return result as { isError: true; content: [{ type: 'text'; text: string }] };
 }
 
 function redactStatusForMcp(value: unknown): unknown {
@@ -248,18 +643,28 @@ function redactStatusForMcp(value: unknown): unknown {
   return status;
 }
 
-function createPulseMcpServer(): Server {
+export function createPulseMcpServer(
+  runtimeMode: RuntimeMode = RUNTIME_MODE,
+  teamContext?: Readonly<TeamPrincipalContext>,
+  teamDomain?: Readonly<BoundTeamDomain>,
+  teamSecurityEventSink?: (event: GatewaySecurityEventInput) => void,
+): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    if (runtimeMode === 'team-remote') {
+      if (!teamContext) throw new Error('team request context is unavailable');
+      const { TEAM_PRODUCT_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
+      return { tools: TEAM_PRODUCT_TOOL_DESCRIPTORS };
+    }
+    const tools = [
     {
       name: 'pulse_remember',
       description:
-        'Save a minimal, user-approved Pulse memory capsule. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
+        'Propose a minimal private Pulse memory capsule. Product Personal/Desk mode returns a pending Memory Tray receipt and is saved only after a created, deduplicated, or updated receipt; Local Preview stores immediately. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -426,7 +831,7 @@ function createPulseMcpServer(): Server {
     {
       name: 'pulse_graph_delta',
       description:
-        'Write a host-extracted pulse.semantic_delta.v1 graph delta. Use when the current host model has identified durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
+        'Propose a private host-extracted pulse.semantic_delta.v1 graph delta. Product Personal/Desk mode returns a pending Memory Tray receipt and is saved only after a created, deduplicated, or updated receipt; Local Preview stores immediately. Use for durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -717,12 +1122,45 @@ function createPulseMcpServer(): Server {
       },
     },
     {
+      name: 'pulse_tray',
+      description: 'Inspect pending and terminal private Memory Tray candidates and their truthful receipt state.',
+      inputSchema: {
+        type: 'object',
+        properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } },
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'pulse_status',
       description:
         'Show Pulse billing mode, host, backend LLM state, raw capture state, retention state, and last write. Local filesystem paths are redacted for MCP hosts.',
       inputSchema: {
         type: 'object',
         properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'pulse_consolidation_report',
+      description:
+        'Start or inspect the read-only local memory-source report for the current signed project binding. This tool cannot choose a destination, import, merge, delete, clean up, publish, or reveal local paths.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['start', 'status', 'explain', 'cancel', 'resume'] },
+          report_id: { type: 'string', pattern: '^report_[A-Za-z0-9._-]{1,128}$' },
+        },
+        required: ['action'],
+        allOf: [
+          {
+            if: { properties: { action: { enum: ['explain', 'cancel', 'resume'] } } },
+            then: { required: ['report_id'] },
+          },
+          {
+            if: { properties: { action: { const: 'start' } } },
+            then: { not: { required: ['report_id'] } },
+          },
+        ],
         additionalProperties: false,
       },
     },
@@ -754,13 +1192,108 @@ function createPulseMcpServer(): Server {
         additionalProperties: false,
       },
     },
-    ],
-  }));
+      ];
+    const localTools = PRODUCT_HOST_ADAPTER
+      ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
+      : tools.filter((tool) => tool.name !== 'pulse_consolidation_report');
+    let productTools = PRODUCT_UNASSIGNED_REASON
+      ? localTools.filter((tool) => tool.name === 'pulse_remember')
+      : localTools;
+    if (PRODUCT_HOST) {
+      productTools = productTools.map((tool) => {
+        if (tool.name !== 'pulse_remember') return tool;
+        const descriptor = JSON.parse(JSON.stringify(tool)) as typeof tool;
+        const source = descriptor.inputSchema.properties?.source;
+        const host = source?.properties?.host;
+        if (host) {
+          source.properties.host = { type: 'string', const: PRODUCT_HOST } as unknown as typeof host;
+        }
+        return descriptor;
+      });
+    }
+    if (!PRODUCT_TEAM_BINDING) return { tools: productTools };
+    const { TEAM_INSTALLED_READ_TOOL_DESCRIPTORS } = await loadTeamRemoteContracts();
+    return { tools: [...productTools, ...TEAM_INSTALLED_READ_TOOL_DESCRIPTORS] };
+  });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+	const invocationKey = mcpRequestIdempotencyKey(extra.sessionId, extra.requestId);
 
     try {
+      await assertProductBindingCurrent();
+      if (PRODUCT_UNASSIGNED_REASON && name !== 'pulse_remember') {
+        throw new Error('Choose a project before using Pulse recall or project memory tools');
+      }
+      if (runtimeMode === 'team-remote') {
+        if (!teamContext) throw new Error('team request context is unavailable');
+        const contracts = await loadTeamRemoteContracts();
+        const { isTeamProductToolName, teamNotReadyResult } = contracts;
+        if (!isTeamProductToolName(name)) {
+          throw new Error('Unknown team tool');
+        }
+        if (
+          name === 'pulse_team_status' ||
+          name === 'pulse_team_recall' || name === 'pulse_team_context_query' ||
+          name === 'pulse_team_resume' || name === 'pulse_team_inspect' ||
+          name === 'pulse_team_audit' || name === 'pulse_team_delete_status'
+        ) {
+          const methodClass: 'read' | 'write' | 'delete' = 'read';
+          if (!teamDomain) {
+            reportTeamDomainFailure(
+              teamSecurityEventSink, teamContext.request_id, 'shared_memory_unavailable', methodClass,
+            );
+            return contracts.teamDomainErrorResult('shared_memory_unavailable');
+          }
+          try {
+            let result: unknown;
+            if (name === 'pulse_team_status') result = await teamDomain.status(args);
+            else if (name === 'pulse_team_recall') result = await teamDomain.recall(args);
+            else if (name === 'pulse_team_context_query') result = await teamDomain.contextQuery(args);
+            else if (name === 'pulse_team_resume') result = await teamDomain.resume(args);
+            else if (name === 'pulse_team_inspect') result = await teamDomain.inspect(args);
+            else if (name === 'pulse_team_audit') result = await teamDomain.audit(args);
+            else result = await teamDomain.deleteStatus(args);
+            return jsonText(result);
+          } catch (error) {
+            if (error instanceof contracts.TeamContractError) {
+              reportTeamDomainFailure(
+                teamSecurityEventSink, teamContext.request_id, 'invalid_contract', methodClass,
+              );
+              return contracts.teamDomainErrorResult('invalid_team_contract');
+            }
+            if (error instanceof contracts.TeamDomainError) {
+              reportTeamDomainFailure(
+                teamSecurityEventSink, teamContext.request_id, error.code, methodClass,
+              );
+              return contracts.teamDomainErrorResult(error.code);
+            }
+            reportTeamDomainFailure(
+              teamSecurityEventSink, teamContext.request_id, 'unexpected_domain_failure', methodClass,
+            );
+            return contracts.teamDomainErrorResult('shared_memory_unavailable');
+          }
+        }
+        return teamNotReadyResult(name);
+      }
+      if (PRODUCT_TEAM_BINDING && name.startsWith('pulse_team_')) {
+        const contracts = await loadTeamRemoteContracts();
+        if (!contracts.isTeamInstalledReadToolName(name)) {
+          throw new Error('Team Commons writes are Airlock-only and destructive Team tools are human-controlled');
+        }
+        try {
+          return jsonText(await callProductTeamTool(name, args));
+        } catch (error) {
+          const remoteResult = exactProductTeamDomainToolResult(
+            error, contracts.isTeamClosedErrorCode,
+          );
+          if (remoteResult) return remoteResult;
+          throw error;
+        }
+      }
+      if (PRODUCT_HOST_ADAPTER && GIT_TEAM_MEMORY_PRODUCT_TOOL_NAMES.has(name)) {
+        throw new Error('Git Team Memory requires the governed Git export path');
+      }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);
       }
@@ -775,14 +1308,14 @@ function createPulseMcpServer(): Server {
         if (resolvedEngine !== null) {
           return resolvedEngine === 'standalone'
             ? standaloneResult(name, args)
-            : await daemonToolCall(name, args);
+            : await daemonToolCall(name, args, invocationKey);
         }
         firstCallGate = new Promise((resolve) => {
           releaseGate = resolve;
         });
       }
       try {
-        const out = await daemonToolCall(name, args);
+        const out = await daemonToolCall(name, args, invocationKey);
         resolvedEngine = 'daemon';
         return out;
       } catch (err: unknown) {
@@ -820,17 +1353,55 @@ function createPulseMcpServer(): Server {
   return server;
 }
 
+async function loadTeamRemoteContracts() {
+  // Keep the entire team-only branch lazy. U3 can add JWT/JWKS dependencies
+  // behind the same runtime boundary without raising Local Preview's Node floor.
+  return import('./team-contracts.js');
+}
+
 function standaloneResult(name: string, args: unknown) {
-  const out = standaloneStore.call(name, args);
+  const out = resolveStandaloneStore().call(name, args);
   return jsonText(name === 'pulse_status' ? redactStatusForMcp(out) : out);
 }
 
-async function daemonToolCall(name: string, args: Record<string, unknown> | undefined) {
+function resolveStandaloneStore(): StandaloneStore {
+  if (RUNTIME_MODE === 'team-remote') {
+    throw new Error('team-remote cannot construct or use standalone storage');
+  }
+  standaloneStore ??= new StandaloneStore(PULSE_DATA_DIR);
+  return standaloneStore;
+}
+
+async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
-    const out = await pulseFetch<{ ok: boolean; ids: string[] }>(
+    if (PRODUCT_HOST_ADAPTER) {
+      assertProductRememberSourceHost(args);
+      if (PRODUCT_UNASSIGNED_REASON) {
+        if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+        const runtime = await productRuntimeModule();
+        return jsonText(runtime.stageUnassignedProductCandidate(PRODUCT_HOST, args, invocationKey));
+      }
+      const context = await consumeProductTurnContext(args);
+      const body = productFinalizeBody(args as unknown as MemoryCapsule, context);
+      const out = await pulseFetch<unknown>(
+        '/turn/finalize', body, 'POST', String(body.idempotency_key),
+      );
+      assertTruthfulWriteResponse(out);
+      try {
+        await writeProductFinalizeMarker(context, out);
+      } catch {
+        // The durable daemon receipt is authoritative. A missing local marker
+        // only causes Stop to perform the bounded server-side idempotency check.
+      }
+      return jsonText(out);
+    }
+    const out = await pulseFetch<unknown>(
       '/memory/remember',
       args as unknown as MemoryCapsule,
+      'POST',
+      invocationKey,
     );
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -845,7 +1416,9 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_graph_delta') {
-    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody);
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Product-host graph writes require the governed candidate path');
+    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody, 'POST', invocationKey);
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -859,16 +1432,61 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
     return jsonText(redactStatusForMcp(out));
   }
 
+  if (name === 'pulse_consolidation_report') {
+    if (!PRODUCT_HOST_ADAPTER) throw new Error('Consolidation reports require an installed Personal or Desk product binding');
+    const action = args?.action;
+    const reportId = args?.report_id;
+    if (!['start', 'status', 'explain', 'cancel', 'resume'].includes(String(action))) {
+      throw new Error('invalid consolidation report action');
+    }
+    if (reportId !== undefined && !/^report_[A-Za-z0-9._-]{1,128}$/.test(String(reportId))) {
+      throw new Error('invalid consolidation report id');
+    }
+    if (['explain', 'cancel', 'resume'].includes(String(action)) && reportId === undefined) {
+      throw new Error(`pulse_consolidation_report ${String(action)} requires report_id`);
+    }
+    if (action === 'start' && reportId !== undefined) {
+      throw new Error('pulse_consolidation_report start does not accept report_id');
+    }
+    let path = '/memory/consolidation/reports';
+    let method: 'GET' | 'POST' = 'POST';
+    if (action === 'status') {
+      method = 'GET';
+      path = reportId === undefined
+        ? '/memory/consolidation/reports/latest'
+        : `/memory/consolidation/reports/${String(reportId)}`;
+    } else if (action === 'explain') {
+      method = 'GET';
+      path = `/memory/consolidation/reports/${String(reportId)}/explain`;
+    } else if (action === 'cancel' || action === 'resume') {
+      path = `/memory/consolidation/reports/${String(reportId)}/${String(action)}`;
+    }
+    const out = await pulseFetch(path, method === 'POST' ? {} : undefined, method, invocationKey);
+    return jsonText(action === 'explain'
+      ? validateConsolidationExplanation(out)
+      : validateConsolidationReport(out));
+  }
+
+  if (name === 'pulse_tray') {
+    const limit = args?.limit === undefined ? 50 : Number(args.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('pulse_tray limit must be 1..100');
+    const out = await pulseFetch(`/memory/tray?limit=${limit}`, undefined, 'GET');
+    return jsonText(out);
+  }
+
   if (name === 'pulse_forget') {
-    const out = await pulseFetch('/memory/delete', { id: args?.id });
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product deletion requires the privileged OS-backed user-presence surface, which is not active');
+    const out = await pulseFetch('/memory/delete', { id: args?.id }, 'POST', invocationKey);
+    assertTruthfulDeletionReceipt(out, String(args?.id || ''));
     return jsonText(out);
   }
 
   if (name === 'pulse_wipe') {
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product wipe requires the privileged OS-backed user-presence surface, which is not active');
     if (args?.confirm !== 'wipe pulse memory') {
       throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
     }
-    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' });
+    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' }, 'POST', invocationKey);
     return jsonText(out);
   }
 
@@ -876,7 +1494,7 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
 }
 
 async function main(): Promise<void> {
-  if (args.includes('--http')) {
+  if (RUNTIME_MODE !== 'local-stdio') {
     await startHttpMode();
     return;
   }
@@ -900,7 +1518,9 @@ async function startHttpMode(): Promise<void> {
   const port = Number(argValue('--port') ?? process.env.PULSE_MCP_PORT ?? 8787);
   const bearer = process.env.PULSE_REMOTE_BEARER ?? '';
   const publicBaseURL = trimTrailingSlash(process.env.PULSE_REMOTE_PUBLIC_BASE_URL ?? '');
-  const authIssuer = trimTrailingSlash(process.env.PULSE_REMOTE_AUTH_ISSUER ?? '');
+  // OAuth issuer identifiers are exact identities. A trailing slash may be
+  // canonical and must survive metadata, JWT, and principal mapping unchanged.
+  const authIssuer = process.env.PULSE_REMOTE_AUTH_ISSUER ?? '';
   const oauthMode = publicBaseURL !== '' && authIssuer !== '';
   const oauthDevMode = oauthMode && process.env.PULSE_REMOTE_OAUTH_DEV === '1';
   const devAuthCodes = new Map<string, DevOAuthCode>();
@@ -909,12 +1529,25 @@ async function startHttpMode(): Promise<void> {
   // Persist OAuth tokens to disk so an mcp restart/redeploy does NOT log out
   // connected clients (e.g. Claude.ai). Load non-expired tokens on start.
   const oauthTokensFile = join(PULSE_DATA_DIR, 'oauth-tokens.json');
-  loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
-  const persistOAuth = () => persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+  if (RUNTIME_MODE === 'development-http') {
+    loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+  }
+  const persistOAuth = () => {
+    if (RUNTIME_MODE === 'development-http') {
+      persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
+    }
+  };
   const allowUnauthenticated =
     process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1' ||
     args.includes('--allow-unauthenticated');
   const publicBind = !isLoopbackHost(host);
+  const teamSecurity = RUNTIME_MODE === 'team-remote'
+    ? await loadTeamRemoteSecurity(publicBaseURL, authIssuer)
+    : undefined;
+  const teamAllowedOrigins = teamSecurity
+    ? parseTeamAllowedOrigins(publicBaseURL, process.env.PULSE_REMOTE_ALLOWED_ORIGINS)
+    : new Set<string>();
+  let teamRequestsInFlight = 0;
 
   if (oauthMode && (!isHTTPSURL(publicBaseURL) || !isHTTPSURL(authIssuer))) {
     throw new Error('OAuth HTTP MCP mode requires HTTPS public base and authorization issuer URLs');
@@ -928,22 +1561,65 @@ async function startHttpMode(): Promise<void> {
     );
   }
 
-  const httpServer = createServer(async (req, res) => {
-    const path = requestPath(req, host);
-    if (path === '/health') {
-      writeCors(res);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
-        transport: 'streamable-http',
-        path: '/mcp',
-        auth: oauthMode ? 'oauth' : bearer ? 'bearer' : 'none',
-      }));
+  const httpServer = createServer({
+    maxHeaderSize: 16 * 1024,
+    headersTimeout: 10_000,
+    requestTimeout: 15_000,
+    keepAliveTimeout: 5_000,
+  }, async (req, res) => {
+    try {
+    const requestId = randomUUID();
+    const requestURL = parseRequestTarget(req.url);
+    const path = requestURL.pathname;
+    const requestOrigin = singleHeader(req.headers.origin);
+    if (teamSecurity && hasInvalidHostHeader(req)) {
+      res.setHeader('Connection', 'close');
+      writeJSON(res, { error: 'invalid_request' }, 400);
       return;
     }
-    if (oauthMode && isProtectedResourceMetadataPath(path)) {
-      writeCors(res);
-      writeJSON(res, protectedResourceMetadata(publicBaseURL, authIssuer));
+    if (teamSecurity?.airlockGateway?.matches(path)) {
+      await teamSecurity.airlockGateway.handle(req, res, requestURL);
+      return;
+    }
+    if (teamSecurity && hasDuplicateHeader(req, 'origin')) {
+      recordTeamSecurityEvent(teamSecurity, {
+        eventType: 'authentication_denied', reasonCode: 'invalid_credential',
+        methodClass: 'other', requestId,
+      });
+      writeJSON(res, { error: 'origin_not_allowed' }, 403);
+      return;
+    }
+    if (teamSecurity && requestOrigin !== '' && !teamAllowedOrigins.has(requestOrigin)) {
+      recordTeamSecurityEvent(teamSecurity, {
+        eventType: 'authentication_denied', reasonCode: 'invalid_credential',
+        methodClass: 'other', requestId,
+      });
+      writeJSON(res, { error: 'origin_not_allowed' }, 403);
+      return;
+    }
+    if (req.method === 'GET' && path === '/health' && (!teamSecurity || requestURL.search === '')) {
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+      } else {
+        writeCors(res);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(teamSecurity ? { ok: true } : {
+          ok: true,
+          transport: 'streamable-http',
+          path: '/mcp',
+          auth: oauthMode ? 'oauth' : bearer ? 'bearer' : 'none',
+        }));
+      return;
+    }
+    if (req.method === 'GET' && oauthMode && isProtectedResourceMetadataPath(path) && (!teamSecurity || requestURL.search === '')) {
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, teamSecurity.metadata);
+      } else {
+        writeCors(res);
+        writeJSON(res, protectedResourceMetadata(publicBaseURL, authIssuer));
+      }
       return;
     }
     if (oauthDevMode && isAuthorizationServerMetadataPath(path)) {
@@ -976,21 +1652,298 @@ async function startHttpMode(): Promise<void> {
       persistOAuth();
       return;
     }
-    if (!path.startsWith('/mcp')) {
+    if (teamSecurity && teamSecurity.isOwnerPublicPath(path)) {
+      if (
+        requestURL.search !== '' ||
+        !teamSecurity.isExactOwnerBrowserRequest({
+          origin: requestOrigin,
+          host: singleHeader(req.headers.host),
+          publicBaseURL,
+          allowedOrigins: teamAllowedOrigins,
+        })
+      ) {
+        writeJSON(res, { error: 'owner_request_denied', fallback: false }, 403);
+        return;
+      }
+      writeOwnerCors(res, requestOrigin);
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (req.method !== 'POST') {
+        writeJSON(res, { error: 'method_not_allowed', fallback: false }, 405);
+        return;
+      }
+      if (teamRequestsInFlight >= 64) {
+        writeJSON(res, { error: 'owner_service_unavailable', fallback: false }, 503);
+        return;
+      }
+      teamRequestsInFlight++;
+      let refreshableOAuthFailure = false;
+      try {
+        if (
+          hasDuplicateHeader(req, 'authorization') || hasDuplicateHeader(req, 'content-type') ||
+          hasDuplicateHeader(req, 'content-encoding') || hasDuplicateHeader(req, 'content-length') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-id-token') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-operation-challenge') ||
+          hasDuplicateHeader(req, 'x-pulse-owner-authorization-started-at') ||
+          hasDuplicateHeader(req, 'transfer-encoding') ||
+          singleHeader(req.headers['transfer-encoding']) !== ''
+        ) {
+          throw new teamSecurity.OAuthError('invalid_token');
+        }
+        const senderHeaders = teamSecurity.requireSenderConstrainedHeaders(req);
+        let identity;
+        try {
+          identity = await teamSecurity.senderVerifier.verifyAuthorization(
+            {
+              ...senderHeaders,
+              method: req.method ?? '',
+              targetURL: `${publicBaseURL}${path}`,
+            },
+            ['pulse:owner'],
+          );
+        } catch (error) {
+          refreshableOAuthFailure =
+            teamSecurity.isOAuthError(error) && error.code === 'invalid_token';
+          throw error;
+        }
+        teamSecurity.ownerGateway.verifyRecentStepUp(identity);
+        const contentEncoding = singleHeader(req.headers['content-encoding']);
+        if (contentEncoding !== '' && contentEncoding.toLowerCase() !== 'identity') {
+          writeJSON(res, { error: 'content_encoding_not_supported', fallback: false }, 415);
+          return;
+        }
+        if (
+          singleHeader(req.headers['content-type']).split(';', 1)[0]?.trim().toLowerCase() !==
+          'application/json'
+        ) {
+          writeJSON(res, { error: 'content_type_not_supported', fallback: false }, 415);
+          return;
+        }
+        const body = await readRequestJSON(req, 64 * 1024);
+        const idToken = singleHeader(req.headers['x-pulse-owner-id-token']);
+        const operationChallenge = singleHeader(req.headers['x-pulse-owner-operation-challenge']);
+        const authorizationStartedText = singleHeader(
+          req.headers['x-pulse-owner-authorization-started-at'],
+        );
+        let ownerStepUp: { assertionJTI: string } | undefined;
+        if (path === '/owner/v1/approval') {
+          if (
+            idToken === '' || idToken.length > 16 * 1024 ||
+            !/^[A-Za-z0-9_-]{43}$/.test(operationChallenge) ||
+            !/^[1-9][0-9]{0,10}$/.test(authorizationStartedText)
+          ) {
+            throw new teamSecurity.OwnerError('owner_step_up_required');
+          }
+          const authorized = await authorizeTeamOwnerPublicOperation({
+            senderVerifier: teamSecurity.senderVerifier,
+            browserVerifier: teamSecurity.verifier,
+            ownerGateway: teamSecurity.ownerGateway,
+            ownerOperationStepUpNonce: teamSecurity.ownerOperationStepUpNonce,
+            ownerStepUpError: () => new teamSecurity.OwnerError('owner_step_up_required'),
+          }, {
+            senderHeaders,
+            method: req.method ?? '',
+            targetURL: `${publicBaseURL}${path}`,
+            body,
+            idToken,
+            operationChallenge,
+            authorizationStartedAt: Number(authorizationStartedText),
+            maxAuthenticationAgeSeconds: parseBoundedEnvInt(
+              'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
+            ),
+          }, identity);
+          identity = authorized.identity;
+          ownerStepUp = authorized.ownerStepUp;
+        } else if (idToken !== '' || operationChallenge !== '' || authorizationStartedText !== '') {
+          throw new teamSecurity.OwnerError('invalid_owner_request');
+        }
+        const result = await teamSecurity.ownerGateway.call(
+          path, identity, requestId, body, ownerStepUp,
+        );
+        writeJSON(res, result);
+      } catch (error) {
+        if (teamSecurity.isOAuthError(error) || teamSecurity.isInstallationProofError(error)) {
+          writeTeamOAuthChallenge(
+            res,
+            publicBaseURL,
+            teamSecurity.isOAuthError(error) ? error : new teamSecurity.OAuthError('invalid_token'),
+            refreshableOAuthFailure,
+          );
+        } else if (teamSecurity.isOwnerGatewayError(error)) {
+          writeJSON(res, { error: error.code, fallback: false }, error.status);
+        } else if (error instanceof RequestBodyTooLargeError) {
+          writeJSON(res, { error: 'invalid_owner_request', fallback: false }, 413);
+        } else if (error instanceof SyntaxError) {
+          writeJSON(res, { error: 'invalid_owner_request', fallback: false }, 400);
+        } else {
+          writeJSON(res, { error: 'owner_service_unavailable', fallback: false }, 503);
+        }
+      } finally {
+        teamRequestsInFlight--;
+      }
+      return;
+    }
+    if (path !== '/mcp' || (teamSecurity && requestURL.search !== '')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
       return;
     }
     if (req.method === 'OPTIONS') {
-      writeCors(res);
+      if (teamSecurity) {
+        writeTeamCors(res, requestOrigin);
+      } else {
+        writeCors(res);
+      }
       res.writeHead(204);
       res.end();
+      return;
+    }
+    if (teamSecurity) {
+      if (req.method !== 'POST' && req.method !== 'GET' && req.method !== 'DELETE') {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, { error: 'method_not_allowed' }, 405);
+        return;
+      }
+      if (teamRequestsInFlight >= 64) {
+        writeTeamCors(res, requestOrigin);
+        writeJSON(res, { error: 'server_busy' }, 503);
+        return;
+      }
+      teamRequestsInFlight++;
+      let methodClass: 'read' | 'write' | 'delete' | 'other' = 'other';
+      let refreshableOAuthFailure = false;
+      try {
+        if (hasDuplicateHeader(req, 'authorization')) {
+          throw new teamSecurity.OAuthError('invalid_token');
+        }
+        // Baseline validation happens before reading or parsing the request body.
+        const senderHeaders = teamSecurity.requireSenderConstrainedHeaders(req);
+        let identity;
+        try {
+          identity = await teamSecurity.senderVerifier.verifyAuthorization(
+            {
+              ...senderHeaders,
+              method: req.method ?? '',
+              targetURL: `${publicBaseURL}${path}`,
+            },
+            ['pulse:connect'],
+          );
+        } catch (error) {
+          refreshableOAuthFailure =
+            teamSecurity.isOAuthError(error) && error.code === 'invalid_token';
+          throw error;
+        }
+        if (req.method !== 'POST' && hasUnexpectedRequestBody(req)) {
+          res.setHeader('Connection', 'close');
+          writeTeamCors(res, requestOrigin);
+          writeJSON(res, { error: 'request_body_not_allowed' }, 400);
+          return;
+        }
+        const contentEncoding = singleHeader(req.headers['content-encoding']);
+        if (contentEncoding !== '' && contentEncoding.toLowerCase() !== 'identity') {
+          writeTeamCors(res, requestOrigin);
+          writeJSON(res, { error: 'content_encoding_not_supported' }, 415);
+          return;
+        }
+        let parsedBody: unknown;
+        let teamContext: Readonly<TeamPrincipalContext>;
+        let teamDomain: Readonly<BoundTeamDomain> | undefined;
+        if (req.method === 'POST') {
+          if (singleHeader(req.headers['content-type']).split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+            writeTeamCors(res, requestOrigin);
+            writeJSON(res, { error: 'content_type_not_supported' }, 415);
+            return;
+          }
+          parsedBody = await readRequestJSON(req, 1024 * 1024);
+          const required = teamSecurity.requiredCapabilities(parsedBody);
+          methodClass = methodClassForCapabilities(required);
+          teamContext = await teamSecurity.requestSecurity.resolveAfterBody({
+            baseline: identity,
+            requiredCapabilities: required,
+            requestId,
+          });
+          if (required.some((capability) => capability !== 'pulse:connect')) {
+            teamDomain = teamSecurity.principalClient.bindDomain(identity, teamContext);
+          }
+        } else {
+          teamContext = await teamSecurity.requestSecurity.resolveBaseline(identity, requestId);
+        }
+        writeTeamCors(res, requestOrigin);
+        await dispatchMcpRequest(
+          req, res, parsedBody, teamContext, teamDomain,
+          (event) => recordTeamSecurityEvent(teamSecurity, event),
+        );
+      } catch (error) {
+        if (terminateStartedResponse(res)) return;
+        writeTeamCors(res, requestOrigin);
+        if (teamSecurity.isOAuthError(error) || teamSecurity.isInstallationProofError(error)) {
+          const oauthError = teamSecurity.isOAuthError(error)
+            ? error
+            : new teamSecurity.OAuthError('invalid_token');
+          if (oauthError.code === 'insufficient_scope') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authorization_denied', reasonCode: 'insufficient_scope', methodClass, requestId,
+            });
+          } else {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authentication_denied',
+              reasonCode: oauthError.reasonCode === 'insufficient_scope' ? 'invalid_credential' : oauthError.reasonCode,
+              methodClass,
+              requestId,
+            });
+          }
+          writeTeamOAuthChallenge(res, publicBaseURL, oauthError, refreshableOAuthFailure);
+        } else if (teamSecurity.isPrincipalError(error)) {
+          if (error.code === 'principal_revoked') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'principal_revoked' }, 403);
+          } else if (error.code === 'principal_store_unavailable') {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+          } else {
+            recordTeamSecurityEvent(teamSecurity, {
+              eventType: 'principal_assertion_denied',
+              reasonCode: error.code === 'principal_replayed'
+                ? 'assertion_replayed'
+                : error.code === 'principal_binding_mismatch'
+                  ? 'assertion_binding_mismatch'
+                  : 'assertion_invalid',
+              methodClass, requestId,
+            });
+            writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+          }
+        } else if (error instanceof RequestBodyTooLargeError) {
+          writeJSON(res, { error: 'request_too_large' }, 413);
+        } else if (error instanceof SyntaxError || (error instanceof Error && /Unknown team tool/.test(error.message))) {
+          writeJSON(res, { error: 'invalid_request' }, 400);
+        } else {
+          recordTeamSecurityEvent(teamSecurity, {
+            eventType: 'audit_degraded', reasonCode: 'internal_failure', methodClass, requestId,
+          });
+          writeJSON(res, { error: 'shared_memory_unavailable', fallback: false }, 503);
+        }
+      } finally {
+        teamRequestsInFlight--;
+      }
       return;
     }
     let parsedBody: unknown;
     if (oauthMode && req.method === 'POST') {
       parsedBody = await readRequestJSON(req);
-      if (callsProtectedTool(parsedBody) && !isAuthorized(req, bearer, devAccessTokens)) {
+      if (
+        RUNTIME_MODE !== 'team-remote' &&
+        callsProtectedTool(parsedBody) &&
+        !isAuthorized(req, bearer, devAccessTokens)
+      ) {
         writeOAuthChallenge(res, publicBaseURL);
         return;
       }
@@ -1006,15 +1959,7 @@ async function startHttpMode(): Promise<void> {
     }
     try {
       writeCors(res);
-      const requestServer = createPulseMcpServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      await requestServer.connect(transport);
-      await transport.handleRequest(req, res, parsedBody);
-      res.on('close', () => {
-        void requestServer.close();
-      });
+      await dispatchMcpRequest(req, res, parsedBody);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
@@ -1026,7 +1971,15 @@ async function startHttpMode(): Promise<void> {
         id: null,
       }));
     }
+    } catch (error) {
+      terminateHttpRequest(res, error instanceof InvalidRequestTargetError ? 400 : 500);
+    }
   });
+  if (teamSecurity) {
+    httpServer.maxConnections = 128;
+    httpServer.maxHeadersCount = 64;
+    httpServer.maxRequestsPerSocket = 100;
+  }
 
   await new Promise<void>((resolve, reject) => {
     httpServer.once('error', reject);
@@ -1040,12 +1993,431 @@ async function startHttpMode(): Promise<void> {
     `[pulse-mcp v${VERSION}] Streamable HTTP listening on http://${host}:${actualPort}/mcp; backing Pulse: ${PULSE_BASE_URL}`,
   );
 
+  let shuttingDown = false;
   const shutdown = async () => {
-    httpServer.close(() => process.exit(0));
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    if (teamSecurity) {
+      await drainSecurityReporterForShutdown(teamSecurity.securityReporter, 2_000);
+    }
+    process.exit(0);
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 }
+
+async function dispatchMcpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  parsedBody: unknown,
+  teamContext?: Readonly<TeamPrincipalContext>,
+  teamDomain?: Readonly<BoundTeamDomain>,
+  teamSecurityEventSink?: (event: GatewaySecurityEventInput) => void,
+): Promise<void> {
+  const requestServer = createPulseMcpServer(
+    RUNTIME_MODE, teamContext, teamDomain, teamSecurityEventSink,
+  );
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    void Promise.allSettled([transport.close(), requestServer.close()]);
+  };
+  try {
+    await requestServer.connect(transport);
+    // Register before handleRequest: it may synchronously close the response.
+    res.once('close', cleanup);
+    await transport.handleRequest(req, res, parsedBody);
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function reportTeamDomainFailure(
+  sink: ((event: GatewaySecurityEventInput) => void) | undefined,
+  requestId: string,
+  code: string,
+  methodClass: 'read' | 'write' | 'delete' = 'write',
+): void {
+  if (!sink) return;
+  let event: GatewaySecurityEventInput | undefined;
+  switch (code) {
+  case 'principal_revoked':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'principal_revoked',
+      methodClass, requestId,
+    };
+    break;
+  case 'policy_denied':
+  case 'not_found':
+  case 'concealed_not_found':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'policy_denied',
+      methodClass, requestId,
+    };
+    break;
+  case 'authorization_stale':
+    event = {
+      eventType: 'authorization_denied', reasonCode: 'stale_generation',
+      methodClass, requestId,
+    };
+    break;
+  case 'invalid_principal':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_invalid',
+      methodClass, requestId,
+    };
+    break;
+  case 'principal_request_mismatch':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_binding_mismatch',
+      methodClass, requestId,
+    };
+    break;
+  case 'principal_replay':
+    event = {
+      eventType: 'principal_assertion_denied', reasonCode: 'assertion_replayed',
+      methodClass, requestId,
+    };
+    break;
+  case 'invalid_contract':
+  case 'invalid_team_memory':
+  case 'invalid_team_graph_delta':
+  case 'invalid_team_recall':
+  case 'invalid_team_context':
+  case 'invalid_team_resume':
+  case 'invalid_team_delete':
+  case 'invalid_team_delete_status':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'invalid_contract',
+      methodClass, requestId,
+    };
+    break;
+  case 'idempotency_conflict':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'idempotency_conflict',
+      methodClass, requestId,
+    };
+    break;
+  case 'idempotency_in_progress':
+    event = {
+      eventType: 'operation_denied', reasonCode: 'operation_in_progress',
+      methodClass, requestId,
+    };
+    break;
+  case 'shared_memory_unavailable':
+    event = {
+      eventType: 'audit_degraded', reasonCode: 'store_unavailable',
+      methodClass, requestId,
+    };
+    break;
+  case 'idempotency_failed':
+  case 'unexpected_domain_failure':
+    event = {
+      eventType: 'audit_degraded', reasonCode: 'internal_failure',
+      methodClass, requestId,
+    };
+    break;
+  }
+  if (!event) return;
+  try {
+    sink(event);
+  } catch {
+    // A denied operation stays denied if its metadata-only signal degrades.
+  }
+}
+
+function recordTeamSecurityEvent(
+  security: Awaited<ReturnType<typeof loadTeamRemoteSecurity>>,
+  event: GatewaySecurityEventInput,
+): void {
+  security.securityReporter.report(event);
+}
+
+function methodClassForCapabilities(capabilities: readonly string[]): 'read' | 'write' | 'delete' | 'other' {
+  if (capabilities.includes('pulse:delete')) return 'delete';
+  if (capabilities.includes('pulse:write')) return 'write';
+  if (capabilities.some((value) => value === 'pulse:read' || value === 'pulse:audit' || value === 'pulse:status')) return 'read';
+  return 'other';
+}
+
+async function loadTeamRemoteSecurity(publicBaseURL: string, authIssuer: string) {
+  const [
+    { OAuthResourceError, OAuthResourceVerifier, protectedResourceMetadata: teamMetadata },
+    principal,
+    contracts,
+    owner,
+    sender,
+    airlock,
+  ] = await Promise.all([
+    import('./oauth-resource.js'),
+    import('./principal-context.js'),
+    import('./team-contracts.js'),
+    import('./owner-approval.js'),
+    import('./sender-constrained-auth.js'),
+    import('./airlock-browser-gateway.js'),
+  ]);
+  const required = (name: string): string => {
+    const value = process.env[name] ?? '';
+    if (value === '' || value !== value.trim()) {
+      throw new Error(`team-remote requires exact non-empty ${name}`);
+    }
+    return value;
+  };
+  const resource = `${publicBaseURL}/mcp`;
+  const verifier = new OAuthResourceVerifier({
+    issuer: authIssuer,
+    resource,
+    maxTokenLifetimeSeconds: parseBoundedEnvInt('PULSE_REMOTE_MAX_TOKEN_LIFETIME_SECONDS', 900, 1, 900),
+  });
+  const enrollmentRegistry = new sender.InstallationEnrollmentRegistry({
+    file: required('PULSE_REMOTE_ENROLLMENT_REGISTRY_FILE'),
+    issuer: authIssuer,
+  });
+  enrollmentRegistry.assertReady();
+  const installationProofVerifier = new sender.InstallationProofVerifier({
+    registry: enrollmentRegistry,
+  });
+  const senderVerifier = new sender.SenderConstrainedOAuthVerifier({
+    oauthVerifier: verifier,
+    proofVerifier: installationProofVerifier,
+  });
+  const signer = principal.loadPrincipalSigner({
+    privateKeyFile: required('PULSE_TEAM_PRINCIPAL_SIGNING_KEY_FILE'),
+    keyId: required('PULSE_TEAM_PRINCIPAL_SIGNING_KID'),
+    verifyKeyringFile: required('PULSE_TEAM_PRINCIPAL_VERIFY_KEYRING_FILE'),
+    storeId: required('PULSE_TEAM_EXPECTED_STORE_ID'),
+    teamId: required('PULSE_TEAM_EXPECTED_TEAM_ID'),
+  });
+  const principalClient = new principal.TeamPrincipalClient({
+      daemonBaseURL: PULSE_BASE_URL,
+      signer,
+      apiKey: resolveApiKey,
+    });
+  const securityReporter = new principal.BoundedSecurityEventReporter(principalClient);
+  const ownerGateway = new owner.OwnerApprovalGateway({
+    daemonBaseURL: PULSE_BASE_URL,
+    signer,
+    expectedOAuthIssuer: authIssuer,
+    apiKey: resolveApiKey,
+    maxStepUpAgeSeconds: parseBoundedEnvInt(
+      'PULSE_REMOTE_OWNER_MAX_AUTH_AGE_SECONDS', 300, 30, 300,
+    ),
+  });
+  const airlockConfig = [
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_CLIENT_ID ?? '',
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_AUTHORIZATION_ENDPOINT ?? '',
+    process.env.PULSE_TEAM_AIRLOCK_OIDC_TOKEN_ENDPOINT ?? '',
+  ];
+  const airlockConfigured = airlockConfig.filter((value) => value !== '').length;
+  if (airlockConfig.some((value) => value !== value.trim()) ||
+      (airlockConfigured !== 0 && airlockConfigured !== airlockConfig.length)) {
+    throw new Error('team-remote requires complete exact Airlock OIDC configuration');
+  }
+  const airlockGateway = airlockConfigured === airlockConfig.length
+    ? new airlock.TeamPublicationBrowserGateway({
+        publicBaseURL,
+        authIssuer,
+        clientId: airlockConfig[0]!,
+        authorizationEndpoint: airlockConfig[1]!,
+        tokenEndpoint: airlockConfig[2]!,
+        daemonBaseURL: PULSE_BASE_URL,
+        verifier,
+        signer,
+      })
+    : undefined;
+  return {
+    verifier,
+    senderVerifier,
+    requireSenderConstrainedHeaders: sender.requireSenderConstrainedHeaders,
+    principalClient,
+    securityReporter,
+    requestSecurity: new principal.TeamRequestSecurity({ verifier, principalClient }),
+    ownerGateway,
+    airlockGateway,
+    isOwnerPublicPath: owner.isOwnerPublicPath,
+    isExactOwnerBrowserRequest: owner.isExactOwnerBrowserRequest,
+    ownerOperationStepUpNonce: owner.ownerOperationStepUpNonce,
+    isOwnerGatewayError: (error: unknown): error is InstanceType<typeof owner.OwnerGatewayError> =>
+      error instanceof owner.OwnerGatewayError,
+    OwnerError: owner.OwnerGatewayError,
+    requiredCapabilities: contracts.requiredTeamProductCapabilities,
+    metadata: teamMetadata(resource, authIssuer),
+    isOAuthError: (error: unknown): error is InstanceType<typeof OAuthResourceError> =>
+      error instanceof OAuthResourceError,
+    isInstallationProofError: (
+      error: unknown,
+    ): error is InstanceType<typeof sender.InstallationProofError> =>
+      error instanceof sender.InstallationProofError,
+    OAuthError: OAuthResourceError,
+    isPrincipalError: (error: unknown): error is InstanceType<typeof principal.PrincipalCheckError> =>
+      error instanceof principal.PrincipalCheckError,
+  };
+}
+
+function parseBoundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`team-remote ${name} is outside its allowed bound`);
+  }
+  return value;
+}
+
+function parseTeamAllowedOrigins(publicBaseURL: string, configured: string | undefined): Set<string> {
+  const values = configured?.split(',').map((value) => value.trim()).filter(Boolean) ?? [new URL(publicBaseURL).origin];
+  if (values.length < 1 || values.length > 16 || values.some((value) => value === '*' || new URL(value).origin !== value)) {
+    throw new Error('team-remote allowed origins must be exact URL origins');
+  }
+  return new Set(values);
+}
+
+function writeTeamCors(res: ServerResponse, origin: string): void {
+  if (origin !== '') {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Accept, Content-Type, Authorization, DPoP, X-Pulse-Enrollment, Mcp-Session-Id, MCP-Protocol-Version',
+  );
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+}
+
+function writeOwnerCors(res: ServerResponse, origin: string): void {
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Authorization, Content-Type, DPoP, X-Pulse-Enrollment, X-Pulse-Owner-ID-Token, X-Pulse-Owner-Operation-Challenge, X-Pulse-Owner-Authorization-Started-At',
+  );
+}
+
+function exactDPoPAccessToken(authorization: string): string {
+  const match = /^DPoP ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.exec(authorization);
+  if (!match || match[1].length > 16 * 1024) throw new Error('invalid Owner access token');
+  return match[1];
+}
+
+type OwnerPublicIdentity = Readonly<VerifiedOAuthIdentity>;
+
+export async function authorizeTeamOwnerPublicOperation(
+  dependencies: Readonly<{
+    senderVerifier: {
+      verifyAuthorization(input: {
+        authorization: string;
+        dpop: string;
+        enrollmentID: string;
+        method: string;
+        targetURL: string;
+      }, requiredCapabilities: readonly TeamCapability[]): Promise<OwnerPublicIdentity>;
+    };
+    browserVerifier: {
+      verifyBrowserAuthorization(input: {
+        accessToken: string;
+        idToken: string;
+        clientId: string;
+        nonce: string;
+        requiredCapabilities: readonly TeamCapability[];
+        maxAuthenticationAgeSeconds: number;
+        authorizationStartedAt: number;
+      }): Promise<OwnerPublicIdentity>;
+    };
+    ownerGateway: { verifyRecentStepUp(identity: OwnerPublicIdentity): void };
+    ownerOperationStepUpNonce(body: unknown, challenge: string): string;
+    ownerStepUpError(): Error;
+  }>,
+  request: Readonly<{
+    senderHeaders: { authorization: string; dpop: string; enrollmentID: string };
+    method: string;
+    targetURL: string;
+    body: unknown;
+    idToken: string;
+    operationChallenge: string;
+    authorizationStartedAt: number;
+    maxAuthenticationAgeSeconds: number;
+  }>,
+  baselineIdentity?: OwnerPublicIdentity,
+): Promise<Readonly<{ identity: OwnerPublicIdentity; ownerStepUp: { assertionJTI: string } }>> {
+  const identity = baselineIdentity ?? await dependencies.senderVerifier.verifyAuthorization({
+    ...request.senderHeaders,
+    method: request.method,
+    targetURL: request.targetURL,
+  }, ['pulse:owner']);
+  dependencies.ownerGateway.verifyRecentStepUp(identity);
+  const expectedNonce = dependencies.ownerOperationStepUpNonce(
+    request.body, request.operationChallenge,
+  );
+  let browserIdentity: OwnerPublicIdentity;
+  try {
+    browserIdentity = await dependencies.browserVerifier.verifyBrowserAuthorization({
+      accessToken: exactDPoPAccessToken(request.senderHeaders.authorization),
+      idToken: request.idToken,
+      clientId: identity.clientId,
+      nonce: expectedNonce,
+      requiredCapabilities: ['pulse:owner'],
+      maxAuthenticationAgeSeconds: request.maxAuthenticationAgeSeconds,
+      authorizationStartedAt: request.authorizationStartedAt,
+    });
+  } catch {
+    // Sender-constrained OAuth already succeeded. Any failure in the separate
+    // browser assertion is a failed human step-up, never a transport verdict.
+    throw dependencies.ownerStepUpError();
+  }
+  if (
+    browserIdentity.issuer !== identity.issuer ||
+    browserIdentity.subject !== identity.subject ||
+    browserIdentity.clientId !== identity.clientId ||
+    browserIdentity.confirmationKeyThumbprint !== identity.confirmationKeyThumbprint
+  ) throw dependencies.ownerStepUpError();
+  return Object.freeze({
+    identity: browserIdentity,
+    ownerStepUp: Object.freeze({ assertionJTI: `owner_browser_${expectedNonce}` }),
+  });
+}
+
+function singleHeader(value: string | string[] | undefined): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function hasDuplicateHeader(req: IncomingMessage, name: string): boolean {
+  let count = 0;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index]?.toLowerCase() === name) count++;
+  }
+  return count > 1;
+}
+
+function writeTeamOAuthChallenge(
+  res: ServerResponse,
+  publicBaseURL: string,
+  error: { status: 401 | 403; code: string; requiredCapabilities: string[] },
+  refreshable = false,
+): void {
+  const metadataURL = `${publicBaseURL}/.well-known/oauth-protected-resource/mcp`;
+  const scope = error.requiredCapabilities.length > 0
+    ? `, scope="${error.requiredCapabilities.join(' ')}"`
+    : '';
+  const reauth = refreshable && error.code === 'invalid_token'
+    ? ', pulse_reauth="refresh"'
+    : '';
+  res.writeHead(error.status, {
+    'Content-Type': 'application/json',
+    'WWW-Authenticate': `DPoP resource_metadata="${metadataURL}", error="${error.code}"${scope}${reauth}`,
+  });
+  res.end(JSON.stringify({ error: error.code }));
+}
+
+class RequestBodyTooLargeError extends Error {}
+class InvalidRequestTargetError extends Error {}
 
 function writeCors(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', process.env.PULSE_REMOTE_CORS_ORIGIN ?? 'http://127.0.0.1');
@@ -1057,6 +2429,42 @@ function writeCors(res: ServerResponse): void {
 function writeJSON(res: ServerResponse, value: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(value));
+}
+
+function terminateHttpRequest(res: ServerResponse, status: 400 | 500): void {
+  if (terminateStartedResponse(res)) return;
+  try {
+    res.setHeader('Connection', 'close');
+    writeJSON(res, { error: status === 400 ? 'invalid_request' : 'internal_error' }, status);
+  } catch {
+    res.destroy();
+  }
+}
+
+export function terminateStartedResponse(res: ServerResponse): boolean {
+  if (!res.headersSent) return false;
+  res.destroy();
+  return true;
+}
+
+export async function drainSecurityReporterForShutdown(
+  reporter: { drain(): Promise<void> },
+  timeoutMs: number,
+  log: (message: string) => void = (message) => console.error(message),
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const completed = await Promise.race([
+      reporter.drain().then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (!completed) log('[pulse-mcp] team security audit degraded');
+    return completed;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function argValue(name: string): string | undefined {
@@ -1075,8 +2483,36 @@ function trimTrailingSlash(value: string): string {
   return value.trim().replace(/\/+$/, '');
 }
 
-function requestPath(req: IncomingMessage, fallbackHost: string): string {
-  return new URL(req.url ?? '/', `http://${req.headers.host ?? fallbackHost}`).pathname;
+function parseRequestTarget(rawTarget: string | undefined): URL {
+  const target = rawTarget ?? '/';
+  if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\') || /[\u0000-\u001f\u007f]/.test(target)) {
+    throw new InvalidRequestTargetError('invalid request target');
+  }
+  const parsed = new URL(target, 'http://127.0.0.1');
+  if (parsed.origin !== 'http://127.0.0.1' || parsed.hash !== '') {
+    throw new InvalidRequestTargetError('invalid request target');
+  }
+  return parsed;
+}
+
+function hasUnexpectedRequestBody(req: IncomingMessage): boolean {
+  if (hasDuplicateHeader(req, 'content-length') || hasDuplicateHeader(req, 'transfer-encoding')) return true;
+  if (singleHeader(req.headers['transfer-encoding']) !== '') return true;
+  const contentLength = singleHeader(req.headers['content-length']);
+  if (contentLength === '') return false;
+  return !/^\d+$/.test(contentLength) || Number(contentLength) !== 0;
+}
+
+function hasInvalidHostHeader(req: IncomingMessage): boolean {
+  if (hasDuplicateHeader(req, 'host')) return true;
+  const host = singleHeader(req.headers.host);
+  if (host === '' || host !== host.trim()) return true;
+  try {
+    const parsed = new URL(`http://${host}`);
+    return parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '';
+  } catch {
+    return true;
+  }
 }
 
 function isProtectedResourceMetadataPath(path: string): boolean {
@@ -1113,18 +2549,28 @@ function authorizationServerMetadata(publicBaseURL: string) {
   };
 }
 
-async function readRequestJSON(req: IncomingMessage): Promise<unknown> {
-  const text = await readRequestText(req);
+async function readRequestJSON(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<unknown> {
+  const text = await readRequestText(req, maxBytes);
   if (text === '') {
     return undefined;
   }
   return JSON.parse(text);
 }
 
-async function readRequestText(req: IncomingMessage): Promise<string> {
+async function readRequestText(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<string> {
+  const declared = Number(singleHeader(req.headers['content-length']));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new RequestBodyTooLargeError();
+  }
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > maxBytes) {
+      throw new RequestBodyTooLargeError();
+    }
+    chunks.push(bytes);
   }
   if (chunks.length === 0) {
     return '';
@@ -1352,8 +2798,26 @@ function writeOAuthChallenge(res: ServerResponse, publicBaseURL: string): void {
   }));
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('[pulse-mcp] fatal:', err);
-  process.exit(1);
-});
+const invokedAsEntrypoint = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
+  } catch {
+    return false;
+  }
+})();
+
+// The published CLI imports the prebuilt MCP module instead of duplicating
+// its startup logic. Keep one explicit callable entrypoint while preserving
+// direct `node dist/index.js` execution.
+export async function runMcpEntrypoint(): Promise<void> {
+  await main();
+}
+
+if (invokedAsEntrypoint) {
+  runMcpEntrypoint().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('[pulse-mcp] fatal:', err);
+    process.exit(1);
+  });
+}

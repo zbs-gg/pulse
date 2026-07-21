@@ -380,6 +380,19 @@ The hosted Cloudflare connector currently narrows `pulse_graph_delta` to
 continuity checkpoints only; use local Pulse for full graph writes.
 See `mcp/README.md`.
 
+## Team remote foundation
+
+Team mode opens only an explicitly marked, dedicated team database with the
+stronger durability profile. Its daemon binds to loopback, has an exact route
+allowlist, requires the IPC channel key plus a body-bound signed principal
+assertion, and serves no local memory routes. Remote failure never selects the
+local engine.
+
+The current team branch is a synthetic-data security foundation, not a hosted
+service or completed pilot. Human Owner actions remain outside MCP and require
+recent action-bound browser approval. See
+[`docs/TEAM_REMOTE_PILOT.md`](../docs/TEAM_REMOTE_PILOT.md).
+
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE). Commercial dual-license available, see [`COMMERCIAL.md`](../COMMERCIAL.md).

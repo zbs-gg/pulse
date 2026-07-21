@@ -1,0 +1,22 @@
+{
+  "name": "pulse",
+  "displayName": "Pulse",
+  "version": "0.7.0",
+  "description": "Local-first continuity and governed team memory for Cursor.",
+  "author": {
+    "name": "ZBS.GG"
+  },
+  "homepage": "https://github.com/zbs-gg/pulse",
+  "repository": "https://github.com/zbs-gg/pulse",
+  "license": "AGPL-3.0-only",
+  "keywords": ["memory", "continuity", "cursor", "local-first", "team"],
+  "category": "developer-tools",
+  "tags": ["memory", "productivity", "local-first"],
+  "hooks": "./cursor-hooks/hooks.json",
+  "mcpServers": {
+    "pulse-product": {
+      "command": "node",
+      "args": ["${CURSOR_PLUGIN_ROOT}/mcp/cursor-server.mjs"]
+    }
+  }
+}

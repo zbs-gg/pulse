@@ -1,0 +1,158 @@
+{
+  "allowed_origins": [
+    "https://files.pythonhosted.org",
+    "https://github.com",
+    "https://huggingface.co",
+    "https://raw.githubusercontent.com"
+  ],
+  "allowed_redirect_origins": [
+    "https://cas-bridge.xethub.hf.co",
+    "https://huggingface.co",
+    "https://release-assets.githubusercontent.com"
+  ],
+  "architecture": "arm64",
+  "components": [
+    {
+      "bytes": 15584818,
+      "destination": "runtime",
+      "id": "cpython-standalone",
+      "license": "PSF-2.0",
+      "runtime": true,
+      "sha256": "3d561e3ec31db3b12c2e1ee2ccfa5dc679683a982de692f9526e19535106d367",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250212/cpython-3.12.9%2B20250212-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "version": "3.12.9+20250212"
+    },
+    {
+      "bytes": 549516,
+      "destination": "wheel",
+      "id": "mlx",
+      "license": "MIT",
+      "runtime": true,
+      "sha256": "86c62791ce930028d75c41b88b4e3ceb58f5f2e263ff9bfacda998b0c03d9544",
+      "url": "https://files.pythonhosted.org/packages/07/f5/14e12e219a2715296150d35f930dc3a6ff319cd60126408e563f03100113/mlx-0.29.3-cp312-cp312-macosx_13_0_arm64.whl",
+      "version": "0.29.3"
+    },
+    {
+      "bytes": 36817352,
+      "destination": "wheel",
+      "id": "mlx-metal",
+      "license": "MIT",
+      "runtime": true,
+      "sha256": "27b5a4d905202a71e84d9fd559ea0236813f6f960ef494e5cafe9c45df4c9d7c",
+      "url": "https://files.pythonhosted.org/packages/41/95/a00054a006df82bb1b5b8f666ae44a676b259146fadbff90fe654309fefc/mlx_metal-0.29.3-py3-none-macosx_13_0_arm64.whl",
+      "version": "0.29.3"
+    },
+    {
+      "bytes": 2650555,
+      "destination": "wheel",
+      "id": "tokenizers",
+      "license": "Apache-2.0",
+      "runtime": true,
+      "sha256": "cd51cd0a91ecc801633829fcd1fda9cf8682ed3477c6243b9a095539de4aecf3",
+      "url": "https://files.pythonhosted.org/packages/ae/1a/4526797f3719b0287853f12c5ad563a9be09d446c44ac784cdd7c50f76ab/tokenizers-0.21.1-cp39-abi3-macosx_11_0_arm64.whl",
+      "version": "0.21.1"
+    },
+    {
+      "bytes": 715,
+      "destination": "support/config.json",
+      "id": "bge-m3-config",
+      "license": "MIT",
+      "runtime": true,
+      "sha256": "2f0b6a5c00cf8653f67d93dd611b119f57e9199f876e137de63090dab4dfb426",
+      "url": "https://huggingface.co/mlx-community/bge-m3-mlx-fp16/resolve/a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec/config.json",
+      "version": "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec"
+    },
+    {
+      "bytes": 17098085,
+      "destination": "support/tokenizer.json",
+      "id": "bge-m3-tokenizer",
+      "license": "MIT",
+      "runtime": true,
+      "sha256": "5df1f55d60c9705a501ab9a75550728625740741fe4be308dac4806c16b7d51d",
+      "url": "https://huggingface.co/mlx-community/bge-m3-mlx-fp16/resolve/a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec/tokenizer.json",
+      "version": "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec"
+    },
+    {
+      "bytes": 1135554209,
+      "destination": "separate-model-artifact",
+      "id": "bge-m3-mlx-fp16",
+      "license": "MIT",
+      "runtime": false,
+      "sha256": "e8028acb2e77e0010d35ef75832d823edb5851c95682deef2bde86a45bd4441d",
+      "url": "https://huggingface.co/mlx-community/bge-m3-mlx-fp16/resolve/a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec/model.safetensors",
+      "version": "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec"
+    },
+    {
+      "bytes": 79535,
+      "destination": "provenance-only",
+      "id": "transformers-xlm-roberta-reference",
+      "license": "Apache-2.0",
+      "runtime": false,
+      "sha256": "a83d1f989157f8671fb74ce976e7c1fc525b4b6ad4db4b47586935ffb280d6fb",
+      "url": "https://raw.githubusercontent.com/huggingface/transformers/a22a4378d97d06b7a1d9abad6e0086d30fdea199/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py",
+      "version": "4.49.0+a22a4378d97d06b7a1d9abad6e0086d30fdea199"
+    }
+  ],
+  "minimum_os": "13.5",
+  "model_contract": {
+    "custom_code": false,
+    "data_only": true,
+    "dimensions": 1024,
+    "model": "bge-m3",
+    "normalized": true,
+    "pooling": "cls"
+  },
+  "platform": "darwin",
+  "quality_reference": {
+    "model": "BAAI/bge-m3",
+    "model_files": [
+      {
+        "bytes": 2100674,
+        "path": "colbert_linear.pt",
+        "sha256": "19bfbae397c2b7524158c919d0e9b19393c5639d098f0a66932c91ed8f5f9abb"
+      },
+      {
+        "bytes": 687,
+        "path": "config.json",
+        "sha256": "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa"
+      },
+      {
+        "bytes": 2271145830,
+        "path": "pytorch_model.bin",
+        "sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
+      },
+      {
+        "bytes": 5069051,
+        "path": "sentencepiece.bpe.model",
+        "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865"
+      },
+      {
+        "bytes": 3516,
+        "path": "sparse_linear.pt",
+        "sha256": "45c93804d2142b8f6d7ec6914ae23a1eee9c6a1d27d83d908a20d2afb3595ad9"
+      },
+      {
+        "bytes": 964,
+        "path": "special_tokens_map.json",
+        "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835"
+      },
+      {
+        "bytes": 17098108,
+        "path": "tokenizer.json",
+        "sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08"
+      },
+      {
+        "bytes": 444,
+        "path": "tokenizer_config.json",
+        "sha256": "a62b2b6784f990259fddef5f16388693a8043be4f69179e6a5257eeb3f9abac4"
+      }
+    ],
+    "model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "package": "FlagEmbedding",
+    "package_bytes": 247714,
+    "package_sha256": "fb1856b312851591341cf4533187350e9ce43f66bbf195c66f25a73266ff7db9",
+    "package_url": "https://files.pythonhosted.org/packages/73/70/3593ccb1299f8440369fd3c542ef2f5c09718eb8c7628614303e65dd38f8/flagembedding-1.4.0-py3-none-any.whl",
+    "package_version": "1.4.0"
+  },
+  "schema": "pulse.embedder_runtime.sources.v1"
+}

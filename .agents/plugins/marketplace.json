@@ -1,0 +1,20 @@
+{
+  "name": "zbs-gg",
+  "interface": {
+    "displayName": "ZBS.GG"
+  },
+  "plugins": [
+    {
+      "name": "pulse",
+      "source": {
+        "source": "local",
+        "path": "./plugins/pulse"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -15,10 +15,12 @@ Check: npm view @zbs-gg/pulse dist-tags
 Explain which harness path fits my setup, what Pulse writes, what it will not
 do by default, and how I can erase it. Ask my confirmation before installing.
 
-For Claude Code full local preview:
-  npx @zbs-gg/pulse@preview init claude-code
-  pulse doctor
-  pulse demo
+For Personal Pulse when Claude Code, Cursor, or Codex is installed:
+  npx -y @zbs-gg/pulse@preview install
+  pulse doctor claude-code  # when detected
+  pulse doctor cursor       # when detected
+  pulse doctor codex        # when detected
+  pulse home
 
 For other MCP-compatible hosts:
   configure the host to run:
@@ -36,20 +38,21 @@ closest text match — shows why that memory surfaced, shows the continuity pack
 the next agent receives, and wipes on one command. Host-extracted structured
 capsules only; raw transcript capture is off by default (the store rejects
 transcript/secret/path-like content); no backend model API keys by default.
-Developer preview; Claude Code-first; not production.
+Developer preview; host-neutral Claude Code, Cursor, and Codex support is
+pending the matching signed preview publication; not production.
 
 ## Compatible harnesses
 
-- Claude Code: primary full Local Preview.
-  `npx @zbs-gg/pulse@preview init claude-code`
+- Claude Code: native Personal plugin and lifecycle.
+  `npx -y @zbs-gg/pulse@preview install`
 - Claude Desktop / local Claude MCP clients: MCP-compatible Safe Mode today.
   Configure `npx -y @zbs-gg/pulse@preview mcp`.
-- Cursor: MCP-compatible Safe Mode today.
-  Configure `npx -y @zbs-gg/pulse@preview mcp`.
+- Cursor: native local Personal plugin and lifecycle; no Cursor CLI required.
+  `npx -y @zbs-gg/pulse@preview install`.
 - Windsurf: MCP-compatible Safe Mode today.
   Configure `npx -y @zbs-gg/pulse@preview mcp`.
-- Codex / OpenAI local agents: compatible when the host can run local MCP
-  command servers. Use agent audit first.
+- Codex / OpenAI local agents: native Personal plugin and lifecycle.
+  `npx -y @zbs-gg/pulse@preview install`.
 - Gemini CLI: compatible when local MCP command servers are supported. Use
   agent audit first.
 - LangChain / CrewAI / custom agents: integration surface; run Pulse MCP
@@ -57,17 +60,18 @@ Developer preview; Claude Code-first; not production.
 - ChatGPT app / Claude Directory / Pulse Cloud: future surfaces, not shipped
   in this preview.
 
-Primary install (Pulse Local Preview):
-`npx @zbs-gg/pulse@preview init claude-code` then `pulse doctor` then
-`pulse demo`. Requires Node 20+, Go toolchain, Claude Code CLI, and an
-embedder (local MLX on Apple Silicon, or a Cohere key — doctor reports which
-path is active). The demo seeds an isolated SIMULATED corpus and proves:
+Primary install (Pulse Personal):
+`npx -y @zbs-gg/pulse@preview install`, then run the exact doctor command for
+each detected host (`claude-code`, `cursor`, or `codex`), then `pulse home`.
+Requires Apple Silicon, Node 20+, a Git project, and any one
+of Claude Code, Cursor, or Codex. It requires no Go, Python, Make, Docker, or
+model API key. The optional demo seeds an isolated SIMULATED corpus and proves:
 same query in three user states returns different justified episodes
 (visible per-line reasons: state/anchor/emotion/date boosts), old anchors
 beat recent noise, and the next-agent continuity pack matches the evidence.
-`pulse demo --clean` erases the demo store. Doctor verdict is binary and
-honest: "Pulse Local Preview ready." or "Pulse MCP fallback is ready. Full
-retrieval is not enabled."
+`pulse demo --clean` erases the demo store. Product doctor names the host and
+only reports `Pulse <host> automatic lifecycle ready.` after native lifecycle
+evidence and full retrieval pass. Safe Mode remains separately labeled.
 
 Safe Mode (fallback, not the product):
 `claude mcp add pulse -- npx -y @zbs-gg/pulse@preview mcp` — keyword-recall

@@ -6,11 +6,34 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { buildPulseRequestHeaders, requireLoopbackPulseIPC } from './remote-auth-network.js';
 
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
-  'Pulse keeps the thread: structured memories, never raw transcripts, wipe always available.';
+	'Pulse keeps the thread: structured memories, never raw transcripts, deletion stays human-controlled.';
+
+function productReceipt(overrides = {}) {
+  return {
+    schema: 'pulse.write_receipt.v1',
+    receipt_id: 'receipt_test',
+    ledger_id: 'turn_test',
+    candidate_id: 'candidate_test',
+    candidate_version: 1,
+    status: 'pending',
+    destination: 'desk',
+    destination_store_id: 'store_desk_test',
+    safe_provenance: {
+      host: 'pulse-cli', session_id: 'session:test', turn_id: 'turn:test', source_event_key: 'event:test',
+    },
+    content_digest: 'a'.repeat(64),
+    policy_epoch: 0,
+    resolver_epoch: 0,
+    measurement_method: 'host_structured_v1',
+    created_at: '2026-07-14T09:00:00Z',
+    ...overrides,
+  };
+}
 
 function run(args, env = {}) {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
@@ -88,6 +111,16 @@ function writeExecutable(path, content) {
   chmodSync(path, 0o755);
 }
 
+test('destructive CLI refuses non-interactive agent and pipe execution', () => {
+  const wipe = run(['wipe', '--confirm', 'wipe pulse memory']).result;
+  assert.equal(wipe.status, 1);
+  assert.match(wipe.stderr, /directly attached interactive terminal/);
+
+  const deletion = run(['delete', '--id', 'pulse:test']).result;
+  assert.equal(deletion.status, 1);
+  assert.match(deletion.stderr, /directly attached interactive terminal/);
+});
+
 function runAsync(args, env = {}, stdin = '') {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
@@ -119,6 +152,45 @@ function runAsync(args, env = {}, stdin = '') {
     child.stdin.end(stdin);
   });
 }
+
+test('workspace binding CLI exposes human-gated Personal and Team onboarding', () => {
+  const help = run(['--help']).result;
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /pulse binding resolve/);
+  assert.match(help.stdout, /pulse binding create-personal/);
+  assert.match(help.stdout, /pulse binding create-team/);
+  assert.match(help.stdout, /--commons-project-id <project_id>/);
+  assert.match(help.stdout, /pulse trust install/);
+
+  const mutation = run(['binding', 'bind']).result;
+  assert.notEqual(mutation.status, 0);
+	assert.match(mutation.stderr, /supports resolve, status, create-personal, or create-team/);
+
+	const personalWithoutHumanConfirmation = run([
+		'binding', 'create-personal', '--principal-id', 'principal_nik',
+	]).result;
+	assert.notEqual(personalWithoutHumanConfirmation.status, 0);
+	assert.match(personalWithoutHumanConfirmation.stderr, /requires --confirm "bind pulse personal workspace"/);
+
+	const teamWithoutHumanConfirmation = run([
+		'binding', 'create-team', '--principal-id', 'principal_nik', '--team-id', 'team_zbs',
+		'--commons-store-id', 'store_commons_zbs', '--commons-resource', 'https:\/\/pulse.example.test\/mcp',
+	]).result;
+	assert.notEqual(teamWithoutHumanConfirmation.status, 0);
+	assert.match(teamWithoutHumanConfirmation.stderr, /requires --confirm "bind pulse team workspace"/);
+
+	const teamWithoutSignedProject = run([
+		'binding', 'create-team', '--principal-id', 'principal_nik', '--team-id', 'team_zbs',
+		'--commons-store-id', 'store_commons_zbs', '--commons-resource', 'https:\/\/pulse.example.test\/mcp',
+		'--confirm', 'bind pulse team workspace',
+	]).result;
+	assert.notEqual(teamWithoutSignedProject.status, 0);
+	assert.match(teamWithoutSignedProject.stderr, /requires --commons-project-id <id>/);
+
+	const trustWithoutHumanConfirmation = run(['trust', 'install']).result;
+	assert.notEqual(trustWithoutHumanConfirmation.status, 0);
+	assert.match(trustWithoutHumanConfirmation.stderr, /trust_confirmation_required/);
+});
 
 function withPulseStub(handler) {
   const requests = [];
@@ -152,6 +224,26 @@ function withPulseStub(handler) {
     server.on('error', reject);
   });
 }
+
+test('legacy consolidate stays on its existing route', async () => {
+  const stub = await withPulseStub((req, body) => {
+    if (req.url === '/memory/consolidate') {
+      assert.equal(req.method, 'POST');
+      assert.deepEqual(body, { dry_run: true, threshold: 0.91 });
+      return { body: { dry_run: true, groups: [] } };
+    }
+    return { status: 404, body: { error: 'not found' } };
+  });
+  try {
+    const legacyResult = await runAsync(['consolidate', '--threshold', '0.91'], { PULSE_BASE_URL: stub.baseUrl });
+    assert.equal(legacyResult.status, 0, legacyResult.stderr);
+    assert.match(legacyResult.stdout, /"dry_run": true/);
+    assert.match(legacyResult.stdout, /re-run with --apply/);
+    assert.deepEqual(stub.requests.map((request) => request.url), ['/memory/consolidate']);
+  } finally {
+    await stub.close();
+  }
+});
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -255,6 +347,44 @@ function stopChild(child) {
   });
 }
 
+test('remote Pulse refuses static bearer replay and never carries the loopback IPC secret', () => {
+  assert.throws(
+    () => buildPulseRequestHeaders('https://pulse.example/team', {
+      ipcSecret: 'ipc-secret',
+      remoteBearer: 'access-token',
+    }),
+    /remote_auth_static_bearer_forbidden/,
+  );
+  assert.deepEqual(
+    buildPulseRequestHeaders('http://127.0.0.1:18789', {
+      ipcSecret: 'ipc-secret',
+      remoteBearer: '',
+    }),
+    {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': 'ipc-secret',
+    },
+  );
+  assert.equal(
+    Object.hasOwn(
+      buildPulseRequestHeaders('https://127.0.0.1.evil.example', {
+        ipcSecret: 'ipc-secret',
+        remoteBearer: '',
+      }),
+      'X-Pulse-Key',
+    ),
+    false,
+  );
+});
+
+test('IPC administration refuses non-loopback Pulse bases', () => {
+  assert.doesNotThrow(() => requireLoopbackPulseIPC('http://[::1]:18789'));
+  assert.throws(
+    () => requireLoopbackPulseIPC('https://pulse.example'),
+    /loopback/i,
+  );
+});
+
 test('daemon requires explicit Go binary path', () => {
   const { result } = run(['daemon']);
 
@@ -276,7 +406,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.6.7');
+  assert.equal(plan.version, '0.7.0');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -315,6 +445,108 @@ test('install-plan claude-code prints human-readable trust plan', () => {
   assert.doesNotMatch(result.stdout, /PULSE_API_KEY|secret\.key|sk-|ghp_|xoxb-/);
 });
 
+test('install-plan --json exposes the host-neutral Personal product contract without mutation', () => {
+  const { home, result } = run(['install-plan', '--json']);
+
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.schema, 'pulse.personal_install_plan.v2');
+  assert.equal('target_host' in plan, false);
+  assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+  assert.deepEqual(plan.detected.hosts.map((host) => host.host), ['claude-code', 'codex', 'cursor']);
+  assert.equal(plan.stage, 'personal_stage_1');
+  assert.equal(plan.privacy.raw_transcript_capture, 'off');
+  assert.equal(plan.privacy.backend_model_calls, 'off');
+  assert.match(plan.reason_codes.join('\n'), /workspace_not_git/);
+  assert.match(plan.reason_codes.join('\n'), /release_manifest_unavailable/);
+  assert.equal(existsSync(join(home, '.pulse')), false);
+});
+
+test('non-interactive Personal install prints disclosure and cancels before product state', () => {
+  const { home, result } = run(['install']);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Pulse Personal install/);
+  assert.match(result.stdout, /Nothing above is written until you approve/);
+  assert.match(result.stdout, /action_required/);
+  assert.equal(existsSync(join(home, '.pulse')), false);
+});
+
+test('Personal install --json keeps stdout machine-readable', () => {
+  const { result } = run(['install', '--json']);
+
+  assert.notEqual(result.status, 0);
+  const terminal = JSON.parse(result.stdout);
+  assert.equal(terminal.schema, 'pulse.personal_install_result.v2');
+  assert.equal(terminal.outcome, 'action_required');
+  assert.match(result.stderr, /Pulse Personal install/);
+  assert.doesNotMatch(result.stdout, /Pulse Personal install/);
+});
+
+test('complete pre-consent plan never executes a project-local Codex from PATH', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-plan-safe-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-plan-safe-cwd.'));
+  const bin = join(cwd, 'bin');
+  const marker = join(cwd, 'codex-executed');
+  mkdirSync(bin);
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(bin, 'codex'), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o700 });
+  chmodSync(join(bin, 'codex'), 0o700);
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PATH: `${bin}:/usr/bin:/bin` });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).schema, 'pulse.personal_install_plan.v2');
+  assert.equal(existsSync(marker), false);
+});
+
+test('public Personal installer rejects a marketplace source override as synthetic authority', () => {
+  const { result } = run(['install-plan', '--json'], {
+    PULSE_CODEX_MARKETPLACE_SOURCE: '/tmp/untrusted-pulse-marketplace',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.outcome, 'action_required');
+  assert.ok(plan.reason_codes.includes('synthetic_authority_forbidden'));
+});
+
+test('preflight derives resume evidence from a durable runtime journal after process interruption', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-cwd.'));
+  const dataDir = join(home, 'pulse-data');
+  mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(dataDir, 'runtime', 'install-journal.json'), JSON.stringify({
+    schema: 'pulse.personal_install_journal.v1',
+    phase: 'downloading',
+    manifest_digest: 'a'.repeat(64),
+  }), { mode: 0o600 });
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
+});
+
+test('preflight keeps a staged release generation resumable while host lifecycle completes', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-cwd.'));
+  const dataDir = join(home, 'pulse-data');
+  mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(dataDir, 'runtime', 'install-journal.json'), JSON.stringify({
+    schema: 'pulse.personal_install_journal.v1',
+    phase: 'candidate_staged',
+    manifest_digest: 'a'.repeat(64),
+  }), { mode: 0o600 });
+
+  const result = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
+});
+
 test('init claude-code dry run prints install plan and writes nothing', () => {
   const { cwd, home, result } = run(['init', 'claude-code', '--dry-run']);
 
@@ -334,7 +566,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.6.7');
+  assert.equal(report.version, '0.7.0');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
@@ -345,6 +577,62 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   }
   assert.match(report.next_steps.join('\n'), /pulse init claude-code/);
   assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
+});
+
+test('doctor cursor --json reports the native Cursor product contract', () => {
+  const { result } = run(['doctor', 'cursor', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.target_host, 'cursor');
+  assert.equal(report.verdict, 'Pulse Cursor automatic lifecycle is not ready.');
+  assert.deepEqual(report.authority_profile, {
+    schema: 'pulse.personal_authority_profile.v1',
+    version: 1,
+    kind: 'portable',
+    ordinary_ready: true,
+    enhanced_presence: {
+      schema: 'pulse.enhanced_presence.profile.v1',
+      version: 1,
+      kind: 'unavailable',
+      available: false,
+      protected_actions: [],
+      reason_code: 'enhanced_presence_unavailable',
+    },
+  });
+  assert.equal(report.checks.presence_trust.ok, true);
+  assert.match(report.checks.presence_trust.detail, /optional/i);
+  for (const key of ['presence_trust', 'binding', 'runtime', 'plugin', 'hooks', 'vault', 'capture', 'retrieval']) {
+    assert.ok(report.checks[key], `missing check ${key}`);
+    assert.equal(typeof report.checks[key].ok, 'boolean');
+    assert.equal(typeof report.checks[key].detail, 'string');
+  }
+  assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
+});
+
+test('doctor presents native presence as optional and scoped only to protected actions', () => {
+  const { result } = run(['doctor', 'claude-code'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Authority profile: pulse\.personal_authority_profile\.v1/);
+  assert.match(result.stdout, /Ordinary Personal memory: ready without enhanced presence/i);
+  assert.match(result.stdout, /Unavailable protected actions: binding\.change, vault\.wipe/i);
+  assert.doesNotMatch(result.stdout, /Next: pulse trust install/);
+  assert.match(result.stdout, /Optional setup for binding\.change and vault\.wipe only: pulse trust install --confirm "install pulse presence helper"/i);
+});
+
+test('Codex doctor exposes the same portable authority profile without making presence a readiness failure', () => {
+  const { result } = run(['doctor', 'codex', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+
+  assert.notEqual(result.status, 0);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.target_host, 'codex');
+  assert.equal(report.authority_profile.schema, 'pulse.personal_authority_profile.v1');
+  assert.equal(report.authority_profile.ordinary_ready, true);
+  assert.equal(report.authority_profile.enhanced_presence.available, false);
+  assert.deepEqual(report.authority_profile.enhanced_presence.protected_actions, []);
+  assert.equal(report.checks.presence_trust.ok, true);
+  assert.notEqual(report.personal_live_readiness.reason_code, 'presence_required');
 });
 
 test('viewer --print-url prints only the authenticated URL', () => {
@@ -532,11 +820,11 @@ test('stop removes the preview daemon pid file when process is absent', () => {
   assert.equal(existsSync(join(dataDir, 'pulse-preview-daemon.pid')), false);
 });
 
-test('init does not write project .mcp.json fallback without explicit flag', () => {
+test('product init fails closed before writing config when Claude Code is unavailable', () => {
   const { cwd, result } = run(['init', 'claude-code']);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--write-project-mcp/);
+  assert.match(result.stderr, /automatic lifecycle unavailable: missing/);
 
   const list = spawnSync('find', [cwd, '-maxdepth', '1', '-name', '.mcp.json'], {
     encoding: 'utf8',
@@ -544,40 +832,29 @@ test('init does not write project .mcp.json fallback without explicit flag', () 
   assert.equal(list.stdout.trim(), '');
 });
 
-test('explicit project MCP fallback writes gitignore entry', () => {
-  const { cwd, result } = run(['init', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(readFileSync(join(cwd, '.mcp.json'), 'utf8'), /PULSE_API_KEY/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.mcp\.json/);
-});
-
-test('connect claude-code dry run includes MCP and continuity hooks', () => {
+test('connect claude-code dry run exposes the pinned secret-free product lifecycle', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run']);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /MCP command:/);
-  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
-  assert.match(result.stdout, /mcp\/dist\/index\.js/);
-  assert.match(result.stdout, /SessionStart/);
-  assert.match(result.stdout, /UserPromptSubmit/);
-  assert.match(result.stdout, /PostToolUse/);
-  assert.match(result.stdout, /Stop/);
-  assert.match(result.stdout, /hook session-start/);
-  assert.match(result.stdout, /PULSE_BASE_URL=/);
+  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
+  for (const event of [
+    'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact',
+    'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop',
+  ]) assert.match(result.stdout, new RegExp(`claude-hook ${event}`));
+  assert.match(result.stdout, /startup\|resume\|clear\|compact/);
   assert.match(result.stdout, /PULSE_DATA_DIR=/);
-  assert.match(result.stdout, new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(result.stdout, new RegExp(CLI.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.doesNotMatch(result.stdout, /"command": "pulse hook/);
+  assert.doesNotMatch(result.stdout, /PULSE_CLAUDE_HOOKS_DIGEST=/);
+  assert.doesNotMatch(result.stdout, /PULSE_API_KEY|\bnpx\b|@zbs-gg\/pulse@preview/);
 });
 
-test('connect claude-code dry run falls back to preview npm package outside local repo', () => {
+test('connect claude-code never falls back to mutable preview npm registration', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run'], {
     PULSE_MCP_ENTRYPOINT: '/tmp/pulse-mcp-missing/dist/index.js',
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /MCP command: npx -y @zbs-gg\/pulse@preview mcp/);
+  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
+  assert.doesNotMatch(result.stdout, /\bnpx\b|@zbs-gg\/pulse@preview/);
 });
 
 test('pulse mcp serves stdio MCP tools with the standalone store', () => {
@@ -618,110 +895,6 @@ test('pulse mcp serves stdio MCP tools with the standalone store', () => {
   assert.match(result.stdout, /standalone_lite/);
   assert.match(result.stderr, /standalone lite store/);
   assert.equal(existsSync(join(home, '.pulse', 'standalone', 'store.json')), true);
-});
-
-test('init claude-code uses preview first-run flow', () => {
-  const { result } = run(['init', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Pulse is breathing locally/);
-  assert.match(result.stdout, /memory proof first, import later/);
-  assert.match(result.stdout, /Thank you for installing Pulse MCP/);
-  assert.match(result.stdout, /Try first memory/);
-  assert.match(result.stdout, /Dashboard:/);
-  assert.doesNotMatch(result.stdout, /host-extracted memory via Claude Code/);
-});
-
-test('init claude-code starts vendored preview runtime before configuring Claude Code', () => {
-  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
-  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
-  const tools = mkdtempSync(join(tmpdir(), 'pulse-cli-test-tools.'));
-  const vendor = mkdtempSync(join(tmpdir(), 'pulse-cli-test-vendor.'));
-  const dataDir = join(home, '.pulse');
-  const log = join(home, 'tools.log');
-  mkdirSync(join(vendor, 'pulse-app', 'cmd', 'pulse'), { recursive: true });
-  mkdirSync(join(vendor, 'mcp'), { recursive: true });
-  writeFileSync(join(vendor, 'mcp', 'package.json'), '{"name":"fake-pulse-mcp"}\n');
-
-  writeExecutable(join(tools, 'go'), `#!${process.execPath}
-const fs = require('node:fs');
-const path = require('node:path');
-fs.appendFileSync(${JSON.stringify(log)}, 'go ' + process.argv.slice(2).join(' ') + '\\n');
-const out = process.argv[process.argv.indexOf('-o') + 1];
-fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, '#!${process.execPath}\\n' + ${JSON.stringify(`
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
-const args = process.argv.slice(2);
-const addr = args[args.indexOf('-addr') + 1];
-const dataDir = args[args.indexOf('-data-dir') + 1];
-fs.mkdirSync(dataDir, { recursive: true });
-fs.writeFileSync(path.join(dataDir, 'secret.key'), 'fake-secret');
-const server = http.createServer((req, res) => {
-  let body = '';
-  req.on('data', (chunk) => { body += chunk; });
-  req.on('end', () => {
-    res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/memory/status') {
-      res.end(JSON.stringify({ billing_mode: 'host-extracted', backend_llm_enabled: false }));
-      return;
-    }
-    if (req.url === '/memory/remember') {
-      res.end(JSON.stringify({ ok: true, ids: ['pulse:first-memory'] }));
-      return;
-    }
-    res.end(JSON.stringify({ ok: true }));
-  });
-});
-const [host, port] = addr.split(':');
-server.listen(Number(port), host);
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-`)});
-fs.chmodSync(out, 0o755);
-`);
-  writeExecutable(join(tools, 'npm'), `#!${process.execPath}
-const fs = require('node:fs');
-const path = require('node:path');
-fs.appendFileSync(${JSON.stringify(log)}, 'npm ' + process.argv.slice(2).join(' ') + ' cwd=' + process.cwd() + '\\n');
-if (process.argv.includes('run') && process.argv.includes('build')) {
-  fs.mkdirSync(path.join(process.cwd(), 'dist'), { recursive: true });
-  fs.writeFileSync(path.join(process.cwd(), 'dist', 'index.js'), '#!/usr/bin/env node\\n');
-}
-process.exit(0);
-`);
-  writeExecutable(join(tools, 'claude'), `#!${process.execPath}
-const fs = require('node:fs');
-fs.appendFileSync(${JSON.stringify(log)}, 'claude ' + process.argv.slice(2).join(' ') + ' cwd=' + process.cwd() + '\\n');
-process.exit(0);
-`);
-
-  const result = runInWorkspace(['init', 'claude-code'], cwd, home, {
-    PATH: `${tools}:/usr/bin:/bin`,
-    PULSE_BASE_URL: 'http://127.0.0.1:18899',
-    PULSE_PREVIEW_SOURCE_DIR: vendor,
-    PULSE_PREVIEW_RUNTIME_SETUP: '1',
-    PULSE_CLI_ANIMATION: '0',
-  });
-
-  const pidPath = join(dataDir, 'pulse-preview-daemon.pid');
-  if (existsSync(pidPath)) {
-    try {
-      process.kill(Number(readFileSync(pidPath, 'utf8').trim()), 'SIGTERM');
-    } catch {
-      // The fake daemon may already be gone if the test failed late.
-    }
-  }
-
-  assert.equal(result.status, 0, result.stderr);
-  const toolLog = readFileSync(log, 'utf8');
-  assert.match(toolLog, /go build -o .*pulse-preview-daemon .*\.\/cmd\/pulse/);
-  assert.match(toolLog, /npm ci cwd=.*mcp/);
-  assert.match(toolLog, /npm run build cwd=.*mcp/);
-  assert.match(toolLog, /claude mcp add-json --scope local pulse/);
-  assert.match(result.stdout, /Pulse daemon: +running locally/);
-  assert.match(result.stdout, /First memory saved locally/);
-  assert.equal(existsSync(join(cwd, '.claude', 'settings.local.json')), true);
 });
 
 test('connect claude-code remote-control dry run prints mobile start path', () => {
@@ -775,119 +948,13 @@ test('connect chatgpt dry run prints generic connector handoff via the one packa
   assert.doesNotMatch(result.stdout, /pulse-mcp/);
 });
 
-test('connect claude-code writes local hook config and gitignore entry', () => {
-  const { cwd, result } = run(['connect', 'claude-code', '--write-project-mcp']);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /pulse  \.  :  o  ♥  o  :  \./);
-  assert.match(result.stdout, /Pulse wave:/);
-  assert.match(result.stdout, /breathing locally/);
-  assert.match(result.stdout, /memory proof first/);
-  assert.match(result.stdout, /Pulse is breathing locally/);
-  assert.match(result.stdout, /No backend model is running by default/);
-  assert.match(result.stdout, /No emotion is stored until you choose it/);
-  assert.match(result.stdout, /Source import waits until after the first proof/);
-  assert.match(result.stdout, /Thank you for installing Pulse MCP/);
-  assert.match(result.stdout, /Pulse helps Claude Code remember what actually mattered/);
-  assert.match(result.stdout, /Save one small memory/);
-  assert.match(result.stdout, /Recall it in a fresh session/);
-  assert.match(result.stdout, /Keep the thread across AI chats/);
-  assert.match(result.stdout, /backend LLM off/);
-  assert.match(result.stdout, /raw transcript capture off/);
-  assert.match(result.stdout, /What Pulse will tell Claude next/);
-  assert.match(result.stdout, /Try first memory/);
-  assert.match(result.stdout, /Pulse keeps the thread: structured memories/);
-  assert.match(result.stdout, /What did we decide about how Pulse stores memory/);
-  assert.match(result.stdout, /Explore your universe and yourself with Claude Code \+ Pulse/);
-  assert.match(result.stdout, /Dashboard:/);
-  assert.match(result.stdout, /first_run=1/);
-  assert.match(result.stdout, /Import old chats later/);
-  assert.doesNotMatch(result.stdout, /What Claude will get next/);
-  const settingsPath = join(cwd, '.claude', 'settings.local.json');
-  assert.equal(existsSync(settingsPath), true);
-  const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8')).mcpServers.pulse;
-  assert.equal(mcp.command, process.execPath);
-  // No leading repo-dir segment: the clone directory is not guaranteed to be named "pulse".
-  assert.match(mcp.args[0], /mcp\/dist\/index\.js/);
-  assert.equal(mcp.env.PULSE_BASE_URL, 'http://127.0.0.1:18789');
-  const settings = readFileSync(settingsPath, 'utf8');
-  assert.match(settings, /SessionStart/);
-  assert.match(settings, /hook stop/);
-  assert.match(settings, /PULSE_BASE_URL=/);
-  assert.match(settings, /PULSE_DATA_DIR=/);
-  assert.doesNotMatch(settings, /"command": "pulse hook/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.claude\/settings\.local\.json/);
-  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /\.mcp\.json/);
-});
-
-test('connect claude-code best-effort writes private first install memory when daemon is available', async () => {
-  const stub = await withPulseStub((req, body) => {
-    assert.equal(req.method, 'POST');
-    assert.equal(req.url, '/memory/remember');
-    assert.equal(body.schema, 'pulse.memory_capsule.v1');
-    assert.equal(body.source.host, 'pulse-cli');
-    assert.equal(body.source.conversation_scope, 'install_event');
-    assert.equal(body.raw_input_included, false);
-    assert.equal(body.items[0].kind, 'system_event');
-    assert.equal(body.items[0].redacted_summary, 'User installed Pulse MCP and connected it to Claude Code.');
-    assert.equal(body.items[0].privacy_tier, 'private');
-    assert.equal(body.items[0].retention, 'project');
-    assert.deepEqual(body.items[0].tags, ['pulse_install', 'first_memory', 'claude_code']);
-    return { body: { ok: true, ids: ['pulse:first-memory'] } };
-  });
-  try {
-    const result = await runAsync(['connect', 'claude-code', '--write-project-mcp'], {
-      PULSE_BASE_URL: stub.baseUrl,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /First memory saved locally/);
-    assert.equal(stub.requests.length, 1);
-  } finally {
-    await stub.close();
-  }
-});
-
-test('connect claude-code preserves existing hooks and writes local-auto mode marker', () => {
-  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
-  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
-  const settingsPath = join(cwd, '.claude', 'settings.local.json');
-  mkdirSync(join(cwd, '.claude'), { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify({
-    hooks: {
-      SessionStart: [{
-        matcher: 'startup',
-        hooks: [
-          { type: 'command', command: 'echo existing-session-start', timeout: 10 },
-          { type: 'command', command: 'pulse hook session-start', timeout: 60 },
-        ],
-      }],
-      Stop: [{
-        hooks: [{ type: 'command', command: 'pulse hook stop', timeout: 60 }],
-      }],
-    },
-  }, null, 2));
-
-  const result = runInWorkspace(['connect', 'claude-code', '--write-project-mcp'], cwd, home);
-
-  assert.equal(result.status, 0, result.stderr);
-  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  const commands = settings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command));
-  assert.deepEqual(commands.includes('echo existing-session-start'), true);
-  assert.deepEqual(commands.some((command) => /hook session-start/.test(command)), true);
-  assert.deepEqual(commands.some((command) => /^pulse hook session-start$/.test(command)), false);
-  const stopCommands = settings.hooks.Stop.flatMap((entry) => entry.hooks.map((hook) => hook.command));
-  assert.deepEqual(stopCommands.some((command) => /^pulse hook stop$/.test(command)), false);
-  assert.deepEqual(stopCommands.some((command) => /hook stop/.test(command)), true);
-  assert.equal(readFileSync(join(home, '.pulse', 'mode'), 'utf8').trim(), 'local-auto');
-});
-
 test('disconnect claude-code removes Pulse hooks and project MCP fallback', () => {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
   const settingsPath = join(cwd, '.claude', 'settings.local.json');
   mkdirSync(join(cwd, '.claude'), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify({
+    permissions: { allow: ['Bash(git status)'] },
     hooks: {
       SessionStart: [{
         matcher: 'startup',
@@ -897,8 +964,13 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
         ],
       }],
       Stop: [{
-        hooks: [{ type: 'command', command: 'pulse hook stop', timeout: 60 }],
+        hooks: [{
+          type: 'command',
+          command: `PULSE_DATA_DIR='${join(home, '.pulse')}' '${process.execPath}' '${join(home, '.pulse', 'runtime', 'codex', 'current', 'src', 'cli.js')}' claude-hook Stop`,
+          timeout: 60,
+        }],
       }],
+      Notification: [{ hooks: [{ type: 'command', command: 'echo keep-notification' }] }],
     },
   }, null, 2));
   writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({
@@ -907,17 +979,41 @@ test('disconnect claude-code removes Pulse hooks and project MCP fallback', () =
       keep: { command: 'keep-mcp' },
     },
   }, null, 2));
+	const dataDir = join(home, '.pulse');
+	mkdirSync(dataDir, { recursive: true });
+	writeFileSync(join(dataDir, 'memory.keep'), 'committed memory remains');
 
   const result = runInWorkspace(['disconnect', 'claude-code'], cwd, home);
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Claude Code disconnected/);
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(settings.permissions, { allow: ['Bash(git status)'] });
   assert.deepEqual(settings.hooks.SessionStart[0].hooks.map((hook) => hook.command), ['echo keep-me']);
   assert.equal(settings.hooks.Stop, undefined);
+  assert.equal(settings.hooks.Notification[0].hooks[0].command, 'echo keep-notification');
   const mcp = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8'));
   assert.equal(mcp.mcpServers.pulse, undefined);
   assert.equal(mcp.mcpServers.keep.command, 'keep-mcp');
+	const captureState = JSON.parse(readFileSync(join(dataDir, 'capture-state.json'), 'utf8'));
+	assert.equal(captureState.schema, 'pulse.capture_state.v1');
+	assert.equal(captureState.enabled, false);
+	assert.equal(captureState.hosts['claude-code'].reason, 'host_disconnected');
+	assert.equal(readFileSync(join(dataDir, 'memory.keep'), 'utf8'), 'committed memory remains');
+});
+
+test('disconnect claude-code never overwrites invalid hook JSON', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-test-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-test-cwd.'));
+  const settingsPath = join(cwd, '.claude', 'settings.local.json');
+  mkdirSync(join(cwd, '.claude'), { recursive: true });
+  const invalid = '{"hooks":{"Stop":[';
+  writeFileSync(settingsPath, invalid);
+
+  const result = runInWorkspace(['disconnect', 'claude-code'], cwd, home);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(settingsPath, 'utf8'), invalid);
 });
 
 test('viewer prints local authenticated viewer URL', () => {
@@ -925,6 +1021,247 @@ test('viewer prints local authenticated viewer URL', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\/viewer\?key=/);
+});
+
+const testHomeRouteScope = Buffer.alloc(32).toString('base64url');
+const testHomeRoutePath = `/home/s/${testHomeRouteScope}/`;
+
+test('home exchanges the daemon secret internally and opens a one-shot credential-free relay', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-session-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-session-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const daemonSecret = 'daemon-secret-must-never-escape';
+  const cookieValue = 'browser-session-must-never-escape';
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), daemonSecret);
+  const stub = await withPulseStub((req, body) => {
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/home/session');
+    assert.equal(req.headers['x-pulse-key'], daemonSecret);
+		assert.deepEqual(Object.keys(body), ['live_readiness']);
+		assert.deepEqual(Object.keys(body.live_readiness).sort(), [
+			'checked_at', 'next_action', 'outcome', 'reason_code', 'schema',
+		]);
+		assert.equal(body.live_readiness.schema, 'pulse.personal_live_readiness.v1');
+		assert.match(body.live_readiness.checked_at, /^\d{4}-\d{2}-\d{2}T.*Z$/);
+    return {
+      body: {
+        cookie_name: 'pulse_home',
+        cookie_value: cookieValue,
+        cookie_path: testHomeRoutePath,
+        max_age_seconds: 30,
+        target_url: `http://${req.headers.host}${testHomeRoutePath}`,
+      },
+    };
+  });
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PULSE_OPEN_DRY_RUN: '1',
+      PULSE_HOME_HANDOFF_TIMEOUT_MS: '1000',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
+    assert.equal(result.stderr, '');
+    assert.equal(stub.requests.length, 1);
+		assert.equal(stub.requests[0].method, 'POST');
+		assert.equal(stub.requests[0].url, '/home/session');
+		assert.equal(stub.requests[0].body.live_readiness.schema, 'pulse.personal_live_readiness.v1');
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      new RegExp(`${daemonSecret}|${cookieValue}|${testHomeRouteScope}|${stub.baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|key=|token=|session=|bootstrap`, 'i'),
+    );
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home rejects print-url instead of exposing a bootstrap capability', () => {
+  const { result } = run(['home', '--print-url']);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /pulse home does not support --print-url/);
+  assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
+});
+
+test('home accepts only the three supported Personal harness selectors', () => {
+  for (const args of [['home', '--host'], ['home', '--host', 'gemini']]) {
+    const { result } = run(args);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /pulse home --host must be claude-code, codex, or cursor/);
+    assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
+  }
+});
+
+test('home rejects a daemon target with a query without echoing session credentials', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-target-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-target-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'target-daemon-secret');
+  const stub = await withPulseStub((req) => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'target-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://${req.headers.host}${testHomeRoutePath}?key=forbidden`,
+    },
+  }));
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /exact queryless scoped \/home target/);
+    assert.doesNotMatch(result.stdout + result.stderr, /target-daemon-secret|target-browser-session|key=forbidden/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home rejects non-canonical, mismatched, and broadened scoped handoffs', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-scoped-target-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-scoped-target-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const daemonSecret = 'scoped-target-daemon-secret';
+  const cookieValue = 'scoped-target-browser-session';
+  const otherRoutePath = `/home/s/${Buffer.alloc(32, 1).toString('base64url')}/`;
+  const nonCanonicalPath = `/home/s/${'A'.repeat(42)}B/`;
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), daemonSecret);
+  const cases = [
+    { cookiePath: testHomeRoutePath.slice(0, -1), targetPath: testHomeRoutePath },
+    { cookiePath: testHomeRoutePath, targetPath: otherRoutePath },
+    { cookiePath: nonCanonicalPath, targetPath: nonCanonicalPath },
+    { cookiePath: testHomeRoutePath, targetPath: `${testHomeRoutePath}assets/home.js` },
+    { cookiePath: testHomeRoutePath, targetPath: `${testHomeRoutePath}#fragment` },
+  ];
+  const stub = await withPulseStub((req) => {
+    const current = cases[stub.requests.length - 1];
+    return {
+      body: {
+        cookie_name: 'pulse_home', cookie_value: cookieValue,
+        cookie_path: current.cookiePath, max_age_seconds: 30,
+        target_url: `http://${req.headers.host}${current.targetPath}`,
+      },
+    };
+  });
+
+  try {
+    for (const current of cases) {
+      const result = await runInWorkspaceAsync([
+        'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+      ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+      assert.equal(result.status, 1, `accepted unsafe scoped handoff ${JSON.stringify(current)}`);
+      assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${daemonSecret}|${cookieValue}`));
+    }
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home stops reading an oversized daemon session response before JSON decoding', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-oversized-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-oversized-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'oversized-daemon-secret');
+  const stub = await withPulseStub(() => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'oversized-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://127.0.0.1:18789${testHomeRoutePath}`,
+      padding: 'x'.repeat(20 * 1024),
+    },
+  }));
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, { PULSE_OPEN_DRY_RUN: '1' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /oversized Memory Home session/);
+    assert.doesNotMatch(result.stdout + result.stderr, /oversized-daemon-secret|oversized-browser-session/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('home bounds an unresponsive daemon session exchange', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-timeout-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-timeout-cwd.'));
+  const dataDir = join(home, '.pulse');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'timeout-daemon-secret');
+  const server = createServer(async (req) => {
+    for await (const _chunk of req) { /* keep the response pending */ }
+  });
+  await new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', resolve);
+    server.on('error', reject);
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const startedAt = Date.now();
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--base', baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PULSE_OPEN_DRY_RUN: '1',
+      PULSE_HOME_REQUEST_TIMEOUT_MS: '50',
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(Date.now() - startedAt < 2_000, 'home session request must fail within its bound');
+    assert.match(result.stderr, /Memory Home session request timed out/);
+    assert.doesNotMatch(result.stdout + result.stderr, /timeout-daemon-secret|key=|token=/i);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('viewer fails closed when product activation evidence exists but binding trust is broken', () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-cwd.'));
+	spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+	mkdirSync(join(cwd, '.claude'), { recursive: true });
+	writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
+		hooks: { Stop: [{ hooks: [{
+			type: 'command',
+			command: "'/Users/example/.pulse/runtime/codex/current/src/cli.js' claude-hook Stop",
+		}] }] },
+	}));
+
+	const result = runInWorkspace(['viewer', '--print-url'], cwd, home);
+
+	assert.equal(result.status, 1);
+	assert.match(`${result.stdout}${result.stderr}`, /product activation exists, but its bound vault cannot be trusted/);
+	assert.doesNotMatch(result.stdout, /127\.0\.0\.1:18789\/viewer/);
+});
+
+test('viewer keeps legacy Claude hooks on Local Preview when no product activation exists', () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-viewer-preview-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-viewer-preview-cwd.'));
+	spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+	mkdirSync(join(cwd, '.claude'), { recursive: true });
+	writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
+		hooks: { Stop: [{ hooks: [{ type: 'command', command: 'pulse hook stop' }] }] },
+	}));
+
+	const result = runInWorkspace(['viewer', '--print-url'], cwd, home);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /127\.0\.0\.1:18789\/viewer\?key=/);
 });
 
 test('viewer can target an explicit live server data dir and base URL', () => {
@@ -1039,7 +1376,7 @@ test('hook stop writes checkpoint with open loop and state signal', async () => 
     assert.deepEqual(body.decisions, ['Pulse owns continuity.']);
     assert.deepEqual(body.open_loops, ['Harden viewer auth.']);
     assert.deepEqual(body.do_not_repeat, ['Do not pitch generic graph memory.']);
-    assert.deepEqual(body.emotional_anchors, ['The Vitaly call changed the product wedge.']);
+    assert.deepEqual(body.emotional_anchors, ['The Bob call changed the product wedge.']);
     return { body: { ok: true } };
   });
   try {
@@ -1052,7 +1389,7 @@ test('hook stop writes checkpoint with open loop and state signal', async () => 
       decisions: ['Pulse owns continuity.'],
       open_loops: ['Harden viewer auth.'],
       do_not_repeat: ['Do not pitch generic graph memory.'],
-      emotional_anchors: ['The Vitaly call changed the product wedge.'],
+      emotional_anchors: ['The Bob call changed the product wedge.'],
       state_signals: ['User wants no re-explaining.'],
     }));
 
@@ -1149,7 +1486,7 @@ test('migrate preview scans a ChatGPT export without writing raw text', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Remember Vitaly follow-up for Pulse packaging.'] },
+            content: { parts: ['Remember Bob follow-up for Pulse packaging.'] },
           },
         },
         assistant: {
@@ -1169,9 +1506,33 @@ test('migrate preview scans a ChatGPT export without writing raw text', () => {
   assert.match(result.stdout, /source: chatgpt/);
   assert.match(result.stdout, /conversations: 1/);
   assert.match(result.stdout, /messages: 2/);
-  assert.match(result.stdout, /people found: Vitaly/);
+  assert.match(result.stdout, /people found: Bob/);
   assert.match(result.stdout, /thread candidates: Garden launch/);
   assert.match(result.stdout, /raw text will not be written/);
+});
+
+test('migrate preview does not promote generic sentence starters as people', () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-generic-person-word.'));
+  writeFileSync(join(exportDir, 'conversations.json'), JSON.stringify([
+    {
+      title: 'Simple reminder',
+      mapping: {
+        user: {
+          message: {
+            author: { role: 'user' },
+            content: { parts: ['Please remind Alice about the review.'] },
+          },
+        },
+      },
+    },
+  ]));
+
+  const { result } = run(['migrate', 'preview', exportDir, '--json']);
+
+  assert.equal(result.status, 0, result.stderr);
+  const preview = JSON.parse(result.stdout);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
+  assert.deepEqual(preview.people_candidates.includes('Please'), false);
 });
 
 test('migrate preview can scan a zipped ChatGPT export directly', () => {
@@ -1184,7 +1545,7 @@ test('migrate preview can scan a zipped ChatGPT export directly', () => {
       mapping: {
         user: {
           message: {
-            content: { parts: ['Vitaly should see the one-click archive import flow.'] },
+            content: { parts: ['Bob should see the one-click archive import flow.'] },
           },
         },
       },
@@ -1205,7 +1566,7 @@ test('migrate preview can scan a zipped ChatGPT export directly', () => {
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 1);
   assert.equal(preview.archive_was_unpacked, true);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.raw_text_written, false);
 });
 
@@ -1215,7 +1576,7 @@ test('migrate preview json scans Claude-like exports and redacts secrets', () =>
     {
       name: 'Pulse Distribution',
       chat_messages: [
-        { sender: 'human', text: 'Anya should review the Pulse graph viewer.' },
+        { sender: 'human', text: 'Alice should review the Pulse graph viewer.' },
         { sender: 'assistant', text: 'Do not store /home/example/private or sk-secret in Pulse.' },
       ],
     },
@@ -1231,7 +1592,7 @@ test('migrate preview json scans Claude-like exports and redacts secrets', () =>
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
   assert.deepEqual(preview.raw_text_written, false);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.thread_candidates.includes('Pulse Distribution'), true);
 });
 
@@ -1243,7 +1604,7 @@ test('migrate preview emits human-readable relationship labels', () => {
       mapping: {
         a: {
           message: {
-            content: { parts: ['Vitaly and Anya should review the Pulse Dashboard together.'] },
+            content: { parts: ['Bob and Alice should review the Pulse Dashboard together.'] },
           },
         },
       },
@@ -1254,12 +1615,12 @@ test('migrate preview emits human-readable relationship labels', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.relationship_candidates.includes('Vitaly - mentioned in - Pulse Dashboard'), true);
-  assert.deepEqual(preview.relationship_candidates.includes('Vitaly - related to - Anya'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Bob - mentioned in - Pulse Dashboard'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Bob - related to - Alice'), true);
   assert.doesNotMatch(JSON.stringify(preview.relationship_candidates), /->|<->|mentioned_in|related_to/);
 });
 
-test('migrate preview omits alias-self relationships', () => {
+test('migrate preview does not invent alias equivalence without a curated people graph', () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-alias-self-relationships.'));
   writeFileSync(join(exportDir, 'conversations.json'), JSON.stringify([
     {
@@ -1267,7 +1628,7 @@ test('migrate preview omits alias-self relationships', () => {
       mapping: {
         a: {
           message: {
-            content: { parts: ['Nik and Ник are the same person. Anya is a separate person.'] },
+            content: { parts: ['Alex and Алекс are the same person. Alice is a separate person.'] },
           },
         },
       },
@@ -1278,9 +1639,9 @@ test('migrate preview omits alias-self relationships', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.relationship_candidates.includes('Nik - related to - Anya'), true);
-  assert.deepEqual(preview.relationship_candidates.includes('Nik - related to - Ник'), false);
-  assert.deepEqual(preview.relationship_candidates.includes('Ник - related to - Anya'), false);
+  assert.deepEqual(preview.relationship_candidates.includes('Alex - related to - Alice'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Alex - related to - Алекс'), true);
+  assert.deepEqual(preview.relationship_candidates.includes('Алекс - related to - Alice'), true);
 });
 
 test('migrate preview scans Claude conversations exports larger than the old 50MB guard', () => {
@@ -1291,7 +1652,7 @@ test('migrate preview scans Claude conversations exports larger than the old 50M
       name: 'Large Claude archive',
       ignored_padding: padding,
       chat_messages: [
-        { sender: 'human', text: 'Vitaly should verify the large Claude archive preview.' },
+        { sender: 'human', text: 'Bob should verify the large Claude archive preview.' },
       ],
     },
   ]));
@@ -1304,7 +1665,7 @@ test('migrate preview scans Claude conversations exports larger than the old 50M
   assert.equal(preview.files_skipped.length, 0);
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 1);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.raw_text_written, false);
 });
 
@@ -1316,14 +1677,14 @@ test('migrate preview keeps Claude as source when archive has unknown sidecar ch
     {
       name: 'Claude main archive',
       chat_messages: [
-        { sender: 'human', text: 'Vitaly should review the Claude main archive.' },
+        { sender: 'human', text: 'Bob should review the Claude main archive.' },
       ],
     },
   ]));
   writeFileSync(join(sidecars, 'sidecar.json'), JSON.stringify({
     name: 'Design sidecar',
     messages: [
-      { text: 'Anya appears in a sidecar chat without host metadata.' },
+      { text: 'Alice appears in a sidecar chat without host metadata.' },
     ],
   }));
 
@@ -1334,8 +1695,8 @@ test('migrate preview keeps Claude as source when archive has unknown sidecar ch
   assert.equal(preview.source, 'claude');
   assert.equal(preview.conversations, 2);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
 });
 
 test('migrate preview fails clearly for a missing archive path', () => {
@@ -1363,7 +1724,7 @@ create_time: 2025-09-01T10:00:00Z
 # Title: Pulse MCP people graph
 
 >[!nexus_user] **User** - 2025-09-01 10:00
-> This raw Nexus sentence must stay hidden. Vitaly and Anya should inspect the people graph.
+> This raw Nexus sentence must stay hidden. Bob and Alice should inspect the people graph.
 
 >[!nexus_agent] **Assistant** - 2025-09-01 10:01
 > Pulse should keep the graph preview gentle and structured.
@@ -1393,8 +1754,8 @@ provider: chatgpt
   assert.equal(preview.files_scanned, 1);
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.people_candidates.includes('Oldperson'), false);
   assert.deepEqual(preview.review_candidates.includes('Qwen'), false);
   assert.deepEqual(preview.thread_candidates.includes('Pulse MCP people graph'), true);
@@ -1413,7 +1774,7 @@ test('migrate preview scans Codex JSONL session files', () => {
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Ask Vitaly about the Pulse graph migrator.' }],
+        content: [{ type: 'input_text', text: 'Ask Bob about the Pulse graph migrator.' }],
       },
     }),
     JSON.stringify({
@@ -1434,7 +1795,7 @@ test('migrate preview scans Codex JSONL session files', () => {
   assert.equal(preview.source, 'codex');
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.people_candidates.includes('Keep'), false);
   assert.deepEqual(preview.raw_text_written, false);
 });
@@ -1449,7 +1810,7 @@ test('migrate preview filters harness words from person candidates', () => {
       role: 'user',
       content: [{
         type: 'input_text',
-          text: 'Filesystem Network Approvals Default However Planning Task Agent Read Bash Updated Users-nikshilov Check Сейчас Use Phase Output File Opus Sonnet Asia Bangkok Error Usage May Mem Hello Record Create Failed Invalid Full After Command Work Async Pro Pages Один Когда Три Сначала Только Потом Telegram Hermes Atlas Both Pass Python Project Bundle Confirmed Not Architecture Extraction Test Tests Russian Complete Correction Live Source All Conversation Added Verified Verify Section Waiting Apr June Prompt Server Context Heart Chat Demo Companion Evidence First Script Gateway Build Cloudflare Final Fix Run Running Files Port Worker Created History Primary Hearth Bitwarden Library Caches Applications Bench Content Map Module Акт Готово Просто Жду Через Всё После Пауза Запускаю Два Проверю Его Мне Цель Для Тихо Ещё Медленно Привет Карта Мои Напиши Приоритет Или Чтобы Now. Vitaly should review Pulse. Vitaly is the real person here.',
+          text: 'Filesystem Network Approvals Default However Planning Task Agent Read Bash Updated Users-example Check Сейчас Use Phase Output File Opus Sonnet Asia Location Error Usage May Mem Hello Record Create Failed Invalid Full After Command Work Async Pro Pages Один Когда Три Сначала Только Потом Telegram Hermes Atlas Both Pass Python Project Bundle Confirmed Not Architecture Extraction Test Tests Russian Complete Correction Live Source All Conversation Added Verified Verify Section Waiting Apr June Prompt Server Context Heart Chat Demo Companion Evidence First Script Gateway Build Cloudflare Final Fix Run Running Files Port Worker Created History Primary Hearth Bitwarden Library Caches Applications Bench Content Map Module Акт Готово Просто Жду Через Всё После Пауза Запускаю Два Проверю Его Мне Цель Для Тихо Ещё Медленно Привет Карта Мои Напиши Приоритет Или Чтобы Now. Bob should review Pulse. Bob is the real person here.',
       }],
     },
   }),
@@ -1458,7 +1819,7 @@ test('migrate preview filters harness words from person candidates', () => {
       payload: {
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'output_text', text: 'Vitaly remains the relevant person candidate.' }],
+        content: [{ type: 'output_text', text: 'Bob remains the relevant person candidate.' }],
       },
     }),
   ].join('\n'));
@@ -1467,11 +1828,11 @@ test('migrate preview filters harness words from person candidates', () => {
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.equal(preview.people_candidates[0], 'Vitaly');
-  for (const noise of ['Filesystem', 'Network', 'Approvals', 'Default', 'However', 'Planning', 'Task', 'Agent', 'Read', 'Bash', 'Import', 'Keep', 'Graph', 'Viewer', 'Preview', 'Updated', 'Users-nikshilov', 'Check', 'Сейчас', 'Use', 'Phase', 'Output', 'File', 'Opus', 'Sonnet', 'Asia', 'Bangkok', 'Error', 'Usage', 'May', 'Mem', 'Hello', 'Record', 'Create', 'Failed', 'Invalid', 'Full', 'After', 'Command', 'Work', 'Async', 'Pro', 'Pages', 'Один', 'Когда', 'Три', 'Сначала', 'Только', 'Потом', 'Telegram', 'Hermes', 'Atlas', 'Both', 'Pass', 'Python', 'Project', 'Bundle', 'Confirmed', 'Not', 'Architecture', 'Extraction', 'Test', 'Tests', 'Russian', 'Complete', 'Correction', 'Live', 'Source', 'All', 'Conversation', 'Added', 'Verified', 'Verify', 'Section', 'Waiting', 'Apr', 'June', 'Prompt', 'Server', 'Context', 'Heart', 'Chat', 'Demo', 'Companion', 'Evidence', 'First', 'Script', 'Gateway', 'Build', 'Cloudflare', 'Final', 'Fix', 'Run', 'Running', 'Files', 'Port', 'Worker', 'Created', 'History', 'Primary', 'Hearth', 'Bitwarden', 'Library', 'Caches', 'Applications', 'Bench', 'Content', 'Map', 'Module', 'Акт', 'Готово', 'Просто', 'Жду', 'Через', 'Всё', 'После', 'Пауза', 'Запускаю', 'Два', 'Проверю', 'Его', 'Мне', 'Цель', 'Для', 'Тихо', 'Ещё', 'Медленно', 'Привет', 'Карта', 'Мои', 'Напиши', 'Приоритет', 'Или', 'Чтобы', 'Now']) {
+  assert.equal(preview.people_candidates[0], 'Bob');
+  for (const noise of ['Filesystem', 'Network', 'Approvals', 'Default', 'However', 'Planning', 'Task', 'Agent', 'Read', 'Bash', 'Import', 'Keep', 'Graph', 'Viewer', 'Preview', 'Updated', 'Users-example', 'Check', 'Сейчас', 'Use', 'Phase', 'Output', 'File', 'Opus', 'Sonnet', 'Asia', 'Location', 'Error', 'Usage', 'May', 'Mem', 'Hello', 'Record', 'Create', 'Failed', 'Invalid', 'Full', 'After', 'Command', 'Work', 'Async', 'Pro', 'Pages', 'Один', 'Когда', 'Три', 'Сначала', 'Только', 'Потом', 'Telegram', 'Hermes', 'Atlas', 'Both', 'Pass', 'Python', 'Project', 'Bundle', 'Confirmed', 'Not', 'Architecture', 'Extraction', 'Test', 'Tests', 'Russian', 'Complete', 'Correction', 'Live', 'Source', 'All', 'Conversation', 'Added', 'Verified', 'Verify', 'Section', 'Waiting', 'Apr', 'June', 'Prompt', 'Server', 'Context', 'Heart', 'Chat', 'Demo', 'Companion', 'Evidence', 'First', 'Script', 'Gateway', 'Build', 'Cloudflare', 'Final', 'Fix', 'Run', 'Running', 'Files', 'Port', 'Worker', 'Created', 'History', 'Primary', 'Hearth', 'Bitwarden', 'Library', 'Caches', 'Applications', 'Bench', 'Content', 'Map', 'Module', 'Акт', 'Готово', 'Просто', 'Жду', 'Через', 'Всё', 'После', 'Пауза', 'Запускаю', 'Два', 'Проверю', 'Его', 'Мне', 'Цель', 'Для', 'Тихо', 'Ещё', 'Медленно', 'Привет', 'Карта', 'Мои', 'Напиши', 'Приоритет', 'Или', 'Чтобы', 'Now']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should be filtered`);
   }
-  assert.deepEqual(preview.fun_fact_candidates.some((fact) => /^Vitaly appeared/.test(fact)), true);
+  assert.deepEqual(preview.fun_fact_candidates.some((fact) => /^Bob appeared/.test(fact)), true);
 });
 
 test('migrate preview keeps repeated generic words out of review candidates', () => {
@@ -1485,7 +1846,7 @@ test('migrate preview keeps repeated generic words out of review candidates', ()
           message: {
             content: {
               parts: [
-                'Google Data Step Background Real Process Before Total Two Three Choose Privacy Avoid Built Автор Explore Guidance Heavy Аудитория Курс Тематика Conversations Benchmark Consulting should not become review entities. Vitaly is real.',
+                'Google Data Step Background Real Process Before Total Two Three Choose Privacy Avoid Built Автор Explore Guidance Heavy Аудитория Курс Тематика Conversations Benchmark Consulting should not become review entities. Bob is real.',
               ],
             },
           },
@@ -1498,7 +1859,7 @@ test('migrate preview keeps repeated generic words out of review candidates', ()
 
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   for (const noise of ['Google', 'Data', 'Step', 'Background', 'Real', 'Process', 'Before', 'Total', 'Two', 'Three', 'Choose', 'Privacy', 'Avoid', 'Built', 'Автор', 'Explore', 'Guidance', 'Heavy', 'Аудитория', 'Курс', 'Тематика', 'Conversations', 'Benchmark', 'Consulting']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should not be a person`);
     assert.equal(preview.review_candidates.includes(noise), false, `${noise} should not be review queue noise`);
@@ -1513,7 +1874,7 @@ test('migrate preview scans Claude Code JSONL project files', () => {
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-session',
-      content: { text: 'Anya should review the beautiful Pulse people viewer.' },
+      content: { text: 'Alice should review the beautiful Pulse people viewer.' },
     }),
     JSON.stringify({
       type: 'assistant',
@@ -1531,7 +1892,7 @@ test('migrate preview scans Claude Code JSONL project files', () => {
   assert.equal(preview.source, 'claude-code');
   assert.equal(preview.conversations, 1);
   assert.equal(preview.messages, 2);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.deepEqual(preview.thread_candidates.length, 1);
 });
 
@@ -1545,7 +1906,7 @@ test('migrate preview hides technical session ids and noisy inflections from hum
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: technicalSession,
       content: {
-        text: 'Эли напомнила Никите: Назови движение иначе. Browser Connector Telethon Cron Timestamps True Move Core System Session Retrieval Observations are tools, not people. Никита and Vitaly are the actual people here.',
+        text: 'Мария напомнила Александру: Назови движение иначе. Browser Connector Telethon Cron Timestamps True Move Core System Session Retrieval Observations are tools, not people. Александр and Bob are the actual people here.',
       },
     }),
     JSON.stringify({
@@ -1553,7 +1914,7 @@ test('migrate preview hides technical session ids and noisy inflections from hum
       operation: 'message',
       timestamp: '2026-06-03T00:02:00Z',
       sessionId: technicalSession,
-      content: [{ type: 'text', text: 'Элли and Vitaly should remain human candidates; Обращ, Движение, Browser, Connector, Telethon, Core, and System should not.' }],
+      content: [{ type: 'text', text: 'Мария and Bob should remain human candidates; Обращ, Движение, Browser, Connector, Telethon, Core, and System should not.' }],
     }),
   ].join('\n'));
 
@@ -1563,10 +1924,10 @@ test('migrate preview hides technical session ids and noisy inflections from hum
   assert.doesNotMatch(result.stdout, new RegExp(technicalSession));
   const preview = JSON.parse(result.stdout);
   assert.equal(preview.source, 'claude-code');
-  assert.deepEqual(preview.people_candidates.includes('Элли'), true);
-  assert.deepEqual(preview.people_candidates.includes('Никита'), true);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
-  for (const noise of ['Эли', 'Никите', 'Назови', 'Движение', 'Обращ', 'Browser', 'Connector', 'Telethon', 'Cron', 'Timestamps', 'True', 'Move', 'Core', 'System', 'Session', 'Retrieval', 'Observations']) {
+  assert.deepEqual(preview.people_candidates.includes('Мария'), true);
+  assert.deepEqual(preview.people_candidates.includes('Александр'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
+  for (const noise of ['Марии', 'Александру', 'Назови', 'Движение', 'Обращ', 'Browser', 'Connector', 'Telethon', 'Cron', 'Timestamps', 'True', 'Move', 'Core', 'System', 'Session', 'Retrieval', 'Observations']) {
     assert.equal(preview.people_candidates.includes(noise), false, `${noise} should not be a promoted person`);
     assert.equal(preview.review_candidates.includes(noise), false, `${noise} should not be review noise`);
   }
@@ -1586,7 +1947,7 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
             author: { role: 'user' },
             content: {
               parts: [
-                'Remember Vitaly and Anya are reviewing Pulse. Qwen, Cartographer, Cinema, and Dossier are not people. Nik felt relief after the archive migrator plan.',
+                'Remember Bob and Alice are reviewing Pulse. Qwen, Cartographer, Cinema, and Dossier are not people. Alex felt relief after the archive migrator plan.',
               ],
             },
           },
@@ -1615,7 +1976,7 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.match(html, /glass-card/);
   assert.match(html, /Pulse Import Preview/);
   assert.match(html, /Thread preview/);
-  assert.match(html, /Token economy/);
+	assert.match(html, /Archive sizing/);
   assert.match(html, /Needs your decision/);
   assert.doesNotMatch(html, /Charter|Georgia|--paper:#f7f2e8|background-size:36px 36px|#151a1c/);
   assert.match(html, /What Pulse will turn into continuity/);
@@ -1627,13 +1988,14 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.match(html, /People found/);
   assert.match(html, /Filter preview/);
   assert.match(html, /id="preview-filter"/);
-  assert.match(html, /estimated saved<\/span>/);
+	assert.match(html, /structured candidates<\/span>/);
+	assert.doesNotMatch(html, /estimated saved|estimated raw/i);
   assert.match(html, /source snippets<\/span>/);
   assert.match(html, /person-card/);
   assert.match(html, /Evidence/);
   assert.match(html, /Related continuity/);
-  assert.match(html, /Vitaly/);
-  assert.match(html, /Anya/);
+  assert.match(html, /Bob/);
+  assert.match(html, /Alice/);
   assert.match(html, /Needs your decision/);
   assert.match(html, /Qwen/);
   assert.match(html, /Cartographer/);
@@ -1649,12 +2011,12 @@ test('migrate preview can write a safe browser HTML profile preview', () => {
   assert.doesNotMatch(html, /Cartographer appeared in \d+ safe preview signal/);
   assert.doesNotMatch(html, /Cinema appeared in \d+ safe preview signal/);
   assert.doesNotMatch(html, /Dossier appeared in \d+ safe preview signal/);
-  assert.match(html, /Vitaly appeared in 1 bounded source snippet/);
-  assert.match(html, /Vitaly - mentioned in - Garden launch/);
-  assert.doesNotMatch(html, /Vitaly -&gt; Garden launch|Vitaly &lt;-&gt; Anya/);
+  assert.match(html, /Bob appeared in 1 bounded source snippet/);
+  assert.match(html, /Bob - mentioned in - Garden launch/);
+  assert.doesNotMatch(html, /Bob -&gt; Garden launch|Bob &lt;-&gt; Alice/);
   assert.match(html, /relief/i);
   assert.match(html, /Raw chat text was not written/);
-  assert.doesNotMatch(html, /Nik felt relief after the archive migrator plan/);
+  assert.doesNotMatch(html, /Alex felt relief after the archive migrator plan/);
   assert.doesNotMatch(html, /fun facts/i);
   assert.doesNotMatch(html, /people, memories, emotions, relationships/i);
   assert.doesNotMatch(html, /safe message signals/i);
@@ -1669,7 +2031,7 @@ test('migrate preview json exposes staged import flow', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Remember Vitaly should inspect the Pulse MCP developer preview before public claims.'] },
+            content: { parts: ['Remember Bob should inspect the Pulse MCP developer preview before public claims.'] },
           },
         },
         assistant: {
@@ -1702,9 +2064,9 @@ test('migrate preview json exposes staged import flow', () => {
   const { result } = run(['migrate', 'preview', exportDir, '--json']);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.doesNotMatch(result.stdout, /Remember Vitaly should inspect|Decision: keep import/);
+  assert.doesNotMatch(result.stdout, /Remember Bob should inspect|Decision: keep import/);
   const preview = JSON.parse(result.stdout);
-  assert.equal(preview.flow, 'pulse.import_preview.v1');
+  assert.equal(preview.flow, 'pulse.import_preview.v2');
   assert.equal(preview.source_scan.status, 'scanned');
   assert.equal(preview.source_scan.source, 'chatgpt');
   assert.equal(preview.source_scan.files_scanned, 1);
@@ -1718,9 +2080,10 @@ test('migrate preview json exposes staged import flow', () => {
   assert.equal(preview.candidate_threads.length, 2);
   assert.deepEqual(preview.candidate_threads.map((thread) => thread.title), ['Pulse MCP distribution', 'Garden demo UX']);
   assert.equal(preview.candidate_threads.every((thread) => thread.privacy_tier === 'private'), true);
-  assert.equal(preview.candidate_threads.every((thread) => thread.token_economy.estimated_raw_tokens >= 220), true);
-  assert.equal(preview.candidate_threads.every((thread) => thread.token_economy.resume_tokens <= 2000), true);
-  assert.equal(preview.candidate_threads.some((thread) => thread.people_found.includes('Vitaly')), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.source_snippets >= 0), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.preview_sizing.structured_candidates >= 1), true);
+	assert.equal(preview.candidate_threads.every((thread) => thread.token_economy === undefined), true);
+  assert.equal(preview.candidate_threads.some((thread) => thread.people_found.includes('Bob')), true);
   assert.ok(Array.isArray(preview.pulse_insights));
   assert.equal(preview.pulse_insights.length >= 1, true);
   const distributionInsight = preview.pulse_insights.find((insight) => insight.thread_title === 'Pulse MCP distribution');
@@ -1729,7 +2092,7 @@ test('migrate preview json exposes staged import flow', () => {
   assert.equal(distributionInsight.privacy_tier, 'private');
   assert.match(distributionInsight.title, /Why this may matter now/);
   assert.match(distributionInsight.summary, /Pulse MCP distribution/);
-  assert.equal(distributionInsight.reasons.some((reason) => /Vitaly.*Pulse MCP distribution|Pulse MCP distribution.*Vitaly/i.test(reason)), true);
+  assert.equal(distributionInsight.reasons.some((reason) => /Bob.*Pulse MCP distribution|Pulse MCP distribution.*Bob/i.test(reason)), true);
   assert.equal(distributionInsight.reasons.some((reason) => /1 related person found/i.test(reason)), true);
   assert.doesNotMatch(JSON.stringify(distributionInsight), /1 people found/i);
   assert.match(distributionInsight.suggested_next_step, /Review this thread before import/);
@@ -1760,7 +2123,7 @@ test('migrate preview HTML follows source-to-gate flow with local review actions
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly and Anya should review Cartographer before the import gate.'] },
+            content: { parts: ['Bob and Alice should review Cartographer before the import gate.'] },
           },
         },
         assistant: {
@@ -1791,7 +2154,8 @@ test('migrate preview HTML follows source-to-gate flow with local review actions
     assert.ok(index > previous, `${label} appears out of order`);
     previous = index;
   }
-  assert.match(html, /data-import-flow="pulse.import_preview.v1"/);
+  assert.match(html, /data-import-flow="pulse.import_preview.v2"/);
+  assert.match(html, /flow: "pulse.import_preview.v2"/);
   assert.match(html, /Download reviewed JSON before import/);
   assert.match(html, /reviewed 0 of/);
   assert.match(html, /data-review-action="confirm"/);
@@ -1851,7 +2215,7 @@ test('migrate preview can write HTML and commit-ready JSON together', () => {
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should inspect the Pulse people profile preview before import.'] },
+            content: { parts: ['Bob should inspect the Pulse people profile preview before import.'] },
           },
         },
       },
@@ -1878,7 +2242,7 @@ test('migrate preview can write HTML and commit-ready JSON together', () => {
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.raw_text_written, false);
   assert.equal(preview.html_path, htmlPath);
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   const html = readFileSync(htmlPath, 'utf8');
   assert.match(html, /Import gate/);
   assert.match(html, /Nothing is imported until/);
@@ -1920,7 +2284,7 @@ test('migrate preview-latest finds newest host archive in downloads', () => {
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should be found from the newest ChatGPT archive.'] },
+            content: { parts: ['Bob should be found from the newest ChatGPT archive.'] },
           },
         },
       },
@@ -1950,9 +2314,9 @@ test('migrate preview-latest finds newest host archive in downloads', () => {
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'chatgpt');
   assert.match(preview.next, new RegExp(`pulse migrate commit ${jsonPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --confirm "import pulse graph"`));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.deepEqual(preview.people_candidates.includes('Oldperson'), false);
-  assert.match(readFileSync(htmlPath, 'utf8'), /Vitaly/);
+  assert.match(readFileSync(htmlPath, 'utf8'), /Bob/);
 });
 
 test('migrate preview-latest preserves host label for Claude archives', () => {
@@ -1964,7 +2328,7 @@ test('migrate preview-latest preserves host label for Claude archives', () => {
     {
       name: 'Claude archive export',
       messages: [
-        { sender: 'human', text: 'Vitaly should review the Claude archive preview.' },
+        { sender: 'human', text: 'Bob should review the Claude archive preview.' },
       ],
     },
   ]));
@@ -2014,7 +2378,7 @@ test('migrate wait-latest waits for host archive then previews it', { timeout: 1
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should appear after Pulse waits for the archive download.'] },
+            content: { parts: ['Bob should appear after Pulse waits for the archive download.'] },
           },
         },
       },
@@ -2049,7 +2413,7 @@ test('migrate wait-latest waits for host archive then previews it', { timeout: 1
   assert.match(result.stdout, /migration HTML preview/);
   assert.match(result.stdout, /migration JSON preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Import gate/);
 });
 
@@ -2066,7 +2430,7 @@ test('migrate request opens host archive page then waits for download preview', 
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should appear after Pulse opens the archive request page.'] },
+            content: { parts: ['Bob should appear after Pulse opens the archive request page.'] },
           },
         },
       },
@@ -2101,7 +2465,7 @@ test('migrate request opens host archive page then waits for download preview', 
   assert.match(result.stdout, /waiting for chatgpt archive/);
   assert.match(result.stdout, /migration HTML preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Open the memory viewer/);
 });
 
@@ -2116,7 +2480,7 @@ test('migrate request defaults to browser preview files', { timeout: 10000 }, as
         latest: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Anya should see the default Pulse preview without extra flags.'] },
+            content: { parts: ['Alice should see the default Pulse preview without extra flags.'] },
           },
         },
       },
@@ -2154,7 +2518,7 @@ test('migrate request defaults to browser preview files', { timeout: 10000 }, as
   assert.equal(existsSync(jsonPath), true);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.html_path, htmlPath);
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Import structured continuity/);
 });
 
@@ -2167,30 +2531,31 @@ function writePeopleGraphFixture() {
     '',
     '| Name | Role | Close | Relevant | File |',
     '|------|------|-------|----------|------|',
-    '| Vitaly Dubinin | founder and warm product reviewer | 4 | pulse-distribution | vitaly.md |',
-    '| Nikita Androsov | AI governance connector | 3 | work | nikita-androsov.md |',
+    '| Bob Example | founder and warm product reviewer | 4 | pulse-distribution | bob-example.md |',
+    '| Carol Example | AI governance connector | 3 | work | carol-example.md |',
   ].join('\n'));
-  writeFileSync(join(peopleDir, 'vitaly.md'), [
-    '# Vitaly Dubinin',
+  writeFileSync(join(peopleDir, 'bob-example.md'), [
+    '# Bob Example',
     '',
     '**Status:** warm contact after product call',
-    '**Telegram:** @vitaly',
+    '**Telegram:** @bob_example',
+    '**Aliases:** Robert Example, Боб Example',
     '',
     '## Summary',
-    'Vitaly call changed the Pulse wedge toward memory and continuity instead of generic companion positioning.',
+    'Bob call changed the Pulse wedge toward memory and continuity instead of generic companion positioning.',
     '',
     '## Links',
     '- source:memory/contacts/personal-contacts.md',
     '- Introduced Pulse packaging critique',
     '- Can review first public MCP bundle',
   ].join('\n'));
-  writeFileSync(join(peopleDir, 'nikita-androsov.md'), [
-    '# Nikita Androsov',
+  writeFileSync(join(peopleDir, 'carol-example.md'), [
+    '# Carol Example',
     '',
     '**Status:** useful AI governance bridge',
     '',
     '## Summary',
-    'Nikita can connect the AI governance course context to Pulse distribution.',
+    'Alexander can connect the AI governance course context to Pulse distribution.',
   ].join('\n'));
   return graphDir;
 }
@@ -2208,33 +2573,34 @@ test('migrate preview-people-graph reads curated real people before archive cand
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'people-graph');
   assert.equal(preview.source_kind, 'curated_people_graph');
-  assert.deepEqual(preview.people_candidates, ['Vitaly Dubinin', 'Nikita Androsov']);
+  assert.deepEqual(preview.people_candidates, ['Bob Example', 'Carol Example']);
   assert.deepEqual(preview.review_candidates, []);
   assert.equal(preview.raw_text_written, false);
   assert.match(preview.next, /pulse migrate commit/);
   assert.equal(Array.isArray(preview.person_profiles), true);
-  const vitaly = preview.person_profiles.find((profile) => profile.name === 'Vitaly Dubinin');
-  assert.ok(vitaly, JSON.stringify(preview.person_profiles));
-  assert.equal(vitaly.role, 'founder and warm product reviewer');
-  assert.equal(vitaly.closeness, 4);
-  assert.equal(vitaly.relevance, 'pulse-distribution');
-  assert.equal(vitaly.status, 'warm contact after product call');
-  assert.equal(vitaly.evidence_ref, 'people/vitaly.md');
-  assert.match(vitaly.summary, /Pulse wedge/);
-  assert.deepEqual(vitaly.links.includes('Can review first public MCP bundle'), true);
-  assert.deepEqual(preview.relationship_candidates.some((item) => /source:memory|people\/vitaly\.md/.test(item)), false);
-  assert.doesNotMatch(JSON.stringify(preview), /Qwen|Cinema|Sonya|raw transcript/i);
+  const bobProfile = preview.person_profiles.find((profile) => profile.name === 'Bob Example');
+  assert.ok(bobProfile, JSON.stringify(preview.person_profiles));
+  assert.equal(bobProfile.role, 'founder and warm product reviewer');
+  assert.equal(bobProfile.closeness, 4);
+  assert.equal(bobProfile.relevance, 'pulse-distribution');
+  assert.equal(bobProfile.status, 'warm contact after product call');
+  assert.equal(bobProfile.evidence_ref, 'people/bob-example.md');
+  assert.deepEqual(bobProfile.aliases, ['Robert Example', 'Боб Example']);
+  assert.match(bobProfile.summary, /Pulse wedge/);
+  assert.deepEqual(bobProfile.links.includes('Can review first public MCP bundle'), true);
+  assert.deepEqual(preview.relationship_candidates.some((item) => /source:memory|people\/bob-example\.md/.test(item)), false);
+  assert.doesNotMatch(JSON.stringify(preview), /Qwen|Cinema|Sophie|raw transcript/i);
 
   const html = readFileSync(htmlPath, 'utf8');
   assert.match(html, /Real people graph/);
   assert.match(html, /Curated people/);
-  assert.match(html, /Vitaly Dubinin/);
+  assert.match(html, /Bob Example/);
   assert.match(html, /founder and warm product reviewer/);
   assert.match(html, /warm contact after product call/);
   assert.match(html, /Personal contacts/);
-  assert.doesNotMatch(html, /source:memory|people\/vitaly\.md/);
+  assert.doesNotMatch(html, /source:memory|people\/bob-example\.md/);
   assert.match(html, /pulse-distribution/);
-  assert.doesNotMatch(html, /Qwen|Cinema|Sonya/);
+  assert.doesNotMatch(html, /Qwen|Cinema|Sophie/);
 });
 
 test('migrate request previews local Codex history with default browser files', async () => {
@@ -2247,7 +2613,7 @@ test('migrate request previews local Codex history with default browser files', 
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Vitaly should inspect local Codex memory relationships.' }],
+        content: [{ type: 'input_text', text: 'Bob should inspect local Codex memory relationships.' }],
       },
     }),
   ].join('\n'));
@@ -2269,7 +2635,7 @@ test('migrate request previews local Codex history with default browser files', 
   assert.match(result.stdout, new RegExp(`opened browser: ${htmlPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'codex');
-  assert.deepEqual(preview.people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(preview.people_candidates.includes('Bob'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /People found/);
 });
 
@@ -2283,7 +2649,7 @@ test('migrate request previews local Claude Code history with default browser fi
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-local-request',
-      content: { text: 'Anya should inspect local Claude Code memory profiles.' },
+      content: { text: 'Alice should inspect local Claude Code memory profiles.' },
     }),
   ].join('\n'));
 
@@ -2303,7 +2669,7 @@ test('migrate request previews local Claude Code history with default browser fi
   assert.match(result.stdout, /migration JSON preview/);
   const preview = JSON.parse(readFileSync(jsonPath, 'utf8'));
   assert.equal(preview.source, 'claude-code');
-  assert.deepEqual(preview.people_candidates.includes('Anya'), true);
+  assert.deepEqual(preview.people_candidates.includes('Alice'), true);
   assert.match(readFileSync(htmlPath, 'utf8'), /Open the memory viewer/);
 });
 
@@ -2324,7 +2690,7 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
             author: { role: 'user' },
             content: {
               parts: [
-                'Remember Vitaly and Anya are reviewing Pulse. Nik felt relief after the archive migrator plan.',
+                'Remember Bob and Alice are reviewing Pulse. Alex felt relief after the archive migrator plan.',
               ],
             },
           },
@@ -2390,12 +2756,12 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
     assert.deepEqual(viewerData.graph_profile.emotions.includes('relief'), true);
     const profiles = viewerData.graph_profile.person_profiles;
     assert.equal(Array.isArray(profiles), true);
-    const vitaly = profiles.find((profile) => profile.name === 'Vitaly');
-    assert.ok(vitaly, JSON.stringify(profiles));
-    assert.match(vitaly.summary, /Person candidate/);
-    assert.match(vitaly.facts.join('\n'), /Vitaly appeared in 1 bounded source snippet/);
-    assert.match(vitaly.relationships.join('\n'), /Vitaly mentioned in Garden launch/);
-    assert.match(vitaly.memories.join('\n'), /Pulse archive import preview committed/);
+    const bobProfile = profiles.find((profile) => profile.name === 'Bob');
+    assert.ok(bobProfile, JSON.stringify(profiles));
+    assert.match(bobProfile.summary, /Person candidate/);
+    assert.match(bobProfile.facts.join('\n'), /Bob appeared in 1 bounded source snippet/);
+    assert.match(bobProfile.relationships.join('\n'), /Bob mentioned in Garden launch/);
+    assert.match(bobProfile.memories.join('\n'), /Pulse archive import preview committed/);
 
     const viewerResp = await fetch(`${pulse.baseUrl}/viewer?key=${pulse.secret}&thread_id=archive-import`);
     if (viewerResp.status !== 200) {
@@ -2406,7 +2772,7 @@ test('archive migration commits into real Pulse viewer graph profile', { timeout
     assert.match(viewerHTML, /graph-profile-cards/);
     assert.match(viewerHTML, /graph-emotions/);
     assert.match(viewerHTML, /person_profiles/);
-    assert.doesNotMatch(JSON.stringify(viewerData), /Nik felt relief after the archive migrator plan/);
+    assert.doesNotMatch(JSON.stringify(viewerData), /Alex felt relief after the archive migrator plan/);
   } finally {
     await pulse.stop();
   }
@@ -2423,21 +2789,44 @@ test('migrate commit requires explicit graph import confirmation', () => {
   assert.match(result.stderr, /--confirm "import pulse graph"/);
 });
 
+test('migrate commit rejects unsupported import preview flows before graph delivery', () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-unsupported-preview.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v999',
+    ok: true,
+    source: 'chatgpt',
+    conversations: 1,
+    messages: 1,
+    thread_candidates: ['Garden launch'],
+    memory_candidates: ['Garden launch: 1 bounded source snippet'],
+    raw_text_written: false,
+  }));
+
+  const { result } = run([
+    'migrate', 'commit', previewPath, '--confirm', 'import pulse graph',
+  ]);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unsupported Pulse import preview flow: pulse\.import_preview\.v999/);
+});
+
 test('migrate commit sends safe semantic delta to Pulse graph endpoint', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-preview.'));
   const previewPath = join(exportDir, 'preview.json');
   writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v1',
     ok: true,
     source: 'chatgpt',
     conversations: 1,
     messages: 2,
-    people_candidates: ['Vitaly', 'Qwen', 'Cinema', 'Anya'],
+    people_candidates: ['Bob', 'Qwen', 'Cinema', 'Alice'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 2 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Garden launch', 'Vitaly <-> Anya', 'Qwen <-> Cinema'],
+    relationship_candidates: ['Bob -> Garden launch', 'Bob <-> Alice', 'Qwen <-> Cinema'],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 safe preview signal',
+      'Bob appeared in 1 safe preview signal',
       'Qwen appeared in 1 safe preview signal',
       'Cinema appeared in 1 safe preview signal',
     ],
@@ -2452,10 +2841,10 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     assert.equal(body.source.conversation_scope, 'project_context');
     assert.equal(body.source.thread_id, 'archive-import');
     assert.match(body.source.timestamp, /^\d{4}-\d{2}-\d{2}T/);
-    assert.deepEqual(body.nodes.map((node) => node.canonical_name), ['Vitaly', 'Anya', 'Garden launch']);
+    assert.deepEqual(body.nodes.map((node) => node.canonical_name), ['Bob', 'Alice', 'Garden launch']);
     assert.deepEqual(body.nodes.map((node) => node.kind), ['person', 'person', 'project']);
     assert.deepEqual(body.edges.map((edge) => edge.kind), ['mentioned_in', 'related_to']);
-    assert.deepEqual(body.facts.map((fact) => fact.text), ['Vitaly appeared in 1 safe preview signal']);
+    assert.deepEqual(body.facts.map((fact) => fact.text), ['Bob appeared in 1 safe preview signal']);
     assert.deepEqual([...body.nodes, ...body.edges, ...body.facts, ...body.events].map((item) => item.privacy_tier), [
       'private',
       'private',
@@ -2468,7 +2857,7 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
     ]);
     assert.match(body.events[0].title, /Pulse archive import preview/);
     assert.match(body.continuity.summary, /Imported safe Pulse archive preview/);
-    assert.doesNotMatch(JSON.stringify(body), /Nik felt relief after the archive migrator plan|raw chat|PULSE_API_KEY|secret\.key/);
+    assert.doesNotMatch(JSON.stringify(body), /Alex felt relief after the archive migrator plan|raw chat|PULSE_API_KEY|secret\.key/);
     return {
       body: {
         ok: true,
@@ -2506,6 +2895,47 @@ test('migrate commit sends safe semantic delta to Pulse graph endpoint', async (
   }
 });
 
+test('migrate commit fails closed on a rejected terminal receipt', async () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-rejected-preview.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    flow: 'pulse.import_preview.v2',
+    ok: true,
+    source: 'chatgpt',
+    conversations: 1,
+    messages: 2,
+    people_candidates: ['Bob'],
+    thread_candidates: ['Garden launch'],
+    memory_candidates: ['Garden launch: 2 safe message signals'],
+    relationship_candidates: [],
+    raw_text_written: false,
+  }));
+  const stub = await withPulseStub(() => ({
+    body: {
+      ledger_id: 'turn_migrate_rejected',
+      status: 'rejected',
+      receipts: [productReceipt({
+        receipt_id: 'receipt_migrate_rejected', status: 'rejected', reason_code: 'unsafe_payload',
+      })],
+    },
+  }));
+  try {
+    const result = await runAsync([
+      'migrate',
+      'commit',
+      previewPath,
+      '--confirm',
+      'import pulse graph',
+    ], { PULSE_BASE_URL: stub.baseUrl });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /was not committed \(rejected: unsafe_payload; receipt receipt_migrate_rejected\)/);
+    assert.doesNotMatch(result.stdout, /committed Pulse graph delta/);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('migrate commit applies persisted review decisions from reviewed JSON', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-reviewed-preview.'));
   const previewPath = join(exportDir, 'preview.reviewed.json');
@@ -2514,13 +2944,13 @@ test('migrate commit applies persisted review decisions from reviewed JSON', asy
     source: 'chatgpt',
     conversations: 1,
     messages: 3,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 3 source snippets'],
-    relationship_candidates: ['Vitaly -> Garden launch', 'Qwen -> Garden launch', 'Cartographer -> Garden launch'],
+    relationship_candidates: ['Bob -> Garden launch', 'Qwen -> Garden launch', 'Cartographer -> Garden launch'],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Qwen appeared in 1 bounded source snippet',
     ],
     review_decisions: {
@@ -2533,9 +2963,9 @@ test('migrate commit applies persisted review decisions from reviewed JSON', asy
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const names = body.nodes.map((node) => node.canonical_name);
-    assert.deepEqual(names, ['Vitaly', 'Garden launch', 'Cartographer']);
+    assert.deepEqual(names, ['Bob', 'Garden launch', 'Cartographer']);
     assert.equal(JSON.stringify(body).includes('Qwen'), false);
-    assert.deepEqual(body.facts.map((fact) => fact.text), ['Vitaly appeared in 1 bounded source snippet']);
+    assert.deepEqual(body.facts.map((fact) => fact.text), ['Bob appeared in 1 bounded source snippet']);
     return { body: { ok: true } };
   });
   try {
@@ -2568,17 +2998,17 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     source: 'chatgpt',
     conversations: 1,
     messages: 4,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 4 source snippets'],
     relationship_candidates: [
-      'Vitaly -> Garden launch',
+      'Bob -> Garden launch',
       'Cartographer -> Garden launch',
       'Qwen -> Garden launch',
     ],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
       'Qwen appeared in 1 bounded source snippet',
     ],
@@ -2592,10 +3022,10 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const names = body.nodes.map((node) => node.canonical_name);
-    assert.deepEqual(names, ['Vitaly', 'Garden launch', 'Cartographer']);
+    assert.deepEqual(names, ['Bob', 'Garden launch', 'Cartographer']);
     assert.equal(JSON.stringify(body).includes('Qwen'), false);
     assert.deepEqual(body.facts.map((fact) => fact.text), [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
     ]);
     const nodeByName = new Map(body.nodes.map((node) => [node.canonical_name, node.client_id]));
@@ -2606,7 +3036,7 @@ test('migrate commit includes safe facts and edges for confirmed review entities
     )), JSON.stringify(body.edges));
     assert.ok(body.edges.some((edge) => (
       edge.kind === 'mentioned_in' &&
-      edge.from === nodeByName.get('Vitaly') &&
+      edge.from === nodeByName.get('Bob') &&
       edge.to === nodeByName.get('Garden launch')
     )), JSON.stringify(body.edges));
     return { body: { ok: true } };
@@ -2641,7 +3071,7 @@ test('migrate commit materializes Pulse insights without ignored review leakage'
     source: 'chatgpt',
     conversations: 1,
     messages: 5,
-    people_candidates: ['Vitaly', 'Qwen'],
+    people_candidates: ['Bob', 'Qwen'],
     review_candidates: ['Cartographer', 'Qwen'],
     thread_candidates: ['Garden launch'],
     memory_candidates: [
@@ -2649,12 +3079,12 @@ test('migrate commit materializes Pulse insights without ignored review leakage'
       'Codex entity hygiene session: 2 source snippets',
     ],
     relationship_candidates: [
-      'Vitaly -> Garden launch',
+      'Bob -> Garden launch',
       'Cartographer -> Garden launch',
       'Qwen -> Garden launch',
     ],
     fun_fact_candidates: [
-      'Vitaly appeared in 1 bounded source snippet',
+      'Bob appeared in 1 bounded source snippet',
       'Cartographer appeared in 2 bounded source snippets',
       'Qwen appeared in 1 bounded source snippet',
     ],
@@ -2753,10 +3183,10 @@ test('migrate commit allows explicit privacy override for developer smoke', asyn
     source: 'chatgpt',
     conversations: 1,
     messages: 2,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 2 safe message signals'],
-    relationship_candidates: ['Vitaly -> Garden launch'],
+    relationship_candidates: ['Bob -> Garden launch'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -2819,15 +3249,19 @@ test('migrate commit groups obvious person aliases before graph import', async (
     source: 'chatgpt',
     conversations: 3,
     messages: 12,
-    people_candidates: ['Nik', 'Nikita', 'Никита', 'Anya'],
+    people_candidates: ['Alex', 'Alexander', 'Александр', 'Alice'],
+    person_profiles: [{
+      name: 'Alex',
+      aliases: ['Alexander', 'Александр'],
+    }],
     thread_candidates: ['Pulse Dashboard'],
     memory_candidates: ['Pulse Dashboard: 12 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Nikita -> Pulse Dashboard', 'Никита -> Pulse Dashboard', 'Anya -> Pulse Dashboard'],
+    relationship_candidates: ['Alexander -> Pulse Dashboard', 'Александр -> Pulse Dashboard', 'Alice -> Pulse Dashboard'],
     fun_fact_candidates: [
-      'Nikita appeared in 8 safe preview signals',
-      'Никита appeared in 5 safe preview signals',
-      'Anya appeared in 2 safe preview signals',
+      'Alexander appeared in 8 safe preview signals',
+      'Александр appeared in 5 safe preview signals',
+      'Alice appeared in 2 safe preview signals',
     ],
     raw_text_written: false,
   }));
@@ -2835,8 +3269,8 @@ test('migrate commit groups obvious person aliases before graph import', async (
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/graph/delta');
     const people = body.nodes.filter((node) => node.kind === 'person');
-    assert.deepEqual(people.map((node) => node.canonical_name), ['Nik', 'Anya']);
-    assert.deepEqual(people[0].aliases, ['Nikita', 'Никита']);
+    assert.deepEqual(people.map((node) => node.canonical_name), ['Alex', 'Alice']);
+    assert.deepEqual(people[0].aliases, ['Alexander', 'Александр']);
     assert.equal(body.edges.filter((edge) => edge.from === people[0].client_id).length, 1);
     assert.equal(body.facts.filter((fact) => fact.node === people[0].client_id).length, 2);
     assert.doesNotMatch(JSON.stringify(body), /raw chat|PULSE_API_KEY|secret\.key/);
@@ -2864,6 +3298,53 @@ test('migrate commit groups obvious person aliases before graph import', async (
   }
 });
 
+test('migrate commit removes aliases shared by multiple curated people', async () => {
+  const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-ambiguous-alias.'));
+  const previewPath = join(exportDir, 'preview.json');
+  writeFileSync(previewPath, JSON.stringify({
+    ok: true,
+    source: 'people-graph',
+    conversations: 1,
+    messages: 2,
+    people_candidates: ['Alice Smith', 'Bob Jones'],
+    person_profiles: [
+      { name: 'Alice Smith', aliases: ['Alex'] },
+      { name: 'Bob Jones', aliases: ['Alex'] },
+    ],
+    thread_candidates: [],
+    memory_candidates: [],
+    relationship_candidates: [],
+    raw_text_written: false,
+  }));
+  const stub = await withPulseStub((req, body) => {
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/graph/delta');
+    const people = body.nodes.filter((node) => node.kind === 'person');
+    assert.deepEqual(people.map((node) => node.canonical_name), ['Alice Smith', 'Bob Jones']);
+    assert.deepEqual(people.map((node) => node.aliases), [[], []]);
+    return { body: { ok: true } };
+  });
+  try {
+    const result = await runAsync([
+      'migrate',
+      'commit',
+      previewPath,
+      '--confirm',
+      'import pulse graph',
+    ], {
+      PULSE_BASE_URL: stub.baseUrl,
+      PULSE_THREAD_ID: 'archive-import',
+      PULSE_PROJECT_ID: 'pulse-migration',
+      PULSE_SESSION_ID: 'pulse-migration:test',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(stub.requests.length, 1);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('migrate commit keeps relationship target topics as graph nodes', async () => {
   const exportDir = mkdtempSync(join(tmpdir(), 'pulse-commit-relationship-target.'));
   const previewPath = join(exportDir, 'preview.json');
@@ -2872,15 +3353,15 @@ test('migrate commit keeps relationship target topics as graph nodes', async () 
     source: 'chatgpt',
     conversations: 4,
     messages: 16,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: [
       'Thread A', 'Thread B', 'Thread C', 'Thread D',
       'Thread E', 'Thread F', 'Thread G', 'Thread H',
     ],
     memory_candidates: ['Important hidden topic: 16 safe message signals'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Important hidden topic'],
-    fun_fact_candidates: ['Vitaly appeared in 4 safe preview signals'],
+    relationship_candidates: ['Bob -> Important hidden topic'],
+    fun_fact_candidates: ['Bob appeared in 4 safe preview signals'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -2919,7 +3400,7 @@ test('migrate commit materializes memory candidates as timeline events', async (
     source: 'chatgpt',
     conversations: 3,
     messages: 9,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Pulse Dashboard', 'Graph Cleanup'],
     memory_candidates: [
       'Pulse Dashboard: 5 safe message signals',
@@ -2927,8 +3408,8 @@ test('migrate commit materializes memory candidates as timeline events', async (
       'Viewer polish: 1 safe message signal',
     ],
     emotion_candidates: ['relief', 'excitement'],
-    relationship_candidates: ['Vitaly -> Pulse Dashboard'],
-    fun_fact_candidates: ['Vitaly appeared in 3 safe preview signals'],
+    relationship_candidates: ['Bob -> Pulse Dashboard'],
+    fun_fact_candidates: ['Bob appeared in 3 safe preview signals'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -2970,12 +3451,12 @@ test('migrate commit can open the memory viewer after import', async () => {
     source: 'chatgpt',
     conversations: 1,
     messages: 1,
-    people_candidates: ['Vitaly'],
+    people_candidates: ['Bob'],
     thread_candidates: ['Garden launch'],
     memory_candidates: ['Garden launch: 1 safe message signal'],
     emotion_candidates: ['relief'],
-    relationship_candidates: ['Vitaly -> Garden launch'],
-    fun_fact_candidates: ['Vitaly appeared in 1 safe preview signal'],
+    relationship_candidates: ['Bob -> Garden launch'],
+    fun_fact_candidates: ['Bob appeared in 1 safe preview signal'],
     raw_text_written: false,
   }));
   const stub = await withPulseStub((req, body) => {
@@ -3005,7 +3486,7 @@ test('migrate commit can open the memory viewer after import', async () => {
     assert.match(result.stdout, /opened browser:/);
     assert.match(result.stdout, /\/viewer\?key=/);
     assert.match(result.stdout, /thread_id=archive-import/);
-    assert.match(result.stdout, /Shows what Pulse will tell Claude next time/);
+		assert.match(result.stdout, /Shows the bounded continuity pack for the next connected harness session/);
     assert.equal(stub.requests.length, 1);
   } finally {
     await stub.close();
@@ -3124,7 +3605,7 @@ test('migrate start opens archive pages and builds local previews in one command
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Vitaly should inspect the one command Pulse start flow. Qwen and Cartographer are tool names, not people.' }],
+        content: [{ type: 'input_text', text: 'Bob should inspect the one command Pulse start flow. Qwen and Cartographer are tool names, not people.' }],
       },
     }),
   ].join('\n'));
@@ -3134,7 +3615,7 @@ test('migrate start opens archive pages and builds local previews in one command
       operation: 'message',
       timestamp: '2026-06-03T00:01:00Z',
       sessionId: 'claude-code-start',
-      content: { text: 'Anya should inspect the one command Pulse start flow.' },
+      content: { text: 'Alice should inspect the one command Pulse start flow.' },
     }),
   ].join('\n'));
 
@@ -3241,8 +3722,8 @@ test('migrate start opens archive pages and builds local previews in one command
   assert.match(galleryHTML, /Emotional anchors/);
   assert.match(galleryHTML, /Open loops/);
   assert.doesNotMatch(galleryHTML, /Fun facts/i);
-  assert.match(galleryHTML, /Vitaly/);
-  assert.match(galleryHTML, /Anya/);
+  assert.match(galleryHTML, /Bob/);
+  assert.match(galleryHTML, /Alice/);
   assert.match(galleryHTML, /Needs your decision/);
   assert.match(galleryHTML, /Qwen/);
   assert.match(galleryHTML, /Cartographer/);
@@ -3269,7 +3750,7 @@ test('migrate start puts curated people graph above local archive previews', asy
       payload: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Sonya and Qwen are fiction/model review noise. Vitaly is real.' }],
+        content: [{ type: 'input_text', text: 'Sophie and Qwen are fiction/model review noise. Bob is real.' }],
       },
     }),
   ].join('\n'));
@@ -3293,12 +3774,12 @@ test('migrate start puts curated people graph above local archive previews', asy
   const galleryHTML = readFileSync(join(outDir, 'pulse-memory-gallery.html'), 'utf8');
   assert.match(galleryHTML, /Real people graph/);
   assert.match(galleryHTML, /Curated people graph/);
-  assert.match(galleryHTML, /Vitaly Dubinin/);
+  assert.match(galleryHTML, /Bob Example/);
   assert.match(galleryHTML, /founder and warm product reviewer/);
   assert.match(galleryHTML, /pulse-distribution/);
   assert.match(galleryHTML, /Codex/);
   assert.ok(galleryHTML.indexOf('People Graph') < galleryHTML.indexOf('Codex'));
-  assert.ok(galleryHTML.indexOf('Vitaly Dubinin') < galleryHTML.indexOf('Sonya'));
+  assert.ok(galleryHTML.indexOf('Bob Example') < galleryHTML.indexOf('Sophie'));
   assert.doesNotMatch(galleryHTML, /<h3>Qwen<\/h3>/);
   const preview = JSON.parse(readFileSync(join(outDir, 'pulse-people-graph-preview.json'), 'utf8'));
   assert.equal(preview.source_kind, 'curated_people_graph');
@@ -3317,7 +3798,7 @@ test('migrate start watch previews arrived remote archive and keeps waiting path
         user: {
           message: {
             author: { role: 'user' },
-            content: { parts: ['Vitaly should inspect the Pulse watch flow preview.'] },
+            content: { parts: ['Bob should inspect the Pulse watch flow preview.'] },
           },
         },
       },
@@ -3353,7 +3834,7 @@ test('migrate start watch previews arrived remote archive and keeps waiting path
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /Preview ready/);
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /Not ready yet/);
   assert.match(readFileSync(join(outDir, 'pulse-migrate-status.html'), 'utf8'), /http-equiv="refresh" content="5"/);
-  assert.deepEqual(JSON.parse(readFileSync(join(outDir, 'pulse-chatgpt-preview.json'), 'utf8')).people_candidates.includes('Vitaly'), true);
+  assert.deepEqual(JSON.parse(readFileSync(join(outDir, 'pulse-chatgpt-preview.json'), 'utf8')).people_candidates.includes('Bob'), true);
 });
 
 test('migrate guide fails clearly for unknown sources', () => {
@@ -3361,4 +3842,29 @@ test('migrate guide fails clearly for unknown sources', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /supports: chatgpt, claude, codex, claude-code/);
+});
+
+test('Team Owner CLI exposes the separate step-up and exact mutation commands', () => {
+  const help = run(['--help']).result;
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /pulse team owner login --profile <root-owned-json>/);
+  assert.match(help.stdout, /pulse team owner member create --profile <root-owned-json> --issuer <https-url> --subject <id> --role owner\|member\|reviewer/);
+  assert.match(help.stdout, /pulse team owner member revoke --profile <root-owned-json> --principal-id <id>/);
+  assert.match(help.stdout, /pulse team owner binding create --profile <root-owned-json> --issuer <https-url> --subject <id> --client-id <id>/);
+  assert.match(help.stdout, /pulse team owner binding revoke --profile <root-owned-json> --binding-id <id>/);
+  assert.match(help.stdout, /pulse team owner project create --profile <root-owned-json> --name <name>/);
+  assert.match(help.stdout, /pulse team owner project grant --profile <root-owned-json> --project-id <id> --principal-id <id> --access read\|write\|admin/);
+  assert.match(help.stdout, /pulse team owner project revoke-grant --profile <root-owned-json> --grant-id <id>/);
+
+  const unknown = run(['team', 'owner', 'surprise']).result;
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /pulse team owner supports: login \| member create\|revoke \| binding create\|revoke \| project create\|grant\|revoke-grant/);
+
+  const incomplete = run(['team', 'owner', 'member', 'create']).result;
+  assert.notEqual(incomplete.status, 0);
+  assert.match(incomplete.stderr, /member create requires --issuer, --subject, and --role/);
+
+  const incompleteBinding = run(['team', 'owner', 'binding', 'create']).result;
+  assert.notEqual(incompleteBinding.status, 0);
+  assert.match(incompleteBinding.stderr, /binding create requires --issuer, --subject, and --client-id/);
 });

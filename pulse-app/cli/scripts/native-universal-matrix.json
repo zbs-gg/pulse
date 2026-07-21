@@ -1,0 +1,18 @@
+{
+  "schema": "pulse.native_universal_matrix.v1",
+  "node_version": "22",
+  "go_version": "1.25.6",
+  "harness": {
+    "host": "codex",
+    "package": "@openai/codex",
+    "version": "0.136.0"
+  },
+  "targets": [
+    { "target_id": "darwin-arm64", "runner": "macos-26", "platform": "darwin", "architecture": "arm64", "libc": null },
+    { "target_id": "darwin-x64", "runner": "macos-26-intel", "platform": "darwin", "architecture": "x64", "libc": null },
+    { "target_id": "linux-arm64-gnu", "runner": "ubuntu-24.04-arm", "platform": "linux", "architecture": "arm64", "libc": "gnu" },
+    { "target_id": "linux-x64-gnu", "runner": "ubuntu-24.04", "platform": "linux", "architecture": "x64", "libc": "gnu" },
+    { "target_id": "win32-arm64", "runner": "windows-11-arm", "platform": "win32", "architecture": "arm64", "libc": null },
+    { "target_id": "win32-x64", "runner": "windows-2025", "platform": "win32", "architecture": "x64", "libc": null }
+  ]
+}

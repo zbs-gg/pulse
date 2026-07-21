@@ -1,0 +1,144 @@
+name: Universal
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: universal-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Matrix contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - id: matrix
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          node scripts/native-universal-matrix.mjs --check
+          echo "value=$(node scripts/native-universal-matrix.mjs --github)" >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: Full product suite
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            pulse-app/cli/package-lock.json
+            mcp/package-lock.json
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.6
+          cache-dependency-path: pulse-app/go.sum
+      - name: Verify full Go suite
+        working-directory: pulse-app
+        run: go test ./...
+      - name: Build and verify full MCP suite
+        working-directory: mcp
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          npm test
+      - name: Verify full CLI suite
+        working-directory: pulse-app/cli
+        run: |
+          npm ci --ignore-scripts
+          npm test
+
+  native:
+    name: Native / ${{ matrix.target_id }} / ${{ matrix.host }}
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.contract.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          cache: npm
+          cache-dependency-path: |
+            pulse-app/cli/package-lock.json
+            mcp/package-lock.json
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: pulse-app/go.sum
+      - name: Install exact harness calibration
+        shell: bash
+        run: |
+          npm install --global "${{ matrix.harness_package }}@${{ matrix.harness_version }}"
+          codex --version
+      - name: Build native Go product
+        working-directory: pulse-app
+        shell: bash
+        run: |
+          go build ./cmd/pulse ./cmd/pulse-fixture-embedder
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            go test ./cmd/pulse-platform-adapter
+            go test ./internal/config -run '^TestLoadVaultPinsKindAndStoreIdentity$'
+          fi
+      - name: Build native MCP package
+        working-directory: mcp
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npx tsc
+      - name: Install native CLI dependencies
+        working-directory: pulse-app/cli
+        shell: bash
+        run: npm ci --ignore-scripts
+      - name: Prove exact packed Personal continuity
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          npm run test:native-universal-target --
+          --target "${{ matrix.target_id }}"
+          --out ".pulse-ci/evidence/${{ matrix.target_id }}.json"
+      - name: Upload content-free target evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-native-${{ matrix.target_id }}
+          path: pulse-app/cli/.pulse-ci/evidence/${{ matrix.target_id }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  universal-required:
+    name: Universal / required
+    if: always()
+    needs: [contract, quality, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every native target
+        env:
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        shell: bash
+        run: |
+          test "$CONTRACT_RESULT" = success
+          test "$QUALITY_RESULT" = success
+          test "$NATIVE_RESULT" = success

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 type Retrieval interface {
@@ -105,11 +106,12 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 				// Per-event why-this-surfaced: cosine, recency, and the v3
 				// conditional boosts (emotion/state/anchor/date) that fired.
 				"score_breakdowns": ret.ScoreBreakdowns,
+				"project_memory":   ret.ProjectMemory,
 			},
 		}
 	}
 
-	if err := s.loadEvents(ctx, out, ret.EventIDs, allowedDomains); err != nil {
+	if err := s.loadEvents(ctx, out, ret.EventIDs, allowedDomains, ret.ProjectMemory); err != nil {
 		return nil, err
 	}
 	if err := s.loadEntitiesAndFacts(ctx, out, ret.EventIDs, allowedDomains); err != nil {
@@ -127,7 +129,13 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 	return out, nil
 }
 
-func (s *Service) loadEvents(ctx context.Context, out *ContextResult, ids []int64, allowedDomains map[string]bool) error {
+func (s *Service) loadEvents(
+	ctx context.Context,
+	out *ContextResult,
+	ids []int64,
+	allowedDomains map[string]bool,
+	projectMemory map[int64]store.GitTeamMemoryProvenance,
+) error {
 	for _, id := range ids {
 		if !s.subjectInScope(ctx, "event", id, out.Scope) {
 			continue
@@ -149,6 +157,13 @@ FROM events WHERE id=?`, id)
 		ev.Score = emo
 		ev.SourceScope = out.Scope
 		ev.PrivacyFloor = "private"
+		if provenance, ok := projectMemory[id]; ok {
+			copy := provenance
+			ev.Provenance = "git_team_memory"
+			ev.SourceScope = "project"
+			ev.PrivacyFloor = "normal"
+			ev.ProjectMemory = &copy
+		}
 		ev.EvidenceIDs = s.evidenceIDs(ctx, "event", ev.ID)
 		out.Events = append(out.Events, ev)
 		if emo >= 0.6 {

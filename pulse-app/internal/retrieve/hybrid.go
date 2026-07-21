@@ -197,7 +197,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 
 // EmbedderReady reports whether full retrieval can run (an embedder is wired).
 func (e *Engine) EmbedderReady() bool {
-	return e.embedder != nil
+	if e.embedder == nil {
+		return false
+	}
+	if live, ok := e.embedder.(interface{ Ready() bool }); ok {
+		return live.Ready()
+	}
+	return true
 }
 
 // EmbedderModel names the embedding model the index is built with.
@@ -211,33 +217,37 @@ type IndexEventDoc struct {
 	Text    string
 }
 
-// EmbedAndIndexEvents embeds freshly ingested events as search documents,
-// writes them into event_embeddings, and reloads the in-memory index. This is
-// what makes interactive ingest (/graph/delta) retrievable immediately.
-func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) error {
+// EmbedAndPersistEvents embeds event documents and durably writes their
+// vectors without reloading the in-memory index. Backfill callers use this to
+// persist multiple bounded pages, then perform one deliberate Reload.
+func (e *Engine) EmbedAndPersistEvents(ctx context.Context, docs []IndexEventDoc) (int, error) {
 	if e.embedder == nil {
-		return fmt.Errorf("retrieve index: embedder is nil")
+		return 0, fmt.Errorf("retrieve index: embedder is nil")
 	}
 	if len(docs) == 0 {
-		return nil
+		return 0, nil
 	}
-	texts := make([]string, len(docs))
-	for i, doc := range docs {
-		texts[i] = doc.Text
-	}
-	vecs, err := e.embedder.Embed(ctx, texts, embed.TypeSearchDocument)
-	if err != nil {
-		return fmt.Errorf("retrieve index embed: %w", err)
-	}
-	if len(vecs) != len(docs) {
-		return fmt.Errorf("retrieve index: embedder returned %d vectors for %d docs", len(vecs), len(docs))
-	}
-	for i, doc := range docs {
-		raw, err := json.Marshal(vecs[i])
-		if err != nil {
-			return fmt.Errorf("retrieve index marshal vector: %w", err)
+	persisted := 0
+	for start := 0; start < len(docs); start += embed.MaxBatchSize {
+		end := min(start+embed.MaxBatchSize, len(docs))
+		batch := docs[start:end]
+		texts := make([]string, len(batch))
+		for i, doc := range batch {
+			texts[i] = doc.Text
 		}
-		if _, err := e.store.DB().ExecContext(ctx, `
+		vecs, err := e.embedder.Embed(ctx, texts, embed.TypeSearchDocument)
+		if err != nil {
+			return persisted, fmt.Errorf("retrieve index embed: %w", err)
+		}
+		if len(vecs) != len(batch) {
+			return persisted, fmt.Errorf("retrieve index: embedder returned %d vectors for %d docs", len(vecs), len(batch))
+		}
+		for i, doc := range batch {
+			raw, err := json.Marshal(vecs[i])
+			if err != nil {
+				return persisted, fmt.Errorf("retrieve index marshal vector: %w", err)
+			}
+			if _, err := e.store.DB().ExecContext(ctx, `
 			INSERT INTO event_embeddings (event_id, model, dim, vector_json, text_source)
 			VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT(event_id) DO UPDATE SET
@@ -245,11 +255,26 @@ func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) 
 			  dim = excluded.dim,
 			  vector_json = excluded.vector_json,
 			  text_source = excluded.text_source`,
-			doc.EventID, e.embedModel, len(vecs[i]), string(raw), doc.Text); err != nil {
-			return fmt.Errorf("retrieve index upsert event %d: %w", doc.EventID, err)
+				doc.EventID, e.embedModel, len(vecs[i]), string(raw), doc.Text); err != nil {
+				return persisted, fmt.Errorf("retrieve index upsert event %d: %w", doc.EventID, err)
+			}
+			persisted++
 		}
 	}
-	return e.Reload(ctx)
+	return persisted, nil
+}
+
+// EmbedAndIndexEvents embeds freshly ingested events as search documents,
+// writes them into event_embeddings, and reloads the in-memory index. This is
+// what makes interactive ingest (/graph/delta) retrievable immediately.
+func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) error {
+	persisted, persistErr := e.EmbedAndPersistEvents(ctx, docs)
+	if persisted > 0 {
+		if reloadErr := e.Reload(ctx); reloadErr != nil && persistErr == nil {
+			return reloadErr
+		}
+	}
+	return persistErr
 }
 
 // loadEvents pulls (id, ts, embedding, emotion_vec) per event.
@@ -482,6 +507,7 @@ type RetrieveResponse struct {
 	EmotionRole          EmotionRoleDecision
 	SurfaceabilityAction SurfaceabilityAction
 	ScoreBreakdowns      map[int64]ScoreBreakdown
+	ProjectMemory        map[int64]store.GitTeamMemoryProvenance
 }
 
 type ScoreBreakdown struct {
@@ -652,6 +678,10 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	if e.accessFreqEnabled && e.store != nil && len(ids) > 0 {
 		_ = e.store.IncrementAccessCounts(ids, time.Now())
 	}
+	var projectMemory map[int64]store.GitTeamMemoryProvenance
+	if e.store != nil && (e.store.StoreKind() == store.StoreKindPersonal || e.store.StoreKind() == store.StoreKindDesk) {
+		projectMemory, _ = e.store.GitTeamMemoryProvenanceForEvents(ids)
+	}
 
 	return &RetrieveResponse{
 		EventIDs:             ids,
@@ -660,6 +690,7 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		EmotionRole:          emotionRole,
 		SurfaceabilityAction: surfaceability,
 		ScoreBreakdowns:      breakdowns,
+		ProjectMemory:        projectMemory,
 	}, nil
 }
 

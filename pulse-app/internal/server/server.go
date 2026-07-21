@@ -2,17 +2,23 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/claude"
+	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/contextquery"
 	"github.com/nkkmnk/pulse/internal/health"
 	"github.com/nkkmnk/pulse/internal/ingest"
@@ -20,6 +26,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/prompt"
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
+	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
 // ClaudeAPI is the subset of claude.Client we need. Allows fakes in tests.
@@ -31,9 +38,26 @@ type ContextQueryAPI interface {
 	Query(context.Context, contextquery.ContextQueryRequest) (*contextquery.ContextResult, error)
 }
 
+// ConsolidationInventory is the daemon-owned read-only scan surface. Keeping
+// this small lets the server own job lifetime without exposing Engine internals.
+type ConsolidationInventory interface {
+	Run(context.Context, string, consolidation.Destination) (consolidation.Report, error)
+	EnsureFresh(string) (consolidation.Report, error)
+}
+
+// HomePresence is retained as an optional compatibility dependency for
+// protected native-confirmation flows. Opening ordinary Memory Home never
+// consumes it and never upgrades a browser session into enhanced proof.
+type HomePresence interface {
+	Authorize(context.Context, userpresence.Challenge) (userpresence.Assertion, error)
+}
+
 // Config holds the dependencies a server needs.
 type Config struct {
-	IPCSecret    string
+	IPCSecret string
+	// StartupNonce is an optional supervisor-provided process-instance proof.
+	// When set it is returned only from the authenticated loopback health route.
+	StartupNonce string
 	Outbox       *outbox.Outbox
 	Builder      *prompt.Builder
 	Claude       ClaudeAPI
@@ -51,6 +75,38 @@ type Config struct {
 	Health health.Provider
 	// Billing describes the current Pulse distribution mode for /memory/status.
 	Billing BillingStatus
+	// TrayGracePeriod controls the visible private-write preview window for
+	// Personal/Desk product stores. Zero selects the product default (10s).
+	TrayGracePeriod time.Duration
+	// HomeOrigin is the exact loopback origin for the credential-free Personal
+	// or Desk Memory Home. Empty keeps the Home surface disabled (legacy Local
+	// Preview and tests that do not configure a product browser surface).
+	HomeOrigin string
+	// HomePresence is optional. It may support separately routed protected
+	// actions, but it is neither a constructor nor ordinary Home prerequisite.
+	HomePresence HomePresence
+	// EnhancedPresenceAuthorizer is the exact protected-action capability
+	// exposed by Memory Home. Nil means unavailable; it never blocks ordinary
+	// install, read, recall, save, or Home use.
+	EnhancedPresenceAuthorizer userpresence.EnhancedPresenceAuthorizer
+	// UnassignedInboxPath is the owner-only, non-retrievable queue shared by
+	// installed harnesses before a user chooses an exact project. Empty hides
+	// the queue without changing canonical memory behavior.
+	UnassignedInboxPath string
+	// HomeBindingVerifier re-reads the signed workspace authority before every
+	// Home render or mutation so a stale daemon/session cannot survive revoke.
+	HomeBindingVerifier HomeBindingVerifier
+	// ConsolidationReports overrides the daemon-owned report lifecycle manager.
+	// When nil, Personal and Desk stores with an exact product boundary receive
+	// a private manager next to their vault automatically.
+	ConsolidationReports *consolidation.Manager
+	// ConsolidationInventory overrides the recognized-source read-only engine.
+	// It is primarily a test seam; production derives fixed roots from the
+	// current user home and exact bound vault path.
+	ConsolidationInventory ConsolidationInventory
+	// ConsolidationJobTimeout bounds daemon-owned scans independently from the
+	// initiating HTTP request. Zero selects the product default.
+	ConsolidationJobTimeout time.Duration
 }
 
 type BillingStatus struct {
@@ -63,8 +119,25 @@ type BillingStatus struct {
 
 // Server wraps the chi router.
 type Server struct {
-	cfg     Config
-	started time.Time
+	cfg                      Config
+	started                  time.Time
+	homeSessions             *viewerSessionManager
+	homePresentation         *MemoryPresentationService
+	homeProtectedWipeMu      sync.Mutex
+	homeProtectedWipeItems   map[string]homeProtectedWipePending
+	trayScheduleMu           sync.Mutex
+	traySchedules            map[memoryTrayScheduleKey]*memoryTrayScheduleState
+	consolidationReports     *consolidation.Manager
+	consolidationInventory   ConsolidationInventory
+	consolidationUnavailable string
+	consolidationJobTimeout  time.Duration
+	consolidationCtx         context.Context
+	consolidationCancel      context.CancelFunc
+	consolidationCloseOnce   sync.Once
+	consolidationJobsMu      sync.Mutex
+	consolidationJobs        map[string]context.CancelFunc
+	consolidationJobsWG      sync.WaitGroup
+	consolidationClosing     bool
 }
 
 func New(cfg Config) (*Server, error) {
@@ -74,11 +147,149 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Claude != nil && cfg.DefaultModel == "" {
 		return nil, errors.New("server: Claude set but DefaultModel is empty")
 	}
-	return &Server{cfg: cfg, started: time.Now()}, nil
+	if cfg.StartupNonce != "" && !validStartupNonce(cfg.StartupNonce) {
+		return nil, errors.New("server: startup nonce must be 32 lowercase-hex bytes")
+	}
+	if cfg.TrayGracePeriod == 0 {
+		cfg.TrayGracePeriod = 10 * time.Second
+	}
+	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
+		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
+	}
+	if cfg.EnhancedPresenceAuthorizer == nil {
+		cfg.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
+	}
+	if cfg.ConsolidationJobTimeout == 0 {
+		cfg.ConsolidationJobTimeout = 16 * time.Minute
+	}
+	if cfg.ConsolidationJobTimeout < time.Second || cfg.ConsolidationJobTimeout > 30*time.Minute {
+		return nil, errors.New("server: ConsolidationJobTimeout must be between 1s and 30m")
+	}
+	consolidationCtx, consolidationCancel := context.WithCancel(context.Background())
+	server := &Server{
+		cfg: cfg, started: time.Now(),
+		homeProtectedWipeItems:  make(map[string]homeProtectedWipePending),
+		traySchedules:           make(map[memoryTrayScheduleKey]*memoryTrayScheduleState),
+		consolidationReports:    cfg.ConsolidationReports,
+		consolidationInventory:  cfg.ConsolidationInventory,
+		consolidationJobTimeout: cfg.ConsolidationJobTimeout,
+		consolidationCtx:        consolidationCtx,
+		consolidationCancel:     consolidationCancel,
+		consolidationJobs:       make(map[string]context.CancelFunc),
+	}
+	if server.consolidationReports == nil && cfg.Store != nil &&
+		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
+		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); ok {
+			if !filepath.IsAbs(cfg.Store.DBPath()) {
+				return nil, errors.New("server: product consolidation reports require an absolute vault path")
+			}
+			key := sha256.Sum256([]byte("pulse:consolidation-report:v1:" + cfg.IPCSecret))
+			manager, err := consolidation.NewManager(consolidation.ManagerConfig{
+				RootDir: filepath.Join(filepath.Dir(cfg.Store.DBPath()), "consolidation-reports"),
+				Key:     key[:],
+			})
+			if err != nil {
+				if errors.Is(err, consolidation.ErrCheckpointIntegrity) {
+					// A rotated IPC secret or corrupt report-only checkpoint must
+					// never make the bound memory vault unavailable. Leave the
+					// bundle untouched for owner inspection and fail this feature
+					// closed with a stable diagnostic.
+					server.consolidationUnavailable = "checkpoint_integrity_failure"
+				} else {
+					consolidationCancel()
+					return nil, fmt.Errorf("server: open consolidation reports: %w", err)
+				}
+			}
+			if manager != nil {
+				server.consolidationReports = manager
+			}
+			if manager != nil && server.consolidationInventory == nil {
+				homeDir, homeErr := os.UserHomeDir()
+				if homeErr != nil || !filepath.IsAbs(homeDir) {
+					return nil, errors.New("server: consolidation inventory requires an absolute user home")
+				}
+				inventory, inventoryErr := consolidation.NewEngine(consolidation.EngineConfig{
+					Manager: manager, HomeDir: homeDir, CanonicalPath: cfg.Store.DBPath(), CanonicalDB: cfg.Store.DB(),
+				})
+				if inventoryErr != nil {
+					return nil, fmt.Errorf("server: open consolidation inventory: %w", inventoryErr)
+				}
+				server.consolidationInventory = inventory
+			}
+		}
+	}
+	if cfg.HomeOrigin != "" {
+		parsedHomeOrigin, err := url.Parse(cfg.HomeOrigin)
+		if err != nil || parsedHomeOrigin.Scheme != "http" || parsedHomeOrigin.Hostname() != "127.0.0.1" || parsedHomeOrigin.Port() == "" {
+			return nil, errors.New("server: Memory Home requires an exact http://127.0.0.1 origin")
+		}
+		if cfg.Store == nil || (cfg.Store.StoreKind() != store.StoreKindPersonal && cfg.Store.StoreKind() != store.StoreKindDesk) {
+			return nil, errors.New("server: Memory Home requires a Personal or Desk store")
+		}
+		if cfg.HomeBindingVerifier == nil {
+			return nil, errors.New("server: Memory Home requires live product binding verification")
+		}
+		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); !ok {
+			return nil, errors.New("server: Memory Home requires an exact product runtime boundary")
+		}
+		if cfg.UnassignedInboxPath != "" && !filepath.IsAbs(cfg.UnassignedInboxPath) {
+			return nil, errors.New("server: unassigned inbox path must be absolute")
+		}
+		homeSessions, err := newViewerSessionManager(viewerSessionConfig{
+			ExpectedOrigin: cfg.HomeOrigin, AbsoluteTTL: time.Hour, IdleTTL: 15 * time.Minute,
+			MaxSessions: 8, MaxBodyBytes: 64 << 10,
+		})
+		if err != nil {
+			return nil, err
+		}
+		homePresentation, err := NewMemoryPresentationService(MemoryPresentationServiceConfig{
+			Store: cfg.Store, Schedule: server.schedulePresentedMemory,
+			ExpectedOrigin: cfg.HomeOrigin, ExpectedPath: memoryPresentationScopedHomePath,
+			GracePeriod: cfg.TrayGracePeriod, CapabilityTTL: 45 * time.Second,
+		})
+		if err != nil {
+			return nil, err
+		}
+		server.homeSessions = homeSessions
+		server.homePresentation = homePresentation
+	}
+	if err := server.recoverMemoryTray(); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
-// Handler returns the root http.Handler with auth middleware.
+// Close stops daemon-owned consolidation jobs. It is safe to call more than
+// once and should run before closing the bound vault.
+func (s *Server) Close() {
+	s.consolidationCloseOnce.Do(func() {
+		s.consolidationJobsMu.Lock()
+		s.consolidationClosing = true
+		if s.consolidationCancel != nil {
+			s.consolidationCancel()
+		}
+		s.consolidationJobsMu.Unlock()
+		s.consolidationJobsWG.Wait()
+	})
+}
+
+// Handler returns the local-only root http.Handler with auth middleware.
+// Team remote must use NewTeam(...).Handler(); the two route registries never
+// compose so a local route cannot become reachable through team configuration.
 func (s *Server) Handler() http.Handler {
+	local := s.localHandler()
+	if s.homeSessions == nil {
+		return local
+	}
+	mux := http.NewServeMux()
+	home := s.homeHandler()
+	mux.Handle("/home", home)
+	mux.Handle("/home/", home)
+	mux.Handle("/", local)
+	return mux
+}
+
+func (s *Server) localHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
 	r.Use(s.authMiddleware)
@@ -91,7 +302,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/outbox/ack", s.handleOutboxAck)
 	r.Post("/msg", s.handleMsg)
 	if s.cfg.Store != nil {
-		r.Method(http.MethodPost, "/ingest", ingest.NewHandler(s.cfg.Store))
+		if s.cfg.Store.StoreKind() == store.StoreKindLocalPreview {
+			r.Method(http.MethodPost, "/ingest", ingest.NewHandler(s.cfg.Store))
+		}
 		r.Post("/memory/remember", s.handleMemoryRemember)
 		r.Post("/memory/recall", s.handleMemoryRecall)
 		r.Get("/memory/status", s.handleMemoryStatus)
@@ -102,12 +315,44 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/memory/wipe", s.handleMemoryWipe)
 		r.Post("/memory/consolidate", s.handleMemoryConsolidate)
 		r.Post("/graph/delta", s.handleGraphDelta)
+		r.Post("/turn/finalize", s.handleTurnFinalize)
+		r.Post("/turn/no-change", s.handleTurnNoChange)
+		r.Get("/memory/tray", s.handleMemoryTrayList)
+		r.Get("/memory/receipts/{id}", s.handleMemoryReceiptGet)
+		r.Post("/memory/tray/{id}/edit", s.handleMemoryTrayEdit)
+		r.Post("/memory/tray/{id}/cancel", s.handleMemoryTrayCancel)
+		r.Post("/memory/tray/{id}/commit", s.handleMemoryTrayCommit)
+		r.Post("/memory/{id}/correct", s.handleMemoryCorrect)
 		r.Post("/graph/entity/hide", s.handleGraphEntityHide)
 		r.Post("/graph/entity/restore", s.handleGraphEntityRestore)
 		r.Get("/graph/export", s.handleGraphExport)
 		r.Post("/continuity/resume", s.handleContinuityResume)
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
+		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+			if s.consolidationReports != nil || s.consolidationUnavailable != "" {
+				r.Post("/memory/consolidation/reports", s.handleConsolidationReportStart)
+				r.Get("/memory/consolidation/reports/latest", s.handleConsolidationReportLatest)
+				r.Get("/memory/consolidation/reports/{id}", s.handleConsolidationReportGet)
+				r.Get("/memory/consolidation/reports/{id}/explain", s.handleConsolidationReportExplain)
+				r.Post("/memory/consolidation/reports/{id}/cancel", s.handleConsolidationReportCancel)
+				r.Post("/memory/consolidation/reports/{id}/resume", s.handleConsolidationReportResume)
+			}
+			r.Get("/memory/lifecycle-readiness", s.handleSupportedHostLifecycleReadiness)
+			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
+			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)
+			r.Post("/project/sources/register", s.handleProjectSourceRegister)
+			r.Post("/project/sources/status", s.handleProjectSourceStatus)
+			r.Post("/project/shared-memory/review/stage", s.handleGitTeamMemoryStage)
+			r.Post("/project/shared-memory/review/inspect", s.handleGitTeamMemoryInspect)
+			r.Post("/project/shared-memory/review/candidates/{id}/edit", s.handleGitTeamMemoryEdit)
+			r.Post("/project/shared-memory/review/candidates/{id}/reject", s.handleGitTeamMemoryReject)
+			r.Post("/project/shared-memory/review/present", s.handleGitTeamMemoryPresent)
+			r.Post("/project/shared-memory/review/exact-ok", s.handleGitTeamMemoryExactOK)
+			r.Post("/project/shared-memory/publications/start", s.handleGitTeamMemoryPublicationStart)
+			r.Post("/project/shared-memory/publications/finalize", s.handleGitTeamMemoryPublicationFinalize)
+			r.Post("/project/shared-memory/index", s.handleGitTeamMemoryIndex)
+		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)
 	}
@@ -207,13 +452,27 @@ func corsAllowedOrigins() []string {
 type healthResponse struct {
 	Status        string  `json:"status"`
 	UptimeSeconds float64 `json:"uptime_seconds"`
+	StartupNonce  string  `json:"startup_nonce,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResponse{
 		Status:        "ok",
 		UptimeSeconds: time.Since(s.started).Seconds(),
+		StartupNonce:  s.cfg.StartupNonce,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func validStartupNonce(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }

@@ -6,7 +6,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/retrieve"
@@ -31,17 +34,39 @@ type statusResponse struct {
 	Schema            string `json:"schema"`
 	ItemCount         int    `json:"item_count"`
 	LastWrite         string `json:"last_write,omitempty"`
+	CaptureEnabled    bool   `json:"capture_enabled"`
+	CaptureState      string `json:"capture_state"`
 	// FullRetrieval is true only when the state-aware retrieval engine is
 	// running with an embedder. False means fallback memory only — callers
 	// must not present this as full Pulse.
-	FullRetrieval bool   `json:"full_retrieval"`
-	Embedder      string `json:"embedder,omitempty"`
+	FullRetrieval                 bool   `json:"full_retrieval"`
+	Embedder                      string `json:"embedder,omitempty"`
+	ConsolidationReportsAvailable bool   `json:"consolidation_reports_available"`
+	ConsolidationReportsState     string `json:"consolidation_reports_state"`
 }
 
 func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 	var capsule store.MemoryCapsule
-	if err := json.NewDecoder(r.Body).Decode(&capsule); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+	var decodeErr error
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		decodeErr = decodeMemoryTrayBody(r, &capsule)
+	} else {
+		decodeErr = json.NewDecoder(r.Body).Decode(&capsule)
+	}
+	if decodeErr != nil {
+		http.Error(w, "bad request: "+decodeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		result, err := s.cfg.Store.PrepareManualMemoryCapsuleWithInvocation(
+			capsule, r.Header.Get("Idempotency-Key"), time.Now().UTC(), s.cfg.TrayGracePeriod,
+		)
+		if err != nil {
+			writeMemoryTrayError(w, err)
+			return
+		}
+		s.scheduleTurnResult(result)
+		writeJSON(w, result)
 		return
 	}
 	ids, err := s.cfg.Store.RememberCapsule(capsule)
@@ -93,7 +118,7 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		billing.Mode = "host-extracted"
 	}
 	if billing.Host == "" {
-		billing.Host = "claude-code"
+		billing.Host = "pulse-product"
 	}
 	if billing.StoragePath == "" {
 		billing.StoragePath = s.cfg.Store.DBPath()
@@ -103,18 +128,50 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	if fullRetrieval {
 		embedder = s.cfg.Retrieval.EmbedderModel()
 	}
+	captureEnabled, captureState := readCaptureState(s.cfg.Store.DBPath())
+	consolidationState := "unavailable"
+	if s.consolidationUnavailable != "" {
+		consolidationState = s.consolidationUnavailable
+	} else if s.consolidationReports != nil {
+		consolidationState = "ready"
+	}
 	writeJSON(w, statusResponse{
-		BillingMode:       billing.Mode,
-		Host:              billing.Host,
-		BackendLLMEnabled: billing.BackendLLMEnabled,
-		RawCaptureEnabled: billing.RawCaptureEnabled,
-		StoragePath:       billing.StoragePath,
-		Schema:            store.MemoryCapsuleSchema,
-		ItemCount:         storeStatus.ItemCount,
-		LastWrite:         storeStatus.LastWrite,
-		FullRetrieval:     fullRetrieval,
-		Embedder:          embedder,
+		BillingMode:                   billing.Mode,
+		Host:                          billing.Host,
+		BackendLLMEnabled:             billing.BackendLLMEnabled,
+		RawCaptureEnabled:             billing.RawCaptureEnabled,
+		StoragePath:                   billing.StoragePath,
+		Schema:                        store.MemoryCapsuleSchema,
+		ItemCount:                     storeStatus.ItemCount,
+		LastWrite:                     storeStatus.LastWrite,
+		CaptureEnabled:                captureEnabled,
+		CaptureState:                  captureState,
+		FullRetrieval:                 fullRetrieval,
+		Embedder:                      embedder,
+		ConsolidationReportsAvailable: s.consolidationReports != nil && s.consolidationUnavailable == "",
+		ConsolidationReportsState:     consolidationState,
 	})
+}
+
+func readCaptureState(dbPath string) (bool, string) {
+	body, err := os.ReadFile(filepath.Join(filepath.Dir(dbPath), "capture-state.json"))
+	if os.IsNotExist(err) {
+		return true, "enabled"
+	}
+	if err != nil {
+		return false, "invalid"
+	}
+	var state struct {
+		Schema  string `json:"schema"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if json.Unmarshal(body, &state) != nil || state.Schema != "pulse.capture_state.v1" || state.Enabled == nil {
+		return false, "invalid"
+	}
+	if *state.Enabled {
+		return true, "enabled"
+	}
+	return false, "disabled"
 }
 
 func (s *Server) handleMemoryExport(w http.ResponseWriter, r *http.Request) {
@@ -141,22 +198,28 @@ func (s *Server) handleMemoryImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		http.Error(w, "product memory deletion requires fresh OS-backed user presence; the privileged local deletion surface is not active", http.StatusForbidden)
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		var req struct {
 			ID string `json:"id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		id = req.ID
 	}
-	if err := s.cfg.Store.DeleteMemory(strings.TrimSpace(id)); err != nil {
+	id = strings.TrimSpace(id)
+	if err := s.cfg.Store.DeleteMemory(id); err != nil {
 		http.Error(w, "memory delete error: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, map[string]any{"ok": true, "deleted_id": id})
 }
 
 // handleMemoryConsolidate runs an explicit, opt-in near-duplicate capsule
@@ -175,6 +238,10 @@ func (s *Server) handleMemoryConsolidate(w http.ResponseWriter, r *http.Request)
 	}
 	result, err := s.cfg.Store.ConsolidateCapsules(opt)
 	if err != nil {
+		if errors.Is(err, store.ErrMemoryTrayRequired) {
+			writeMemoryTrayError(w, err)
+			return
+		}
 		http.Error(w, "memory consolidate error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -182,19 +249,34 @@ func (s *Server) handleMemoryConsolidate(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleMemoryWipe(w http.ResponseWriter, r *http.Request) {
+	// A confirmation phrase carried by the same HTTP caller is not user
+	// presence. Agents can type it, wrap the CLI in a pseudo-terminal, or call
+	// this route directly. Product vaults therefore fail closed until the
+	// privileged local surface wires a fresh OS-backed vault.wipe assertion.
+	// Local Preview retains its explicit confirmation contract below.
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+		http.Error(w, "product memory wipe requires fresh OS-backed user presence; the privileged local wipe surface is not active", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		Confirm string `json:"confirm"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+	decodeErr := json.NewDecoder(r.Body).Decode(&req)
+	if decodeErr != nil {
+		http.Error(w, "bad request: "+decodeErr.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.Confirm != "wipe pulse memory" {
 		http.Error(w, "memory wipe requires confirm=\"wipe pulse memory\"", http.StatusBadRequest)
 		return
 	}
-	if err := s.cfg.Store.WipeMemory(); err != nil {
-		http.Error(w, "memory wipe error: "+err.Error(), http.StatusInternalServerError)
+	wipeErr := s.cfg.Store.WipeMemory()
+	if wipeErr != nil {
+		if errors.Is(wipeErr, store.ErrMemoryTrayRequired) {
+			writeMemoryTrayError(w, wipeErr)
+			return
+		}
+		http.Error(w, "memory wipe error: "+wipeErr.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
