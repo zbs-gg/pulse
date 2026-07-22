@@ -45,20 +45,21 @@ type unitCheckpoint struct {
 }
 
 type ingestCheckpoint struct {
-	Schema           string                       `json:"schema"`
-	Generation       uint64                       `json:"generation"`
-	JobID            string                       `json:"job_id"`
-	State            JobState                     `json:"state"`
-	Snapshot         SourceSnapshot               `json:"snapshot"`
-	Contract         RunnerContract               `json:"contract"`
-	Units            []unitCheckpoint             `json:"units"`
-	ManifestRevision int64                        `json:"manifest_revision,omitempty"`
-	ManifestDigest   string                       `json:"manifest_digest,omitempty"`
-	Review           map[string]ReviewDisposition `json:"review,omitempty"`
-	ReviewComplete   bool                         `json:"review_complete,omitempty"`
-	ReasonCode       string                       `json:"reason_code,omitempty"`
-	CreatedAt        time.Time                    `json:"created_at"`
-	UpdatedAt        time.Time                    `json:"updated_at"`
+	Schema             string                       `json:"schema"`
+	Generation         uint64                       `json:"generation"`
+	JobID              string                       `json:"job_id"`
+	State              JobState                     `json:"state"`
+	Snapshot           SourceSnapshot               `json:"snapshot"`
+	Contract           RunnerContract               `json:"contract"`
+	Units              []unitCheckpoint             `json:"units"`
+	ManifestRevision   int64                        `json:"manifest_revision,omitempty"`
+	ManifestDigest     string                       `json:"manifest_digest,omitempty"`
+	Review             map[string]ReviewDisposition `json:"review,omitempty"`
+	ReviewComplete     bool                         `json:"review_complete,omitempty"`
+	EgressAuthorizedAt *time.Time                   `json:"egress_authorized_at,omitempty"`
+	ReasonCode         string                       `json:"reason_code,omitempty"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	UpdatedAt          time.Time                    `json:"updated_at"`
 }
 
 type checkpointEnvelope struct {
@@ -167,6 +168,12 @@ func validateCheckpoint(checkpoint ingestCheckpoint) error {
 		}
 	}
 	if checkpoint.ReviewComplete && checkpoint.State != JobApprovalReady {
+		return ErrIngestCheckpointIntegrity
+	}
+	if checkpoint.State == JobAwaitingEgress && checkpoint.EgressAuthorizedAt != nil {
+		return ErrIngestCheckpointIntegrity
+	}
+	if checkpoint.EgressAuthorizedAt != nil && (checkpoint.EgressAuthorizedAt.Before(checkpoint.CreatedAt) || checkpoint.EgressAuthorizedAt.After(checkpoint.UpdatedAt)) {
 		return ErrIngestCheckpointIntegrity
 	}
 	return nil

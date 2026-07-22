@@ -42,14 +42,22 @@ func ChunkCodexEvidence(rootID string, records []CodexEvidence, maxBytes int) ([
 
 	chunks := make([]CodexEvidenceChunk, 0)
 	current := make([]CodexEvidence, 0)
+	currentBytes, err := emptyCodexChunkBytes(rootID, 0)
+	if err != nil {
+		return nil, err
+	}
 	for _, record := range ordered {
-		candidate := append(append([]CodexEvidence(nil), current...), record)
-		encoded, err := encodeCodexChunk(rootID, len(chunks), candidate)
+		encodedRecord, err := json.Marshal(record)
 		if err != nil {
 			return nil, err
 		}
-		if len(encoded) <= maxBytes {
-			current = candidate
+		separatorBytes := 0
+		if len(current) > 0 {
+			separatorBytes = 1
+		}
+		if currentBytes+separatorBytes+len(encodedRecord) <= maxBytes {
+			current = append(current, record)
+			currentBytes += separatorBytes + len(encodedRecord)
 			continue
 		}
 		if len(current) == 0 {
@@ -61,11 +69,12 @@ func ChunkCodexEvidence(rootID string, records []CodexEvidence, maxBytes int) ([
 		}
 		chunks = append(chunks, chunk)
 		current = []CodexEvidence{record}
-		encoded, err = encodeCodexChunk(rootID, len(chunks), current)
+		currentBytes, err = emptyCodexChunkBytes(rootID, len(chunks))
 		if err != nil {
 			return nil, err
 		}
-		if len(encoded) > maxBytes {
+		currentBytes += len(encodedRecord)
+		if currentBytes > maxBytes {
 			return nil, ErrCodexEvidenceTooLarge
 		}
 	}
@@ -77,6 +86,14 @@ func ChunkCodexEvidence(rootID string, records []CodexEvidence, maxBytes int) ([
 		chunks = append(chunks, chunk)
 	}
 	return chunks, nil
+}
+
+func emptyCodexChunkBytes(rootID string, ordinal int) (int, error) {
+	empty, err := encodeCodexChunk(rootID, ordinal, []CodexEvidence{})
+	if err != nil {
+		return 0, err
+	}
+	return len(empty) - 2, nil
 }
 
 func finalizeCodexChunk(rootID string, ordinal int, records []CodexEvidence) (CodexEvidenceChunk, error) {

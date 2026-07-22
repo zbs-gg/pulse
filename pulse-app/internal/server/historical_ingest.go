@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,9 +18,22 @@ import (
 
 const historicalIngestRequestMaxBytes = 5 << 20
 
+const codexSubscriptionRunnerContractDigestV1 = "02bfe327fb6e958c05e28b84f2bfd66534d235e12f0c9e9ee8d5c357571232bc"
+
+var codexHistoricalSessionIDPattern = regexp.MustCompile(`^[a-f0-9-]{16,64}$`)
+
 type HistoricalIngestWorkPayload struct {
 	TrustedPrompt string
 	Evidence      string
+}
+
+type codexHistoricalEvidence struct {
+	source *historicalingest.CodexSourceStore
+}
+
+func (provider codexHistoricalEvidence) LoadHistoricalIngestEvidence(_ context.Context, unit historicalingest.WorkUnit) (HistoricalIngestWorkPayload, error) {
+	prompt, evidence, err := provider.source.Load(unit)
+	return HistoricalIngestWorkPayload{TrustedPrompt: prompt, Evidence: evidence}, err
 }
 
 type historicalWorkerLease struct {
@@ -55,6 +71,72 @@ func (s *Server) historicalManager() (*historicalingest.IngestManager, error) {
 	return s.historicalIngest, nil
 }
 
+func (s *Server) handleHistoricalIngestStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Source            string `json:"source"`
+		RootLimit         int    `json:"root_limit"`
+		ExcludedSessionID string `json:"excluded_session_id,omitempty"`
+	}
+	if !decodeHistoricalRequest(w, r, &body) {
+		return
+	}
+	manager, err := s.historicalManager()
+	if err != nil || s.historicalCodexSource == nil || body.Source != "codex" || body.RootLimit < 1 || body.RootLimit > 200 ||
+		(body.ExcludedSessionID != "" && !codexHistoricalSessionIDPattern.MatchString(body.ExcludedSessionID)) {
+		writeHistoricalIngestError(w, errors.New("historical Codex source unavailable"))
+		return
+	}
+	jobID, err := newHistoricalJobID()
+	if err != nil {
+		writeHistoricalIngestError(w, err)
+		return
+	}
+	excluded := map[string]struct{}{}
+	if body.ExcludedSessionID != "" {
+		excluded[body.ExcludedSessionID] = struct{}{}
+	}
+	prepared, err := s.historicalCodexSource.Prepare(jobID, historicalingest.CodexPrepareOptions{
+		RootLimit: body.RootLimit, Cutoff: time.Now().UTC(), ExcludedSessionIDs: excluded,
+	})
+	if err != nil {
+		writeHistoricalIngestError(w, err)
+		return
+	}
+	contract := historicalingest.RunnerContract{
+		Digest: codexSubscriptionRunnerContractDigestV1, SchemaDigest: historicalingest.SchemaDigest(),
+		ModelID: "gpt-5.6-luna", ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1,
+		PromptVersion: "historical_prompt_v1",
+	}
+	status, err := manager.StartJobAwaitingEgress(jobID, prepared.Snapshot, prepared.Units, contract)
+	if err != nil {
+		writeHistoricalIngestError(w, err)
+		return
+	}
+	writeJSON(w, status)
+}
+
+func (s *Server) handleHistoricalIngestLatest(w http.ResponseWriter, r *http.Request) {
+	manager, err := s.historicalManager()
+	if err != nil {
+		writeHistoricalIngestError(w, err)
+		return
+	}
+	status, err := manager.LatestStatus()
+	if err != nil {
+		writeHistoricalIngestError(w, err)
+		return
+	}
+	writeJSON(w, status)
+}
+
+func newHistoricalJobID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "job_" + hex.EncodeToString(value[:]), nil
+}
+
 func (s *Server) handleHistoricalIngestStatus(w http.ResponseWriter, r *http.Request) {
 	manager, err := s.historicalManager()
 	if err != nil {
@@ -82,11 +164,23 @@ func (s *Server) handleHistoricalIngestLease(w http.ResponseWriter, r *http.Requ
 	jobID := chi.URLParam(r, "id")
 	lease, err := manager.LeaseNext(jobID)
 	if errors.Is(err, historicalingest.ErrNoWorkAvailable) {
+		status, statusErr := manager.Status(jobID)
+		if statusErr != nil {
+			writeHistoricalIngestError(w, statusErr)
+			return
+		}
+		if s.historicalCodexSource != nil {
+			if verifyErr := s.historicalCodexSource.VerifyDigest(status.SnapshotDigest); verifyErr != nil {
+				_, _ = manager.MarkStale(jobID, status.SnapshotDigest, "source_prefix_changed")
+				writeHistoricalIngestError(w, verifyErr)
+				return
+			}
+		}
 		if _, _, _, buildErr := manager.BuildManifest(jobID); buildErr != nil {
 			writeHistoricalIngestError(w, buildErr)
 			return
 		}
-		status, statusErr := manager.Status(jobID)
+		status, statusErr = manager.Status(jobID)
 		if statusErr != nil {
 			writeHistoricalIngestError(w, statusErr)
 			return
@@ -209,7 +303,8 @@ func writeHistoricalIngestError(w http.ResponseWriter, err error) {
 		http.Error(w, "historical ingest job not found", http.StatusNotFound)
 	case errors.Is(err, historicalingest.ErrLeaseConflict), errors.Is(err, historicalingest.ErrResultConflict),
 		errors.Is(err, historicalingest.ErrIncompleteCohort), errors.Is(err, historicalingest.ErrJobNotExtracting),
-		errors.Is(err, historicalingest.ErrNoWorkAvailable):
+		errors.Is(err, historicalingest.ErrNoWorkAvailable), errors.Is(err, historicalingest.ErrEgressAuthorizationConflict),
+		errors.Is(err, historicalingest.ErrInsufficientValidCodexRoots):
 		http.Error(w, "historical ingest lifecycle conflict", http.StatusConflict)
 	default:
 		http.Error(w, "historical ingest unavailable", http.StatusServiceUnavailable)

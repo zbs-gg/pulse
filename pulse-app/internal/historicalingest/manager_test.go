@@ -52,8 +52,8 @@ func testSnapshotOne() SourceSnapshot {
 
 func testUnits() []WorkUnit {
 	return []WorkUnit{
-		{ID: "unit_a", RootID: "root_a", SnapshotDigest: strings.Repeat("a", 64), EvidenceDigest: strings.Repeat("d", 64), SourceAliases: []string{"source_0123456789abcdef"}, Ordinal: 0},
-		{ID: "unit_b", RootID: "root_b", SnapshotDigest: strings.Repeat("a", 64), EvidenceDigest: strings.Repeat("e", 64), SourceAliases: []string{"source_fedcba9876543210"}, Ordinal: 0},
+		{ID: "unit_a", RootID: "root_a", SnapshotDigest: strings.Repeat("a", 64), EvidenceDigest: strings.Repeat("d", 64), EvidenceBytes: 128, SourceAliases: []string{"source_0123456789abcdef"}, Ordinal: 0},
+		{ID: "unit_b", RootID: "root_b", SnapshotDigest: strings.Repeat("a", 64), EvidenceDigest: strings.Repeat("e", 64), EvidenceBytes: 256, SourceAliases: []string{"source_fedcba9876543210"}, Ordinal: 0},
 	}
 }
 
@@ -368,5 +368,35 @@ func TestCleanupRetentionMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStartAwaitingEgressRequiresDigestBoundAuthorizationBeforeLease(t *testing.T) {
+	manager, _ := testIngestManager(t, time.Now)
+	jobID := "job_0123456789abcdef"
+	snapshot := testSnapshotOne()
+	contract := testRunnerContract()
+	status, err := manager.StartJobAwaitingEgress(jobID, snapshot, testUnits()[:1], contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != JobAwaitingEgress || status.EgressAuthorized {
+		t.Fatalf("unexpected awaiting status: %+v", status)
+	}
+	if _, err := manager.LeaseNext(jobID); !errors.Is(err, ErrJobNotExtracting) {
+		t.Fatalf("lease before egress authorization err=%v", err)
+	}
+	if _, err := manager.AuthorizeEgress(jobID, strings.Repeat("0", 64), contract.Digest); !errors.Is(err, ErrEgressAuthorizationConflict) {
+		t.Fatalf("mismatched snapshot authorization err=%v", err)
+	}
+	status, err = manager.AuthorizeEgress(jobID, snapshot.Digest, contract.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != JobExtracting || !status.EgressAuthorized {
+		t.Fatalf("unexpected authorized status: %+v", status)
+	}
+	if _, err := manager.LeaseNext(jobID); err != nil {
+		t.Fatalf("lease after egress authorization: %v", err)
 	}
 }

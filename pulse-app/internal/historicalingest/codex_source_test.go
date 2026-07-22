@@ -229,6 +229,55 @@ func TestChunkCodexEvidenceIsDeterministicAndBounded(t *testing.T) {
 	}
 }
 
+func TestCompactCodexChildResultKeepsInstructionsAndFinalResult(t *testing.T) {
+	t.Parallel()
+
+	result := CodexParseResult{
+		Coverage:   CodexCoverage{Included: 5},
+		Exclusions: map[string]int64{},
+		Evidence: []CodexEvidence{
+			{Kind: "message", Role: "user", Text: "Investigate the source adapter."},
+			{Kind: "message", Role: "assistant", Text: "I am inspecting it."},
+			{Kind: "tool_result", Text: "large intermediate output"},
+			{Kind: "message", Role: "user", Text: "Also check privacy."},
+			{Kind: "message", Role: "assistant", Text: "Final result: safe with one fix."},
+		},
+	}
+	compactCodexChildResult(&result)
+	if len(result.Evidence) != 3 || result.Evidence[0].Role != "user" || result.Evidence[1].Role != "user" || result.Evidence[2].Text != "Final result: safe with one fix." {
+		t.Fatalf("unexpected compact child evidence: %#v", result.Evidence)
+	}
+	if result.Coverage.Included != 3 || result.Coverage.Excluded != 2 || result.Exclusions["child_intermediate"] != 2 {
+		t.Fatalf("unexpected compact child coverage: %+v exclusions=%+v", result.Coverage, result.Exclusions)
+	}
+}
+
+func TestCompactCodexRootEvidenceKeepsConversationAndLastToolResultPerTurn(t *testing.T) {
+	t.Parallel()
+
+	result := CodexParseResult{
+		Coverage:   CodexCoverage{Included: 8},
+		Exclusions: map[string]int64{},
+		Evidence: []CodexEvidence{
+			{Kind: "message", Role: "user", Text: "First request"},
+			{Kind: "tool_result", Text: "intermediate one"},
+			{Kind: "agent_result", Role: "assistant", Text: "mirrored child update"},
+			{Kind: "tool_result", Text: "final evidence one"},
+			{Kind: "message", Role: "assistant", Text: "First answer"},
+			{Kind: "message", Role: "user", Text: "Second request"},
+			{Kind: "tool_result", Text: "final evidence two"},
+			{Kind: "message", Role: "assistant", Text: "Second answer"},
+		},
+	}
+	compactCodexRootEvidence(&result)
+	if len(result.Evidence) != 6 || result.Evidence[1].Text != "final evidence one" || result.Evidence[4].Text != "final evidence two" {
+		t.Fatalf("unexpected compact root evidence: %#v", result.Evidence)
+	}
+	if result.Coverage.Included != 6 || result.Coverage.Excluded != 2 || result.Exclusions["root_tool_intermediate"] != 1 || result.Exclusions["root_agent_result_mirror"] != 1 {
+		t.Fatalf("unexpected compact root coverage: %+v exclusions=%+v", result.Coverage, result.Exclusions)
+	}
+}
+
 func writeCodexSession(t *testing.T, dir, id, parent, timestamp string, records ...map[string]any) string {
 	t.Helper()
 	path := filepath.Join(dir, fmt.Sprintf("rollout-%s-%s.jsonl", strings.NewReplacer(":", "-", "T", "_").Replace(timestamp), id))

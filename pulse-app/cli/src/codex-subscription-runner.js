@@ -198,8 +198,8 @@ async function readPrivateFile(file, maximum) {
   }
 }
 
-async function invokeCodex({ command, args, cwd, env, stdin, timeoutMs = 10 * 60_000 }) {
-  return runCaptured(command, args, { cwd, env, input: stdin, timeoutMs });
+async function invokeCodex({ command, args, cwd, env, stdin, timeoutMs = 10 * 60_000, signal }) {
+  return runCaptured(command, args, { cwd, env, input: stdin, timeoutMs, signal });
 }
 
 async function executeUnit({
@@ -217,6 +217,7 @@ async function executeUnit({
   copyAuth,
   preflight,
   acceptResult,
+	signal,
 }) {
   if (!egressAuthorized) fail('egress_not_authorized');
   if (typeof evidence !== 'string' || typeof prompt !== 'string' || prompt.length < 1) fail('unit_input_invalid');
@@ -243,7 +244,8 @@ async function executeUnit({
     const outputPath = path.join(tempRoot, 'output.json');
     await writeFile(schemaPath, codexHistoricalIngestOutputSchemaBytes(), { mode: 0o600, flag: 'wx' });
     const args = buildCodexExecArgs({ cwd: stage, schemaPath, outputPath, prompt });
-    const execution = await invoke({ command: codexPath, args, cwd: stage, env: childEnv, stdin: evidence, outputPath });
+		if (signal?.aborted) fail('runner_signaled');
+    const execution = await invoke({ command: codexPath, args, cwd: stage, env: childEnv, stdin: evidence, outputPath, signal });
     if (execution.status !== 0 || execution.signal) fail(classifyCodexFailure(execution));
     const events = parseCodexEventStream(execution.stdout);
     const output = await readPrivateFile(outputPath, MAX_OUTPUT_BYTES);
@@ -286,11 +288,13 @@ export async function runHistoricalIngestUnit({
   copyAuth = copyAuthFile,
   preflight = offlineCodexPreflight,
   acceptResult,
+	signal,
 } = {}) {
   return executeUnit({
     prompt, evidence, expectedJobID, expectedSnapshotDigest, egressAuthorized,
     qualification, requireLiveQualification: true, authFile, environment,
     codexPath, invoke, copyAuth, preflight, acceptResult,
+		signal,
   });
 }
 
@@ -325,13 +329,22 @@ export async function runSyntheticLunaCanary({
   });
 }
 
-async function runCaptured(command, args, { cwd, env, input = '', timeoutMs = 30_000 } = {}) {
+async function runCaptured(command, args, { cwd, env, input = '', timeoutMs = 30_000, signal } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false });
     const stdout = [];
     const stderr = [];
     let size = 0;
     let timedOut = false;
+		let aborted = false;
+		let forceTimer;
+		const abort = () => {
+			aborted = true;
+			child.kill('SIGTERM');
+			forceTimer = setTimeout(() => child.kill('SIGKILL'), 1_000);
+		};
+		if (signal?.aborted) abort();
+		else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
@@ -345,13 +358,17 @@ async function runCaptured(command, args, { cwd, env, input = '', timeoutMs = 30
     child.stderr.on('data', collect(stderr));
     child.on('error', (error) => {
       clearTimeout(timer);
+			clearTimeout(forceTimer);
+			signal?.removeEventListener('abort', abort);
       reject(error);
     });
-    child.on('close', (status, signal) => {
+    child.on('close', (status, childSignal) => {
       clearTimeout(timer);
+			clearTimeout(forceTimer);
+			signal?.removeEventListener('abort', abort);
       resolve({
-        status: timedOut ? 124 : status,
-        signal,
+				status: timedOut ? 124 : status,
+				signal: aborted ? 'SIGTERM' : childSignal,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
       });

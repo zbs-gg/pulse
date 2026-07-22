@@ -30,10 +30,11 @@ var (
 )
 
 type CodexParseOptions struct {
-	ExpectedSessionID string
-	CapturedBytes     int64
-	MaxRecordBytes    int
-	SourceAlias       string
+	ExpectedSessionID  string
+	CapturedBytes      int64
+	MaxRecordBytes     int
+	SourceAlias        string
+	AllowMultipleLinks bool
 }
 
 type CodexCoverage struct {
@@ -65,6 +66,14 @@ type CodexParseResult struct {
 	BlockingKinds         map[string]int64
 	AttachmentOccurrences map[string]int64
 	Evidence              []CodexEvidence
+	sourceVersion         codexSourceVersion
+}
+
+type codexSourceVersion struct {
+	Size            int64  `json:"size"`
+	ModTimeUnixNano int64  `json:"mod_time_unix_nano"`
+	Device          uint64 `json:"device"`
+	Inode           uint64 `json:"inode"`
 }
 
 type codexEnvelope struct {
@@ -107,7 +116,7 @@ type codexContentPart struct {
 }
 
 func ParseCodexFile(path string, options CodexParseOptions) (CodexParseResult, error) {
-	file, initial, err := openRegularCodexFile(path)
+	file, initial, err := openCodexFile(path, options.AllowMultipleLinks)
 	if err != nil {
 		return CodexParseResult{}, err
 	}
@@ -132,6 +141,7 @@ func ParseCodexFile(path string, options CodexParseOptions) (CodexParseResult, e
 		Exclusions:            map[string]int64{},
 		BlockingKinds:         map[string]int64{},
 		AttachmentOccurrences: map[string]int64{},
+		sourceVersion:         codexVersionFromInfo(initial),
 	}
 	seen := map[string]struct{}{}
 	boundaryFound := options.ExpectedSessionID == ""
@@ -320,7 +330,7 @@ func normalizeCodexResponse(envelope codexEnvelope, timestamp time.Time, lineNum
 		if !ok || text == "" {
 			return CodexEvidence{}, key, "empty_or_unsafe_message"
 		}
-		base.Kind = "message"
+		base.Kind = "agent_result"
 		base.Role = "assistant"
 		base.Text = text
 		base.AttachmentDigests = attachments
@@ -445,11 +455,15 @@ func readCodexLine(reader *bufio.Reader, maxBytes int) ([]byte, bool, error) {
 }
 
 func openRegularCodexFile(path string) (*os.File, os.FileInfo, error) {
+	return openCodexFile(path, false)
+}
+
+func openCodexFile(path string, allowMultipleLinks bool) (*os.File, os.FileInfo, error) {
 	initial, err := os.Lstat(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: lstat source: %v", ErrUnsafeCodexSource, err)
 	}
-	if !initial.Mode().IsRegular() || initial.Mode()&os.ModeSymlink != 0 || hasMultipleLinks(initial) {
+	if !initial.Mode().IsRegular() || initial.Mode()&os.ModeSymlink != 0 || (!allowMultipleLinks && hasMultipleLinks(initial)) {
 		return nil, nil, ErrUnsafeCodexSource
 	}
 	file, err := os.Open(path)
@@ -457,7 +471,7 @@ func openRegularCodexFile(path string) (*os.File, os.FileInfo, error) {
 		return nil, nil, fmt.Errorf("%w: open source: %v", ErrUnsafeCodexSource, err)
 	}
 	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(initial, opened) || hasMultipleLinks(opened) {
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(initial, opened) || (!allowMultipleLinks && hasMultipleLinks(opened)) {
 		file.Close()
 		return nil, nil, ErrUnsafeCodexSource
 	}
@@ -467,4 +481,28 @@ func openRegularCodexFile(path string) (*os.File, os.FileInfo, error) {
 func hasMultipleLinks(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Nlink > 1
+}
+
+func codexVersionFromInfo(info os.FileInfo) codexSourceVersion {
+	version := codexSourceVersion{Size: info.Size(), ModTimeUnixNano: info.ModTime().UnixNano()}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		version.Device = uint64(stat.Dev)
+		version.Inode = uint64(stat.Ino)
+	}
+	return version
+}
+
+func currentCodexSourceVersion(path string) (codexSourceVersion, error) {
+	file, info, err := openCodexFile(path, true)
+	if err != nil {
+		return codexSourceVersion{}, err
+	}
+	if err := file.Close(); err != nil {
+		return codexSourceVersion{}, err
+	}
+	return codexVersionFromInfo(info), nil
+}
+
+func validCodexSourceVersion(version codexSourceVersion) bool {
+	return version.Size > 0 && version.ModTimeUnixNano != 0 && version.Device != 0 && version.Inode != 0
 }

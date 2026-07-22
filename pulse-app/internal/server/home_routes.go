@@ -86,6 +86,7 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/consolidation/{id}/cancel", s.handleHomeConsolidationCancel)
 		r.Post("/consolidation/{id}/resume", s.handleHomeConsolidationResume)
 		r.Post("/history/{job}/items/{candidate}/review", s.handleHomeHistoricalReviewItem)
+		r.Post("/history/{job}/authorize-egress", s.handleHomeHistoricalAuthorizeEgress)
 		r.Get("/history/{job}/items/{candidate}/evidence", s.handleHomeHistoricalEvidence)
 		r.Post("/history/{job}/entities/preview", s.handleHomeHistoricalEntityPreview)
 		r.Post("/history/{job}/entities/apply", s.handleHomeHistoricalEntityApply)

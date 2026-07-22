@@ -17,14 +17,15 @@ import (
 )
 
 var (
-	ErrIngestJobNotFound = errors.New("historical ingest job not found")
-	ErrNoWorkAvailable   = errors.New("no historical ingest work available")
-	ErrJobNotExtracting  = errors.New("historical ingest job is not extracting")
-	ErrLeaseConflict     = errors.New("historical ingest lease conflict")
-	ErrResultConflict    = errors.New("historical ingest result conflict")
-	ErrIncompleteCohort  = errors.New("historical ingest cohort incomplete")
-	leaseIDPattern       = regexp.MustCompile(`^lease_[a-z0-9]{16,64}$`)
-	unitIDPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+	ErrIngestJobNotFound           = errors.New("historical ingest job not found")
+	ErrNoWorkAvailable             = errors.New("no historical ingest work available")
+	ErrJobNotExtracting            = errors.New("historical ingest job is not extracting")
+	ErrLeaseConflict               = errors.New("historical ingest lease conflict")
+	ErrResultConflict              = errors.New("historical ingest result conflict")
+	ErrIncompleteCohort            = errors.New("historical ingest cohort incomplete")
+	ErrEgressAuthorizationConflict = errors.New("historical ingest egress authorization conflict")
+	leaseIDPattern                 = regexp.MustCompile(`^lease_[a-z0-9]{16,64}$`)
+	unitIDPattern                  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 )
 
 type RunnerContract struct {
@@ -114,6 +115,9 @@ type JobStatus struct {
 	RunnerContract   string     `json:"runner_contract_digest"`
 	SourceRootCount  int        `json:"source_root_count"`
 	SourceFileCount  int        `json:"source_file_count"`
+	SourceBytes      int64      `json:"source_bytes"`
+	EvidenceBytes    int64      `json:"evidence_bytes"`
+	EgressAuthorized bool       `json:"egress_authorized"`
 }
 
 func NewIngestManager(cfg IngestManagerConfig) (*IngestManager, error) {
@@ -154,8 +158,19 @@ func NewIngestManager(cfg IngestManagerConfig) (*IngestManager, error) {
 }
 
 func (m *IngestManager) StartJob(jobID string, snapshot SourceSnapshot, units []WorkUnit, contract RunnerContract) (JobStatus, error) {
+	return m.startJob(jobID, snapshot, units, contract, JobExtracting)
+}
+
+func (m *IngestManager) StartJobAwaitingEgress(jobID string, snapshot SourceSnapshot, units []WorkUnit, contract RunnerContract) (JobStatus, error) {
+	return m.startJob(jobID, snapshot, units, contract, JobAwaitingEgress)
+}
+
+func (m *IngestManager) startJob(jobID string, snapshot SourceSnapshot, units []WorkUnit, contract RunnerContract, initialState JobState) (JobStatus, error) {
 	if !jobIDPattern.MatchString(jobID) || validateSourceSnapshot(snapshot) != nil || contract.Validate() != nil || len(units) == 0 {
 		return JobStatus{}, errors.New("historical ingest start contract invalid")
+	}
+	if initialState != JobExtracting && initialState != JobAwaitingEgress {
+		return JobStatus{}, errors.New("historical ingest start state invalid")
 	}
 	ordered := append([]WorkUnit(nil), units...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -207,7 +222,37 @@ func (m *IngestManager) StartJob(jobID string, snapshot SourceSnapshot, units []
 		return statusFor(current), nil
 	}
 	now := m.clock().UTC()
-	checkpoint := ingestCheckpoint{Schema: ingestCheckpointSchema, JobID: jobID, State: JobExtracting, Snapshot: snapshot, Contract: contract, Units: checkpoints, CreatedAt: now, UpdatedAt: now}
+	checkpoint := ingestCheckpoint{Schema: ingestCheckpointSchema, JobID: jobID, State: initialState, Snapshot: snapshot, Contract: contract, Units: checkpoints, CreatedAt: now, UpdatedAt: now}
+	if initialState == JobAwaitingEgress {
+		checkpoint.ReasonCode = "provider_consent_required"
+	}
+	if err := m.commitLocked(&checkpoint); err != nil {
+		return JobStatus{}, err
+	}
+	return statusFor(checkpoint), nil
+}
+
+func (m *IngestManager) AuthorizeEgress(jobID, snapshotDigest, runnerContractDigest string) (JobStatus, error) {
+	if !hexDigestPattern.MatchString(snapshotDigest) || !hexDigestPattern.MatchString(runnerContractDigest) {
+		return JobStatus{}, ErrEgressAuthorizationConflict
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	checkpoint, ok := m.jobs[jobID]
+	if !ok {
+		return JobStatus{}, ErrIngestJobNotFound
+	}
+	if checkpoint.Snapshot.Digest != snapshotDigest || checkpoint.Contract.Digest != runnerContractDigest {
+		return JobStatus{}, ErrEgressAuthorizationConflict
+	}
+	if checkpoint.State == JobExtracting && checkpoint.EgressAuthorizedAt != nil {
+		return statusFor(checkpoint), nil
+	}
+	if checkpoint.State != JobAwaitingEgress {
+		return JobStatus{}, ErrEgressAuthorizationConflict
+	}
+	now := m.clock().UTC()
+	checkpoint.State, checkpoint.ReasonCode, checkpoint.EgressAuthorizedAt = JobExtracting, "", &now
 	if err := m.commitLocked(&checkpoint); err != nil {
 		return JobStatus{}, err
 	}
@@ -535,7 +580,7 @@ func validateSourceSnapshot(snapshot SourceSnapshot) error {
 }
 
 func validateWorkUnit(unit WorkUnit, snapshotDigest string) error {
-	if !unitIDPattern.MatchString(unit.ID) || !opaqueRefPattern.MatchString(unit.RootID) || unit.Ordinal < 0 || unit.SnapshotDigest != snapshotDigest || !hexDigestPattern.MatchString(unit.EvidenceDigest) || len(unit.SourceAliases) == 0 {
+	if !unitIDPattern.MatchString(unit.ID) || !opaqueRefPattern.MatchString(unit.RootID) || unit.Ordinal < 0 || unit.SnapshotDigest != snapshotDigest || !hexDigestPattern.MatchString(unit.EvidenceDigest) || unit.EvidenceBytes <= 0 || len(unit.SourceAliases) == 0 {
 		return errors.New("work unit invalid")
 	}
 	for _, alias := range unit.SourceAliases {
@@ -588,8 +633,12 @@ func validateResultProvenance(result WorkUnitResult, unit WorkUnit, snapshot Sou
 }
 
 func statusFor(checkpoint ingestCheckpoint) JobStatus {
-	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest, SourceRootCount: checkpoint.Snapshot.RootCount, SourceFileCount: len(checkpoint.Snapshot.Files)}
+	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest, SourceRootCount: checkpoint.Snapshot.RootCount, SourceFileCount: len(checkpoint.Snapshot.Files), EgressAuthorized: checkpoint.EgressAuthorizedAt != nil}
+	for _, source := range checkpoint.Snapshot.Files {
+		status.SourceBytes += source.CapturedBytes
+	}
 	for _, unit := range checkpoint.Units {
+		status.EvidenceBytes += unit.Unit.EvidenceBytes
 		switch unit.State {
 		case unitAccepted:
 			status.AcceptedUnits++
@@ -634,7 +683,7 @@ func randomLeaseID() string {
 }
 func validManagerState(state JobState) bool {
 	switch state {
-	case JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobApprovalReady, JobStale, JobCanceled:
+	case JobAwaitingEgress, JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobApprovalReady, JobStale, JobCanceled:
 		return true
 	default:
 		return false

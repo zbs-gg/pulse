@@ -13,6 +13,7 @@ export async function runHistoricalIngestWorker({
   qualification,
   runUnit = runHistoricalIngestUnit,
   maximumUnits = 10_000,
+	signal,
 }) {
   if (!JOB_ID.test(jobID ?? '') || typeof request !== 'function' ||
       !qualification?.live_model_qualified || !DIGEST.test(qualification.contract_digest ?? '') ||
@@ -21,6 +22,7 @@ export async function runHistoricalIngestWorker({
   }
   let processed = 0;
   while (processed < maximumUnits) {
+		if (signal?.aborted) throw signal.reason ?? new Error('historical_worker_interrupted');
     const response = await request('POST', `/memory/historical-ingest/jobs/${jobID}/lease`, {});
     if (response?.done) {
       const state = response.status?.state;
@@ -36,6 +38,7 @@ export async function runHistoricalIngestWorker({
         expectedSnapshotDigest: current.unit.snapshot_digest,
         egressAuthorized: true,
         qualification,
+			signal,
         acceptResult: async (manifest, receipt) => {
           await request('POST', `/memory/historical-ingest/jobs/${jobID}/submit`, {
             unit_id: current.unit.id,

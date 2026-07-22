@@ -199,7 +199,7 @@ func TestMigrations035Through039UpgradeFrozenV34TeamStoreWithoutFingerprintDrift
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 52 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 53 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
@@ -325,7 +325,7 @@ func TestMigrations036Through039UpgradeFrozenV35TeamStoreWithoutFingerprintDrift
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 52 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 53 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{
@@ -445,7 +445,7 @@ func TestMigrations038And039UpgradeFrozenV37TeamStoreWithoutFingerprintDrift(t *
 	if err := upgraded.DB().QueryRow(`SELECT count(*) FROM schema_migration_manifest`).Scan(&manifestRows); err != nil {
 		t.Fatal(err)
 	}
-	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 52 {
+	if schemaVersion != 44 || minReader != 44 || minWriter != 44 || manifestRows != 53 {
 		t.Fatalf("v39 upgrade state: policy=%d reader=%d writer=%d manifest=%d", schemaVersion, minReader, minWriter, manifestRows)
 	}
 	for _, table := range []string{

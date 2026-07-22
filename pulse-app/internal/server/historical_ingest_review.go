@@ -18,30 +18,37 @@ import (
 const historicalEvidenceViewLimit = 8 << 10
 
 type memoryHomeHistoricalReview struct {
-	Available          bool
-	HasManifest        bool
-	Unavailable        bool
-	JobID              string
-	State              string
-	StateLabel         string
-	StateDetail        string
-	SourceRootCount    int
-	SourceFileCount    int
-	CandidateCount     int
-	WriteCount         int
-	ExcludedCount      int
-	ReviewedCount      int
-	RemainingRequired  int
-	Revision           int64
-	ManifestDigest     string
-	ReviewComplete     bool
-	CanComplete        bool
-	CanMutate          bool
-	ConfirmationDigest string
-	DestinationStoreID string
-	RepositoryID       string
-	Cards              []memoryHomeHistoricalCard
-	RootOptions        []memoryHomeHistoricalRoot
+	Available                bool
+	HasManifest              bool
+	Unavailable              bool
+	JobID                    string
+	State                    string
+	StateLabel               string
+	StateDetail              string
+	SourceRootCount          int
+	SourceFileCount          int
+	TotalUnits               int
+	SourceBytes              string
+	EvidenceBytes            string
+	CandidateCount           int
+	WriteCount               int
+	ExcludedCount            int
+	ReviewedCount            int
+	RemainingRequired        int
+	Revision                 int64
+	ManifestDigest           string
+	ReviewComplete           bool
+	CanComplete              bool
+	CanMutate                bool
+	CanAuthorizeEgress       bool
+	SnapshotDigest           string
+	RunnerContract           string
+	EgressConfirmationDigest string
+	ConfirmationDigest       string
+	DestinationStoreID       string
+	RepositoryID             string
+	Cards                    []memoryHomeHistoricalCard
+	RootOptions              []memoryHomeHistoricalRoot
 }
 
 type memoryHomeHistoricalRoot struct{ Value, Label string }
@@ -85,7 +92,14 @@ func (s *Server) memoryHomeHistoricalReview() memoryHomeHistoricalReview {
 	}
 	if status.ManifestDigest == "" {
 		title, detail := historicalReviewStateCopy(status.State, 0)
-		return memoryHomeHistoricalReview{Available: true, JobID: status.JobID, State: string(status.State), StateLabel: title, StateDetail: detail, SourceRootCount: status.SourceRootCount, SourceFileCount: status.SourceFileCount}
+		return memoryHomeHistoricalReview{
+			Available: true, JobID: status.JobID, State: string(status.State), StateLabel: title, StateDetail: detail,
+			SourceRootCount: status.SourceRootCount, SourceFileCount: status.SourceFileCount, TotalUnits: status.TotalUnits,
+			SourceBytes: formatHistoricalBytes(status.SourceBytes), EvidenceBytes: formatHistoricalBytes(status.EvidenceBytes),
+			CanAuthorizeEgress: status.State == historicalingest.JobAwaitingEgress,
+			SnapshotDigest:     status.SnapshotDigest, RunnerContract: status.RunnerContract,
+			EgressConfirmationDigest: historicalEgressConfirmationDigest(status),
+		}
 	}
 	snapshot, err := s.historicalIngest.ReviewSnapshot(status.JobID, nil)
 	if err != nil {
@@ -103,7 +117,8 @@ func (s *Server) memoryHomeHistoricalReview() memoryHomeHistoricalReview {
 	}
 	view := memoryHomeHistoricalReview{
 		Available: true, HasManifest: true, JobID: snapshot.JobID, State: string(snapshot.State),
-		SourceRootCount: snapshot.SourceRootCount, SourceFileCount: snapshot.SourceFileCount,
+		SourceRootCount: snapshot.SourceRootCount, SourceFileCount: snapshot.SourceFileCount, TotalUnits: status.TotalUnits,
+		SourceBytes: formatHistoricalBytes(status.SourceBytes), EvidenceBytes: formatHistoricalBytes(status.EvidenceBytes),
 		CandidateCount: snapshot.CandidateCount, WriteCount: snapshot.WriteCount, ExcludedCount: snapshot.ExcludedCount,
 		ReviewedCount: snapshot.ReviewedCount, RemainingRequired: snapshot.RemainingRequired,
 		Revision: snapshot.Revision, ManifestDigest: snapshot.ManifestDigest, ReviewComplete: snapshot.ReviewComplete,
@@ -132,6 +147,8 @@ func (s *Server) memoryHomeHistoricalReview() memoryHomeHistoricalReview {
 
 func historicalReviewStateCopy(state historicalingest.JobState, remaining int) (string, string) {
 	switch state {
+	case historicalingest.JobAwaitingEgress:
+		return "Your snapshot is frozen", "Nothing has been sent to a model. Review the exact cohort below, then authorize this snapshot for GPT-5.6 Luna through your Codex subscription."
 	case historicalingest.JobManifestReady:
 		if remaining > 0 {
 			return "Review needed", fmt.Sprintf("%d blocking candidate(s) still need an explicit keep or exclude decision.", remaining)
@@ -152,6 +169,55 @@ func historicalReviewStateCopy(state historicalingest.JobState, remaining int) (
 	default:
 		return strings.ReplaceAll(string(state), "_", " "), "Pulse shows this lifecycle state without implying review or apply authority."
 	}
+}
+
+func historicalEgressConfirmationDigest(status historicalingest.JobStatus) string {
+	value := fmt.Sprintf("pulse:historical-egress-consent:v1\n%s\n%s\n%s\n%d\n%d\n%d\n%d\n%d", status.JobID, status.SnapshotDigest, status.RunnerContract, status.SourceRootCount, status.SourceFileCount, status.TotalUnits, status.SourceBytes, status.EvidenceBytes)
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func formatHistoricalBytes(value int64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	size := float64(value)
+	unit := 0
+	for size >= 1024 && unit < len(units)-1 {
+		size /= 1024
+		unit++
+	}
+	if unit == 0 || size >= 10 {
+		return fmt.Sprintf("%.0f %s", size, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", size, units[unit])
+}
+
+func (s *Server) handleHomeHistoricalAuthorizeEgress(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "snapshot_digest", "runner_contract_digest", "confirmation_digest") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	manager, err := s.historicalManager()
+	if err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	jobID := chi.URLParam(r, "job")
+	status, err := manager.Status(jobID)
+	if err != nil || status.State != historicalingest.JobAwaitingEgress ||
+		r.PostFormValue("snapshot_digest") != status.SnapshotDigest ||
+		r.PostFormValue("runner_contract_digest") != status.RunnerContract ||
+		r.PostFormValue("confirmation_digest") != historicalEgressConfirmationDigest(status) {
+		http.Error(w, "Historical snapshot consent is stale.", http.StatusConflict)
+		return
+	}
+	if _, err := manager.AuthorizeEgress(jobID, status.SnapshotDigest, status.RunnerContract); err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func historicalReviewCard(value historicalingest.ReviewItem) memoryHomeHistoricalCard {

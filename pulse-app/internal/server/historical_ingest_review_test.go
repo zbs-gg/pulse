@@ -34,7 +34,7 @@ func seedHistoricalReview(t *testing.T, srv *Server, evidence string, items ...h
 			RootID: "root_test", ParserVersion: historicalingest.CodexParserVersionV1, RecordCount: 1, IncludedCount: 1,
 		}},
 	}
-	unit := historicalingest.WorkUnit{ID: "unit_test", RootID: "root_test", SnapshotDigest: snapshot.Digest, EvidenceDigest: evidenceDigest, SourceAliases: []string{"source_0123456789abcdef"}}
+	unit := historicalingest.WorkUnit{ID: "unit_test", RootID: "root_test", SnapshotDigest: snapshot.Digest, EvidenceDigest: evidenceDigest, EvidenceBytes: int64(len(evidence)), SourceAliases: []string{"source_0123456789abcdef"}}
 	contract := historicalingest.RunnerContract{Digest: strings.Repeat("f", 64), SchemaDigest: historicalingest.SchemaDigest(), ModelID: "gpt-5.6-luna", ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1, PromptVersion: "historical_prompt_v1"}
 	jobID := "job_0123456789abcdef"
 	if _, err := srv.historicalIngest.StartJob(jobID, snapshot, []historicalingest.WorkUnit{unit}, contract); err != nil {
@@ -78,6 +78,51 @@ func historicalDecisionItem(summary string) historicalingest.MaterialItem {
 		Privacy: historicalingest.PrivacyPrivate, EpistemicStatus: historicalingest.EpistemicExplicit,
 		Derivation: historicalingest.DerivationDirect, ValidTime: historicalingest.ValidTime{From: time.Date(2026, 7, 22, 5, 0, 0, 0, time.UTC)},
 		Scope: historicalingest.Scope{Kind: historicalingest.ScopeGlobal}, Payload: historicalingest.MaterialPayload{Summary: summary},
+	}
+}
+
+func TestHomeHistoricalEgressConsentBindsExactFrozenSnapshot(t *testing.T) {
+	srv, _ := newHomeRouteFixture(t)
+	snapshot := historicalingest.SourceSnapshot{
+		Digest: strings.Repeat("a", 64), Cutoff: time.Date(2026, 7, 22, 5, 0, 0, 0, time.UTC), RootCount: 1,
+		ParserVersion: historicalingest.CodexParserVersionV1,
+		Files:         []historicalingest.SourceFilePrefix{{Alias: "source_0123456789abcdef", CapturedBytes: 20, PrefixDigest: strings.Repeat("b", 64), RootID: "root_test", ParserVersion: historicalingest.CodexParserVersionV1, RecordCount: 1, IncludedCount: 1}},
+	}
+	unit := historicalingest.WorkUnit{ID: "unit_test", RootID: "root_test", SnapshotDigest: snapshot.Digest, EvidenceDigest: strings.Repeat("c", 64), EvidenceBytes: 64, SourceAliases: []string{"source_0123456789abcdef"}}
+	contract := historicalingest.RunnerContract{Digest: strings.Repeat("d", 64), SchemaDigest: historicalingest.SchemaDigest(), ModelID: "gpt-5.6-luna", ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1, PromptVersion: "historical_prompt_v1"}
+	if _, err := srv.historicalIngest.StartJobAwaitingEgress("job_0123456789abcdef", snapshot, []historicalingest.WorkUnit{unit}, contract); err != nil {
+		t.Fatal(err)
+	}
+	home := srv.memoryHomeHistoricalReview()
+	if !home.CanAuthorizeEgress || home.HasManifest || home.EgressConfirmationDigest == "" {
+		t.Fatalf("unexpected consent view: %+v", home)
+	}
+	html, err := renderMemoryHomeHTML(memoryHomePage{Historical: home, CSRFToken: "csrf-test"})
+	if err != nil || !strings.Contains(html, "Authorize 1 Luna turns") || !strings.Contains(html, "cannot write memory") || !strings.Contains(html, "64 B normalized evidence") {
+		t.Fatalf("consent UI missing: err=%v html=%s", err, html)
+	}
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "history/job_0123456789abcdef/authorize-egress"
+	stale := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(stale, homeMutationRequest(srv, session, path, url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "snapshot_digest": {snapshot.Digest}, "runner_contract_digest": {contract.Digest}, "confirmation_digest": {strings.Repeat("0", 64)},
+	}))
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale consent status=%d", stale.Code)
+	}
+	valid := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(valid, homeMutationRequest(srv, session, path, url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "snapshot_digest": {snapshot.Digest}, "runner_contract_digest": {contract.Digest}, "confirmation_digest": {home.EgressConfirmationDigest},
+	}))
+	if valid.Code != http.StatusNoContent {
+		t.Fatalf("valid consent status=%d body=%s", valid.Code, valid.Body.String())
+	}
+	status, err := srv.historicalIngest.Status("job_0123456789abcdef")
+	if err != nil || status.State != historicalingest.JobExtracting || !status.EgressAuthorized {
+		t.Fatalf("authorized status=%+v err=%v", status, err)
 	}
 }
 

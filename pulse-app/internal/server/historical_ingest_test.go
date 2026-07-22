@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +17,17 @@ import (
 	"github.com/nkkmnk/pulse/internal/historicalingest"
 	"github.com/nkkmnk/pulse/internal/store"
 )
+
+func writeHistoricalCodexFixture(t *testing.T, dir, id, timestamp, text string) {
+	t.Helper()
+	meta := map[string]any{"timestamp": timestamp, "type": "session_meta", "payload": map[string]any{"id": id}}
+	message := map[string]any{"timestamp": timestamp, "type": "response_item", "payload": map[string]any{"id": "msg_" + id, "type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": text}}}}
+	first, _ := json.Marshal(meta)
+	second, _ := json.Marshal(message)
+	if err := os.WriteFile(filepath.Join(dir, "rollout-"+id+".jsonl"), append(append(first, '\n'), append(second, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type historicalEvidenceFunc func(context.Context, historicalingest.WorkUnit) (HistoricalIngestWorkPayload, error)
 
@@ -46,7 +59,7 @@ func newHistoricalIngestServer(t *testing.T, evidence string) (*httptest.Server,
 	snapshotDigest := strings.Repeat("b", 64)
 	unit := historicalingest.WorkUnit{
 		ID: "unit_server", RootID: "root_server", SnapshotDigest: snapshotDigest,
-		EvidenceDigest: hex.EncodeToString(evidenceDigest[:]), SourceAliases: []string{"source_0123456789abcdef"}, Ordinal: 0,
+		EvidenceDigest: hex.EncodeToString(evidenceDigest[:]), EvidenceBytes: int64(len(evidence)), SourceAliases: []string{"source_0123456789abcdef"}, Ordinal: 0,
 	}
 	snapshot := historicalingest.SourceSnapshot{
 		Digest: snapshotDigest, Cutoff: time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC), RootCount: 1,
@@ -123,6 +136,86 @@ func TestHistoricalIngestWorkerRoutesLeaseSubmitAndFinalize(t *testing.T) {
 	_ = done.Body.Close()
 	if !terminal.Done || terminal.Status.State != historicalingest.JobManifestReady || terminal.Status.AcceptedUnits != 1 {
 		t.Fatalf("terminal=%+v", terminal)
+	}
+}
+
+func TestHistoricalIngestStartFreezesCodexCohortAndWaitsForHomeEgressConsent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHistoricalCodexFixture(t, root, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "2026-07-21T10:00:00Z", "Keep this decision.")
+	writeHistoricalCodexFixture(t, root, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "2026-07-22T10:00:00Z", "Importer must be excluded.")
+	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_historical_start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := strings.Repeat("a", 64)
+	if err := vault.ConfigureProductRuntimeAuthority(binding, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ConfigureContinuityDeliveryAuthority(binding, "repository_historical_start"); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := historicalingest.NewIngestManager(historicalingest.IngestManagerConfig{RootDir: filepath.Join(t.TempDir(), "manager"), Key: []byte(strings.Repeat("m", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := historicalingest.NewCodexSourceStore(historicalingest.CodexSourceStoreConfig{RootDir: filepath.Join(t.TempDir(), "source-index"), Key: []byte(strings.Repeat("s", 32)), SourceRoots: []string{root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{IPCSecret: "secret", Store: vault, HistoricalIngestManager: manager, HistoricalCodexSource: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { ts.Close(); srv.Close(); _ = vault.Close() })
+	response := pulseJSON(t, ts, http.MethodPost, "/memory/historical-ingest/jobs", map[string]any{"source": "codex", "root_limit": 1, "excluded_session_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("start status=%d", response.StatusCode)
+	}
+	var status historicalingest.JobStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if status.State != historicalingest.JobAwaitingEgress || status.SourceRootCount != 1 || status.EgressAuthorized || status.RunnerContract != codexSubscriptionRunnerContractDigestV1 {
+		t.Fatalf("start status=%+v", status)
+	}
+	blocked := pulseJSON(t, ts, http.MethodPost, "/memory/historical-ingest/jobs/"+status.JobID+"/lease", map[string]any{})
+	if blocked.StatusCode != http.StatusConflict {
+		t.Fatalf("lease before consent status=%d", blocked.StatusCode)
+	}
+	_ = blocked.Body.Close()
+	if _, err := manager.AuthorizeEgress(status.JobID, status.SnapshotDigest, status.RunnerContract); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := manager.LeaseNext(status.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := source.Load(probe.Unit); err != nil {
+		t.Fatalf("source load: %v", err)
+	}
+	if _, err := manager.FailLease(status.JobID, probe.Unit.ID, probe.Token, "test_probe"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ResumeJob(status.JobID); err != nil {
+		t.Fatal(err)
+	}
+	leaseResponse := pulseJSON(t, ts, http.MethodPost, "/memory/historical-ingest/jobs/"+status.JobID+"/lease", map[string]any{})
+	if leaseResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(leaseResponse.Body)
+		t.Fatalf("lease after consent status=%d body=%s", leaseResponse.StatusCode, body)
+	}
+	var lease historicalWorkerLease
+	if err := json.NewDecoder(leaseResponse.Body).Decode(&lease); err != nil {
+		t.Fatal(err)
+	}
+	_ = leaseResponse.Body.Close()
+	if lease.Unit.RootID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" || !strings.Contains(lease.Evidence, "Keep this decision") || strings.Contains(lease.Evidence, root) {
+		t.Fatalf("unsafe or wrong lease: %+v", lease)
 	}
 }
 

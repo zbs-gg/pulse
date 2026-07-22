@@ -373,6 +373,7 @@ type WorkUnit struct {
 	RootID         string   `json:"root_id"`
 	SnapshotDigest string   `json:"snapshot_digest"`
 	EvidenceDigest string   `json:"evidence_digest"`
+	EvidenceBytes  int64    `json:"evidence_bytes"`
 	SourceAliases  []string `json:"source_aliases"`
 	Ordinal        int      `json:"ordinal"`
 }

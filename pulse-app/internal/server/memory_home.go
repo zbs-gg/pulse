@@ -631,9 +631,18 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       </div>
       {{if .Historical.Unavailable}}<div class="empty" style="margin-top:18px">The canonical memory vault is unchanged. Inspect or remove the private historical sidecar before retrying.</div>{{else}}
       <div class="history-answers">
-        <div class="history-answer"><strong>What Pulse read</strong><p>{{.Historical.SourceRootCount}} frozen root session trees across {{.Historical.SourceFileCount}} path-free source aliases. Raw source files were not changed.</p></div>
+        <div class="history-answer"><strong>What Pulse read</strong><p>{{.Historical.SourceRootCount}} frozen root session trees across {{.Historical.SourceFileCount}} path-free source aliases ({{.Historical.SourceBytes}} captured), producing {{.Historical.TotalUnits}} isolated extraction turns from {{.Historical.EvidenceBytes}} normalized evidence. Raw source files were not changed.</p></div>
         <div class="history-answer"><strong>What Pulse will write</strong><p>{{if .Historical.HasManifest}}{{.Historical.WriteCount}} structured private candidates in this revision; {{.Historical.ExcludedCount}} excluded. This is still a dry run.{{else}}No candidate manifest exists yet. Extraction and review cannot imply a future write.{{end}}</p></div>
       </div>
+      {{if .Historical.CanAuthorizeEgress}}
+      <div class="history-final">
+        <div><strong>Allow {{.Historical.TotalUnits}} isolated Luna turns for this exact snapshot?</strong><p>Pulse will send {{.Historical.EvidenceBytes}} of normalized records from these {{.Historical.SourceRootCount}} root trees to <strong>GPT-5.6 Luna · low</strong> through your existing Codex/ChatGPT subscription. Local paths, attachments, credentials, hidden reasoning, inherited summaries, and raw source files are excluded. This may consume significant subscription quota; Pulse pauses on quota and never falls back to an API or another model. This creates a dry-run manifest only; it cannot write memory.</p><p class="receipt">Snapshot <code>{{.Historical.SnapshotDigest}}</code> · {{.Historical.SourceFileCount}} files · {{.Historical.TotalUnits}} model turns</p></div>
+        <form method="post" action="history/{{.Historical.JobID}}/authorize-egress" data-home-mutation data-home-pending-label="Authorizing only this frozen snapshot…">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="snapshot_digest" value="{{.Historical.SnapshotDigest}}"><input type="hidden" name="runner_contract_digest" value="{{.Historical.RunnerContract}}"><input type="hidden" name="confirmation_digest" value="{{.Historical.EgressConfirmationDigest}}">
+          <button class="primary">Authorize {{.Historical.TotalUnits}} Luna turns</button>
+        </form>
+      </div>
+      {{end}}
       {{if .Historical.HasManifest}}
       <div class="history-counts" aria-label="Historical review progress">
         <div class="history-count"><span>Reviewed</span><strong>{{.Historical.ReviewedCount}} / {{.Historical.CandidateCount}}</strong><p>Explicit keep, edit, or exclude decisions.</p></div>

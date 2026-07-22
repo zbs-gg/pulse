@@ -306,14 +306,15 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 			RawCaptureEnabled: rawCaptureEnabled,
 			StoragePath:       cfg.DBPath,
 		},
-		Retrieval:                  retrievalEngine,
-		ContextQuery:               contextQuery,
-		Health:                     healthProvider,
-		HomeOrigin:                 homeOrigin,
-		HomePresence:               homePresence,
-		EnhancedPresenceAuthorizer: enhancedPresenceAuthorizer,
-		UnassignedInboxPath:        unassignedInboxPath,
-		HomeBindingVerifier:        homeBindingVerifier,
+		Retrieval:                   retrievalEngine,
+		ContextQuery:                contextQuery,
+		Health:                      healthProvider,
+		HomeOrigin:                  homeOrigin,
+		HomePresence:                homePresence,
+		EnhancedPresenceAuthorizer:  enhancedPresenceAuthorizer,
+		UnassignedInboxPath:         unassignedInboxPath,
+		HomeBindingVerifier:         homeBindingVerifier,
+		EnableHistoricalCodexSource: kind != "",
 	})
 	if err != nil {
 		return err
