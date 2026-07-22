@@ -11,6 +11,7 @@
   "files": [
     "src/cli.js",
     "src/consolidation-report.js",
+    "src/historical-ingest-schema.js",
     "src/capture-state.js",
     "src/cli-idempotency.js",
     "src/host-adapter.js",

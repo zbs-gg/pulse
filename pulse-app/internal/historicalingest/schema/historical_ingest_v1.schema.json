@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zbs.gg/schemas/pulse/historical-ingest/v1",
+  "title": "Pulse Historical Ingest Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "revision",
+    "source_snapshot_digest",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "https://zbs.gg/schemas/pulse/historical-ingest/v1"
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^job_[a-f0-9]{16,64}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_snapshot_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/materialItem"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "prefix_digest",
+        "record_locator"
+      ],
+      "properties": {
+        "alias": {
+          "type": "string",
+          "pattern": "^source_[a-f0-9]{16,64}$"
+        },
+        "prefix_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "record_locator": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "project",
+            "global",
+            "unassigned"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "pattern": "^project_[A-Za-z0-9._:-]{1,247}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "project"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "project_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "project_id"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "validTime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "to": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "predicate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "object_value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "object_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "entity_type": {
+          "enum": [
+            "person",
+            "project"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "state_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "continuity_status": {
+          "enum": [
+            "open",
+            "closed",
+            "historical"
+          ]
+        }
+      }
+    },
+    "materialItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "kind",
+        "confidence",
+        "privacy",
+        "epistemic_status",
+        "derivation",
+        "valid_time",
+        "scope",
+        "source_refs",
+        "payload"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^candidate_[a-f0-9]{16,64}$"
+        },
+        "kind": {
+          "enum": [
+            "event",
+            "decision",
+            "assertion",
+            "person",
+            "project",
+            "relation",
+            "state",
+            "continuity"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "privacy": {
+          "const": "private"
+        },
+        "epistemic_status": {
+          "enum": [
+            "explicit",
+            "hypothesis",
+            "conflict"
+          ]
+        },
+        "derivation": {
+          "enum": [
+            "direct",
+            "inferred"
+          ]
+        },
+        "valid_time": {
+          "$ref": "#/$defs/validTime"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
+        },
+        "payload": {
+          "$ref": "#/$defs/payload"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "derivation": {
+                "const": "inferred"
+              }
+            },
+            "required": [
+              "derivation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "epistemic_status": {
+                "enum": [
+                  "hypothesis",
+                  "conflict"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
