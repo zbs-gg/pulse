@@ -8,6 +8,7 @@ const OPAQUE_LOCATOR = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const ABSOLUTE_PATH = /(?:^|[\s"'])\/(?:Users|home|var|private|Volumes|workspace)\/|[A-Za-z]:\\/;
 const SENSITIVE = /(?:api[_-]?key|authorization\s*:|begin private key|ghp_|xox[baprs]-)/i;
+const UNSAFE_MATERIAL_TEXT = /[\p{Cc}\p{Cf}]/u;
 
 const MATERIAL_KINDS = new Set(['event', 'decision', 'assertion', 'person', 'project', 'relation', 'state', 'continuity']);
 const EPISTEMIC = new Set(['explicit', 'hypothesis', 'conflict']);
@@ -75,8 +76,14 @@ function payload(value, kind) {
     if (key === 'intensity') {
       if (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 1) fail('payload_intensity');
       continue;
-    }
-    boundedString(item, 1, ['summary', 'object_value'].includes(key) ? 8192 : key === 'name' || key === 'title' ? 512 : 256, `payload_${key}`);
+      }
+    const maximum = {
+      title: 4000, summary: 4000, subject_id: 256, predicate: 128, object_value: 4000,
+      object_id: 256, entity_type: 64, name: 512, state_kind: 128, continuity_status: 32,
+    }[key];
+    if (typeof item !== 'string' || item.length < 1 || Buffer.byteLength(item, 'utf8') > maximum ||
+        item.normalize('NFC') !== item || UNSAFE_MATERIAL_TEXT.test(item)) fail(`payload_${key}`);
+    if (['subject_id', 'object_id'].includes(key) && !OPAQUE_LOCATOR.test(item)) fail(`payload_${key}`);
   }
   if (kind === 'event' && (!value.title || !value.summary)) fail('payload_event');
   if (kind === 'decision' && !value.summary) fail('payload_decision');
@@ -186,7 +193,23 @@ export function normalizeCodexHistoricalIngestManifest(value) {
       }
     }
   }
+  normalized.items = normalized.items.filter((item) => payloadSupportsMaterialKind(item?.payload, item?.kind));
   return normalized;
+}
+
+function payloadSupportsMaterialKind(payloadValue, kind) {
+  if (!payloadValue || typeof payloadValue !== 'object' || Array.isArray(payloadValue)) return true;
+  switch (kind) {
+    case 'event': return Boolean(payloadValue.title && payloadValue.summary);
+    case 'decision': return Boolean(payloadValue.summary);
+    case 'assertion': return Boolean(payloadValue.subject_id && payloadValue.predicate && payloadValue.object_value);
+    case 'person': return payloadValue.entity_type === 'person' && Boolean(payloadValue.name);
+    case 'project': return payloadValue.entity_type === 'project' && Boolean(payloadValue.name);
+    case 'relation': return Boolean(payloadValue.subject_id && payloadValue.predicate && payloadValue.object_id);
+    case 'state': return Boolean(payloadValue.state_kind && payloadValue.summary);
+    case 'continuity': return Boolean(payloadValue.summary) && ['open', 'closed', 'historical'].includes(payloadValue.continuity_status);
+    default: return true;
+  }
 }
 
 export function contentFreeUnitReceipt({ manifest, outputDigest, usage, model, effort, cliVersion }) {

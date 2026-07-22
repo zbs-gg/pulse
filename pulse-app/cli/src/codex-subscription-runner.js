@@ -62,6 +62,7 @@ export function buildCodexExecArgs({ cwd, schemaPath, outputPath, prompt }) {
     '--model', CODEX_LUNA_MODEL,
     '--config', `model_reasoning_effort="${CODEX_LUNA_EFFORT}"`,
     '--config', 'approval_policy="never"',
+    '--config', 'web_search="disabled"',
     ...featureDisableArgs(),
     '--output-schema', schemaPath, '--output-last-message', outputPath,
     '--json', prompt,

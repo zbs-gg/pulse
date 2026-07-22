@@ -60,6 +60,7 @@ test('runner pins Luna low, isolation flags, closed schema, and every qualified 
   assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', CODEX_LUNA_MODEL]);
   assert.ok(args.includes('model_reasoning_effort="low"'));
   assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes('web_search="disabled"'));
   assert.equal(args.at(-1), 'trusted instructions');
   for (const feature of CODEX_DISABLED_FEATURES) {
     assert.ok(args.some((value, index) => value === '--disable' && args[index + 1] === feature), feature);
@@ -159,6 +160,18 @@ test('historical protocol is closed and preserves inference and provenance rules
     scope: { kind: 'global' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' }],
     payload: { state_kind: 'emotion', summary: 'inferred state' },
   }] })), /inferred_explicit/);
+  assert.throws(() => assertHistoricalIngestManifest(manifest({ items: [{
+    candidate_id: 'candidate_0123456789abcdef', kind: 'assertion', confidence: 0.7, privacy: 'private',
+    epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z' },
+    scope: { kind: 'unassigned' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' }],
+    payload: { subject_id: 'not an opaque id', predicate: 'prefers', object_value: 'Pulse' },
+  }] })), /payload_subject_id/);
+  assert.throws(() => assertHistoricalIngestManifest(manifest({ items: [{
+    candidate_id: 'candidate_0123456789abcdef', kind: 'decision', confidence: 0.7, privacy: 'private',
+    epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z' },
+    scope: { kind: 'unassigned' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' }],
+    payload: { summary: 'x'.repeat(4001) },
+  }] })), /payload_summary/);
 });
 
 test('Codex output schema stays closed without unsupported conditionals and normalizes nullable optionals', () => {
@@ -168,6 +181,21 @@ test('Codex output schema stays closed without unsupported conditionals and norm
   assert.deepEqual(schema.$defs.payload.required.sort(), Object.keys(schema.$defs.payload.properties).sort());
   const value = manifest({ items: [] });
   assert.deepEqual(normalizeCodexHistoricalIngestManifest(value), value);
+  const withIncompleteConditionalItem = manifest({ items: [
+    {
+      candidate_id: 'candidate_0123456789abcdef', kind: 'assertion', confidence: 0.7, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z', to: null },
+      scope: { kind: 'unassigned', project_id: null }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' }],
+      payload: { title: null, summary: 'insufficient assertion', subject_id: null, predicate: null, object_value: null, object_id: null, entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
+    },
+    {
+      candidate_id: 'candidate_fedcba9876543210', kind: 'decision', confidence: 0.8, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z', to: null },
+      scope: { kind: 'unassigned', project_id: null }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:2' }],
+      payload: { title: null, summary: 'keep this decision', subject_id: null, predicate: null, object_value: null, object_id: null, entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
+    },
+  ] });
+  assert.deepEqual(normalizeCodexHistoricalIngestManifest(withIncompleteConditionalItem).items.map((item) => item.candidate_id), ['candidate_fedcba9876543210']);
 });
 
 test('unit run sends evidence only on stdin and returns a content-free receipt', async () => {
