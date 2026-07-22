@@ -137,6 +137,15 @@ func TestEmbeddedSchemaIsClosedAndDigestStable(t *testing.T) {
 	}
 }
 
+func TestMaterialTextRejectsControlAndBidiCharacters(t *testing.T) {
+	for _, value := range []string{"hidden\x00control", "right\u202eto-left", "line\nfeed"} {
+		item := materialFixture(MaterialKindDecision, MaterialPayload{Summary: value})
+		if err := item.Validate(); err == nil {
+			t.Fatalf("unsafe material text %q was accepted", value)
+		}
+	}
+}
+
 func TestHistoricalApplyRuntimeProfile(t *testing.T) {
 	t.Parallel()
 

@@ -112,6 +112,8 @@ type JobStatus struct {
 	ReasonCode       string     `json:"reason_code,omitempty"`
 	SnapshotDigest   string     `json:"snapshot_digest"`
 	RunnerContract   string     `json:"runner_contract_digest"`
+	SourceRootCount  int        `json:"source_root_count"`
+	SourceFileCount  int        `json:"source_file_count"`
 }
 
 func NewIngestManager(cfg IngestManagerConfig) (*IngestManager, error) {
@@ -380,7 +382,7 @@ func (m *IngestManager) CancelJob(jobID string) (JobStatus, error) {
 			checkpoint.Units[index].State, checkpoint.Units[index].LeaseHash, checkpoint.Units[index].LeaseExpiresAt = unitPending, "", nil
 		}
 	}
-	checkpoint.State, checkpoint.ReasonCode = JobCanceled, "user_canceled"
+	checkpoint.State, checkpoint.ReasonCode, checkpoint.ReviewComplete = JobCanceled, "user_canceled", false
 	if err := m.commitLocked(&checkpoint); err != nil {
 		return JobStatus{}, err
 	}
@@ -393,6 +395,43 @@ func (m *IngestManager) Status(jobID string) (JobStatus, error) {
 	checkpoint, ok := m.jobs[jobID]
 	if !ok {
 		return JobStatus{}, ErrIngestJobNotFound
+	}
+	return statusFor(checkpoint), nil
+}
+
+func (m *IngestManager) LatestStatus() (JobStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var selected *ingestCheckpoint
+	for _, checkpoint := range m.jobs {
+		if selected == nil || checkpoint.UpdatedAt.After(selected.UpdatedAt) ||
+			(checkpoint.UpdatedAt.Equal(selected.UpdatedAt) && checkpoint.Generation > selected.Generation) {
+			copy := checkpoint
+			selected = &copy
+		}
+	}
+	if selected == nil {
+		return JobStatus{}, ErrIngestJobNotFound
+	}
+	return statusFor(*selected), nil
+}
+
+func (m *IngestManager) MarkStale(jobID, snapshotDigest, reason string) (JobStatus, error) {
+	if !hexDigestPattern.MatchString(snapshotDigest) || !unitIDPattern.MatchString(reason) {
+		return JobStatus{}, ErrReviewInvalid
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	checkpoint, ok := m.jobs[jobID]
+	if !ok {
+		return JobStatus{}, ErrIngestJobNotFound
+	}
+	if checkpoint.Snapshot.Digest != snapshotDigest {
+		return JobStatus{}, ErrReviewVersionConflict
+	}
+	checkpoint.State, checkpoint.ReasonCode, checkpoint.ReviewComplete = JobStale, reason, false
+	if err := m.commitLocked(&checkpoint); err != nil {
+		return JobStatus{}, err
 	}
 	return statusFor(checkpoint), nil
 }
@@ -479,7 +518,7 @@ func validateSourceSnapshot(snapshot SourceSnapshot) error {
 	aliases := map[string]struct{}{}
 	roots := map[string]struct{}{}
 	for _, file := range snapshot.Files {
-		if !sourceAliasPattern.MatchString(file.Alias) || file.CapturedBytes < 0 || !hexDigestPattern.MatchString(file.PrefixDigest) || file.RootID == "" || file.ParserVersion == "" ||
+		if !sourceAliasPattern.MatchString(file.Alias) || file.CapturedBytes < 0 || !hexDigestPattern.MatchString(file.PrefixDigest) || !opaqueRefPattern.MatchString(file.RootID) || file.ParserVersion == "" ||
 			file.RecordCount < 0 || file.IncludedCount < 0 || file.ExcludedCount < 0 || file.BlockingCount < 0 || file.RecordCount != file.IncludedCount+file.ExcludedCount+file.BlockingCount {
 			return errors.New("snapshot source invalid")
 		}
@@ -496,7 +535,7 @@ func validateSourceSnapshot(snapshot SourceSnapshot) error {
 }
 
 func validateWorkUnit(unit WorkUnit, snapshotDigest string) error {
-	if !unitIDPattern.MatchString(unit.ID) || unit.RootID == "" || unit.Ordinal < 0 || unit.SnapshotDigest != snapshotDigest || !hexDigestPattern.MatchString(unit.EvidenceDigest) || len(unit.SourceAliases) == 0 {
+	if !unitIDPattern.MatchString(unit.ID) || !opaqueRefPattern.MatchString(unit.RootID) || unit.Ordinal < 0 || unit.SnapshotDigest != snapshotDigest || !hexDigestPattern.MatchString(unit.EvidenceDigest) || len(unit.SourceAliases) == 0 {
 		return errors.New("work unit invalid")
 	}
 	for _, alias := range unit.SourceAliases {
@@ -549,7 +588,7 @@ func validateResultProvenance(result WorkUnitResult, unit WorkUnit, snapshot Sou
 }
 
 func statusFor(checkpoint ingestCheckpoint) JobStatus {
-	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest}
+	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest, SourceRootCount: checkpoint.Snapshot.RootCount, SourceFileCount: len(checkpoint.Snapshot.Files)}
 	for _, unit := range checkpoint.Units {
 		switch unit.State {
 		case unitAccepted:
@@ -595,7 +634,7 @@ func randomLeaseID() string {
 }
 func validManagerState(state JobState) bool {
 	switch state {
-	case JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobStale, JobCanceled:
+	case JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobApprovalReady, JobStale, JobCanceled:
 		return true
 	default:
 		return false

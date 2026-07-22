@@ -14,6 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const SchemaVersionV1 = "https://zbs.gg/schemas/pulse/historical-ingest/v1"
@@ -167,6 +171,14 @@ type MaterialPayload struct {
 }
 
 func (payload MaterialPayload) Validate(kind MaterialKind) error {
+	if !validMaterialText(payload.Title, 4000) || !validMaterialText(payload.Summary, 4000) ||
+		!validMaterialText(payload.ObjectValue, 4000) || !validMaterialText(payload.Name, 512) ||
+		!validMaterialText(payload.Predicate, 128) || !validMaterialText(payload.EntityType, 64) ||
+		!validMaterialText(payload.StateKind, 128) || !validMaterialText(payload.ContinuityStatus, 32) ||
+		(payload.SubjectID != "" && !opaqueRefPattern.MatchString(payload.SubjectID)) ||
+		(payload.ObjectID != "" && !opaqueRefPattern.MatchString(payload.ObjectID)) {
+		return errors.New("material payload text is invalid")
+	}
 	if payload.Intensity != nil && (*payload.Intensity < 0 || *payload.Intensity > 1) {
 		return errors.New("state intensity must be between zero and one")
 	}
@@ -207,6 +219,18 @@ func (payload MaterialPayload) Validate(kind MaterialKind) error {
 		return fmt.Errorf("unsupported material kind %q", kind)
 	}
 	return nil
+}
+
+func validMaterialText(value string, maximum int) bool {
+	if len(value) > maximum || !utf8.ValidString(value) || !norm.NFC.IsNormalString(value) {
+		return false
+	}
+	for _, char := range value {
+		if unicode.Is(unicode.Cc, char) || unicode.Is(unicode.Cf, char) {
+			return false
+		}
+	}
+	return true
 }
 
 type MaterialItem struct {

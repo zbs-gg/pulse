@@ -1,6 +1,7 @@
 package historicalingest
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,10 +38,25 @@ func (m *IngestManager) CleanupJob(jobID string, reason RetentionReason) error {
 	}
 	// Inspect every recognized private artifact before deleting any one. A
 	// substituted symlink or special file makes cleanup fail atomically.
+	manifestTargets := []string{}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "result-") || strings.HasPrefix(entry.Name(), "manifest-") {
-			if _, err := platform.InspectPrivateFile(filepath.Join(m.rootDir, entry.Name()), privateIngestPolicy(maxIngestManifest)); err != nil {
+			path := filepath.Join(m.rootDir, entry.Name())
+			if _, err := platform.InspectPrivateFile(path, privateIngestPolicy(maxIngestManifest)); err != nil {
 				return err
+			}
+			if strings.HasPrefix(entry.Name(), "manifest-") {
+				encoded, err := platform.ReadPrivateFile(path, privateIngestPolicy(maxIngestManifest))
+				if err != nil {
+					return err
+				}
+				var manifest Manifest
+				if json.Unmarshal(encoded, &manifest) != nil || manifest.Validate() != nil {
+					return ErrIngestCheckpointIntegrity
+				}
+				if manifest.JobID == jobID {
+					manifestTargets = append(manifestTargets, entry.Name())
+				}
 			}
 		}
 	}
@@ -53,9 +69,7 @@ func (m *IngestManager) CleanupJob(jobID string, reason RetentionReason) error {
 			targets = append(targets, "result-"+unit.ResultDigest+".json")
 		}
 	}
-	if checkpoint.ManifestDigest != "" {
-		targets = append(targets, "manifest-"+checkpoint.ManifestDigest+".json")
-	}
+	targets = append(targets, manifestTargets...)
 	for _, name := range targets {
 		path := filepath.Join(m.rootDir, name)
 		info, err := platform.InspectPrivateFile(path, privateIngestPolicy(maxIngestManifest))
@@ -69,7 +83,7 @@ func (m *IngestManager) CleanupJob(jobID string, reason RetentionReason) error {
 			return err
 		}
 	}
-	checkpoint.State = JobCanceled
+	checkpoint.State, checkpoint.ReviewComplete = JobCanceled, false
 	checkpoint.ReasonCode = "retention_" + string(reason)
 	return m.commitLocked(&checkpoint)
 }

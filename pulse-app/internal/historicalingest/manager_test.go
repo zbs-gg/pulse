@@ -343,14 +343,22 @@ func TestCleanupRetentionMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, manifestDigest, _, err := manager.BuildManifest(jobID)
+			_, firstManifestDigest, _, err := manager.BuildManifest(jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := manager.ReviewSnapshot(jobID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err = manager.MutateReview(jobID, ReviewMutation{ExpectedRevision: review.Revision, ExpectedDigest: review.ManifestDigest, CandidateID: review.Items[0].Item.CandidateID, Disposition: ReviewKept})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := manager.CleanupJob(jobID, test.reason); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"result-" + receipt.ResultDigest + ".json", "manifest-" + manifestDigest + ".json"} {
+			for _, name := range []string{"result-" + receipt.ResultDigest + ".json", "manifest-" + firstManifestDigest + ".json", "manifest-" + review.ManifestDigest + ".json"} {
 				_, err := os.Lstat(filepath.Join(cfg.RootDir, name))
 				if test.keeps && err != nil {
 					t.Fatalf("%s should be retained: %v", name, err)
