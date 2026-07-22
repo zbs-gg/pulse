@@ -21,6 +21,7 @@ import (
 	"github.com/nkkmnk/pulse/internal/consolidation"
 	"github.com/nkkmnk/pulse/internal/contextquery"
 	"github.com/nkkmnk/pulse/internal/health"
+	"github.com/nkkmnk/pulse/internal/historicalingest"
 	"github.com/nkkmnk/pulse/internal/ingest"
 	"github.com/nkkmnk/pulse/internal/outbox"
 	"github.com/nkkmnk/pulse/internal/prompt"
@@ -43,6 +44,10 @@ type ContextQueryAPI interface {
 type ConsolidationInventory interface {
 	Run(context.Context, string, consolidation.Destination) (consolidation.Report, error)
 	EnsureFresh(string) (consolidation.Report, error)
+}
+
+type HistoricalIngestEvidence interface {
+	LoadHistoricalIngestEvidence(context.Context, historicalingest.WorkUnit) (HistoricalIngestWorkPayload, error)
 }
 
 // HomePresence is retained as an optional compatibility dependency for
@@ -107,6 +112,12 @@ type Config struct {
 	// ConsolidationJobTimeout bounds daemon-owned scans independently from the
 	// initiating HTTP request. Zero selects the product default.
 	ConsolidationJobTimeout time.Duration
+	// HistoricalIngestManager owns Personal/Desk historical extraction
+	// checkpoints. Nil auto-opens an owner-private manager beside a bound vault.
+	HistoricalIngestManager *historicalingest.IngestManager
+	// HistoricalIngestEvidence rehydrates one frozen normalized work unit. Raw
+	// source paths and transcript files never cross this interface.
+	HistoricalIngestEvidence HistoricalIngestEvidence
 }
 
 type BillingStatus struct {
@@ -138,6 +149,9 @@ type Server struct {
 	consolidationJobs        map[string]context.CancelFunc
 	consolidationJobsWG      sync.WaitGroup
 	consolidationClosing     bool
+	historicalIngest         *historicalingest.IngestManager
+	historicalEvidence       HistoricalIngestEvidence
+	historicalUnavailable    string
 }
 
 func New(cfg Config) (*Server, error) {
@@ -176,6 +190,8 @@ func New(cfg Config) (*Server, error) {
 		consolidationCtx:        consolidationCtx,
 		consolidationCancel:     consolidationCancel,
 		consolidationJobs:       make(map[string]context.CancelFunc),
+		historicalIngest:        cfg.HistoricalIngestManager,
+		historicalEvidence:      cfg.HistoricalIngestEvidence,
 	}
 	if server.consolidationReports == nil && cfg.Store != nil &&
 		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
@@ -215,6 +231,29 @@ func New(cfg Config) (*Server, error) {
 					return nil, fmt.Errorf("server: open consolidation inventory: %w", inventoryErr)
 				}
 				server.consolidationInventory = inventory
+			}
+		}
+	}
+	if server.historicalIngest == nil && cfg.Store != nil &&
+		(cfg.Store.StoreKind() == store.StoreKindPersonal || cfg.Store.StoreKind() == store.StoreKindDesk) {
+		if _, _, ok := cfg.Store.ProductRuntimeBoundary(); ok {
+			if !filepath.IsAbs(cfg.Store.DBPath()) {
+				return nil, errors.New("server: product historical ingest requires an absolute vault path")
+			}
+			key := sha256.Sum256([]byte("pulse:historical-ingest:v1:" + cfg.IPCSecret))
+			manager, err := historicalingest.NewIngestManager(historicalingest.IngestManagerConfig{
+				RootDir: filepath.Join(filepath.Dir(cfg.Store.DBPath()), "historical-ingest"),
+				Key:     key[:],
+			})
+			if err != nil {
+				if errors.Is(err, historicalingest.ErrIngestCheckpointIntegrity) {
+					server.historicalUnavailable = "checkpoint_integrity_failure"
+				} else {
+					consolidationCancel()
+					return nil, fmt.Errorf("server: open historical ingest: %w", err)
+				}
+			} else {
+				server.historicalIngest = manager
 			}
 		}
 	}
@@ -330,6 +369,14 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/continuity/checkpoint", s.handleContinuityCheckpoint)
 		r.Post("/continuity/observe", s.handleContinuityObserve)
 		if s.cfg.Store.StoreKind() == store.StoreKindPersonal || s.cfg.Store.StoreKind() == store.StoreKindDesk {
+			if s.historicalIngest != nil || s.historicalUnavailable != "" {
+				r.Get("/memory/historical-ingest/jobs/{id}", s.handleHistoricalIngestStatus)
+				r.Post("/memory/historical-ingest/jobs/{id}/lease", s.handleHistoricalIngestLease)
+				r.Post("/memory/historical-ingest/jobs/{id}/submit", s.handleHistoricalIngestSubmit)
+				r.Post("/memory/historical-ingest/jobs/{id}/quota", s.handleHistoricalIngestQuota)
+				r.Post("/memory/historical-ingest/jobs/{id}/resume", s.handleHistoricalIngestResume)
+				r.Post("/memory/historical-ingest/jobs/{id}/cancel", s.handleHistoricalIngestCancel)
+			}
 			if s.consolidationReports != nil || s.consolidationUnavailable != "" {
 				r.Post("/memory/consolidation/reports", s.handleConsolidationReportStart)
 				r.Get("/memory/consolidation/reports/latest", s.handleConsolidationReportLatest)

@@ -216,6 +216,7 @@ async function executeUnit({
   invoke,
   copyAuth,
   preflight,
+  acceptResult,
 }) {
   if (!egressAuthorized) fail('egress_not_authorized');
   if (typeof evidence !== 'string' || typeof prompt !== 'string' || prompt.length < 1) fail('unit_input_invalid');
@@ -253,7 +254,7 @@ async function executeUnit({
       fail('output_json_invalid');
     }
     const validated = assertHistoricalIngestManifest(normalizeCodexHistoricalIngestManifest(parsed), { expectedJobID, expectedSnapshotDigest });
-    return contentFreeUnitReceipt({
+    const receipt = contentFreeUnitReceipt({
       manifest: validated,
       outputDigest: createHash('sha256').update(output).digest('hex'),
       usage: events.usage,
@@ -261,6 +262,11 @@ async function executeUnit({
       effort: CODEX_LUNA_EFFORT,
       cliVersion: QUALIFIED_CODEX_VERSION,
     });
+    if (acceptResult !== undefined) {
+      if (typeof acceptResult !== 'function') fail('result_acceptor_invalid');
+      await acceptResult(validated, receipt);
+    }
+    return receipt;
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -279,11 +285,12 @@ export async function runHistoricalIngestUnit({
   invoke = invokeCodex,
   copyAuth = copyAuthFile,
   preflight = offlineCodexPreflight,
+  acceptResult,
 } = {}) {
   return executeUnit({
     prompt, evidence, expectedJobID, expectedSnapshotDigest, egressAuthorized,
     qualification, requireLiveQualification: true, authFile, environment,
-    codexPath, invoke, copyAuth, preflight,
+    codexPath, invoke, copyAuth, preflight, acceptResult,
   });
 }
 
@@ -303,7 +310,7 @@ export async function runSyntheticLunaCanary({
     prompt: `Synthetic capability canary. No user history is present. You MUST call every model-visible tool exactly once using harmless empty input. If and only if no tool exists, return exactly this JSON object: ${exact}`,
     evidence: '', expectedJobID: jobID, expectedSnapshotDigest: snapshot,
     egressAuthorized, qualification: undefined, requireLiveQualification: false,
-    authFile, environment, codexPath, invoke, copyAuth, preflight,
+    authFile, environment, codexPath, invoke, copyAuth, preflight, acceptResult: undefined,
   });
   return Object.freeze({
     ready: true,
