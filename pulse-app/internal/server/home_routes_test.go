@@ -457,7 +457,7 @@ func TestHomeRouterIsolatedFromIPCAndCORSAndRendersRealReadModel(t *testing.T) {
 	}
 	assertHomeHeaders(t, response.Header())
 	csp := response.Header().Get("Content-Security-Policy")
-	for _, directive := range []string{"script-src 'self'", "style-src 'unsafe-inline'", "frame-ancestors 'none'"} {
+	for _, directive := range []string{"connect-src 'self'", "script-src 'self'", "style-src 'unsafe-inline'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, directive) {
 			t.Fatalf("Home CSP missing %q: %q", directive, csp)
 		}

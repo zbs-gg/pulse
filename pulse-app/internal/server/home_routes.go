@@ -498,7 +498,7 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Memory Home render failed", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'unsafe-inline'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'unsafe-inline'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, page)
 }

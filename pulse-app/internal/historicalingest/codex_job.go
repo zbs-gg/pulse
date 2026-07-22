@@ -212,21 +212,34 @@ func (s *CodexSourceStore) VerifyDigest(snapshotDigest string) error {
 }
 
 func verifyCodexAliases(snapshot CodexSnapshot, aliases []string) error {
-	byAlias := make(map[string]struct{}, len(snapshot.Sources))
+	byAlias := make(map[string]CodexSourcePrefix, len(snapshot.Sources))
 	for _, source := range snapshot.Sources {
-		byAlias[source.Alias] = struct{}{}
+		byAlias[source.Alias] = source
 	}
 	for _, alias := range aliases {
-		_, exists := byAlias[alias]
+		source, exists := byAlias[alias]
 		if !exists {
 			return ErrCodexPrefixStale
 		}
 		current, err := currentCodexSourceVersion(snapshot.sourcePaths[alias])
-		if err != nil || current != snapshot.sourceVersions[alias] {
+		if err != nil || !codexSourceVersionPreservesPrefix(snapshot.sourceVersions[alias], current, source.CapturedBytes) {
+			return ErrCodexPrefixStale
+		}
+		if err := verifyCodexSourcePrefix(snapshot.sourcePaths[alias], source); err != nil {
 			return ErrCodexPrefixStale
 		}
 	}
 	return nil
+}
+
+func codexSourceVersionPreservesPrefix(expected, current codexSourceVersion, capturedBytes int64) bool {
+	return capturedBytes > 0 &&
+		validCodexSourceVersion(expected) &&
+		validCodexSourceVersion(current) &&
+		expected.Size >= capturedBytes &&
+		current.Size >= capturedBytes &&
+		expected.Device == current.Device &&
+		expected.Inode == current.Inode
 }
 
 func (s *CodexSourceStore) loadSnapshot(snapshotDigest string) (codexSourceIndex, CodexSnapshot, error) {
@@ -344,7 +357,7 @@ func restoreCodexSnapshot(index codexSourceIndex, allowedRoots []string) (CodexS
 	snapshot := CodexSnapshot{ParserVersion: index.ParserVersion, Cutoff: index.Cutoff, Digest: index.SnapshotDigest, RootCount: len(index.Trees), Trees: append([]CodexTree(nil), index.Trees...), InvalidReasons: cloneStringMap(index.InvalidReasons), sourcePaths: map[string]string{}, sourceEvidence: map[string][]CodexEvidence{}, sourceVersions: map[string]codexSourceVersion{}}
 	for _, indexed := range index.Sources {
 		parsed, err := ParseCodexFile(indexed.Path, CodexParseOptions{ExpectedSessionID: indexed.SessionID, CapturedBytes: indexed.CapturedBytes, SourceAlias: indexed.Alias, AllowMultipleLinks: true})
-		if err != nil || parsed.PrefixDigest != indexed.PrefixDigest || parsed.sourceVersion != indexed.Version {
+		if err != nil || parsed.PrefixDigest != indexed.PrefixDigest || !codexSourceVersionPreservesPrefix(indexed.Version, parsed.sourceVersion, indexed.CapturedBytes) {
 			return CodexSnapshot{}, ErrCodexPrefixStale
 		}
 		if indexed.SessionID != indexed.RootID {

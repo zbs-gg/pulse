@@ -406,24 +406,31 @@ func VerifyCodexSnapshot(snapshot CodexSnapshot) error {
 		if path == "" {
 			return fmt.Errorf("%w: source map unavailable", ErrCodexPrefixStale)
 		}
-		file, initial, err := openCodexFile(path, true)
-		if err != nil {
+		if err := verifyCodexSourcePrefix(path, source); err != nil {
 			return err
 		}
-		if initial.Size() < source.CapturedBytes {
-			_ = file.Close()
-			return ErrCodexPrefixStale
-		}
-		hasher := sha256.New()
-		written, copyErr := io.Copy(hasher, io.LimitReader(file, source.CapturedBytes))
-		final, statErr := file.Stat()
-		closeErr := file.Close()
-		if copyErr != nil || statErr != nil || closeErr != nil || written != source.CapturedBytes || !os.SameFile(initial, final) || final.Size() < source.CapturedBytes {
-			return ErrCodexPrefixStale
-		}
-		if hex.EncodeToString(hasher.Sum(nil)) != source.PrefixDigest {
-			return ErrCodexPrefixStale
-		}
+	}
+	return nil
+}
+
+func verifyCodexSourcePrefix(path string, source CodexSourcePrefix) error {
+	file, initial, err := openCodexFile(path, true)
+	if err != nil {
+		return err
+	}
+	if initial.Size() < source.CapturedBytes {
+		_ = file.Close()
+		return ErrCodexPrefixStale
+	}
+	hasher := sha256.New()
+	written, copyErr := io.Copy(hasher, io.LimitReader(file, source.CapturedBytes))
+	final, statErr := file.Stat()
+	closeErr := file.Close()
+	if copyErr != nil || statErr != nil || closeErr != nil || written != source.CapturedBytes || !os.SameFile(initial, final) || final.Size() < source.CapturedBytes {
+		return ErrCodexPrefixStale
+	}
+	if hex.EncodeToString(hasher.Sum(nil)) != source.PrefixDigest {
+		return ErrCodexPrefixStale
 	}
 	return nil
 }

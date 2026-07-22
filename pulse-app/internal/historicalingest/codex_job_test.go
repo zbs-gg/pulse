@@ -2,6 +2,7 @@ package historicalingest
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ func TestCodexSourceStoreFreezesExactJobAndRehydratesPathFreeEvidence(t *testing
 	if err := os.MkdirAll(sourceRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCodexSession(t, sourceRoot, "root-a", "", "2026-07-20T01:00:00Z", messageRecord("one", "2026-07-20T01:01:00Z", "Remember the Pulse decision."))
+	sourcePath := writeCodexSession(t, sourceRoot, "root-a", "", "2026-07-20T01:00:00Z", messageRecord("one", "2026-07-20T01:01:00Z", "Remember the Pulse decision."))
 	store, err := NewCodexSourceStore(CodexSourceStoreConfig{
 		RootDir: filepath.Join(t.TempDir(), "private-index"), Key: []byte(strings.Repeat("s", 32)), SourceRoots: []string{sourceRoot},
 	})
@@ -39,7 +40,20 @@ func TestCodexSourceStoreFreezesExactJobAndRehydratesPathFreeEvidence(t *testing
 	if json.Unmarshal([]byte(evidence), &payload) != nil || payload["root_id"] != "root-a" {
 		t.Fatalf("unexpected evidence: %s", evidence)
 	}
-	if err := os.WriteFile(filepath.Join(sourceRoot, "append-marker"), []byte("ignored"), 0o600); err != nil {
+	file, err := os.OpenFile(sourcePath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended, err := json.Marshal(messageRecord("two", "2026-07-20T01:02:00Z", "This arrived after the frozen snapshot."))
+	if err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if _, err := file.Write(append(appended, '\n')); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := NewCodexSourceStore(CodexSourceStoreConfig{
@@ -48,8 +62,23 @@ func TestCodexSourceStoreFreezesExactJobAndRehydratesPathFreeEvidence(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := reopened.Load(prepared.Units[0]); err != nil {
+	_, rehydratedEvidence, err := reopened.Load(prepared.Units[0])
+	if err != nil {
 		t.Fatalf("restart rehydrate failed: %v", err)
+	}
+	if rehydratedEvidence != evidence {
+		t.Fatalf("rehydrated evidence included data after the frozen prefix\nwant: %s\n got: %s", evidence, rehydratedEvidence)
+	}
+	mutated, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated[0] = 'X'
+	if err := os.WriteFile(sourcePath, mutated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reopened.Load(prepared.Units[0]); !errors.Is(err, ErrCodexPrefixStale) {
+		t.Fatalf("prefix mutation error = %v, want stale prefix", err)
 	}
 }
 
