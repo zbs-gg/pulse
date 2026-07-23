@@ -131,3 +131,16 @@ claim applies to it.
 - push Personal memory into Git;
 - print an IPC secret, browser session credential, or release signing key;
 - say “saved” without a receipt or “ready” without the doctor verdict.
+
+## Temporary Personal recovery lane
+
+When the current branch is `codex/personal-real-dogfood`, read
+`docs/recovery/PERSONAL_DOGFOOD.md` before changing code.
+
+In this lane, use native Codex tools by default. Do not invoke Superpowers,
+`ce-work`, or `lfg`; do not create another worktree; and do not expand into
+Team, historical import, dashboard redesign, or release-matrix work. Keep one
+short plan with at most three vertical units and at most two bounded
+subagents. The acceptance gate is a real Codex conversation that produces a
+visible approved memory and delivers that same memory to a newly opened real
+Codex task.
