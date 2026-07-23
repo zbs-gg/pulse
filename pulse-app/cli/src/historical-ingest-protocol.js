@@ -193,22 +193,19 @@ export function normalizeCodexHistoricalIngestManifest(value) {
       }
     }
   }
-  normalized.items = normalized.items.filter((item) => payloadSupportsMaterialKind(item?.payload, item?.kind));
+  normalized.items = normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind));
   return normalized;
 }
 
-function payloadSupportsMaterialKind(payloadValue, kind) {
-  if (!payloadValue || typeof payloadValue !== 'object' || Array.isArray(payloadValue)) return true;
-  switch (kind) {
-    case 'event': return Boolean(payloadValue.title && payloadValue.summary);
-    case 'decision': return Boolean(payloadValue.summary);
-    case 'assertion': return Boolean(payloadValue.subject_id && payloadValue.predicate && payloadValue.object_value);
-    case 'person': return payloadValue.entity_type === 'person' && Boolean(payloadValue.name);
-    case 'project': return payloadValue.entity_type === 'project' && Boolean(payloadValue.name);
-    case 'relation': return Boolean(payloadValue.subject_id && payloadValue.predicate && payloadValue.object_id);
-    case 'state': return Boolean(payloadValue.state_kind && payloadValue.summary);
-    case 'continuity': return Boolean(payloadValue.summary) && ['open', 'closed', 'historical'].includes(payloadValue.continuity_status);
-    default: return true;
+function payloadIsCanonical(payloadValue, kind) {
+  try {
+    payload(payloadValue, kind);
+    return true;
+  } catch (error) {
+    if (error instanceof HistoricalIngestProtocolError && error.code.startsWith('payload')) {
+      return false;
+    }
+    throw error;
   }
 }
 

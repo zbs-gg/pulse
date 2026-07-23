@@ -194,6 +194,12 @@ test('Codex output schema stays closed without unsupported conditionals and norm
       scope: { kind: 'unassigned', project_id: null }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:2' }],
       payload: { title: null, summary: 'keep this decision', subject_id: null, predicate: null, object_value: null, object_id: null, entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
     },
+    {
+      candidate_id: 'candidate_aaaaaaaaaaaaaaaa', kind: 'relation', confidence: 0.7, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z', to: null },
+      scope: { kind: 'unassigned', project_id: null }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:3' }],
+      payload: { title: null, summary: null, subject_id: 'Nikita Shilov', predicate: 'works_on', object_value: null, object_id: 'project:pulse', entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
+    },
   ] });
   assert.deepEqual(normalizeCodexHistoricalIngestManifest(withIncompleteConditionalItem).items.map((item) => item.candidate_id), ['candidate_fedcba9876543210']);
 });
