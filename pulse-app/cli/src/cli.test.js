@@ -446,7 +446,11 @@ test('install-plan claude-code prints human-readable trust plan', () => {
 });
 
 test('install-plan --json exposes the host-neutral Personal product contract without mutation', () => {
-  const { home, result } = run(['install-plan', '--json']);
+  const missingReleaseRoot = mkdtempSync(join(tmpdir(), 'pulse-cli-missing-release.'));
+  const { home, result } = run(['install-plan', '--json'], {
+    PULSE_RELEASE_TEST_MODE: '1',
+    PULSE_RELEASE_MANIFEST_PATH: join(missingReleaseRoot, 'personal-preview-manifest.json'),
+  });
 
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
@@ -458,8 +462,8 @@ test('install-plan --json exposes the host-neutral Personal product contract wit
   assert.equal(plan.privacy.raw_transcript_capture, 'off');
   assert.equal(plan.privacy.backend_model_calls, 'off');
   assert.match(plan.reason_codes.join('\n'), /workspace_not_git/);
-  assert.equal(plan.release?.catalog_schema, 'pulse.personal_preview.release_catalog.v2');
-  assert.doesNotMatch(plan.reason_codes.join('\n'), /release_manifest_unavailable/);
+  assert.equal(plan.release, null);
+  assert.match(plan.reason_codes.join('\n'), /release_manifest_unavailable/);
   assert.equal(existsSync(join(home, '.pulse')), false);
 });
 
