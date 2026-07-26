@@ -525,7 +525,14 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   const packageLock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   assert.equal(packageLock.packages[''].engines.node, '>=20');
   assert.ok(packageJSON.files.includes('src/release-manifest.js'));
-  assert.ok(packageJSON.files.includes('release'));
+  for (const path of [
+    'release/README.md',
+    'release/personal-preview-manifest.json',
+    'release/personal-preview-manifest.schema.json',
+    'release/pulse-release-root.pem',
+  ]) {
+    assert.ok(packageJSON.files.includes(path), path);
+  }
   const schema = JSON.parse(readFileSync(new URL('../release/personal-preview-manifest.schema.json', import.meta.url), 'utf8'));
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties.schema.const, 'pulse.personal_preview.release_catalog.v2');

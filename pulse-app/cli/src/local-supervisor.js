@@ -133,14 +133,23 @@ function samePlatformPath(first, second, platformServices) {
   return platformServices.isPathInside(first, second) && platformServices.isPathInside(second, first);
 }
 
-function activatedFile(activation, relativePath, platformServices, { executable = false } = {}) {
+function activatedFile(
+  activation, relativePath, platformServices, { executable = false, contentRead = true } = {},
+) {
   const path = join(activation.version_path, relativePath);
   if (!inside(activation.version_path, path)) {
     throw new SupervisorError('managed_artifact_path_invalid', 'managed artifact path escaped its activation');
   }
   let executableProof;
   try {
-    platformServices.readIntegrityFile(path, { owner: 'current', maxBytes: 64 * 1024 * 1024 });
+    if (contentRead) {
+      platformServices.readIntegrityFile(path, { owner: 'current', maxBytes: 64 * 1024 * 1024 });
+    } else {
+      // The activation set was already hashed against its signed tree before
+      // reaching the supervisor. Keep the large model identity-bound and
+      // owner-only here without loading hundreds of MiB into a JS Buffer.
+      platformServices.assertPrivateState(path, { kind: 'file' });
+    }
     if (executable) {
       executableProof = platformServices.inspectExecutable(path);
       if (!executableProof?.executable) throw new Error('not executable');
@@ -280,7 +289,7 @@ export function resolveManagedRuntime(runtime, {
   const supportRoot = activatedDirectory(modelActivation, 'support', platformServices);
   nativeFixtureSupervisorStage('support_root_complete');
   nativeFixtureSupervisorStage('model_contract_files_started');
-  activatedFile(modelActivation, 'model_int8.onnx', platformServices);
+  activatedFile(modelActivation, 'model_int8.onnx', platformServices, { contentRead: false });
   activatedFile(modelActivation, 'pulse-model-contract.json', platformServices);
   for (const supportFile of [
     'config.json', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json',

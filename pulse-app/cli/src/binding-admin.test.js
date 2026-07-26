@@ -8,7 +8,11 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
-import { createWorkspaceBinding, recoverWorkspaceBindingTransaction } from './binding-admin.js';
+import {
+  createInitialPersonalWorkspaceBinding,
+  createWorkspaceBinding,
+  recoverWorkspaceBindingTransaction,
+} from './binding-admin.js';
 import {
   BindingError, canonicalizeWorkspace, resolveWorkspaceBinding, verifyBindingRegistry,
 } from './workspace-binding.js';
@@ -70,6 +74,71 @@ function teamOptions(setup, repository, overrides = {}) {
     ...overrides,
   };
 }
+
+test('initial Personal binding uses an ephemeral portable signer and persists only its public key', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-binding-bootstrap.'));
+  const repository = makeRepository(home, 'project');
+  const trust = join(home, 'trust');
+  const registryPath = join(home, '.pulse', 'supervisor', 'workspace-bindings.json');
+  const publicKeyPath = join(trust, 'workspace-bindings.pub.pem');
+  const anchorPath = join(trust, 'workspace-bindings.anchor.json');
+  mkdirSync(trust, { recursive: true, mode: 0o700 });
+  let publicKeyInstalls = 0;
+
+  const binding = await createInitialPersonalWorkspaceBinding({
+    cwd: repository,
+    home,
+    principalID: 'principal_nik',
+    port: 18801,
+    registryPath,
+    publicKeyPath,
+    anchorPath,
+    rootPublicKey: false,
+    rootAnchor: false,
+    publicKeyInstaller: (bytes) => {
+      publicKeyInstalls += 1;
+      writeFileSync(publicKeyPath, bytes, { mode: 0o600 });
+      chmodSync(publicKeyPath, 0o600);
+    },
+    publicKeyRemover: () => rmSync(publicKeyPath, { force: true }),
+    anchorInstaller: (bytes) => {
+      writeFileSync(anchorPath, bytes, { mode: 0o600 });
+      chmodSync(anchorPath, 0o600);
+    },
+    anchorRemover: () => rmSync(anchorPath, { force: true }),
+  });
+
+  assert.equal(binding.mode, 'personal');
+  assert.equal(publicKeyInstalls, 1);
+  assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).algorithm, 'ed25519');
+  assert.doesNotMatch(readFileSync(publicKeyPath, 'utf8'), /PRIVATE KEY/);
+  assert.equal(resolveWorkspaceBinding({
+    cwd: repository,
+    registryPath,
+    publicKeyPath,
+    anchorPath,
+    rootAnchor: false,
+  }).binding_id, binding.binding_id);
+
+  await assert.rejects(
+    createInitialPersonalWorkspaceBinding({
+      cwd: repository,
+      home,
+      principalID: 'principal_nik',
+      registryPath,
+      publicKeyPath,
+      anchorPath,
+      rootPublicKey: false,
+      rootAnchor: false,
+      publicKeyInstaller: () => { publicKeyInstalls += 1; },
+      publicKeyRemover: () => {},
+      anchorInstaller: () => {},
+      anchorRemover: () => {},
+    }),
+    /binding_admin_initial_binding_exists/,
+  );
+  assert.equal(publicKeyInstalls, 1);
+});
 
 test('Personal and Team onboarding creates physically separate exact topologies', async () => {
   const setup = fixture();

@@ -1,11 +1,15 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { join } from 'node:path';
 
-import { acquireInstallLock } from './install-journal.js';
-import { canonicalInstallPlanJSON, formatPersonalInstallPlan } from './install-plan.js';
+import { acquireInstallLock, readInstallJournal } from './install-journal.js';
+import {
+  canonicalInstallPlanJSON,
+  formatPersonalInstallIntroduction,
+  formatPersonalInstallPlan,
+} from './install-plan.js';
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 import { runPersonalInstall } from './personal-install.js';
 
@@ -18,16 +22,19 @@ function printResult(result, { json, stdout }) {
     writeLine(stdout, JSON.stringify(result, null, 2));
     return;
   }
-  writeLine(stdout, `\nPulse install result: ${result.outcome} (${result.reason_code})`);
-  writeLine(stdout, `Project: ${result.current_project.workspace_id}`);
-  writeLine(stdout, `Completed: ${result.completed_steps.length > 0 ? result.completed_steps.join(' -> ') : 'none'}`);
-  writeLine(stdout, `Host parity: ${result.host_status?.parity ?? 'blocked'}`);
-  for (const host of result.host_status?.hosts ?? []) {
-    writeLine(stdout, `  - ${host.host}: ${host.verified ? 'verified' : host.reason_code}`);
+  if (result.outcome === 'ready') {
+    writeLine(stdout, '\nPulse Personal is ready.');
+    writeLine(stdout, 'Continue working in your AI app. Pulse will remember automatically.');
+    writeLine(stdout, 'Optional: run pulse home to inspect or edit memory.');
+  } else {
+    writeLine(stdout, `\nPulse Personal could not finish (${result.reason_code}).`);
+    writeLine(stdout, result.completed_steps.length > 0
+      ? `Completed safely: ${result.completed_steps.join(' -> ')}`
+      : 'No install step completed.');
+    writeLine(stdout, 'Existing Personal memory and project bindings were preserved.');
+    writeLine(stdout, `Next: ${result.next_action}`);
+    writeLine(stdout, 'Technical details: pulse install-plan --json');
   }
-  writeLine(stdout, 'Personal vault and signed binding: preserved');
-  if (result.receipt_ref) writeLine(stdout, `Receipt: ${result.receipt_ref}`);
-  writeLine(stdout, `Next: ${result.next_action}`);
 }
 
 export function installPlanApprovalDigest(plan) {
@@ -94,17 +101,16 @@ export async function requestConsent({
   if (fixture && env.PULSE_NATIVE_PACKED_FIXTURE_APPROVAL === nativePackedFixtureApprovalDigest(plan)) return true;
   if (!input.isTTY || !output.isTTY) {
     if (platform !== 'darwin') return false;
-    const digest = installPlanApprovalDigest(plan);
     const hosts = (plan.detected?.hosts ?? [])
       .filter((host) => host.activation_target === true)
       .map((host) => host.host)
       .join(', ');
+    const project = basename(plan.detected?.workspace?.canonical_path ?? 'this project');
     const message = [
-      'Install Pulse Personal for this exact project?',
-      `Project: ${plan.detected?.workspace?.workspace_id ?? 'unknown'}`,
-      `Hosts: ${hosts || 'none'}`,
-      `Plan: ${digest.slice(0, 16)}`,
-      'Memory stays local. Raw transcript capture and backend model calls stay off.',
+      `Pulse checked ${project} and is ready.`,
+      `It will connect ${hosts || 'your compatible AI app'} automatically.`,
+      'Useful structured memory is saved automatically and can be edited or deleted in Memory Home.',
+      'No old-chat import, raw transcript storage, or paid model API calls.',
     ].join('  ');
     const script = `display dialog ${appleScriptString(message)} buttons {"Cancel", "Install"} default button "Cancel" cancel button "Cancel" with title "Pulse Personal"`;
     const result = runDialog('/usr/bin/osascript', ['-e', script], {
@@ -114,7 +120,7 @@ export async function requestConsent({
   }
   const prompt = createInterface({ input, output });
   try {
-    const answer = await prompt.question('\nInstall Pulse Personal for this exact project? [y/N] ');
+    const answer = await prompt.question('\nInstall Pulse for this project? [y/N] ');
     return /^(?:y|yes)$/i.test(answer.trim());
   } finally {
     prompt.close();
@@ -123,6 +129,38 @@ export async function requestConsent({
 
 function lockContentionPlan(plan) {
   return { ...plan, outcome: 'action_required', reason_codes: ['install_in_progress'] };
+}
+
+export function hasMatchingResumableInstallJournal({
+  dataDir,
+  mode,
+  plan,
+  readJournal = readInstallJournal,
+} = {}) {
+  if (mode !== 'repair' || typeof dataDir !== 'string' ||
+      plan?.current_state?.install_receipt !== 'resumable' ||
+      typeof readJournal !== 'function') return false;
+  const release = plan.release;
+  if (!release || typeof release.manifest_digest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(release.manifest_digest) ||
+      typeof release.version !== 'string' ||
+      !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
+      !Array.isArray(release.artifacts)) return false;
+  const expectedArtifactIDs = release.artifacts
+    .map((artifact) => artifact?.id)
+    .filter((id) => typeof id === 'string')
+    .sort();
+  if (expectedArtifactIDs.length !== release.artifacts.length) return false;
+  try {
+    const journal = readJournal(join(dataDir, 'runtime', 'install-journal.json'));
+    return journal !== null &&
+      journal.manifest_digest === release.manifest_digest &&
+      journal.release_version === release.version &&
+      journal.release_epoch === release.epoch &&
+      journal.artifact_ids.join('\0') === expectedArtifactIDs.join('\0');
+  } catch {
+    return false;
+  }
 }
 
 export async function executePersonalInstallCommand({
@@ -134,7 +172,6 @@ export async function executePersonalInstallCommand({
   input = process.stdin,
   lock = acquireInstallLock,
   mode,
-  openHome = async () => {},
   output = process.stdout,
   errorOutput = process.stderr,
 } = {}) {
@@ -143,24 +180,29 @@ export async function executePersonalInstallCommand({
       typeof consentPrompt !== 'function' ||
       typeof dataDir !== 'string' || !input ||
       typeof output?.write !== 'function' || typeof errorOutput?.write !== 'function' ||
-      typeof lock !== 'function' || typeof openHome !== 'function') {
+      typeof lock !== 'function') {
     throw new TypeError('personal_install_command_invalid');
   }
   const json = argv.includes('--json');
   const plan = buildPlan();
   if (json) writeLine(errorOutput, formatPersonalInstallPlan(plan));
-  else writeLine(output, formatPersonalInstallPlan(plan));
+  else writeLine(output, formatPersonalInstallIntroduction(plan));
 
   if (plan.outcome !== 'ready_to_install') {
     const result = await runPersonalInstall({ plan, consent: false, mode });
     printResult(result, { json, stdout: output });
     return { exitCode: 1, result };
   }
-  if (argv.includes('--yes')) {
+  const resumeApproved = hasMatchingResumableInstallJournal({ dataDir, mode, plan });
+  if (argv.includes('--yes') && !resumeApproved) {
     writeLine(json ? errorOutput : output,
       '\n[pulse] --yes cannot approve disclosure, macOS presence, binding replacement, hook trust, downgrade, or wipe.');
   }
-  const consent = await consentPrompt({ input, output: json ? errorOutput : output, plan });
+  if (resumeApproved && !json) {
+    writeLine(output, '\nResuming the installation already approved for this exact release.');
+  }
+  const consent = resumeApproved ||
+    await consentPrompt({ input, output: json ? errorOutput : output, plan });
   if (!consent) {
     const result = await runPersonalInstall({ plan, consent: false, mode });
     printResult(result, { json, stdout: output });
@@ -191,6 +233,5 @@ export async function executePersonalInstallCommand({
   } finally {
     releaseLock();
   }
-  if (result.outcome === 'ready' && !json) await openHome();
   return { exitCode: result.outcome === 'ready' ? 0 : 1, result };
 }

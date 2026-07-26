@@ -75,8 +75,9 @@ type Config struct {
 	Health health.Provider
 	// Billing describes the current Pulse distribution mode for /memory/status.
 	Billing BillingStatus
-	// TrayGracePeriod controls the visible private-write preview window for
-	// Personal/Desk product stores. Zero selects the product default (10s).
+	// TrayGracePeriod is retained for wire/schema compatibility with older
+	// runtimes. Ordinary Personal writes are immediate; zero is the product
+	// default and no per-card review window is created.
 	TrayGracePeriod time.Duration
 	// HomeOrigin is the exact loopback origin for the credential-free Personal
 	// or Desk Memory Home. Empty keeps the Home surface disabled (legacy Local
@@ -150,11 +151,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.StartupNonce != "" && !validStartupNonce(cfg.StartupNonce) {
 		return nil, errors.New("server: startup nonce must be 32 lowercase-hex bytes")
 	}
-	if cfg.TrayGracePeriod == 0 {
-		cfg.TrayGracePeriod = 10 * time.Second
-	}
-	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
-		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
+	if cfg.TrayGracePeriod < 0 || cfg.TrayGracePeriod > 30*time.Second {
+		return nil, errors.New("server: TrayGracePeriod must be between 0s and 30s")
 	}
 	if cfg.EnhancedPresenceAuthorizer == nil {
 		cfg.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
@@ -243,6 +241,8 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 		homePresentation, err := NewMemoryPresentationService(MemoryPresentationServiceConfig{
+			// Presentation is optional audit evidence, never an approval or
+			// persistence gate.
 			Store: cfg.Store, Schedule: server.schedulePresentedMemory,
 			ExpectedOrigin: cfg.HomeOrigin, ExpectedPath: memoryPresentationScopedHomePath,
 			GracePeriod: cfg.TrayGracePeriod, CapabilityTTL: 45 * time.Second,

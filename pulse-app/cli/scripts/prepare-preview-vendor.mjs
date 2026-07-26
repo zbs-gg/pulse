@@ -143,7 +143,9 @@ if (process.platform === 'darwin') {
       minimumVersions.some((version) => version !== '13.0')) {
     throw new Error('Pulse presence helper must include Apple Silicon and target macOS 13.0; production release must be arm64-only');
   }
-  const assessment = spawnSync('/usr/sbin/spctl', ['-a', '-vv', '-t', 'exec', nativeHelper], {
+  const assessment = spawnSync('/usr/bin/codesign', [
+    '-vvvv', '-R=notarized', '--check-notarization', nativeHelper,
+  ], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (assessment.status !== 0) {
@@ -151,7 +153,7 @@ if (process.platform === 'darwin') {
       throw new Error('refusing npm publish: Pulse presence helper has no accepted notarization ticket');
     }
     if (process.env.PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW !== '1') {
-      throw new Error('Pulse presence helper is not notarized; only an explicit unquarantined internal preview pack may continue');
+      throw new Error('Pulse presence helper has no accepted notarization evidence; only an explicit unquarantined internal preview pack may continue');
     }
     console.error('[pulse] explicit internal-preview override: helper is signed but not notarized; do not redistribute this tarball');
   }

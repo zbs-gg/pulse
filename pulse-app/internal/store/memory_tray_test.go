@@ -448,12 +448,12 @@ func TestPostFoundationDeskMigrationsUpgradeVersion40BeforeRaisingFloor(t *testi
 	).Scan(&reader, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if reader != 52 || writer != 52 {
+	if reader != 54 || writer != 54 {
 		t.Fatalf("upgraded floors reader=%d writer=%d", reader, writer)
 	}
 }
 
-func TestFinalizePendingThenAtomicCommitReturnsTruthfulStableReceipts(t *testing.T) {
+func TestFinalizeThenImmediateAtomicCommitReturnsTruthfulStableReceipts(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	req := trayFinalizeRequest("Use one durable receipt chain for every private memory write.")
@@ -487,12 +487,7 @@ func TestFinalizePendingThenAtomicCommitReturnsTruthfulStableReceipts(t *testing
 	if err := s.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&canonical); err != nil || canonical != 0 {
 		t.Fatalf("pending reached canonical storage: count=%d err=%v", canonical, err)
 	}
-	presentTrayReceipt(t, s, pending, now, 10*time.Second)
-	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(9*time.Second)); !errors.Is(err, ErrMemoryTrayGraceActive) {
-		t.Fatalf("commit before grace err=%v, want grace active", err)
-	}
-
-	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(10*time.Second))
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -705,7 +700,7 @@ func TestProductSemanticClaimsFailClosedInsteadOfSilentlyDroppingProjection(t *t
 	}
 }
 
-func TestEditRestartsGraceAndCancelIsTerminal(t *testing.T) {
+func TestPendingEditAndCancelCASIsTerminal(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	result, err := s.FinalizeTurn(trayFinalizeRequest("Keep the first candidate private."), now, 10*time.Second)
@@ -937,18 +932,17 @@ func TestTurnAuthorityCannotBeCrossSentOrForgeEpochs(t *testing.T) {
 	}
 }
 
-func TestCommitRechecksRuntimeAuthorityAfterGrace(t *testing.T) {
+func TestImmediateCommitRechecksRuntimeAuthority(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Now().UTC()
 	prepared, err := s.FinalizeTurn(trayFinalizeRequest("Stale authority must never reach canonical memory."), now, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	presentTrayReceipt(t, s, prepared.Receipts[0], now, time.Second)
 	if err := s.ConfigureProductRuntimeAuthority(strings.Repeat("c", 64), 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now.Add(time.Second)); !errors.Is(err, ErrProductRuntimeMismatch) {
+	if _, err := s.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, now); !errors.Is(err, ErrProductRuntimeMismatch) {
 		t.Fatalf("stale authority commit error=%v", err)
 	}
 	var objects int
@@ -1010,7 +1004,7 @@ func TestPulseCLIManualWriteCanEnterProductTray(t *testing.T) {
 	}
 }
 
-func TestSemanticDeltaCommitsAtomicallyAfterGrace(t *testing.T) {
+func TestSemanticDeltaCommitsAtomicallyImmediately(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	delta := validSemanticDelta()
@@ -1030,9 +1024,8 @@ func TestSemanticDeltaCommitsAtomicallyAfterGrace(t *testing.T) {
 			t.Fatalf("pending semantic delta reached %s: count=%d err=%v", table, count, err)
 		}
 	}
-	presentTrayReceipt(t, s, pending, now, 10*time.Second)
 	committed, err := s.CommitMemoryTrayCandidate(
-		pending.CandidateID, pending.CandidateVersion, now.Add(10*time.Second),
+		pending.CandidateID, pending.CandidateVersion, now,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1198,6 +1191,80 @@ func TestPrivateSemanticProjectionMergesContributionsAndPreservesLegacyRows(t *t
 	}
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM events WHERE id=?`, legacyResult.EventIDs[0]).Scan(&legacyStillPresent); err != nil || legacyStillPresent != 1 {
 		t.Fatalf("legacy event lost after private delete: count=%d err=%v", legacyStillPresent, err)
+	}
+}
+
+func TestPrivateSemanticProjectionDoesNotMergeCanonicalNodesAcrossProjectNamespaces(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	now := time.Date(2026, 7, 25, 13, 0, 0, 0, time.UTC)
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_scope_a"); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDelta := validSemanticDelta()
+	firstDelta.Source.Host = "codex"
+	firstDelta.Source.Timestamp = now.Format(time.RFC3339)
+	firstDelta.Source.ThreadID = "shared-thread-name"
+	firstDelta.Source.SessionID = "scope-a-session"
+	firstDelta.Continuity.Summary = "Project A owns this continuity."
+	first, err := s.PrepareManualSemanticDelta(firstDelta, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCreated, err := s.CommitMemoryTrayCandidate(
+		first.Receipts[0].CandidateID, first.Receipts[0].CandidateVersion, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_scope_b"); err != nil {
+		t.Fatal(err)
+	}
+	secondDelta := validSemanticDelta()
+	secondDelta.Source.Host = "codex"
+	secondDelta.Source.Timestamp = now.Add(time.Minute).Format(time.RFC3339)
+	secondDelta.Source.ThreadID = "shared-thread-name"
+	secondDelta.Source.SessionID = "scope-b-session"
+	secondDelta.Continuity.Summary = "Project B owns this continuity."
+	second, err := s.PrepareManualSemanticDelta(secondDelta, now.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCreated, err := s.CommitMemoryTrayCandidate(
+		second.Receipts[0].CandidateID, second.Receipts[0].CandidateVersion, now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var distinctEntities int
+	if err := s.DB().QueryRow(`
+		SELECT COUNT(DISTINCT projection.row_ref)
+		  FROM private_semantic_projection_rows projection
+		 WHERE projection.row_kind='entity'
+		   AND projection.object_id IN (?, ?)`,
+		firstCreated.ObjectID, secondCreated.ObjectID,
+	).Scan(&distinctEntities); err != nil {
+		t.Fatal(err)
+	}
+	if distinctEntities != len(firstDelta.Nodes)+len(secondDelta.Nodes) {
+		t.Fatalf("cross-project canonical nodes merged: distinct=%d want=%d",
+			distinctEntities, len(firstDelta.Nodes)+len(secondDelta.Nodes))
+	}
+
+	threadID := "private:" + normalizeThreadID(
+		secondDelta.Source.ThreadID, secondDelta.Source.ProjectID, secondDelta.Source.SessionID,
+	)
+	projectBResume, err := s.BuildResume(ResumeQuery{
+		ThreadID: threadID, ProjectID: "repository_scope_b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(projectBResume.ResumeMarkdown, "Project B owns this continuity.") ||
+		strings.Contains(projectBResume.ResumeMarkdown, "Project A owns this continuity.") {
+		t.Fatalf("project B continuity scope=%q", projectBResume.ResumeMarkdown)
 	}
 }
 
@@ -1714,8 +1781,7 @@ func TestCommittedCapsuleDeleteIsAtomicReceiptedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	presentTrayReceipt(t, s, finalized.Receipts[0], now, 10*time.Second)
-	created, err := s.CommitMemoryTrayCandidate(finalized.Receipts[0].CandidateID, 1, now.Add(10*time.Second))
+	created, err := s.CommitMemoryTrayCandidate(finalized.Receipts[0].CandidateID, 1, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1728,8 +1794,7 @@ func TestCommittedCapsuleDeleteIsAtomicReceiptedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	presentTrayReceipt(t, s, dedupFinalized.Receipts[0], now.Add(20*time.Second), 10*time.Second)
-	deduplicated, err := s.CommitMemoryTrayCandidate(dedupFinalized.Receipts[0].CandidateID, 1, now.Add(30*time.Second))
+	deduplicated, err := s.CommitMemoryTrayCandidate(dedupFinalized.Receipts[0].CandidateID, 1, now.Add(20*time.Second))
 	if err != nil || deduplicated.Status != MemoryWriteDeduplicated || deduplicated.ObjectID != created.ObjectID {
 		t.Fatalf("deduplicate: receipt=%#v err=%v", deduplicated, err)
 	}
@@ -1776,7 +1841,150 @@ func TestCommittedCapsuleDeleteIsAtomicReceiptedAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
+func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_pulse"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	finalized, err := s.FinalizeTurn(
+		trayFinalizeRequest("Keep scope changes explicit and reversible."),
+		now,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := finalized.Receipts[0]
+	created, err := s.CommitMemoryTrayCandidate(
+		pending.CandidateID, pending.CandidateVersion, now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	movedGlobal, err := s.MoveCommittedMemoryScope(
+		created.ObjectID, 1, MemoryScopePersonalGlobal, "move_global_01", now.Add(2*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedGlobal.Scope != MemoryScopePersonalGlobal || movedGlobal.LogicalGeneration != 2 ||
+		movedGlobal.WriteReceipt.ReasonCode != "user_moved_to_personal_global" {
+		t.Fatalf("global move=%#v", movedGlobal)
+	}
+	replay, err := s.MoveCommittedMemoryScope(
+		created.ObjectID, 1, MemoryScopePersonalGlobal, "move_global_01", now.Add(3*time.Second),
+	)
+	if err != nil || replay.WriteReceipt.ReceiptID != movedGlobal.WriteReceipt.ReceiptID {
+		t.Fatalf("global replay=%#v err=%v", replay, err)
+	}
+	if _, err := s.MoveCommittedMemoryScope(
+		created.ObjectID, 1, MemoryScopeProject, "move_stale_01", now.Add(4*time.Second),
+	); !errors.Is(err, ErrMemoryScopeConflict) {
+		t.Fatalf("stale move error=%v", err)
+	}
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_project_b"); err != nil {
+		t.Fatal(err)
+	}
+	globalRecall, err := s.RecallMemory(RecallMemoryQuery{
+		Query: "scope changes explicit", Limit: 10, PrivacyCeiling: "normal",
+	})
+	if err != nil || len(globalRecall) != 1 || globalRecall[0].ID != created.ObjectID {
+		t.Fatalf("global recall from project B=%#v err=%v", globalRecall, err)
+	}
+	globalResume, err := s.BuildResume(ResumeQuery{
+		ThreadID: "project-b-thread", ProjectID: "repository_project_b",
+	})
+	if err != nil || !strings.Contains(globalResume.ResumeMarkdown, "Keep scope changes explicit and reversible.") {
+		t.Fatalf("global resume from project B=%q err=%v", globalResume.ResumeMarkdown, err)
+	}
+	if len(globalResume.IncludedObjectIDs) != 1 ||
+		globalResume.IncludedObjectIDs[0] != created.ObjectID ||
+		globalResume.CoverageCounted < 1 ||
+		globalResume.CoverageCounted != globalResume.CoverageTotal ||
+		globalResume.SourceEquivalentTokens == nil {
+		t.Fatalf("global token evidence=%#v", globalResume)
+	}
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_pulse"); err != nil {
+		t.Fatal(err)
+	}
+
+	movedProject, err := s.MoveCommittedMemoryScope(
+		created.ObjectID, 2, MemoryScopeProject, "move_project_01", now.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedProject.Scope != MemoryScopeProject || movedProject.LogicalGeneration != 3 ||
+		movedProject.WriteReceipt.ReasonCode != "user_moved_to_project" {
+		t.Fatalf("project move=%#v", movedProject)
+	}
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_project_b"); err != nil {
+		t.Fatal(err)
+	}
+	projectBRecall, err := s.RecallMemory(RecallMemoryQuery{
+		Query: "scope changes explicit", Limit: 10, PrivacyCeiling: "normal",
+	})
+	if err != nil || len(projectBRecall) != 0 {
+		t.Fatalf("project A memory leaked into project B recall=%#v err=%v", projectBRecall, err)
+	}
+	projectBResume, err := s.BuildResume(ResumeQuery{
+		ThreadID: "project-b-thread", ProjectID: "repository_project_b",
+	})
+	if err != nil || strings.Contains(projectBResume.ResumeMarkdown, "Keep scope changes explicit and reversible.") {
+		t.Fatalf("project A memory leaked into project B resume=%q err=%v", projectBResume.ResumeMarkdown, err)
+	}
+	if len(projectBResume.IncludedObjectIDs) != 0 ||
+		projectBResume.CoverageCounted != 0 || projectBResume.CoverageTotal != 0 ||
+		projectBResume.SourceEquivalentTokens != nil {
+		t.Fatalf("foreign memory influenced project B token evidence=%#v", projectBResume)
+	}
+	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_pulse"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteCommittedMemoryGeneration(
+		created.ObjectID, 2, "delete_stale_generation_01", now.Add(6*time.Second),
+	); !errors.Is(err, ErrMemoryScopeConflict) {
+		t.Fatalf("stale generation delete error=%v", err)
+	}
+	var scope, namespace, origin, summary, captureHost, captureSession, capturedAt string
+	var generation, activeHeads int
+	if err := s.DB().QueryRow(`
+		SELECT object.memory_scope, object.project_namespace_id, object.original_repository_id,
+		       object.logical_generation, capsule.redacted_summary, object.capture_host,
+		       object.capture_session_ref, object.captured_at
+		  FROM private_memory_objects object
+		  JOIN memory_capsules capsule ON capsule.id=object.object_id
+		 WHERE object.object_id=?`,
+		created.ObjectID,
+	).Scan(
+		&scope, &namespace, &origin, &generation, &summary,
+		&captureHost, &captureSession, &capturedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow(`
+		SELECT COUNT(*) FROM private_memory_objects
+		 WHERE logical_memory_id=? AND lifecycle='active'`,
+		created.ObjectID,
+	).Scan(&activeHeads); err != nil {
+		t.Fatal(err)
+	}
+	if scope != MemoryScopeProject || namespace != stableProjectNamespace("repository_pulse") ||
+		origin != "repository_pulse" || generation != 3 || activeHeads != 1 ||
+		summary != "Keep scope changes explicit and reversible." ||
+		captureHost != "codex" || captureSession == "" ||
+		capturedAt != now.Add(time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf(
+			"head scope=%q namespace=%q origin=%q generation=%d active=%d summary=%q capture=%q/%q/%q",
+			scope, namespace, origin, generation, activeHeads, summary,
+			captureHost, captureSession, capturedAt,
+		)
+	}
+}
+
+func TestConcurrentEditCancelAndImmediateCommitHaveOneWinner(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	finalized, err := s.FinalizeTurn(
@@ -1787,7 +1995,6 @@ func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := finalized.Receipts[0]
-	presentTrayReceipt(t, s, pending, now, 10*time.Second)
 	start := make(chan struct{})
 	type outcome struct {
 		receipt MemoryWriteReceipt
@@ -1798,19 +2005,19 @@ func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
 		<-start
 		receipt, err := s.EditMemoryTrayCandidate(
 			pending.CandidateID, 1,
-			PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited candidate won and restarted grace."))},
-			now.Add(11*time.Second), 10*time.Second,
+			PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited candidate won the internal CAS race."))},
+			now, 10*time.Second,
 		)
 		outcomes <- outcome{receipt, err}
 	}()
 	go func() {
 		<-start
-		receipt, err := s.CancelMemoryTrayCandidate(pending.CandidateID, 1, now.Add(11*time.Second))
+		receipt, err := s.CancelMemoryTrayCandidate(pending.CandidateID, 1, now)
 		outcomes <- outcome{receipt, err}
 	}()
 	go func() {
 		<-start
-		receipt, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, now.Add(11*time.Second))
+		receipt, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, now)
 		outcomes <- outcome{receipt, err}
 	}()
 	close(start)
@@ -1837,45 +2044,41 @@ func TestConcurrentEditCancelAndExpiryCommitHaveOneWinner(t *testing.T) {
 	}
 }
 
-func TestMemoryPresentationIsRequiredBeforeGraceAndCommit(t *testing.T) {
+func TestMemoryCandidateIsImmediatelyCommittableWithoutPresentation(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	finalized, err := s.FinalizeTurn(
-		trayFinalizeRequest("An unseen candidate must stay pending without a running deadline."),
+		trayFinalizeRequest("A normal memory becomes durable without opening Memory Home."),
 		now, 10*time.Second,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pending := finalized.Receipts[0]
-
-	var deadline string
-	if err := s.DB().QueryRow(`
-		SELECT grace_expires_at FROM memory_tray_candidates WHERE candidate_id=?`,
-		pending.CandidateID,
-	).Scan(&deadline); err != nil {
-		t.Fatal(err)
-	}
-	if deadline != "" {
-		t.Fatalf("unpresented candidate has running deadline %q", deadline)
-	}
-	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
-		t.Fatalf("unpresented commit err=%v, want ErrMemoryTrayNotPresented", err)
-	}
-	due, err := s.CommitDueMemoryTrayCandidates(now.Add(time.Hour), 10)
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(due) != 0 {
-		t.Fatalf("unpresented candidate became due: %#v", due)
+	if committed.Status != MemoryWriteCreated || committed.ObjectID == "" {
+		t.Fatalf("immediate commit receipt=%#v", committed)
+	}
+	var presentations int
+	if err := s.DB().QueryRow(`
+		SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`,
+		pending.CandidateID,
+	).Scan(&presentations); err != nil {
+		t.Fatal(err)
+	}
+	if presentations != 0 {
+		t.Fatalf("immediate commit invented %d presentation receipts", presentations)
 	}
 }
 
-func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
+func TestPresentMemoryTrayCandidateIsOptionalImmutableAudit(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	finalized, err := s.FinalizeTurn(
-		trayFinalizeRequest("The exact card becomes committable only after Home renders it."),
+		trayFinalizeRequest("Memory Home may record an exact audit without authorizing persistence."),
 		now, 10*time.Second,
 	)
 	if err != nil {
@@ -1887,7 +2090,7 @@ func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
 		ContentDigest: pending.ContentDigest, BindingDigest: testTrayBindingDigest,
 		TrustedSurfaceKind: "memory_home", TrustedSurfaceInstance: "home_session_01",
 	}
-	presentedAt := now.Add(time.Minute)
+	presentedAt := now
 	receipt, err := s.PresentMemoryTrayCandidate(req, presentedAt, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -1895,8 +2098,7 @@ func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
 	if receipt.CandidateID != pending.CandidateID || receipt.CandidateVersion != 1 ||
 		receipt.ContentDigest != pending.ContentDigest || receipt.BindingDigest != testTrayBindingDigest ||
 		receipt.TrustedSurfaceKind != "memory_home" || receipt.TrustedSurfaceInstance != "home_session_01" ||
-		receipt.PresentedAt != presentedAt.Format(time.RFC3339Nano) ||
-		receipt.GraceExpiresAt != presentedAt.Add(10*time.Second).Format(time.RFC3339Nano) {
+		receipt.PresentedAt != presentedAt.Format(time.RFC3339Nano) {
 		t.Fatalf("presentation receipt lost exact binding: %#v", receipt)
 	}
 	replayed, err := s.PresentMemoryTrayCandidate(req, presentedAt.Add(5*time.Second), 10*time.Second)
@@ -1906,10 +2108,7 @@ func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
 	if replayed != receipt {
 		t.Fatalf("exact concurrent/retry presentation was not idempotent: first=%#v retry=%#v", receipt, replayed)
 	}
-	if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, presentedAt.Add(9*time.Second)); !errors.Is(err, ErrMemoryTrayGraceActive) {
-		t.Fatalf("commit before presented grace err=%v", err)
-	}
-	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, presentedAt.Add(10*time.Second))
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, 1, presentedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1918,10 +2117,10 @@ func TestPresentMemoryTrayCandidateStartsExactDigestGraceOnce(t *testing.T) {
 	}
 }
 
-func TestTerminalMemoryReadinessFactsComeFromPresentedActiveTerminalReceipts(t *testing.T) {
+func TestTerminalMemoryReadinessFactsDoNotRequirePresentation(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
-	req := trayFinalizeRequest("Readiness uses the real presented terminal memory chain.")
+	req := trayFinalizeRequest("Readiness uses the real terminal memory chain without a Home gate.")
 	finalized, err := s.FinalizeTurn(req, now, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -1930,8 +2129,7 @@ func TestTerminalMemoryReadinessFactsComeFromPresentedActiveTerminalReceipts(t *
 	if facts, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 10); err != nil || len(facts) != 0 {
 		t.Fatalf("pending readiness facts=%#v err=%v", facts, err)
 	}
-	presentation := presentTrayReceipt(t, s, pending, now, 10*time.Second)
-	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now.Add(10*time.Second))
+	committed, err := s.CommitMemoryTrayCandidate(pending.CandidateID, pending.CandidateVersion, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1943,7 +2141,7 @@ func TestTerminalMemoryReadinessFactsComeFromPresentedActiveTerminalReceipts(t *
 		t.Fatalf("terminal readiness facts=%#v", facts)
 	}
 	fact := facts[0]
-	if fact.ReceiptID != committed.ReceiptID || fact.PresentationReceiptID != presentation.ReceiptID ||
+	if fact.ReceiptID != committed.ReceiptID || fact.PresentationReceiptID != "" ||
 		fact.ObjectID != committed.ObjectID || fact.Status != string(MemoryWriteCreated) ||
 		fact.ContentDigest != pending.ContentDigest || fact.MemoryKind != "decision" ||
 		fact.ConversationScope != "current_turn" || fact.BindingDigest != testTrayBindingDigest ||
@@ -2030,11 +2228,11 @@ func TestConcurrentExactPresentationsConvergeOnOneImmutableReceipt(t *testing.T)
 	}
 }
 
-func TestConcurrentPresentEditAndCancelNeverTransfersPresentation(t *testing.T) {
+func TestConcurrentOptionalPresentationEditAndCancelPreserveCAS(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	finalized, err := s.FinalizeTurn(
-		trayFinalizeRequest("Presentation races stay bound to the exact candidate version."), now, 10*time.Second,
+		trayFinalizeRequest("Optional presentation races stay bound to the exact candidate version."), now, 10*time.Second,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2056,7 +2254,7 @@ func TestConcurrentPresentEditAndCancelNeverTransfersPresentation(t *testing.T) 
 		<-start
 		_, err := s.EditMemoryTrayCandidate(
 			pending.CandidateID, 1,
-			PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited race winner still needs its own presentation."))},
+			PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited race winner remains immediately committable."))},
 			now, 10*time.Second,
 		)
 		errs <- err
@@ -2073,85 +2271,161 @@ func TestConcurrentPresentEditAndCancelNeverTransfersPresentation(t *testing.T) 
 			t.Fatalf("unexpected presentation/control race error: %v", err)
 		}
 	}
-	var state, deadline, digest string
+	var state, digest string
 	var version int
 	if err := s.DB().QueryRow(`
-		SELECT state, version, content_digest, grace_expires_at
+		SELECT state, version, content_digest
 		  FROM memory_tray_candidates WHERE candidate_id=?`, pending.CandidateID,
-	).Scan(&state, &version, &digest, &deadline); err != nil {
+	).Scan(&state, &version, &digest); err != nil {
 		t.Fatal(err)
 	}
 	switch {
 	case state == "canceled":
-		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayTerminal) {
+		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now); !errors.Is(err, ErrMemoryTrayTerminal) {
 			t.Fatalf("canceled race winner became committable: %v", err)
 		}
 	case state == "pending" && version == 1:
-		if deadline == "" || digest != pending.ContentDigest {
-			t.Fatalf("original presented winner is inconsistent: state=%q version=%d digest=%q deadline=%q", state, version, digest, deadline)
+		if digest != pending.ContentDigest {
+			t.Fatalf("original race winner changed digest: state=%q version=%d digest=%q", state, version, digest)
+		}
+		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now); err != nil {
+			t.Fatalf("unmodified race winner was not immediately committable: %v", err)
 		}
 	case state == "pending" && version == 2:
-		if deadline != "" {
-			t.Fatalf("edited winner inherited original presentation deadline %q", deadline)
+		if digest == pending.ContentDigest {
+			t.Fatalf("edited race winner retained original digest %q", digest)
 		}
-		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
-			t.Fatalf("edited race winner inherited presentation: %v", err)
+		if _, err := s.CommitMemoryTrayCandidate(pending.CandidateID, version, now); err != nil {
+			t.Fatalf("edited race winner was not immediately committable: %v", err)
 		}
 	default:
 		t.Fatalf("unexpected presentation/control race state=%q version=%d", state, version)
 	}
 }
 
-func TestMemoryTrayEditInvalidatesPresentationAndDeadline(t *testing.T) {
+func TestDurableMemoryCorrectionAndDeleteDoNotRequirePresentation(t *testing.T) {
 	s, _ := openDeskTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	finalized, err := s.FinalizeTurn(
-		trayFinalizeRequest("The original exact card is presented."), now, 10*time.Second,
+		trayFinalizeRequest("The original durable memory can be corrected from Home."), now, 10*time.Second,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := finalized.Receipts[0]
-	original := MemoryPresentationRequest{
-		CandidateID: pending.CandidateID, CandidateVersion: 1, ContentDigest: pending.ContentDigest,
-		BindingDigest: testTrayBindingDigest, TrustedSurfaceKind: "memory_home",
-		TrustedSurfaceInstance: "home_session_01",
-	}
-	if _, err := s.PresentMemoryTrayCandidate(original, now, 10*time.Second); err != nil {
+	created, err := s.CommitMemoryTrayCandidate(
+		finalized.Receipts[0].CandidateID, finalized.Receipts[0].CandidateVersion, now,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	edited, err := s.EditMemoryTrayCandidate(
-		pending.CandidateID, 1,
-		PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: ptr(safeTrayCapsule("The edited exact card needs a fresh presentation."))},
+	replacement := safeTrayCapsule("The corrected durable memory is used in later sessions.")
+	correction, err := s.PrepareMemoryCorrection(
+		created.ObjectID,
+		PrivateMemoryCandidate{Kind: PrivateMemoryCandidateCapsule, Capsule: &replacement},
 		now.Add(time.Second), 10*time.Second,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitMemoryTrayCandidate(edited.CandidateID, edited.CandidateVersion, now.Add(time.Hour)); !errors.Is(err, ErrMemoryTrayNotPresented) {
-		t.Fatalf("edited candidate inherited old presentation: %v", err)
-	}
-	if _, err := s.PresentMemoryTrayCandidate(original, now.Add(2*time.Second), 10*time.Second); !errors.Is(err, ErrMemoryTrayVersionConflict) {
-		t.Fatalf("stale presentation err=%v, want version conflict", err)
-	}
-	editedReq := original
-	editedReq.CandidateVersion = edited.CandidateVersion
-	editedReq.ContentDigest = edited.ContentDigest
-	if _, err := s.PresentMemoryTrayCandidate(editedReq, now.Add(3*time.Second), 10*time.Second); err != nil {
+	updated, err := s.CommitMemoryTrayCandidate(
+		correction.Receipts[0].CandidateID, correction.Receipts[0].CandidateVersion, now.Add(time.Second),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitMemoryTrayCandidate(edited.CandidateID, edited.CandidateVersion, now.Add(13*time.Second)); err != nil {
-		t.Fatal(err)
+	if updated.Status != MemoryWriteUpdated || updated.ObjectID != created.ObjectID {
+		t.Fatalf("correction receipt created=%#v updated=%#v", created, updated)
 	}
-	var receiptCount int
+	var summary string
 	if err := s.DB().QueryRow(`
-		SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`,
-		pending.CandidateID,
-	).Scan(&receiptCount); err != nil {
+		SELECT redacted_summary FROM memory_capsules WHERE id=?`,
+		created.ObjectID,
+	).Scan(&summary); err != nil {
 		t.Fatal(err)
 	}
-	if receiptCount != 2 {
-		t.Fatalf("append-only presentation receipt count=%d, want 2", receiptCount)
+	if summary != replacement.Items[0].RedactedSummary {
+		t.Fatalf("corrected summary=%q", summary)
+	}
+	deleted, err := s.DeleteCommittedMemory(created.ObjectID, "delete_corrected_memory_01", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Status != MemoryWriteUpdated || deleted.ObjectID != created.ObjectID || deleted.ReasonCode != "user_deleted" {
+		t.Fatalf("delete receipt=%#v", deleted)
+	}
+	var lifecycle string
+	if err := s.DB().QueryRow(`
+		SELECT lifecycle FROM private_memory_objects WHERE object_id=?`,
+		created.ObjectID,
+	).Scan(&lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle != "deleted" {
+		t.Fatalf("deleted lifecycle=%q", lifecycle)
+	}
+}
+
+func TestMemoryHomeSummaryEditIsImmediateAndCannotCrossProjectBinding(t *testing.T) {
+	s, _ := openDeskTrayStore(t)
+	bindingA := strings.Repeat("a", 64)
+	if err := s.ConfigureProductRuntimeAuthority(bindingA, 4, 7); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	req := trayFinalizeRequest("The original project-scoped Home memory.")
+	req.BindingDigest = bindingA
+	req.PolicyEpoch = 4
+	req.ResolverEpoch = 7
+	finalized, err := s.FinalizeTurn(req, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CommitMemoryTrayCandidate(
+		finalized.Receipts[0].CandidateID, finalized.Receipts[0].CandidateVersion, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correction, err := s.PrepareMemorySummaryCorrectionWithInvocation(
+		created.ObjectID, "The corrected project-scoped Home memory.",
+		"home_summary_edit_01", now.Add(time.Second), 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(correction.Receipts) != 1 {
+		t.Fatalf("correction receipts=%d, want 1", len(correction.Receipts))
+	}
+	updated, err := s.CommitMemoryTrayCandidate(
+		correction.Receipts[0].CandidateID,
+		correction.Receipts[0].CandidateVersion,
+		now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != MemoryWriteUpdated || updated.ObjectID != created.ObjectID ||
+		updated.ReasonCode != "user_corrected" {
+		t.Fatalf("updated receipt=%#v", updated)
+	}
+	var summary string
+	if err := s.DB().QueryRow(
+		`SELECT redacted_summary FROM memory_capsules WHERE id=?`, created.ObjectID,
+	).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary != "The corrected project-scoped Home memory." {
+		t.Fatalf("summary=%q", summary)
+	}
+
+	if err := s.ConfigureProductRuntimeAuthority(strings.Repeat("b", 64), 8, 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareMemorySummaryCorrectionWithInvocation(
+		created.ObjectID, "This project must not edit another project.",
+		"home_summary_edit_cross_binding", now.Add(2*time.Second), 0,
+	); !errors.Is(err, ErrProductRuntimeMismatch) {
+		t.Fatalf("cross-binding edit error=%v, want %v", err, ErrProductRuntimeMismatch)
 	}
 }
 

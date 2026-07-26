@@ -123,8 +123,23 @@ func (s *Store) ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID
 		return ErrContinuityDeliveryAuthority
 	}
 	s.continuityAuthorityMu.Lock()
+	defer s.continuityAuthorityMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := backfillPersonalScopeForBindingTx(tx, bindingDigest, personalMemoryScope{
+		ProjectNamespaceID: stableProjectNamespace(repositoryID),
+		OriginalRepository: repositoryID,
+		Scope:              MemoryScopeProject,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	s.continuityRepository = repositoryID
-	s.continuityAuthorityMu.Unlock()
 	return nil
 }
 

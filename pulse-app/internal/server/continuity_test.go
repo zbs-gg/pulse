@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nkkmnk/pulse/internal/store"
 )
@@ -398,12 +397,10 @@ func TestProductMemoryWipeRejectsCallerConfirmationWithoutOSPresence(t *testing.
 		t.Fatalf("decode protected product memory: %v", err)
 	}
 	if len(prepared.Receipts) != 1 {
-		t.Fatalf("expected one protected product memory candidate: %#v", prepared)
+		t.Fatalf("expected one protected product memory receipt: %#v", prepared)
 	}
-	presentedAt := time.Now().UTC()
-	presentProductCandidate(t, vault, prepared.Receipts[0], presentedAt, 10*time.Second)
-	if _, err := vault.CommitMemoryTrayCandidate(prepared.Receipts[0].CandidateID, 1, presentedAt.Add(10*time.Second)); err != nil {
-		t.Fatalf("commit protected product memory: %v", err)
+	if receipt := prepared.Receipts[0]; receipt.Status != store.MemoryWriteCreated || receipt.ObjectID == "" {
+		t.Fatalf("product memory was not durable before wipe protection: %#v", receipt)
 	}
 
 	resp := pulseJSON(t, ts, http.MethodPost, "/memory/wipe", map[string]any{

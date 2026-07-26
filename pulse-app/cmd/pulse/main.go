@@ -150,9 +150,15 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		if err := s.ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID); err != nil {
 			return fmt.Errorf("configure continuity delivery authority: %w", err)
 		}
+		workspace := os.Getenv("PULSE_PRODUCT_WORKSPACE")
+		if err := s.RegisterPersonalProjectLabel(
+			repositoryID, filepath.Base(filepath.Clean(workspace)),
+		); err != nil {
+			return fmt.Errorf("configure Personal project label: %w", err)
+		}
 		homeBindingVerifier, err = server.NewCommandHomeBindingVerifier(
 			os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE"), os.Getenv("PULSE_PRODUCT_AUTHORITY_HELPER"),
-			os.Getenv("PULSE_PRODUCT_WORKSPACE"), resolverEpoch,
+			workspace, resolverEpoch,
 		)
 		if err != nil {
 			return fmt.Errorf("configure live product binding verifier: %w", err)

@@ -365,11 +365,15 @@ test('production presence carrier uses the same exact-tree contract as the insta
 	assert.match(builder, /join\(carrierRoot, 'bin'\)/);
 	assert.match(builder, /--identifier', EXPECTED_IDENTIFIER/);
 	assert.match(builder, /join\(mountPoint, 'bin', EXPECTED_IDENTIFIER\)/);
+	assert.match(builder, /'--check-notarization'/);
+	assert.doesNotMatch(builder, /spctl'[^]*'-t', 'exec'/);
 
 	const packager = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
 	);
 	assert.match(packager, /join\(mountPoint, 'bin', expectedHelperIdentifier\)/);
+	assert.match(packager, /'--check-notarization'/);
+	assert.doesNotMatch(packager, /spctl'[^]*'-t', 'exec'/);
 });
 
 test('target release builder emits native artifacts and production stays explicitly authorized', () => {
@@ -385,6 +389,7 @@ test('target release builder emits native artifacts and production stays explici
 	assert.match(builder, /target-build-approved/);
 	assert.ok(builder.indexOf('requireProductionAuthority') < builder.lastIndexOf('buildDaemonTarget'));
 	assert.match(builder, /notarytool', 'submit'/);
+	assert.match(builder, /'--check-notarization'/);
 	assert.match(builder, /production_ready: false/);
 
 	const fixture = readFileSync(

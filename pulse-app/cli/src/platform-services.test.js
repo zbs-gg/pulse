@@ -33,6 +33,16 @@ test('portable services own port probing, OS version, host candidates, and conta
   assert.ok(services.hostCandidates().cursor.some((path) => path === '/opt/Cursor/cursor'));
 });
 
+test('macOS host discovery includes the Homebrew Codex executable', () => {
+  const services = createPlatformServices({
+    platform: 'darwin',
+    architecture: 'arm64',
+    home: '/Users/pulse',
+  });
+
+  assert.ok(services.hostCandidates().codex.includes('/opt/homebrew/bin/codex'));
+});
+
 test('native packed Codex calibration path is available only under the exact isolated attestation', () => {
   const executable = '/opt/native-codex/bin/codex';
   const attested = createPlatformServices({

@@ -159,6 +159,7 @@ test('UserPromptSubmit mints a shared-memory lease only for exact normalized ok'
   }, {
     now: () => new Date('2026-07-16T10:00:01Z'),
     resolveRuntime: () => sharedResolved,
+    hasSessionDelivery: async () => true,
     portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
     writeTurnContext: () => ({}),
     request: async (_resolved, path, options) => {
@@ -175,6 +176,7 @@ test('UserPromptSubmit mints a shared-memory lease only for exact normalized ok'
     ...base, prompt: 'ok, but change the second card',
   }, {
     resolveRuntime: () => sharedResolved,
+    hasSessionDelivery: async () => true,
     writeTurnContext: () => ({}),
     request: async (_resolved, path, options) => { calls.push({ path, options }); return lease; },
   });
@@ -189,6 +191,7 @@ test('ordinary exact ok without pending cards keeps normal Pulse context instead
   };
   const output = await handleCodexHook('UserPromptSubmit', { ...base, prompt: 'ok' }, {
     resolveRuntime: () => sharedResolved,
+    hasSessionDelivery: async () => true,
     portableProjectID: () => 'project_0123456789abcdef0123456789abcdef',
     writeTurnContext: () => ({}),
     request: async () => {
@@ -201,6 +204,69 @@ test('ordinary exact ok without pending cards keeps normal Pulse context instead
   assert.equal(output.systemMessage, undefined);
   assert.match(output.hookSpecificOutput.additionalContext, /pulse\.context_lease/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /approval lease/);
+});
+
+test('first UserPromptSubmit bootstraps receipt-backed resume when Codex omitted SessionStart', async () => {
+  const input = { ...base, prompt: 'What exact project marker was remembered?' };
+  const output = await handleCodexHook('UserPromptSubmit', input, {
+    resolveRuntime: () => resolved,
+    observeDelivery: async () => ({ state: 'host_observed' }),
+    hasSessionDelivery: async () => false,
+    writeTurnContext: () => ({}),
+    composeResume: async (_resolved, event) => {
+      assert.equal(event.event, 'session_start');
+      assert.equal(event.native_event, 'SessionStart');
+      assert.equal(event.source, 'prompt_bootstrap');
+      return {
+        evidence: ['Personal Vault continuity (local, private):\nLUNA-724-TEAL'],
+        manifest: {
+          object_ids: ['memory_luna'],
+          evidence_ids: ['pulse:memory_luna'],
+          baseline_kind: 'canonical_structured_resume_v1',
+          source_equivalent_tokens: 40,
+          coverage_counted: 2,
+          coverage_total: 2,
+        },
+      };
+    },
+  });
+  assert.equal(output.continue, true);
+  assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(output.hookSpecificOutput.additionalContext, /LUNA-724-TEAL/);
+  assert.match(output.hookSpecificOutput.additionalContext, /"scope":"session_start"/);
+
+  const order = [];
+  let offer;
+  let ticket;
+  await codexHooks.flushCodexHookOutput('UserPromptSubmit', input, output, {
+    recordDelivery: async (value) => {
+      order.push('receipt');
+      offer = value;
+      return {
+        schema: 'pulse.continuity_delivery_receipt.v1',
+        receipt_id: 'delivery_prompt_bootstrap',
+        state: 'offered_to_host',
+        purpose: value.purpose,
+        context_id: value.context_id,
+        binding_digest: value.binding_digest,
+        repository_id: value.repository_id,
+        host: value.host,
+        session_ref: value.session_ref,
+        payload_digest: value.payload_digest,
+        source_event_digest: value.source_event_digest,
+        created_at: '2026-07-16T10:00:01Z',
+      };
+    },
+    writeOutput: async () => { order.push('stdout'); },
+    recordObservationTicket: (value) => {
+      order.push('ticket');
+      ticket = value;
+    },
+  });
+  assert.deepEqual(order, ['receipt', 'stdout', 'ticket']);
+  assert.equal(offer.purpose, 'session_start');
+  assert.deepEqual(offer.object_ids, ['memory_luna']);
+  assert.equal(ticket.offer.context_id, offer.context_id);
 });
 
 function testTreeDigest(root) {
@@ -496,6 +562,30 @@ test('PreToolUse denies a supported side effect when binding recheck fails', asy
   });
 });
 
+test('PreToolUse denies Personal memory writes through legacy or lookalike Pulse servers', async () => {
+  for (const toolName of [
+    'mcp__pulse-preview__pulse_graph_delta',
+    'pulse_remember',
+  ]) {
+    let resolvedRuntime = false;
+    const output = await handleCodexHook('PreToolUse', {
+      ...base,
+      hook_event_name: 'PreToolUse',
+      tool_name: toolName,
+      tool_input: { schema: 'pulse.memory_capsule.v1', items: [] },
+      tool_use_id: `tool-${toolName}`,
+    }, {
+      resolveRuntime: () => {
+        resolvedRuntime = true;
+        return resolved;
+      },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /require the pulse-product server/);
+    assert.equal(resolvedRuntime, false);
+  }
+});
+
 test('PreToolUse emits native empty success only after the original turn lease and live vault agree', async () => {
   const calls = [];
   const output = await handleCodexHook('PreToolUse', {
@@ -548,6 +638,54 @@ test('PreToolUse mints one content-free exact-argument lease for pulse_remember'
   assert.equal(leases[0][2], 'mcp__pulse-product__pulse_remember');
   assert.deepEqual(leases[0][3], toolInput);
   assert.equal(leases[0][4], 'tool-memory-lease');
+});
+
+test('PreToolUse trusts the Pulse namespace emitted for the installed Codex plugin', async () => {
+  const leases = [];
+  const toolInput = {
+    schema: 'pulse.memory_capsule.v1', items: [], raw_input_included: false,
+  };
+  const output = await handleCodexHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__pulse__pulse_remember',
+    tool_input: toolInput,
+    tool_use_id: 'tool-codex-plugin-memory-lease',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...values) => leases.push(values),
+  });
+  assert.deepEqual(output, {});
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0][2], 'mcp__pulse__pulse_remember');
+  assert.deepEqual(leases[0][3], toolInput);
+  assert.equal(leases[0][4], 'tool-codex-plugin-memory-lease');
+});
+
+test('PreToolUse trusts the Code Mode pulse_product namespace emitted by real Codex', async () => {
+  const leases = [];
+  const toolInput = {
+    schema: 'pulse.memory_capsule.v1', items: [], raw_input_included: false,
+  };
+  const output = await handleCodexHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__pulse_product__pulse_remember',
+    tool_input: toolInput,
+    tool_use_id: 'tool-code-mode-memory-lease',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...values) => leases.push(values),
+  });
+  assert.deepEqual(output, {});
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0][2], 'mcp__pulse_product__pulse_remember');
+  assert.deepEqual(leases[0][3], toolInput);
+  assert.equal(leases[0][4], 'tool-code-mode-memory-lease');
 });
 
 test('PreToolUse mints the same host lease for local shared-memory tools', async () => {
@@ -629,6 +767,7 @@ test('Codex UserPromptSubmit attempts only a correlated pending-offer observatio
   const output = await handleCodexHook('UserPromptSubmit', input, {
     resolveRuntime: () => resolved,
     writeTurnContext: () => {},
+    hasSessionDelivery: async () => true,
     observeDelivery: async () => { observations++; },
   });
   await codexHooks.flushCodexHookOutput('UserPromptSubmit', input, output, {
@@ -649,7 +788,7 @@ test('PostToolUse trusts only the plugin-owned product receipt namespace', async
   const output = await handleCodexHook('PostToolUse', {
     ...base,
     hook_event_name: 'PostToolUse',
-    tool_name: 'mcp__pulse-product__pulse_remember',
+    tool_name: 'mcp__pulse_product__pulse_remember',
     tool_use_id: 'tool-1',
     tool_input: { summary: 'private input' },
     tool_response: {
@@ -679,11 +818,11 @@ test('PostToolUse trusts only the plugin-owned product receipt namespace', async
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/memory/receipts/receipt_01');
   assert.doesNotMatch(JSON.stringify(calls), /private input/);
-  const legacy = await handleCodexHook('PostToolUse', {
-    ...base, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse__pulse_remember',
-    tool_response: { receipts: [{ receipt_id: 'legacy_forged' }] },
+  const lookalike = await handleCodexHook('PostToolUse', {
+    ...base, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-preview__pulse_remember',
+    tool_response: { receipts: [{ receipt_id: 'lookalike_forged' }] },
   }, { resolveRuntime: () => resolved });
-  assert.deepEqual(legacy, {});
+  assert.deepEqual(lookalike, {});
   assert.equal(calls.length, 1);
 });
 
@@ -727,6 +866,8 @@ test('Stop blocks once for bounded finalization then closes no-change without re
   });
   assert.equal(success.decision, 'block');
   assert.match(success.reason, /one bounded Pulse finalization pass/);
+  assert.match(success.reason, /Use only the pulse-product server/);
+  assert.match(success.reason, /do not call another Pulse or fallback server/);
   assert.equal(requests.length, 0);
 
   const recursiveSuccess = await handleCodexHook('Stop', {
@@ -794,13 +935,22 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   assert.equal(Object.hasOwn(manifest, 'hooks'), false);
   assert.deepEqual(Object.keys(mcp.mcpServers), ['pulse-product']);
   assert.deepEqual(mcp.mcpServers['pulse-product'], {
-    command: 'node', args: ['${PLUGIN_ROOT}/mcp/server.mjs'],
+    command: 'node',
+    args: [
+      '--input-type=module',
+      '--eval',
+      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+    ],
+    env_vars: ['CODEX_HOME'],
   });
   assert.equal(Object.hasOwn(mcp.mcpServers['pulse-product'], 'url'), false);
   assert.deepEqual(Object.keys(hooks.hooks).sort(), [
     'PostCompact', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart',
     'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit',
   ]);
+  assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 30);
+  assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 30);
+  assert.equal(hooks.hooks.PreToolUse[0].hooks[0].timeout, 10);
   for (const entries of Object.values(hooks.hooks)) {
     assert.equal(entries.length, 1);
     assert.equal(entries[0].hooks.length, 1);
@@ -1000,7 +1150,7 @@ test('launcher lifecycle receipts are synthetic-test-only and production ignores
 
 test('readiness lifecycle projection requires a terminal user memory and a matching fresh-session offer observation chain', () => {
 	const terminal = {
-		receipt_id: 'receipt_memory_01', presentation_receipt_id: 'presentation_01', object_id: 'pulse:memory_01',
+		receipt_id: 'receipt_memory_01', object_id: 'pulse:memory_01',
 		evidence_ids: ['pulse:pulse:memory_01'], status: 'created', memory_kind: 'decision',
 		content_digest: 'c'.repeat(64),
 		conversation_scope: 'current_turn', binding_digest: 'a'.repeat(64),
@@ -1018,6 +1168,10 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 	const observed = { ...offered, acknowledgement: 'host_observed', created_at: '2026-07-16T01:02:00Z' };
 
 	assert.equal(projectReadinessLifecycleInputs([], []).state, 'first_memory_pending');
+	assert.equal(projectReadinessLifecycleInputs([terminal], []).state, 'context_offer_pending');
+	assert.equal(projectReadinessLifecycleInputs([{
+		...terminal, presentation_receipt_id: 'presentation_01',
+	}], []).state, 'context_offer_pending');
 	assert.equal(projectReadinessLifecycleInputs([{
 		...terminal, presentation_receipt_id: '',
 	}], []).state, 'first_memory_pending');
@@ -1073,6 +1227,7 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 	assert.equal(ready.schema, 'pulse.readiness_lifecycle_inputs.v1');
 	assert.equal(ready.state, 'ready');
 	assert.equal(ready.terminal_memory.object_id, terminal.object_id);
+	assert.equal(Object.hasOwn(ready.terminal_memory, 'presentation_receipt_id'), false);
 	assert.equal(ready.offered_to_host.context_id, offered.context_id);
 	assert.equal(ready.host_observed.context_id, offered.context_id);
 });

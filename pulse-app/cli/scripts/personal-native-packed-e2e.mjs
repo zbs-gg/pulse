@@ -427,7 +427,7 @@ async function readMemoryHomePage(runtime, secret) {
   return pageResponse.text();
 }
 
-async function openVisibleHomeCard({ candidate, runtime, secret }) {
+async function assertVisibleHomeMemory({ candidate, runtime, secret }) {
   const checks = Object.fromEntries([
     'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
     'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
@@ -451,29 +451,8 @@ async function openVisibleHomeCard({ candidate, runtime, secret }) {
   });
   assert.equal(pageResponse.status, 200);
   const page = await pageResponse.text();
-  assert.equal(page.includes(`data-candidate-id="${candidate.candidate_id}"`), true);
   assert.equal(page.includes(candidate.candidate.capsule.items[0].redacted_summary), true);
-  const csrf = page.match(/name="csrf_token" value="([^"]+)"/)?.[1];
-  assert.equal(typeof csrf, 'string');
-  const form = new URLSearchParams({
-    csrf_token: csrf,
-    candidate_id: candidate.candidate_id,
-    expected_version: String(candidate.version),
-  });
-  const presentResponse = await fetch(new URL('present', session.target_url), {
-    method: 'POST',
-    headers: {
-      Cookie: cookie,
-      Origin: runtime.base_url,
-      'Sec-Fetch-Site': 'same-origin',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Dest': 'empty',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: form,
-    signal: AbortSignal.timeout(5000),
-  });
-  assert.equal(presentResponse.status, 204, await presentResponse.text());
+  assert.equal(page.includes(candidate.canonical_object_id), true);
 }
 
 async function waitForTerminalCandidate(runtime, secret, candidateID, timeoutMs = 30_000) {
@@ -576,13 +555,15 @@ try {
     cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
-  assert.equal(installResult.outcome, 'action_required', `${JSON.stringify(installResult)}\n${installed.stderr}`);
+  assert.equal(installResult.outcome, 'ready', `${JSON.stringify(installResult)}\n${installed.stderr}`);
   assert.equal(
     installResult.reason_code,
-    'codex_lifecycle_required',
+    'installed',
     `${JSON.stringify(installResult)}\n${installed.stderr}`,
   );
   assert.equal(installResult.host_status.hosts[0].installed, true);
+  assert.equal(installResult.host_status.hosts[0].lifecycle_ready, false);
+  assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
   assert.equal(basename(pluginRoot), '0.7.0');
@@ -662,8 +643,8 @@ try {
   });
   assert.equal(remembered.status, 'candidates');
   assert.equal(remembered.receipts.length, 1);
-  assert.equal(remembered.receipts[0].status, 'pending');
-  assert.equal(remembered.receipts[0].object_id ?? '', '');
+  assert.equal(remembered.receipts[0].status, 'created');
+  assert.match(remembered.receipts[0].object_id, /^pulse:/);
   markFirstValueStage('remember_mcp');
 
   const postTool = codexHook(pluginRoot, 'PostToolUse', codexHookInput({
@@ -674,7 +655,7 @@ try {
     },
   }), { cwd: workspace, env: hookEnv });
   assert.match(postTool.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
-  assert.match(postTool.systemMessage, /:pending/);
+  assert.match(postTool.systemMessage, /:created/);
   markFirstValueStage('post_tool');
   const firstStop = codexHook(pluginRoot, 'Stop', codexHookInput({
     eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
@@ -683,23 +664,26 @@ try {
   assert.deepEqual(firstStop, {});
   markFirstValueStage('stop_finalize');
 
-  const pendingTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
-  const pendingCard = pendingTray.candidates.find((candidate) =>
+  const committedTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+  const committedCard = committedTray.candidates.find((candidate) =>
     candidate.candidate_id === remembered.receipts[0].candidate_id);
-  assert.equal(pendingCard.state, 'pending');
-  assert.equal(pendingCard.grace_expires_at, '');
-  assert.equal(pendingCard.candidate.capsule.items[0].redacted_summary, summary);
-  markFirstValueStage('pending_card');
-  await openVisibleHomeCard({ candidate: pendingCard, runtime, secret });
+  assert.equal(committedCard.state, 'committed');
+  assert.equal(committedCard.current, true);
+  assert.equal(committedCard.canonical_object_id, remembered.receipts[0].object_id);
+  assert.equal(committedCard.latest_receipt.status, 'created');
+  assert.equal(committedCard.projection_status, 'complete');
+  assert.equal(committedCard.candidate.capsule.items[0].redacted_summary, summary);
+  markFirstValueStage('committed_card');
+  await assertVisibleHomeMemory({ candidate: committedCard, runtime, secret });
   markFirstValueStage('visible_card');
-  const terminalCard = await waitForTerminalCandidate(runtime, secret, pendingCard.candidate_id);
+  const terminalCard = await waitForTerminalCandidate(runtime, secret, committedCard.candidate_id);
   assert.equal(['created', 'updated', 'deduplicated'].includes(terminalCard.latest_receipt.status), true);
   assert.equal(terminalCard.latest_receipt.object_id, terminalCard.canonical_object_id);
   assert.equal(terminalCard.latest_receipt.safe_provenance.host, 'codex');
   assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
   const objectID = terminalCard.canonical_object_id;
   markFirstValueStage('terminal_receipt');
-  await waitForProjectedCandidate(runtime, secret, pendingCard.candidate_id);
+  await waitForProjectedCandidate(runtime, secret, committedCard.candidate_id);
   markFirstValueStage('retrieval_projection');
   const freshSessionID = 'session-native-packed-fresh';
   const freshTurnID = 'turn-native-packed-fresh';
@@ -857,6 +841,8 @@ try {
     static_host_attached: true,
     visible_memory_card: true,
     first_memory_saved: true,
+    automatic_durable_write: true,
+    tray_save_proof: false,
     canonical_object_id: objectID,
     fresh_session_context: true,
     host_observation: true,

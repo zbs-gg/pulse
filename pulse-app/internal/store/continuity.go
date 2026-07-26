@@ -877,9 +877,33 @@ func relAgo(ts string) string {
 // ("what's cooking across your harnesses"). Read-only over continuity_checkpoints
 // (host + summary + created_at). Honest empty-states; best-effort (errors → nil).
 func (s *Store) harnessActivity(limit int) []string {
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil
+	}
+	query := `
 		SELECT host, COUNT(*) n, MAX(created_at) last
-		FROM continuity_checkpoints WHERE host != '' GROUP BY host ORDER BY last DESC`)
+		FROM continuity_checkpoints WHERE host != '' GROUP BY host ORDER BY last DESC`
+	args := []any{}
+	if scoped {
+		query = `
+			SELECT checkpoint.host, COUNT(*) n, MAX(checkpoint.created_at) last
+			  FROM continuity_checkpoints checkpoint
+			  JOIN private_semantic_projection_rows projection
+			    ON projection.row_kind='checkpoint'
+			   AND projection.row_ref=CAST(checkpoint.id AS TEXT)
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE checkpoint.host!=''
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			 GROUP BY checkpoint.host
+			 ORDER BY last DESC`
+		args = append(args, scope.ProjectNamespaceID)
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil
 	}
@@ -904,7 +928,25 @@ func (s *Store) harnessActivity(limit int) []string {
 			break
 		}
 		var summary string
-		_ = s.db.QueryRow(`SELECT summary FROM continuity_checkpoints WHERE host=? ORDER BY created_at DESC LIMIT 1`, x.host).Scan(&summary)
+		if scoped {
+			_ = s.db.QueryRow(`
+				SELECT checkpoint.summary
+				  FROM continuity_checkpoints checkpoint
+				  JOIN private_semantic_projection_rows projection
+				    ON projection.row_kind='checkpoint'
+				   AND projection.row_ref=CAST(checkpoint.id AS TEXT)
+				  JOIN private_memory_objects object ON object.object_id=projection.object_id
+				 WHERE checkpoint.host=?
+				   AND object.lifecycle='active'
+				   AND (
+				       object.memory_scope='personal_global' OR
+				       (object.memory_scope='project' AND object.project_namespace_id=?)
+				   )
+				 ORDER BY checkpoint.created_at DESC, checkpoint.id DESC
+				 LIMIT 1`, x.host, scope.ProjectNamespaceID).Scan(&summary)
+		} else {
+			_ = s.db.QueryRow(`SELECT summary FROM continuity_checkpoints WHERE host=? ORDER BY created_at DESC LIMIT 1`, x.host).Scan(&summary)
+		}
 		summary = strings.TrimSpace(summary)
 		if r := []rune(summary); len(r) > 80 {
 			summary = string(r[:80]) + "…"
@@ -919,13 +961,41 @@ func (s *Store) harnessActivity(limit int) []string {
 }
 
 func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	query := `
 		SELECT f.text
 		  FROM facts f
 		  JOIN entities e ON e.id = f.entity_id
 		 WHERE NOT EXISTS (SELECT 1 FROM sensitive_actors sa WHERE sa.entity_id = e.id)
 		 ORDER BY f.confidence DESC, f.created_at DESC, e.canonical_name ASC
-		 LIMIT ?`, limit)
+		 LIMIT ?`
+	args := []any{limit}
+	if scoped {
+		query = `
+			SELECT fact.text
+			  FROM facts fact
+			  JOIN entities entity ON entity.id=fact.entity_id
+			  JOIN private_semantic_projection_rows projection
+			    ON projection.row_kind='fact'
+			   AND projection.row_ref=CAST(fact.id AS TEXT)
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			   AND NOT EXISTS (
+			       SELECT 1 FROM sensitive_actors actor
+			        WHERE actor.entity_id=entity.id
+			   )
+			 ORDER BY fact.confidence DESC, fact.created_at DESC, entity.canonical_name ASC
+			 LIMIT ?`
+		args = []any{scope.ProjectNamespaceID, limit}
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1256,7 +1326,11 @@ func (s *Store) WipeContinuity() error {
 func (s *Store) latestCheckpoint(threadID string) (ContinuityCheckpoint, bool, error) {
 	var cp ContinuityCheckpoint
 	var decisions, openLoops, doNotRepeat, emotional, state, activeThreads, reviewInsights, refs string
-	err := s.db.QueryRow(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return ContinuityCheckpoint{}, false, err
+	}
+	query := `
 		SELECT id, thread_id, session_id, host, COALESCE(project_id, ''), summary,
 		       decisions_json, open_loops_json, do_not_repeat_json, emotional_anchors_json,
 		       state_signals_json, active_threads_json, review_insights_json,
@@ -1264,7 +1338,33 @@ func (s *Store) latestCheckpoint(threadID string) (ContinuityCheckpoint, bool, e
 		  FROM continuity_checkpoints
 		 WHERE thread_id = ?
 		 ORDER BY created_at DESC, id DESC
-		 LIMIT 1`, threadID).Scan(
+		 LIMIT 1`
+	args := []any{threadID}
+	if scoped {
+		query = `
+			SELECT checkpoint.id, checkpoint.thread_id, checkpoint.session_id,
+			       checkpoint.host, COALESCE(checkpoint.project_id, ''), checkpoint.summary,
+			       checkpoint.decisions_json, checkpoint.open_loops_json,
+			       checkpoint.do_not_repeat_json, checkpoint.emotional_anchors_json,
+			       checkpoint.state_signals_json, checkpoint.active_threads_json,
+			       checkpoint.review_insights_json, checkpoint.source_refs_json,
+			       checkpoint.confidence, checkpoint.created_at
+			  FROM continuity_checkpoints checkpoint
+			  JOIN private_semantic_projection_rows projection
+			    ON projection.row_kind='checkpoint'
+			   AND projection.row_ref=CAST(checkpoint.id AS TEXT)
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE checkpoint.thread_id=?
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			 ORDER BY checkpoint.created_at DESC, checkpoint.id DESC
+			 LIMIT 1`
+		args = []any{threadID, scope.ProjectNamespaceID}
+	}
+	err = s.db.QueryRow(query, args...).Scan(
 		&cp.ID, &cp.ThreadID, &cp.SessionID, &cp.Host, &cp.ProjectID, &cp.Summary,
 		&decisions, &openLoops, &doNotRepeat, &emotional, &state, &activeThreads, &reviewInsights, &refs,
 		&cp.Confidence, &cp.CreatedAt,
@@ -1287,13 +1387,40 @@ func (s *Store) latestCheckpoint(threadID string) (ContinuityCheckpoint, bool, e
 }
 
 func (s *Store) recentObservations(threadID string, limit int) ([]ContinuityObservation, error) {
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	query := `
 		SELECT id, session_id, thread_id, host, event_type, redacted_summary,
 		       COALESCE(raw_ref, ''), COALESCE(source_ref, ''), created_at
 		  FROM continuity_observations
 		 WHERE thread_id = ?
 		 ORDER BY created_at DESC, id DESC
-		 LIMIT ?`, threadID, limit)
+		 LIMIT ?`
+	args := []any{threadID, limit}
+	if scoped {
+		query = `
+			SELECT observation.id, observation.session_id, observation.thread_id,
+			       observation.host, observation.event_type, observation.redacted_summary,
+			       COALESCE(observation.raw_ref, ''), COALESCE(observation.source_ref, ''),
+			       observation.created_at
+			  FROM continuity_observations observation
+			  JOIN private_semantic_projection_rows projection
+			    ON projection.row_kind='session'
+			   AND projection.row_ref=observation.session_id
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE observation.thread_id=?
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			 ORDER BY observation.created_at DESC, observation.id DESC
+			 LIMIT ?`
+		args = []any{threadID, scope.ProjectNamespaceID, limit}
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1313,13 +1440,39 @@ func (s *Store) recentResumeMemories(limit int) ([]RecalledMemoryItem, error) {
 	if limit <= 0 || limit > 20 {
 		limit = 8
 	}
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	query := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
 		 WHERE kind IN ('fact', 'decision', 'preference', 'project_state', 'open_loop',
 		                'correction', 'relationship_note', 'do_not_repeat', 'state_signal')
 		 ORDER BY created_at DESC
-		 LIMIT ?`, limit)
+		 LIMIT ?`
+	args := []any{limit}
+	if scoped {
+		query = `
+			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
+			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
+			  FROM memory_capsules capsule
+			  JOIN private_memory_objects object ON object.object_id=capsule.id
+			 WHERE capsule.kind IN (
+			       'fact', 'decision', 'preference', 'project_state', 'open_loop',
+			       'correction', 'relationship_note', 'do_not_repeat', 'state_signal'
+			   )
+			   AND capsule.status='active'
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			 ORDER BY capsule.created_at DESC
+			 LIMIT ?`
+		args = []any{scope.ProjectNamespaceID, limit}
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

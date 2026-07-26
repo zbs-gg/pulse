@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -93,5 +93,38 @@ test('fixture build has exact runner layout and is explicitly never production-r
     assert.equal(evidence.quality_gate, 'synthetic-protocol-only');
   } finally {
     rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test('production build pairs a native launcher with the audited ESM runner and pinned runtime', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-portable-production.'));
+  const output = join(root, 'output');
+  const targetRuntime = join(root, 'target-runtime');
+  const launcher = join(root, 'pulse-embedder');
+  try {
+    mkdirSync(join(targetRuntime, 'node_modules', '@huggingface', 'transformers'), { recursive: true });
+    mkdirSync(join(targetRuntime, 'node_modules', 'onnxruntime-node'), { recursive: true });
+    writeFileSync(join(targetRuntime, 'package.json'), readFileSync(join(portableRoot, 'target-runtime', 'package.json')));
+    writeFileSync(join(targetRuntime, 'node_modules', '@huggingface', 'transformers', 'package.json'),
+      '{"version":"4.2.0"}\n');
+    writeFileSync(join(targetRuntime, 'node_modules', 'onnxruntime-node', 'package.json'),
+      '{"version":"1.24.3"}\n');
+    writeFileSync(launcher, 'native-launcher');
+    chmodSync(launcher, 0o700);
+
+    const result = buildPortableEmbedderRuntime({
+      fixture: false,
+      outputRoot: output,
+      platform: 'darwin',
+      runnerInput: launcher,
+      sourceRoot: portableRoot,
+      targetRuntimeRoot: targetRuntime,
+    });
+
+    assert.equal(result.fixture, false);
+    assert.equal(readFileSync(join(output, 'bin', 'pulse-embedder'), 'utf8'), 'native-launcher');
+    assert.match(readFileSync(join(output, 'runtime', 'runner.mjs'), 'utf8'), /loadProductionBackend/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

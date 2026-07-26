@@ -8,6 +8,7 @@ import {
   composeBoundResumeEvidence,
   createContinuityDeliveryOffer,
   createContinuityDeliveryObservation,
+  hasContinuitySessionDelivery,
   observePendingContinuityDelivery,
   recordContinuityObservationTicket,
   renderCommonsResume,
@@ -205,6 +206,7 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     const ticketDirectory = join(root, 'runtime', 'continuity-observations');
     const ticketPath = join(ticketDirectory, readdirSync(ticketDirectory)[0]);
     assert.doesNotMatch(readFileSync(ticketPath, 'utf8'), /remembered context payload|memory_1/);
+    assert.equal(hasContinuitySessionDelivery(runtime, start), false);
 
     const promptEvent = {
       host: 'claude-code', native_event: 'UserPromptSubmit', event: 'turn_start',
@@ -227,7 +229,21 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     assert.deepEqual(calls[0].options.body, expected.body);
     assert.equal(calls[0].options.idempotencyKey, expected.idempotencyKey);
     assert.deepEqual(readdirSync(ticketDirectory), []);
+    const observedDirectory = join(root, 'runtime', 'continuity-observed');
+    const observedFiles = readdirSync(observedDirectory);
+    assert.equal(observedFiles.length, 1);
+    assert.doesNotMatch(readFileSync(join(observedDirectory, observedFiles[0]), 'utf8'),
+      /remembered context payload|memory_1/);
+    assert.equal(hasContinuitySessionDelivery(runtime, promptEvent), true);
     assert.equal(await observePendingContinuityDelivery(runtime, promptEvent, { request: async () => assert.fail() }), undefined);
+
+    const stopEvent = {
+      host: 'claude-code', native_event: 'Stop', event: 'turn_finalize',
+      source: 'stop', session_id: 'session_1',
+      source_event_key: `event_${'d'.repeat(64)}`,
+    };
+    const stopObservation = createContinuityDeliveryObservation(ticket, stopEvent);
+    assert.equal(stopObservation.body.session_ref, ticket.session_ref);
 
     assert.throws(() => createContinuityDeliveryObservation(ticket, {
       ...promptEvent, host: 'cursor',

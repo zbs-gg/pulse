@@ -4,6 +4,10 @@ import { lstatSync, openSync, closeSync, readSync, fstatSync, constants } from '
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const SHA256 = /^[a-f0-9]{64}$/;
+const MACH_O_MAGICS = new Set([
+  'feedface', 'feedfacf', 'cefaedfe', 'cffaedfe',
+  'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca',
+]);
 
 export class TargetReleaseAttestationError extends Error {
   constructor(code) {
@@ -69,7 +73,22 @@ function digestFile(path, expectedBytes) {
   }
 }
 
-function verifyArtifactTrees(artifacts) {
+function nativeCodeForPlatform(path, platform) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const header = Buffer.alloc(4);
+    const count = readSync(descriptor, header, 0, header.length, 0);
+    if (count < 2) return false;
+    if (platform === 'darwin') return count === 4 && MACH_O_MAGICS.has(header.toString('hex'));
+    if (platform === 'win32') return header.subarray(0, 2).toString('ascii') === 'MZ';
+    return false;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function verifyArtifactTrees(artifacts, platform) {
   const executables = [];
   for (const [kind, artifact] of Object.entries(artifacts).sort(([left], [right]) => left.localeCompare(right))) {
     if (!artifact || !artifact.descriptor || !artifact.tree || !Array.isArray(artifact.tree.files)) fail('release_attestation_artifact_invalid');
@@ -81,11 +100,14 @@ function verifyArtifactTrees(artifacts) {
       fail('release_attestation_executable_contract_mismatch');
     }
     for (const file of artifact.tree.files) {
-      if (!Number.isSafeInteger(file.bytes) || file.bytes < 1 || typeof file.sha256 !== 'string' || !SHA256.test(file.sha256) ||
+      if (!Number.isSafeInteger(file.bytes) || file.bytes < 0 || typeof file.sha256 !== 'string' || !SHA256.test(file.sha256) ||
           ![0o600, 0o700].includes(file.mode) || typeof file.executable !== 'boolean') fail('release_attestation_tree_invalid');
       const actual = safeFile(artifact.root, file.path);
       if (digestFile(actual.path, file.bytes) !== file.sha256) fail('release_attestation_file_digest_mismatch');
-      if (artifact.descriptor.executable === true && file.executable) executables.push({ artifact, kind, path: actual.path });
+      const primary = artifact.descriptor.executable === true && file.executable;
+      if (primary || nativeCodeForPlatform(actual.path, platform)) {
+        executables.push({ artifact, kind, path: actual.path, primary });
+      }
     }
   }
   return executables;
@@ -113,16 +135,18 @@ function attestApple(executables, profile, run) {
   for (const executable of executables) {
     requireSuccess(run('/usr/bin/codesign', ['--verify', '--strict', '--verbose=4', executable.path]), 'apple_codesign_invalid');
     const details = requireSuccess(run('/usr/bin/codesign', ['-d', '--verbose=4', executable.path]), 'apple_codesign_identity_invalid');
-    const expectedIdentifier = executable.artifact.descriptor.signing?.identifier;
+    const expectedIdentifier = executable.primary ? executable.artifact.descriptor.signing?.identifier : null;
+    const identifierLine = details.split(/\r?\n/).find((line) => line.startsWith('Identifier='));
     if (executable.artifact.descriptor.signing?.scheme !== 'apple-developer-id' ||
-        executable.artifact.descriptor.signing?.team_id !== profile.team_id || !expectedIdentifier ||
-        !details.split(/\r?\n/).includes(`Identifier=${expectedIdentifier}`) ||
+        executable.artifact.descriptor.signing?.team_id !== profile.team_id ||
+        (executable.primary && (!expectedIdentifier || identifierLine !== `Identifier=${expectedIdentifier}`)) ||
+        (!executable.primary && !/^Identifier=[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(identifierLine ?? '')) ||
         !details.split(/\r?\n/).includes(`TeamIdentifier=${profile.team_id}`) ||
         !details.includes(`Authority=Developer ID Application:`)) fail('apple_codesign_identity_mismatch');
-    const gatekeeper = requireSuccess(run('/usr/sbin/spctl', ['-a', '-t', 'execute', '-vv', executable.path]), 'apple_gatekeeper_rejected');
-    if (!/source=Notarized Developer ID(?:\r?\n|$)/.test(gatekeeper) || !gatekeeper.includes(`(${profile.team_id})`)) {
-      fail('apple_notarization_evidence_missing');
-    }
+    requireSuccess(
+      run('/usr/bin/codesign', ['-vvvv', '-R=notarized', '--check-notarization', executable.path]),
+      'apple_notarization_evidence_missing',
+    );
   }
 }
 
@@ -168,7 +192,7 @@ export function attestSelectedTarget({
     fail(platform === 'linux' ? 'linux_signed_catalog_required' : 'release_signed_catalog_required');
   }
   validateArtifactSet(artifacts);
-  const executables = verifyArtifactTrees(artifacts ?? {});
+  const executables = verifyArtifactTrees(artifacts ?? {}, platform);
   if (profile.kind === 'apple' && platform === 'darwin') attestApple(executables, profile, run);
   else if (profile.kind === 'windows' && platform === 'win32') attestWindows(executables, profile, run);
   else if (profile.kind === 'linux' && platform === 'linux') {

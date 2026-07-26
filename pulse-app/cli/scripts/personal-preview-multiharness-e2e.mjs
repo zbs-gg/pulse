@@ -141,6 +141,9 @@ function productFixture({ failHosts = [] } = {}) {
   };
   const context = {
     binding_id: 'binding_shared_product',
+    edge: {
+      release_manifest_digest: 'a'.repeat(64),
+    },
     edge_digest: 'c'.repeat(64),
     store_id: 'store_personal_shared',
   };

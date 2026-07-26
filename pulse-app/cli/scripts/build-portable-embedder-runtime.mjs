@@ -3,7 +3,7 @@
 import {
   chmodSync, copyFileSync, cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LOCKED_DEPENDENCIES = Object.freeze({
@@ -21,6 +21,39 @@ function inspectTree(path) {
   const stat = lstatSync(path);
   if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new Error('portable target runtime contains an unsafe entry');
   if (stat.isDirectory()) for (const name of readdirSync(path)) inspectTree(join(path, name));
+}
+
+function copyProductionRuntime(sourceRoot, destinationRoot) {
+  const root = lstatSync(sourceRoot);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error('portable target runtime contains an unsafe entry');
+  }
+  cpSync(sourceRoot, destinationRoot, {
+    recursive: true,
+    force: true,
+    errorOnExist: false,
+    dereference: false,
+    filter: (sourcePath) => {
+      const item = relative(sourceRoot, sourcePath);
+      if (item.split(sep).includes('.bin')) return false;
+      const stat = lstatSync(sourcePath);
+      if (stat.isSymbolicLink()) throw new Error('portable target runtime contains an unsafe entry');
+      return stat.isDirectory() || stat.isFile();
+    },
+  });
+}
+
+function normalizeRuntimeData(path) {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+    throw new Error('portable target runtime contains an unsafe entry');
+  }
+  if (stat.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const name of readdirSync(path)) normalizeRuntimeData(join(path, name));
+    return;
+  }
+  chmodSync(path, 0o600);
 }
 
 function manifestAt(path) {
@@ -67,7 +100,6 @@ export function buildPortableEmbedderRuntime({
     if (!runnerStat.isFile() || runnerStat.isSymbolicLink() || (runnerStat.mode & 0o111) === 0) {
       throw new Error('portable runner release input is invalid');
     }
-    inspectTree(targetRuntimeRoot);
     manifestAt(join(targetRuntimeRoot, 'package.json'));
     for (const [name, version] of Object.entries(LOCKED_DEPENDENCIES)) {
       const installed = JSON.parse(readFileSync(join(targetRuntimeRoot, 'node_modules', name, 'package.json'), 'utf8'));
@@ -75,7 +107,11 @@ export function buildPortableEmbedderRuntime({
     }
     copyFileSync(runnerInput, runner);
     chmodSync(runner, 0o700);
-    cpSync(targetRuntimeRoot, join(outputRoot, 'runtime'), { recursive: true, force: true, errorOnExist: false });
+    copyFileSync(join(sourceRoot, 'runner.mjs'), join(outputRoot, 'runtime', 'runner.mjs'));
+    chmodSync(join(outputRoot, 'runtime', 'runner.mjs'), 0o600);
+    copyProductionRuntime(targetRuntimeRoot, join(outputRoot, 'runtime'));
+    inspectTree(join(outputRoot, 'runtime'));
+    normalizeRuntimeData(join(outputRoot, 'runtime'));
   }
 
   const evidence = {

@@ -21,6 +21,8 @@ const STEP = Object.freeze({
 export const PERSONAL_INSTALL_STEPS = Object.freeze(Object.values(STEP));
 
 const ACTION_REQUIRED_CODES = new Set([
+  'binding_bootstrap_signature_invalid',
+  'binding_trust_install_failed',
   'binding_conflict',
   'binding_legacy',
   'binding_repair_required',
@@ -106,9 +108,16 @@ function planWorkspace(plan) {
 
 function nextAction(reasonCode) {
   const actions = {
+    artifact_download_interrupted: 'The release download was interrupted. Check the connection and run pulse install again.',
+    artifact_etag_invalid: 'The release source is missing required verification metadata. The release server must be fixed; this project needs no changes.',
+    artifact_http_status: 'The release source did not return the requested file. Check the release service and run pulse install again.',
+    artifact_digest_mismatch: 'Pulse rejected a release file whose checksum did not match. Do not use that release; retry after the release source is fixed.',
     binding_conflict: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
+    binding_bootstrap_signature_invalid: 'Pulse could not verify the one-time initial project binding. Retry only after updating the installer package.',
     binding_legacy: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
     binding_repair_required: 'Run pulse install-plan --json and review current_state.binding before approving any replacement.',
+    binding_trust_install_failed: 'Approve the operating-system administrator prompt, then run pulse install again.',
+    binding_trust_verification_failed: 'The signed project-binding trust did not verify after setup. Run pulse trust status --json, then retry.',
     codex_activation_incomplete: 'Run pulse doctor codex --json and fix the first failed activation check.',
 		codex_activation_rollback_failed: 'Codex was left in an uncertain plugin state. Run pulse doctor codex --json and repair Codex before using this install.',
     codex_hook_lifecycle_required: 'Run pulse home to inspect the installed memory, then open and use a normal new Codex task so the Pulse lifecycle can run.',
@@ -124,8 +133,8 @@ function nextAction(reasonCode) {
     claude_probe_failed: 'Verify the detected Claude Code CLI runs, then run pulse install-plan --json again.',
     claude_version_invalid: 'Update Claude Code to a compatible version, then run pulse install again.',
     cursor_activation_incomplete: 'Reload Cursor, then run pulse repair.',
-    disclosure_consent_required: 'Review the install plan and approve it in the interactive wizard.',
-    platform_unsupported: 'Use an Apple Silicon Mac with macOS, Node 20+, a supported harness, and a Git project.',
+    disclosure_consent_required: 'Run pulse install again and approve the single installation prompt.',
+    platform_unsupported: 'Use a supported native desktop target with Node 20+, a supported harness, and a Git project.',
     presence_denied: 'Approve the macOS security prompt, then run pulse install again.',
     presence_required: 'Complete the macOS security prompt, then run pulse install again.',
     principal_repair_required: 'Run pulse install-plan --json and review current_state.principal before changing the Personal identity.',
@@ -161,8 +170,8 @@ function terminalResult(plan, {
     host_status: normalizedHostStatus,
     next_action: outcome === 'ready'
       ? normalizedHostStatus.parity === 'degraded'
-        ? 'Run pulse home to inspect memory. Pulse is usable through a verified harness; run pulse repair to attach the remaining detected harnesses.'
-        : 'Run pulse home to inspect memory, then open a new task in a verified harness and create the first visible memory.'
+        ? 'Continue working in a verified harness. Pulse will remember automatically. Optional: run pulse home; run pulse repair later to attach the remaining detected harnesses.'
+        : 'Continue working in a new task. Pulse will remember automatically. Optional: run pulse home to inspect or edit memory.'
       : nextAction(reasonCode),
   };
 }
@@ -306,7 +315,7 @@ async function writeReceiptOnce(dependencies, receipt) {
 }
 
 function failureReason(error) {
-  const code = error instanceof PersonalInstallError ? error.code : undefined;
+  const code = error?.code;
   if (typeof code === 'string' && SAFE_REASON_CODE.test(code)) return code;
   return 'install_failed';
 }
@@ -373,13 +382,23 @@ export async function runPersonalInstall({
   let mutated = false;
   let lastHostStatus;
   try {
-    const runtime = await verifiedStep({
-      inspect: deps.inspectRuntime,
-      mutate: deps.provisionRuntime,
-      completedSteps,
-      step: STEP.artifacts,
-      verificationCode: 'runtime_verification_failed',
-    });
+    let runtime;
+    try {
+      runtime = await verifiedStep({
+        inspect: deps.inspectRuntime,
+        mutate: deps.provisionRuntime,
+        completedSteps,
+        step: STEP.artifacts,
+        verificationCode: 'runtime_verification_failed',
+      });
+    } catch (error) {
+      if (mode !== 'repair' || error?.code !== 'runtime_repair_required') throw error;
+      await deps.provisionRuntime();
+      const repaired = await deps.inspectRuntime();
+      if (repaired?.ready !== true) fail('runtime_verification_failed');
+      completedSteps.push(STEP.artifacts);
+      runtime = { mutated: true, value: repaired };
+    }
     mutated ||= runtime.mutated;
     await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
@@ -425,8 +444,17 @@ export async function runPersonalInstall({
     completedSteps.push(STEP.binding);
     await emitCheckpoint(deps, exact, completedSteps, authorityProfile);
 
+    const inspectReleaseBoundCore = async () => {
+      const inspected = await deps.inspectCore({ binding: bindingStatus.binding, plan: exact });
+      const expectedManifest = exact.release?.manifest_digest;
+      if (inspected?.ready === true && /^[a-f0-9]{64}$/.test(expectedManifest ?? '') &&
+          inspected.context?.edge?.release_manifest_digest !== expectedManifest) {
+        return { ...inspected, ready: false, reason_code: 'core_activation_required' };
+      }
+      return inspected;
+    };
     const core = await verifiedStep({
-      inspect: () => deps.inspectCore({ binding: bindingStatus.binding, plan: exact }),
+      inspect: inspectReleaseBoundCore,
       mutate: () => deps.activateCore({ binding: bindingStatus.binding, plan: exact }),
       completedSteps,
       step: STEP.core,

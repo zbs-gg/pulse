@@ -1,6 +1,6 @@
 import { statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { DesktopTargetError, detectDesktopLibc, resolveDesktopTarget } from './desktop-target.js';
 import { createPlatformServices, defaultPlatformServices } from './platform-services.js';
@@ -202,7 +202,9 @@ function unsafeCurrentStateReasons(state) {
     const status = state[key];
     const mapped = exact[`${key}:${status}`];
     if (mapped) reasons.push(mapped);
-    else if (['corrupt', 'invalid', 'unsafe'].includes(status)) reasons.push(`${key}_${status}`);
+    else if (key !== 'presence' && ['corrupt', 'invalid', 'unsafe'].includes(status)) {
+      reasons.push(`${key}_${status}`);
+    }
   }
   return reasons;
 }
@@ -250,6 +252,61 @@ function formatBytes(bytes) {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+const HUMAN_HOST_NAMES = Object.freeze({
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+});
+
+function humanList(values) {
+  if (values.length < 2) return values[0] ?? 'your AI app';
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`;
+}
+
+export function formatPersonalInstallIntroduction(plan) {
+  if (!plan || plan.schema !== SCHEMA || plan.contract_version !== 2) {
+    throw new TypeError('install_plan_invalid');
+  }
+  const workspacePath = plan.detected?.workspace?.canonical_path;
+  const project = typeof workspacePath === 'string' && workspacePath
+    ? basename(workspacePath)
+    : 'this project';
+  const targetHosts = (plan.detected?.hosts ?? [])
+    .filter((host) => host.activation_target === true)
+    .map((host) => HUMAN_HOST_NAMES[host.host] ?? host.host);
+  const hosts = humanList(targetHosts);
+  const download = Number.isSafeInteger(plan.release?.total_download_bytes)
+    ? `- Downloads ${formatBytes(plan.release.total_download_bytes)} for the local runtime and on-device search.`
+    : null;
+  const bindingTrust = plan.current_state?.binding !== 'ready'
+    ? '- Your operating system may ask once for administrator approval to protect the signed project binding.'
+    : null;
+  const readiness = plan.outcome === 'ready_to_install'
+    ? 'Everything needed is ready.'
+    : `Pulse needs one prerequisite fixed before installation (${plan.reason_codes[0] ?? 'preflight_incomplete'}).`;
+
+  return [
+    'Pulse Personal',
+    '',
+    `I checked the project boundary for ${project}, the compatible AI apps, and this computer.`,
+    'Pulse turns useful context from normal AI conversations into cards in Memory Home.',
+    `Useful structured memory is saved automatically and can arrive in new ${hosts} tasks.`,
+    'You can edit or delete any memory in Memory Home.',
+    '',
+    readiness,
+    targetHosts.length > 0 ? `- Connects ${hosts} automatically.` : null,
+    download,
+    bindingTrust,
+    '- Keeps memory private on this computer.',
+    '- Imports no old chats, stores no raw transcripts, and makes no paid model API calls.',
+    '',
+    'You do not need to choose a model, storage path, port, or hooks.',
+    'Nothing is installed until you approve below.',
+    'Technical details: pulse install-plan --json',
+  ].filter((line) => line !== null).join('\n');
 }
 
 export function formatPersonalInstallPlan(plan) {
@@ -497,6 +554,9 @@ export function buildPersonalInstallPlan({
     },
     required_human_approvals: [
       { code: 'install_disclosure_consent', automatable_by_yes: false },
+      ...(detectedCurrentState.binding !== 'ready'
+        ? [{ code: 'binding_trust_bootstrap', automatable_by_yes: false }]
+        : []),
       ...(codex?.activation_target ? [{ code: 'codex_hook_trust', automatable_by_yes: false }] : []),
     ],
     rollback: {

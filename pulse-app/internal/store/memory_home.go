@@ -81,16 +81,47 @@ type MemoryHomeActiveMemory struct {
 	ObjectID              string `json:"object_id"`
 	Kind                  string `json:"kind"`
 	RedactedSummary       string `json:"redacted_summary"`
+	EditableSummary       string `json:"-"`
+	Scope                 string `json:"scope"`
+	ProjectNamespaceID    string `json:"project_namespace_id"`
+	OriginalRepositoryID  string `json:"original_repository_id"`
+	ProjectLabel          string `json:"project_label"`
+	LogicalGeneration     int    `json:"logical_generation"`
 	Host                  string `json:"host"`
 	SessionRef            string `json:"session_ref"`
+	SessionLabel          string `json:"session_label"`
+	SharingState          string `json:"sharing_state"`
 	CreatedAt             string `json:"created_at"`
+	ModifiedAt            string `json:"modified_at"`
 	TerminalReceiptID     string `json:"terminal_receipt_id"`
-	PresentationReceiptID string `json:"presentation_receipt_id"`
+	PresentationReceiptID string `json:"presentation_receipt_id,omitempty"`
 }
 
 type MemoryHomeMemories struct {
 	ActiveCount  int                      `json:"active_count"`
 	LatestActive []MemoryHomeActiveMemory `json:"latest_active"`
+}
+
+type MemoryHomeFilter struct {
+	Text       string `json:"text,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Harness    string `json:"harness,omitempty"`
+	DateFrom   string `json:"date_from,omitempty"`
+	DateTo     string `json:"date_to,omitempty"`
+	Scope      string `json:"scope,omitempty"`
+	Sharing    string `json:"sharing,omitempty"`
+	PageOffset int    `json:"page_offset,omitempty"`
+	PageSize   int    `json:"page_size,omitempty"`
+}
+
+type MemoryHomeFacet struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+type MemoryHomeFacets struct {
+	Projects []MemoryHomeFacet `json:"projects"`
+	Harness  []MemoryHomeFacet `json:"harnesses"`
 }
 
 type MemoryHomeReceipts struct {
@@ -144,6 +175,8 @@ type MemoryHomeData struct {
 	Boundary        MemoryHomeBoundary          `json:"boundary"`
 	Readiness       MemoryHomeReadinessSnapshot `json:"readiness"`
 	Memories        MemoryHomeMemories          `json:"memories"`
+	Filter          MemoryHomeFilter            `json:"filter"`
+	Facets          MemoryHomeFacets            `json:"facets"`
 	Receipts        MemoryHomeReceipts          `json:"receipts"`
 	Context         MemoryHomeContext           `json:"context"`
 	Economy         MemoryHomeEconomy           `json:"economy"`
@@ -162,6 +195,8 @@ type MemoryHomeProjectionInput struct {
 	Deliveries        []MemoryHomeDeliveryFact
 	CurrentSessionRef string
 	NextTaskPreview   *MemoryHomeNextTaskPreview
+	Filter            MemoryHomeFilter
+	Facets            MemoryHomeFacets
 }
 
 type MemoryHomeQuery struct {
@@ -171,6 +206,7 @@ type MemoryHomeQuery struct {
 	LiveReadiness     MemoryHomeLiveReadiness
 	CurrentSessionRef string
 	NextTaskPreview   *MemoryHomeNextTaskPreview
+	Filter            MemoryHomeFilter
 }
 
 type MemoryHomeDeliveryFactReader interface {
@@ -191,7 +227,14 @@ func (s *Store) BuildMemoryHomeData(query MemoryHomeQuery, deliveries MemoryHome
 	if expectedBinding != query.BindingDigest {
 		return MemoryHomeData{}, ErrProductRuntimeMismatch
 	}
-	activeCount, active, err := queryMemoryHomeCanonicalFacts(s.db, query.BindingDigest, 20)
+	projectNamespaceID := s.currentPersonalMemoryScope(query.BindingDigest).ProjectNamespaceID
+	activeCount, active, err := queryMemoryHomeCanonicalFactsFiltered(
+		s.db, query.BindingDigest, projectNamespaceID, query.Filter,
+	)
+	if err != nil {
+		return MemoryHomeData{}, err
+	}
+	facets, err := queryMemoryHomeFacets(s.db, query.BindingDigest, projectNamespaceID)
 	if err != nil {
 		return MemoryHomeData{}, err
 	}
@@ -211,7 +254,9 @@ func (s *Store) BuildMemoryHomeData(query MemoryHomeQuery, deliveries MemoryHome
 			}
 		}
 	}
-	readinessMemories, err := queryMemoryHomeReadinessFacts(s.db, query.BindingDigest, deliveryFacts)
+	readinessMemories, err := queryMemoryHomeReadinessFacts(
+		s.db, query.BindingDigest, projectNamespaceID, deliveryFacts,
+	)
 	if err != nil {
 		return MemoryHomeData{}, err
 	}
@@ -224,7 +269,7 @@ func (s *Store) BuildMemoryHomeData(query MemoryHomeQuery, deliveries MemoryHome
 		LiveReadiness: query.LiveReadiness, ActiveCount: activeCount, ActiveMemories: active,
 		ReadinessMemories: readinessMemories,
 		Attempts:          attempts, Deliveries: deliveryFacts, CurrentSessionRef: query.CurrentSessionRef,
-		NextTaskPreview: query.NextTaskPreview,
+		NextTaskPreview: query.NextTaskPreview, Filter: query.Filter, Facets: facets,
 	}), nil
 }
 
@@ -240,14 +285,16 @@ func ProjectMemoryHomeData(input MemoryHomeProjectionInput) MemoryHomeData {
 		Receipts: MemoryHomeReceipts{LatestTerminal: []MemoryHomeActiveMemory{}, Attempts: []MemoryHomeAttempt{}},
 		Context:  MemoryHomeContext{Selection: "none"}, Economy: ProjectMemoryHomeEconomy(input.Deliveries),
 		NextTaskPreview: projectMemoryHomeNextTaskPreview(input.NextTaskPreview),
+		Filter:          input.Filter,
+		Facets:          input.Facets,
 	}
 	activeCount := input.ActiveCount
 	if activeCount < len(input.ActiveMemories) {
 		activeCount = len(input.ActiveMemories)
 	}
 	result.Memories.ActiveCount = activeCount
-	result.Memories.LatestActive = boundedMemoryHomeCopy(input.ActiveMemories, 20)
-	result.Receipts.LatestTerminal = boundedMemoryHomeCopy(input.ActiveMemories, 20)
+	result.Memories.LatestActive = boundedMemoryHomeCopy(input.ActiveMemories, 50)
+	result.Receipts.LatestTerminal = boundedMemoryHomeCopy(input.ActiveMemories, 50)
 	result.Receipts.Attempts = boundedMemoryHomeCopy(input.Attempts, 10)
 	result.Context = projectMemoryHomeContext(input.Deliveries, input.CurrentSessionRef)
 	readinessMemories := input.ReadinessMemories
@@ -498,9 +545,9 @@ func projectMemoryHomeReadiness(
 }
 
 func queryMemoryHomeReadinessFacts(
-	db *sql.DB, bindingDigest string, deliveries []MemoryHomeDeliveryFact,
+	db *sql.DB, bindingDigest, projectNamespaceID string, deliveries []MemoryHomeDeliveryFact,
 ) ([]MemoryHomeActiveMemory, error) {
-	if db == nil || !validMemoryHomeDigest(bindingDigest) {
+	if db == nil || !validMemoryHomeDigest(bindingDigest) || !validTrayIdentifier(projectNamespaceID) {
 		return nil, errors.New("Memory Home readiness boundary is invalid")
 	}
 	objectIDs := make([]string, 0)
@@ -527,7 +574,9 @@ func queryMemoryHomeReadinessFacts(
 	factsByID := make(map[string]MemoryHomeActiveMemory, len(objectIDs))
 	for start := 0; start < len(objectIDs); start += batchSize {
 		end := min(start+batchSize, len(objectIDs))
-		batch, err := queryMemoryHomeCanonicalFactsByObjectIDs(db, bindingDigest, objectIDs[start:end])
+		batch, err := queryMemoryHomeCanonicalFactsByObjectIDs(
+			db, bindingDigest, projectNamespaceID, objectIDs[start:end],
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -546,9 +595,11 @@ func queryMemoryHomeReadinessFacts(
 
 const memoryHomeCanonicalFactQuery = `
 	SELECT object.object_id, candidate.payload_json,
-	       receipt.receipt_id, presentation.receipt_id,
-	       receipt.provenance_host, receipt.provenance_session_id,
-	       receipt.created_at
+	       receipt.receipt_id, COALESCE(presentation.receipt_id, ''),
+	       object.capture_host, object.capture_session_ref,
+	       object.captured_at, object.modified_at,
+	       object.memory_scope, object.project_namespace_id,
+	       object.original_repository_id, object.logical_generation
 	  FROM private_memory_objects object
 	  JOIN memory_tray_candidates candidate
 	    ON candidate.candidate_id=object.created_from_candidate_id
@@ -560,12 +611,16 @@ const memoryHomeCanonicalFactQuery = `
 	   AND receipt.content_digest=candidate.content_digest
 	   AND receipt.object_id=object.object_id
 	   AND receipt.status IN ('created','updated','deduplicated')
-	  JOIN memory_presentation_receipts presentation
+	  LEFT JOIN memory_presentation_receipts presentation
 	    ON presentation.candidate_id=candidate.candidate_id
 	   AND presentation.candidate_version=candidate.version
 	   AND presentation.content_digest=candidate.content_digest
 	   AND presentation.binding_digest=ledger.binding_digest
 	 WHERE object.lifecycle='active' AND ledger.binding_digest=?
+	   AND (
+	       object.memory_scope='personal_global' OR
+	       (object.memory_scope='project' AND object.project_namespace_id=?)
+	   )
 	   AND receipt.rowid=(
 	       SELECT latest_receipt.rowid FROM memory_write_receipts latest_receipt
 	        WHERE latest_receipt.candidate_id=candidate.candidate_id
@@ -575,23 +630,25 @@ const memoryHomeCanonicalFactQuery = `
 	          AND latest_receipt.status IN ('created','updated','deduplicated')
 	        ORDER BY latest_receipt.rowid DESC LIMIT 1
 	   )
-	   AND presentation.rowid=(
-	       SELECT first_presentation.rowid FROM memory_presentation_receipts first_presentation
-	        WHERE first_presentation.candidate_id=candidate.candidate_id
-	          AND first_presentation.candidate_version=candidate.version
-	          AND first_presentation.content_digest=candidate.content_digest
-	          AND first_presentation.binding_digest=ledger.binding_digest
-	        ORDER BY first_presentation.rowid LIMIT 1
+	   AND (
+	       presentation.rowid IS NULL OR presentation.rowid=(
+	           SELECT first_presentation.rowid FROM memory_presentation_receipts first_presentation
+	            WHERE first_presentation.candidate_id=candidate.candidate_id
+	              AND first_presentation.candidate_version=candidate.version
+	              AND first_presentation.content_digest=candidate.content_digest
+	              AND first_presentation.binding_digest=ledger.binding_digest
+	            ORDER BY first_presentation.rowid LIMIT 1
+	       )
 	   )`
 
 func queryMemoryHomeCanonicalFactsByObjectIDs(
-	db *sql.DB, bindingDigest string, objectIDs []string,
+	db *sql.DB, bindingDigest, projectNamespaceID string, objectIDs []string,
 ) ([]MemoryHomeActiveMemory, error) {
 	if len(objectIDs) == 0 {
 		return []MemoryHomeActiveMemory{}, nil
 	}
-	arguments := make([]any, 0, len(objectIDs)+1)
-	arguments = append(arguments, bindingDigest)
+	arguments := make([]any, 0, len(objectIDs)+2)
+	arguments = append(arguments, bindingDigest, projectNamespaceID)
 	for _, objectID := range objectIDs {
 		arguments = append(arguments, objectID)
 	}
@@ -605,8 +662,10 @@ func queryMemoryHomeCanonicalFactsByObjectIDs(
 	return scanMemoryHomeCanonicalFacts(rows)
 }
 
-func queryMemoryHomeCanonicalFacts(db *sql.DB, bindingDigest string, limit int) (int, []MemoryHomeActiveMemory, error) {
-	if db == nil || !validMemoryHomeDigest(bindingDigest) {
+func queryMemoryHomeCanonicalFacts(
+	db *sql.DB, bindingDigest, projectNamespaceID string, limit int,
+) (int, []MemoryHomeActiveMemory, error) {
+	if db == nil || !validMemoryHomeDigest(bindingDigest) || !validTrayIdentifier(projectNamespaceID) {
 		return 0, nil, errors.New("Memory Home boundary is invalid")
 	}
 	if limit < 1 || limit > 20 {
@@ -620,12 +679,16 @@ func queryMemoryHomeCanonicalFacts(db *sql.DB, bindingDigest string, limit int) 
 		    ON candidate.candidate_id=object.created_from_candidate_id
 		   AND candidate.content_digest=object.content_digest
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
-		 WHERE object.lifecycle='active' AND ledger.binding_digest=?`, bindingDigest).Scan(&count); err != nil {
+		 WHERE object.lifecycle='active' AND ledger.binding_digest=?
+		   AND (
+		       object.memory_scope='personal_global' OR
+		       (object.memory_scope='project' AND object.project_namespace_id=?)
+		   )`, bindingDigest, projectNamespaceID).Scan(&count); err != nil {
 		return 0, nil, err
 	}
 	rows, err := db.Query(memoryHomeCanonicalFactQuery+`
 		ORDER BY receipt.created_at DESC, receipt.receipt_id DESC
-		LIMIT ?`, bindingDigest, limit)
+		LIMIT ?`, bindingDigest, projectNamespaceID, limit)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -637,6 +700,253 @@ func queryMemoryHomeCanonicalFacts(db *sql.DB, bindingDigest string, limit int) 
 	return count, facts, nil
 }
 
+func queryMemoryHomeCanonicalFactsFiltered(
+	db *sql.DB,
+	bindingDigest, projectNamespaceID string,
+	filter MemoryHomeFilter,
+) (int, []MemoryHomeActiveMemory, error) {
+	if db == nil || !validMemoryHomeDigest(bindingDigest) || !validTrayIdentifier(projectNamespaceID) {
+		return 0, nil, errors.New("Memory Home boundary is invalid")
+	}
+	if err := validateMemoryHomeFilter(filter); err != nil {
+		return 0, nil, err
+	}
+	pageSize := filter.PageSize
+	if pageSize == 0 {
+		pageSize = 50
+	}
+	where := strings.Builder{}
+	args := []any{bindingDigest, projectNamespaceID}
+	if filter.Text != "" {
+		where.WriteString(` AND LOWER(candidate.payload_json) LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeMemoryHomeLike(strings.ToLower(filter.Text))+"%")
+	}
+	if filter.Project != "" {
+		where.WriteString(` AND object.original_repository_id=?`)
+		args = append(args, filter.Project)
+	}
+	if filter.Harness != "" {
+		where.WriteString(` AND object.capture_host=?`)
+		args = append(args, filter.Harness)
+	}
+	if filter.DateFrom != "" {
+		where.WriteString(` AND object.captured_at>=?`)
+		args = append(args, filter.DateFrom+"T00:00:00Z")
+	}
+	if filter.DateTo != "" {
+		where.WriteString(` AND object.captured_at<?`)
+		end, _ := time.Parse("2006-01-02", filter.DateTo)
+		args = append(args, end.AddDate(0, 0, 1).Format("2006-01-02")+"T00:00:00Z")
+	}
+	if filter.Scope != "" {
+		where.WriteString(` AND object.memory_scope=?`)
+		args = append(args, filter.Scope)
+	}
+	switch filter.Sharing {
+	case "":
+	case "local_git":
+		where.WriteString(`
+			AND EXISTS (
+			    SELECT 1
+			      FROM git_memory_projects project
+			      JOIN git_memory_sources source
+			        ON source.portable_project_id=project.portable_project_id
+			     WHERE project.repository_id=object.original_repository_id
+			)`)
+	case "unknown":
+		where.WriteString(`
+			AND NOT EXISTS (
+			    SELECT 1
+			      FROM git_memory_projects project
+			      JOIN git_memory_sources source
+			        ON source.portable_project_id=project.portable_project_id
+			     WHERE project.repository_id=object.original_repository_id
+			)`)
+	case "device_only", "remote_git":
+		// The current schema has no affirmative no-source or remote-push proof.
+		// These filters are therefore truthfully empty, never inferred.
+		where.WriteString(` AND 0`)
+	}
+	filteredQuery := memoryHomeCanonicalFactQuery + where.String()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM (`+filteredQuery+`)`, args...).Scan(&count); err != nil {
+		return 0, nil, err
+	}
+	pageArgs := append(append([]any(nil), args...), pageSize, filter.PageOffset)
+	rows, err := db.Query(filteredQuery+`
+		ORDER BY object.modified_at DESC, receipt.created_at DESC, receipt.receipt_id DESC
+		LIMIT ? OFFSET ?`, pageArgs...)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer rows.Close()
+	facts, err := scanMemoryHomeCanonicalFacts(rows)
+	if err != nil {
+		return 0, nil, err
+	}
+	enrichMemoryHomeFacts(db, facts)
+	return count, facts, nil
+}
+
+func validateMemoryHomeFilter(filter MemoryHomeFilter) error {
+	if !utf8.ValidString(filter.Text) || len([]rune(filter.Text)) > 160 ||
+		(filter.Project != "" && !validTrayIdentifier(filter.Project)) ||
+		(filter.Harness != "" && !validContinuityDeliveryHost(filter.Harness)) ||
+		(filter.Scope != "" && filter.Scope != MemoryScopeProject && filter.Scope != MemoryScopePersonalGlobal) ||
+		(filter.Sharing != "" && filter.Sharing != "device_only" && filter.Sharing != "local_git" &&
+			filter.Sharing != "remote_git" && filter.Sharing != "unknown") ||
+		filter.PageOffset < 0 || filter.PageOffset > 100_000 ||
+		filter.PageSize < 0 || filter.PageSize > 50 {
+		return errors.New("Memory Home filter is invalid")
+	}
+	for _, date := range []string{filter.DateFrom, filter.DateTo} {
+		if date == "" {
+			continue
+		}
+		parsed, err := time.Parse("2006-01-02", date)
+		if err != nil || parsed.Format("2006-01-02") != date {
+			return errors.New("Memory Home filter date is invalid")
+		}
+	}
+	return nil
+}
+
+func escapeMemoryHomeLike(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
+}
+
+func enrichMemoryHomeFacts(db *sql.DB, facts []MemoryHomeActiveMemory) {
+	sharing := make(map[string]string)
+	labels := make(map[string]string)
+	for index := range facts {
+		fact := &facts[index]
+		label, ok := labels[fact.OriginalRepositoryID]
+		if !ok {
+			label = memoryHomeProjectLabel(db, fact.OriginalRepositoryID)
+			labels[fact.OriginalRepositoryID] = label
+		}
+		fact.ProjectLabel = label
+		fact.SessionLabel = humanMemoryHomeSessionLabel(fact.Host, fact.CreatedAt)
+		state, ok := sharing[fact.OriginalRepositoryID]
+		if !ok {
+			state = memoryHomeSharingState(db, fact.OriginalRepositoryID)
+			sharing[fact.OriginalRepositoryID] = state
+		}
+		fact.SharingState = state
+	}
+}
+
+func humanMemoryHomeProjectLabel(repositoryID string) string {
+	label := strings.TrimPrefix(strings.TrimSpace(repositoryID), "repository_")
+	label = strings.TrimPrefix(label, "repo_")
+	if label == "" {
+		return "Unlabeled project"
+	}
+	return label
+}
+
+func memoryHomeProjectLabel(db *sql.DB, repositoryID string) string {
+	if db != nil {
+		var label string
+		if err := db.QueryRow(`
+			SELECT label
+			  FROM personal_project_labels
+			 WHERE repository_id=?`, repositoryID).Scan(&label); err == nil && label != "" {
+			return label
+		}
+	}
+	return humanMemoryHomeProjectLabel(repositoryID)
+}
+
+func humanMemoryHomeSessionLabel(host, createdAt string) string {
+	hostLabel := humanMemoryHomeHarnessLabel(host)
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return hostLabel + " · captured session"
+	}
+	return hostLabel + " · " + parsed.UTC().Format("02 Jan · 15:04 UTC")
+}
+
+func humanMemoryHomeHarnessLabel(host string) string {
+	if label := map[string]string{
+		"codex": "Codex", "claude-code": "Claude Code", "cursor": "Cursor",
+	}[host]; label != "" {
+		return label
+	}
+	return "AI session"
+}
+
+func memoryHomeSharingState(db *sql.DB, repositoryID string) string {
+	if db == nil || repositoryID == "" {
+		return "unknown"
+	}
+	var local int
+	err := db.QueryRow(`
+		SELECT EXISTS(
+		    SELECT 1
+		      FROM git_memory_projects project
+		      JOIN git_memory_sources source
+		        ON source.portable_project_id=project.portable_project_id
+		     WHERE project.repository_id=?
+		)`, repositoryID).Scan(&local)
+	if err != nil || local == 0 {
+		return "unknown"
+	}
+	return "local_git"
+}
+
+func queryMemoryHomeFacets(
+	db *sql.DB, bindingDigest, projectNamespaceID string,
+) (MemoryHomeFacets, error) {
+	if db == nil || !validMemoryHomeDigest(bindingDigest) || !validTrayIdentifier(projectNamespaceID) {
+		return MemoryHomeFacets{}, errors.New("Memory Home facet boundary is invalid")
+	}
+	rows, err := db.Query(`
+		SELECT DISTINCT object.original_repository_id, object.capture_host
+		  FROM private_memory_objects object
+		  JOIN memory_tray_candidates candidate
+		    ON candidate.candidate_id=object.created_from_candidate_id
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE object.lifecycle='active'
+		   AND ledger.binding_digest=?
+		   AND (
+		       object.memory_scope='personal_global' OR
+		       (object.memory_scope='project' AND object.project_namespace_id=?)
+		   )
+		 ORDER BY object.original_repository_id, object.capture_host`,
+		bindingDigest, projectNamespaceID)
+	if err != nil {
+		return MemoryHomeFacets{}, err
+	}
+	defer rows.Close()
+	projectSeen := map[string]bool{}
+	hostSeen := map[string]bool{}
+	result := MemoryHomeFacets{Projects: []MemoryHomeFacet{}, Harness: []MemoryHomeFacet{}}
+	for rows.Next() {
+		var project, host string
+		if err := rows.Scan(&project, &host); err != nil {
+			return MemoryHomeFacets{}, err
+		}
+		if project != "" && !projectSeen[project] {
+			projectSeen[project] = true
+			result.Projects = append(result.Projects, MemoryHomeFacet{
+				Value: project, Label: memoryHomeProjectLabel(db, project),
+			})
+		}
+		if host != "" && !hostSeen[host] {
+			hostSeen[host] = true
+			result.Harness = append(result.Harness, MemoryHomeFacet{
+				Value: host, Label: humanMemoryHomeHarnessLabel(host),
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return MemoryHomeFacets{}, err
+	}
+	return result, nil
+}
+
 func scanMemoryHomeCanonicalFacts(rows *sql.Rows) ([]MemoryHomeActiveMemory, error) {
 	facts := []MemoryHomeActiveMemory{}
 	for rows.Next() {
@@ -644,7 +954,8 @@ func scanMemoryHomeCanonicalFacts(rows *sql.Rows) ([]MemoryHomeActiveMemory, err
 		var payload string
 		if err := rows.Scan(
 			&fact.ObjectID, &payload, &fact.TerminalReceiptID, &fact.PresentationReceiptID,
-			&fact.Host, &fact.SessionRef, &fact.CreatedAt,
+			&fact.Host, &fact.SessionRef, &fact.CreatedAt, &fact.ModifiedAt, &fact.Scope,
+			&fact.ProjectNamespaceID, &fact.OriginalRepositoryID, &fact.LogicalGeneration,
 		); err != nil {
 			return nil, err
 		}
@@ -653,6 +964,7 @@ func scanMemoryHomeCanonicalFacts(rows *sql.Rows) ([]MemoryHomeActiveMemory, err
 			return nil, err
 		}
 		fact.Kind = kind
+		fact.EditableSummary = summary
 		fact.RedactedSummary = boundedMemoryHomeSummary(summary)
 		facts = append(facts, fact)
 	}

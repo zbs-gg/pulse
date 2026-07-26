@@ -20,9 +20,11 @@ LICENSE
 README.md
 package.json
 release/README.md
+release/personal-preview-manifest.json
 release/personal-preview-manifest.schema.json
 release/pulse-release-root.pem
 runtime/embedder-portable/runner.mjs
+runtime/embedder-portable/target-runtime/package-lock.json
 runtime/embedder-portable/target-runtime/package.json
 runtime/embedder/ATTRIBUTION.md
 runtime/embedder/LICENSES/Apache-2.0.txt
@@ -40,9 +42,12 @@ runtime/windows-bootstrap/catalog.json
 runtime/windows-bootstrap/win32-arm64/pulse-platform-adapter.exe
 runtime/windows-bootstrap/win32-x64/pulse-platform-adapter.exe
 scripts/build-embedder-runtime.mjs
+scripts/build-personal-catalog.mjs
 scripts/build-personal-release.mjs
+scripts/build-plugin-runtime.mjs
 scripts/build-portable-embedder-runtime.mjs
 scripts/build-portable-embedder-runtime.test.mjs
+scripts/build-portable-model.mjs
 scripts/build-presence-helper.mjs
 scripts/build-product-hook-bundle.mjs
 scripts/build-windows-bootstrap-adapter.mjs
@@ -50,6 +55,7 @@ scripts/claude-product-e2e.mjs
 scripts/codex-product-e2e.mjs
 scripts/codex-team-packaging-contract.mjs
 scripts/connector-smoke.mjs
+scripts/export-portable-model.py
 scripts/git-team-memory-e2e.mjs
 scripts/native-universal-matrix.json
 scripts/native-universal-matrix.mjs
@@ -304,6 +310,7 @@ vendor/pulse-preview-source/pulse-app/internal/store/memory_home.go
 vendor/pulse-preview-source/pulse-app/internal/store/memory_home_delivery_query.go
 vendor/pulse-preview-source/pulse-app/internal/store/memory_home_economy_projection.go
 vendor/pulse-preview-source/pulse-app/internal/store/memory_tray.go
+vendor/pulse-preview-source/pulse-app/internal/store/personal_scope.go
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/001_outbox.sql
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/002_context.sql
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/003_observations.sql
@@ -356,6 +363,8 @@ vendor/pulse-preview-source/pulse-app/internal/store/migrations/049_git_team_mem
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/050_git_team_memory_publication.sql
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/051_git_team_memory_index.sql
 vendor/pulse-preview-source/pulse-app/internal/store/migrations/052_cursor_continuity_delivery.sql
+vendor/pulse-preview-source/pulse-app/internal/store/migrations/053_personal_memory_scope.sql
+vendor/pulse-preview-source/pulse-app/internal/store/migrations/054_personal_project_labels.sql
 vendor/pulse-preview-source/pulse-app/internal/store/procedures.go
 vendor/pulse-preview-source/pulse-app/internal/store/product_memory_wipe.go
 vendor/pulse-preview-source/pulse-app/internal/store/project_source.go

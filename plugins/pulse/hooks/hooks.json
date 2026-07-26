@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" SessionStart",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" UserPromptSubmit",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }

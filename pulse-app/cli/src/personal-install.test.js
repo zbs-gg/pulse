@@ -49,6 +49,7 @@ function hostStatus(host, {
 function harness(overrides = {}) {
   const state = {
     runtime: false,
+    presence: true,
     principal: null,
     binding: null,
     core: false,
@@ -63,6 +64,11 @@ function harness(overrides = {}) {
       mutations.push('runtime');
       state.runtime = true;
       return { manifest_digest: 'a'.repeat(64), release_epoch: 1 };
+    },
+    inspectPresence: async () => ({ ready: state.presence }),
+    installPresence: async () => {
+      mutations.push('presence');
+      state.presence = true;
     },
     inspectPrincipal: async () => state.principal,
     createPrincipal: async () => {
@@ -174,7 +180,8 @@ test('new install rechecks every durable fact and executes the security ordering
   assert.deepEqual(run.receipts.at(-1).authority_profile, result.authority_profile);
   assert.equal(result.preserved_data, true);
   assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
-  assert.match(result.next_action, /Run pulse home/);
+  assert.match(result.next_action, /Continue working/);
+  assert.match(result.next_action, /Optional: run pulse home/);
   assert.equal(run.receipts.at(-1).outcome, 'ready');
   assert.equal(run.receipts.at(-1).reason_code, 'installed');
   assert.deepEqual(
@@ -275,6 +282,68 @@ test('reused prerequisites do not label a fresh install as resumed', async () =>
 
   assert.equal(result.outcome, 'ready');
   assert.equal(result.reason_code, 'installed');
+  assert.deepEqual(run.mutations, ['principal', 'binding', 'core', 'activation']);
+});
+
+test('only explicit repair may replace a reviewed active runtime with the exact signed release', async () => {
+  function runtimeTransitionHarness() {
+    let repaired = false;
+    const run = harness({
+      inspectRuntime: async () => {
+        if (!repaired) throw new PersonalInstallError('runtime_repair_required');
+        return { ready: true, reason_code: 'runtime_candidate_staged' };
+      },
+      provisionRuntime: async () => {
+        run.mutations.push('runtime');
+        repaired = true;
+      },
+    });
+    return run;
+  }
+
+  const install = runtimeTransitionHarness();
+  const blocked = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, mode: 'install', dependencies: install.dependencies,
+  });
+  assert.equal(blocked.outcome, 'action_required');
+  assert.equal(blocked.reason_code, 'runtime_repair_required');
+  assert.deepEqual(install.mutations, []);
+
+  const repair = runtimeTransitionHarness();
+  const completed = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, mode: 'repair', dependencies: repair.dependencies,
+  });
+  assert.equal(completed.outcome, 'ready');
+  assert.equal(completed.reason_code, 'installed');
+  assert.deepEqual(repair.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.deepEqual(completed.completed_steps, PERSONAL_INSTALL_STEPS);
+});
+
+test('a healthy old core is reactivated when it is not bound to the reviewed release manifest', async () => {
+  const oldDigest = 'a'.repeat(64);
+  const newDigest = 'b'.repeat(64);
+  let activeDigest = oldDigest;
+  const run = harness({
+    inspectCore: async () => ({
+      ready: true,
+      full_retrieval: true,
+      context: { edge: { release_manifest_digest: activeDigest } },
+    }),
+    activateCore: async () => {
+      run.mutations.push('core');
+      activeDigest = newDigest;
+    },
+  });
+  run.state.runtime = true;
+
+  const result = await runPersonalInstall({
+    plan: supportedPlan({ release: { manifest_digest: newDigest } }),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(activeDigest, newDigest);
   assert.deepEqual(run.mutations, ['principal', 'binding', 'core', 'activation']);
 });
 
@@ -383,7 +452,7 @@ test('terminal result exposes a safe writer reference and rejects path-like refe
   assert.equal(pathResult.receipt_ref, 'pulse://receipts/install/latest');
 });
 
-test('legacy presence-helper callbacks are never invoked by an ordinary Personal install', async () => {
+test('optional enhanced-presence setup is never invoked by ordinary Personal install', async () => {
   const run = harness({
     installPresence: async () => {
       run.mutations.push('presence_attempt');
@@ -401,6 +470,26 @@ test('legacy presence-helper callbacks are never invoked by an ordinary Personal
   assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
   assert.equal(result.authority_profile.enhanced_presence.available, false);
   assert.deepEqual(result.authority_profile.enhanced_presence.protected_actions, []);
+});
+
+test('missing enhanced presence does not block the first principal or binding write', async () => {
+  const run = harness({
+    installPresence: async () => {
+      run.mutations.push('presence_attempt');
+      throw new PersonalInstallError('presence_denied');
+    },
+  });
+  run.state.presence = false;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.equal(result.authority_profile.ordinary_ready, true);
+  assert.equal(result.authority_profile.enhanced_presence.available, false);
 });
 
 test('healthy retrieval with incomplete activation reports the exact activation reason', async () => {
@@ -521,6 +610,25 @@ test('generic failure after a completed step is sanitized and writes one termina
   assert.deepEqual(result.completed_steps, ['artifacts_staged']);
   assert.equal(run.receipts.filter((receipt) => receipt.reason_code === 'install_failed').length, 1);
   assert.doesNotMatch(`${result.reason_code} ${result.next_action}`, /\/Users|private|secret/i);
+});
+
+test('safe dependency failure codes stay visible without leaking the underlying message', async () => {
+  const run = harness({
+    provisionRuntime: async () => {
+      const error = new Error('private release diagnostic: /Users/person/secret');
+      error.code = 'artifact_etag_invalid';
+      throw error;
+    },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal(result.reason_code, 'artifact_etag_invalid');
+  assert.deepEqual(result.completed_steps, []);
+  assert.match(result.next_action, /release source.*verification metadata/i);
+  assert.doesNotMatch(JSON.stringify(result), /Users|private release diagnostic|secret/i);
 });
 
 test('receipt writer failure returns a stable partial result without retrying the writer', async () => {

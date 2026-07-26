@@ -340,10 +340,11 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		package_version: packedPackageJSON.version,
 		packed_tarball_sha256: tarballDigest.sha256,
 		packed_tarball_bytes: tarballDigest.bytes,
-		exact_tarball_bound: true,
-		real_daemon_started_from_signed_release_fixture: true,
-		tray_save_proof: false,
-		unassigned_assignment_proof: false,
+			exact_tarball_bound: true,
+			real_daemon_started_from_signed_release_fixture: true,
+			tray_save_proof: false,
+			automatic_durable_write_proof: true,
+			unassigned_assignment_proof: false,
 	});
 	for (const relative of [
 		'src/git-team-memory.js',
@@ -441,12 +442,15 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   const nativeMcpConfig = JSON.parse(nativeMcp.stdout);
   assert.equal(nativeMcpConfig.transport.type, 'stdio');
   assert.equal(nativeMcpConfig.transport.command, 'node');
-  assert.equal(nativeMcpConfig.transport.args[0], '${PLUGIN_ROOT}/mcp/server.mjs');
-  assert.equal(nativeMcpConfig.transport.cwd ?? null, null);
+  assert.deepEqual(nativeMcpConfig.transport.args.slice(0, 2), ['--input-type=module', '--eval']);
+  assert.match(nativeMcpConfig.transport.args[2], /CODEX_HOME/);
+  assert.deepEqual(nativeMcpConfig.transport.env_vars, ['CODEX_HOME']);
+  assert.equal(nativeMcpConfig.transport.cwd, null);
 
   const cacheVersions = readdirSync(join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse'));
   assert.equal(cacheVersions.length, 1);
 	const pluginRoot = join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse', cacheVersions[0]);
+  assert.equal(existsSync(join(pluginRoot, 'mcp', 'server.mjs')), true);
 	const committedRelease = readCommittedArtifactSet({ installRoot: artifactRoot });
 	const signedMarketplaceRoot = join(committedRelease.activations['plugin-runtime'].version_path, 'marketplace');
 	const signedPluginRoot = join(signedMarketplaceRoot, 'plugins', 'pulse');
@@ -669,15 +673,16 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.equal(toolNames.includes('pulse_wipe'), false);
   assert.equal(toolNames.includes('pulse_forget'), false);
   assert.equal(toolNames.includes('pulse_tray'), true);
-  const remembered = JSON.parse(mcpMessages.find((message) => message.id === 3).result.content[0].text);
-  assert.equal(remembered.status, 'candidates');
-  assert.equal(remembered.receipts[0].status, 'pending');
-  assert.equal(remembered.receipts[0].safe_provenance.host, 'codex');
+	  const remembered = JSON.parse(mcpMessages.find((message) => message.id === 3).result.content[0].text);
+	  assert.equal(remembered.status, 'candidates');
+	  assert.equal(remembered.receipts[0].status, 'created');
+	  assert.match(remembered.receipts[0].object_id, /^pulse:/);
+	  assert.equal(remembered.receipts[0].safe_provenance.host, 'codex');
   assert.match(remembered.receipts[0].safe_provenance.session_id, /^session:[a-f0-9]{64}$/);
   assert.match(remembered.receipts[0].safe_provenance.turn_id, /^turn:[a-f0-9]{64}$/);
 
-  // A separate MCP round trip proves the tray read happens after the durable
-  // remember receipt instead of relying on JSON-RPC request execution order.
+	  // A separate MCP round trip proves ordinary Personal memory did not leave
+	  // a review card behind after the durable write succeeded.
   const trayInput = [
     { jsonrpc: '2.0', id: 4, method: 'initialize', params: {
       protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pulse-e2e', version: '1' },
@@ -695,11 +700,13 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   const trayMessages = trayMCP.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   const tray = JSON.parse(trayMessages.find((message) => message.id === 5).result.content[0].text);
-  const pendingCard = tray.candidates.find((candidate) =>
-    candidate.candidate_id === remembered.receipts[0].candidate_id);
-  assert.equal(pendingCard.state, 'pending');
-  assert.equal(pendingCard.grace_expires_at, '',
-    'an unseen card must have no running auto-commit deadline');
+	  const committedCard = tray.candidates.find((candidate) =>
+	    candidate.candidate_id === remembered.receipts[0].candidate_id);
+	  assert.equal(committedCard.state, 'committed');
+	  assert.equal(committedCard.current, true);
+	  assert.equal(committedCard.canonical_object_id, remembered.receipts[0].object_id);
+	  assert.equal(committedCard.latest_receipt.status, 'created');
+	  assert.equal(committedCard.projection_status, 'complete');
 
   const postTool = run(process.execPath, [hook, 'PostToolUse'], {
     cwd: workspace,
@@ -720,7 +727,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   const postToolOutput = JSON.parse(postTool.stdout);
   assert.match(postToolOutput.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
-  assert.match(postToolOutput.systemMessage, /:pending/);
+	  assert.match(postToolOutput.systemMessage, /:created/);
 
   const stop = run(process.execPath, [hook, 'Stop'], {
     cwd: workspace,

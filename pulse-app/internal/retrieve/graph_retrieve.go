@@ -60,9 +60,31 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 		return nil
 	}
 	// 1) entity seeds: lexical match on entity names (entities_fts.rowid = entity id)
-	seeds := queryInt64s(ctx, db,
-		`SELECT rowid FROM entities_fts WHERE entities_fts MATCH ?1
-		 ORDER BY bm25(entities_fts) LIMIT ?2`, match, graphMaxSeeds)
+	seedQuery := `SELECT rowid FROM entities_fts WHERE entities_fts MATCH ?1
+		 ORDER BY bm25(entities_fts) LIMIT ?2`
+	seedArgs := []any{match, graphMaxSeeds}
+	if e.personalScope != nil {
+		seedQuery = `
+			SELECT rowid
+			  FROM entities_fts
+			 WHERE entities_fts MATCH ?1
+			   AND EXISTS (
+			       SELECT 1
+			         FROM private_semantic_projection_rows projection
+			         JOIN private_memory_objects object
+			           ON object.object_id=projection.object_id
+			        WHERE projection.row_kind='entity'
+			          AND projection.row_ref=CAST(entities_fts.rowid AS TEXT)
+			          AND object.lifecycle='active'
+			          AND (
+			              object.memory_scope='personal_global' OR
+			              (object.memory_scope='project' AND object.project_namespace_id=?3)
+			          )
+			   )
+			 ORDER BY bm25(entities_fts) LIMIT ?2`
+		seedArgs = []any{match, graphMaxSeeds, e.personalScope.ProjectNamespaceID}
+	}
+	seeds := queryInt64s(ctx, db, seedQuery, seedArgs...)
 	if len(seeds) == 0 {
 		return nil
 	}
@@ -76,9 +98,51 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 	var out []int64
 	seenEv := map[int64]bool{}
 	for _, ent := range ents {
-		evs := queryInt64s(ctx, db,
-			`SELECT event_id FROM event_entities WHERE entity_id = ?1 LIMIT ?2`,
-			ent, graphMaxEventsPerEnt)
+		eventQuery := `SELECT event_id FROM event_entities WHERE entity_id = ?1 LIMIT ?2`
+		eventArgs := []any{ent, graphMaxEventsPerEnt}
+		if e.personalScope != nil {
+			eventQuery = `
+				WITH eligible_objects AS (
+				    SELECT object_id
+				      FROM private_memory_objects
+				     WHERE lifecycle='active'
+				       AND (
+				           memory_scope='personal_global' OR
+				           (memory_scope='project' AND project_namespace_id=?1)
+				       )
+				),
+				eligible_events(event_id) AS (
+				    SELECT capsule.event_id
+				      FROM eligible_objects object
+				      JOIN memory_capsules capsule ON capsule.id=object.object_id
+				     WHERE capsule.event_id IS NOT NULL
+				    UNION
+				    SELECT CAST(projection.row_ref AS INTEGER)
+				      FROM eligible_objects object
+				      JOIN private_semantic_projection_rows projection
+				        ON projection.object_id=object.object_id
+				       AND projection.row_kind='event'
+				    UNION
+				    SELECT projection.event_id
+				      FROM git_memory_shared_projection projection
+				     WHERE projection.status='active'
+				       AND projection.event_id IS NOT NULL
+				       AND projection.repository_id=?2
+				       AND projection.binding_digest=?3
+				)
+				SELECT link.event_id
+				  FROM event_entities link
+				  JOIN eligible_events eligible ON eligible.event_id=link.event_id
+				 WHERE link.entity_id=?4
+				 LIMIT ?5`
+			eventArgs = []any{
+				e.personalScope.ProjectNamespaceID,
+				e.personalScope.RepositoryID,
+				e.personalScope.BindingDigest,
+				ent, graphMaxEventsPerEnt,
+			}
+		}
+		evs := queryInt64s(ctx, db, eventQuery, eventArgs...)
 		for _, ev := range evs {
 			if !seenEv[ev] {
 				seenEv[ev] = true
@@ -106,14 +170,44 @@ func (e *Engine) walkEntities(ctx context.Context, db *sql.DB, seeds []int64) []
 			if len(next) >= graphMaxFrontier {
 				break
 			}
-			nbrs := queryInt64s(ctx, db,
-				`SELECT to_entity_id FROM relations
+			relationQuery := `SELECT to_entity_id FROM relations
 				   WHERE from_entity_id = ?1 AND strength >= ?2
 				 UNION
 				 SELECT from_entity_id FROM relations
 				   WHERE to_entity_id = ?1 AND strength >= ?2
-				 ORDER BY 1 LIMIT ?3`,
-				node, graphMinEdgeStrength, graphMaxEdgesPerNode)
+				 ORDER BY 1 LIMIT ?3`
+			relationArgs := []any{node, graphMinEdgeStrength, graphMaxEdgesPerNode}
+			if e.personalScope != nil {
+				relationQuery = `
+					WITH eligible_relations AS (
+					    SELECT relation.id, relation.from_entity_id, relation.to_entity_id, relation.strength
+					      FROM relations relation
+					     WHERE EXISTS (
+					         SELECT 1
+					           FROM private_semantic_projection_rows projection
+					           JOIN private_memory_objects object
+					             ON object.object_id=projection.object_id
+					          WHERE projection.row_kind='relation'
+					            AND projection.row_ref=CAST(relation.id AS TEXT)
+					            AND object.lifecycle='active'
+					            AND (
+					                object.memory_scope='personal_global' OR
+					                (object.memory_scope='project' AND object.project_namespace_id=?1)
+					            )
+					     )
+					)
+					SELECT to_entity_id FROM eligible_relations
+					 WHERE from_entity_id=?2 AND strength>=?3
+					UNION
+					SELECT from_entity_id FROM eligible_relations
+					 WHERE to_entity_id=?2 AND strength>=?3
+					ORDER BY 1 LIMIT ?4`
+				relationArgs = []any{
+					e.personalScope.ProjectNamespaceID,
+					node, graphMinEdgeStrength, graphMaxEdgesPerNode,
+				}
+			}
+			nbrs := queryInt64s(ctx, db, relationQuery, relationArgs...)
 			for _, nb := range nbrs {
 				if !seen[nb] {
 					seen[nb] = true

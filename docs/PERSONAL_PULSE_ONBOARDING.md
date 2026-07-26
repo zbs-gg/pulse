@@ -68,8 +68,8 @@ pulse home
 The ready verdict is `Pulse <host> automatic lifecycle ready.` Memory Home shows:
 
 - Personal readiness and the exact next action when incomplete;
-- pending memory cards before their save delay starts;
-- recent saved memories and their presentation/write receipts;
+- automatically saved structured memories with edit, move, and delete controls;
+- recent saved memories and their write receipts;
 - the context offered to a fresh task and whether the host acknowledged it;
 - token economy labeled `collecting`, `estimated`, or `measured` with its
   method and coverage, never a fabricated multiplier.
@@ -94,8 +94,8 @@ separate human approval.
 
 1. Do normal work in a verified Claude Code, Cursor, or Codex task.
 2. Let that harness propose one compact structured memory through Pulse.
-3. Read the exact card in Memory Home. Edit, cancel, or save after the visible
-   review delay.
+3. Confirm that deterministic validation automatically saved it and that the
+   exact card appears in Memory Home with edit, move, and delete controls.
 4. Start a fresh task in the same project, optionally in another verified harness.
 5. Confirm that the memory appears automatically with provenance and retrieval
    reasons.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -117,7 +116,7 @@ func TestMemoryPresentationCapabilityCallsTheRealStoreBoundary(t *testing.T) {
 					Host: "codex", ConversationScope: "current_turn", Timestamp: now.Format(time.RFC3339Nano),
 				},
 				Items: []store.MemoryCapsuleItem{{
-					Kind: "decision", RedactedSummary: "A memory becomes durable only after its exact Home card is visible.",
+					Kind: "decision", RedactedSummary: "A Home render adds an audit receipt without delaying durable memory.",
 					Confidence: 0.98, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project",
 				}},
 			},
@@ -174,13 +173,12 @@ func TestMemoryPresentationCapabilityCallsTheRealStoreBoundary(t *testing.T) {
 		t.Fatalf("durable presentation receipts = %d", durableReceipts)
 	}
 	if len(scheduledReceipts) != 1 || scheduledReceipts[0].ReceiptID != receipt.ReceiptID ||
-		len(scheduledDelays) != 1 || scheduledDelays[0] != 10*time.Second {
+		len(scheduledDelays) != 1 || scheduledDelays[0] != 0 {
 		t.Fatalf("first presentation schedule = receipts:%#v delays:%#v", scheduledReceipts, scheduledDelays)
 	}
 
-	// A later authenticated Home surface preserves the first deadline instead
-	// of extending grace. It is still a valid presentation and wakes the worker
-	// immediately when the original deadline has already elapsed.
+	// A later authenticated Home surface remains valid audit evidence. It never
+	// creates or extends a save delay.
 	now = now.Add(11 * time.Second)
 	secondBinding := binding
 	secondBinding.TrustedSurfaceInstance = testOpaqueBrowserValue("later-surface")
@@ -213,7 +211,7 @@ func TestMemoryPresentationServiceRequiresCommitScheduler(t *testing.T) {
 	}
 }
 
-func TestMemoryPresentationServiceSchedulesCommitAfterLateHomeRender(t *testing.T) {
+func TestMemoryTrayWorkerCommitsWithoutHomePresentation(t *testing.T) {
 	vault, err := store.OpenVault(
 		filepath.Join(t.TempDir(), "desk-presentation-schedule.db"),
 		store.StoreKindDesk, "store_desk_presentation_schedule",
@@ -253,71 +251,15 @@ func TestMemoryPresentationServiceSchedulesCommitAfterLateHomeRender(t *testing.
 	}
 	pending := finalized.Receipts[0]
 
-	// Simulate an older/manual endpoint whose speculative timer fires before
-	// Home renders. The not-presented outcome must release its coalescing key so
-	// the later trusted presentation can install the real deadline worker.
-	srv.scheduleReceipt(pending, 10*time.Millisecond)
-	releaseDeadline := time.Now().Add(time.Second)
-	for {
-		srv.trayScheduleMu.Lock()
-		remaining := len(srv.traySchedules)
-		srv.trayScheduleMu.Unlock()
-		if remaining == 0 {
-			break
-		}
-		if time.Now().After(releaseDeadline) {
-			t.Fatal("unpresented speculative schedule did not release")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// The required presentation callback is now the only commit wake-up.
-	service, err := NewMemoryPresentationService(MemoryPresentationServiceConfig{
-		Store: vault, Schedule: srv.schedulePresentedMemory,
-		ExpectedOrigin: testMemoryPresentationOrigin, ExpectedPath: testMemoryPresentationPath,
-		GracePeriod: time.Second, CapabilityTTL: 45 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := MemoryPresentationBinding{
-		BrowserSessionID: testOpaqueBrowserValue("late-session"), CSRFToken: testOpaqueBrowserValue("late-csrf"),
-		WorkspaceBindingDigest: bindingDigest, CandidateID: pending.CandidateID,
-		CandidateVersion: pending.CandidateVersion, ContentDigest: pending.ContentDigest,
-		TrustedSurfaceInstance: testOpaqueBrowserValue("late-surface"),
-	}
-	capability, err := service.IssueCapability(binding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.Present(context.Background(), testMemoryPresentationRequest(), MemoryPresentationAttempt{
-		Authority: MemoryPresentationAuthorityHomeBrowser, Capability: capability, Binding: binding,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	for index := 0; index < 8; index++ {
-		repeatedBinding := binding
-		repeatedBinding.TrustedSurfaceInstance = testOpaqueBrowserValue(fmt.Sprintf("repeat-surface-%d", index))
-		repeatedCapability, err := service.IssueCapability(repeatedBinding)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := service.Present(context.Background(), testMemoryPresentationRequest(), MemoryPresentationAttempt{
-			Authority: MemoryPresentationAuthorityHomeBrowser, Capability: repeatedCapability, Binding: repeatedBinding,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv.trayScheduleMu.Lock()
-	scheduled := len(srv.traySchedules)
-	srv.trayScheduleMu.Unlock()
-	if scheduled != 1 {
-		t.Fatalf("duplicate Home presentations scheduled %d commit workers", scheduled)
-	}
+	// Compatibility/recovery workers must never wait for Home to render.
+	srv.scheduleReceipt(pending, 0)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		var count int
+		var count, presentationCount int
 		if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_capsules`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_presentation_receipts WHERE candidate_id=?`, pending.CandidateID).Scan(&presentationCount); err != nil {
 			t.Fatal(err)
 		}
 		if count == 1 {
@@ -327,11 +269,14 @@ func TestMemoryPresentationServiceSchedulesCommitAfterLateHomeRender(t *testing.
 			if remainingSchedules != 0 {
 				t.Fatalf("terminal candidate retained %d schedule entries", remainingSchedules)
 			}
+			if presentationCount != 0 {
+				t.Fatalf("automatic commit fabricated %d Home presentation receipts", presentationCount)
+			}
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("presentation callback did not wake the commit worker")
+	t.Fatal("unpresented compatibility candidate did not commit")
 }
 
 func TestPresentationScheduleHandoffSurvivesConcurrentNotPresentedExit(t *testing.T) {

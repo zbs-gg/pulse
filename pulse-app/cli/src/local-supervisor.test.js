@@ -193,6 +193,36 @@ test('managed product runtime resolves three verified activations and atomically
   }).config.runner_path, disk.runner_path);
 });
 
+test('managed product runtime does not load the already tree-verified model into a bounded integrity buffer', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-managed-large-model.'));
+  try {
+    const runtime = vaultRuntimeFromBinding(binding('personal', root));
+    const { installRoot, verifiedActivations } = await activateManagedRuntimeFixtures(root);
+    const modelPath = join(verifiedActivations.model.version_path, 'model_int8.onnx');
+    const basePlatformServices = createPlatformServices();
+    let modelContentRead = false;
+    const platformServices = {
+      ...basePlatformServices,
+      readIntegrityFile(path, options) {
+        if (path === modelPath) {
+          modelContentRead = true;
+          throw new Error('large model must not be loaded into an integrity buffer');
+        }
+        return basePlatformServices.readIntegrityFile(path, options);
+      },
+    };
+
+    const managed = resolveManagedRuntime(runtime, {
+      installRoot, verifiedActivations, platformServices,
+    });
+
+    assert.equal(managed.model.version_path, verifiedActivations.model.version_path);
+    assert.equal(modelContentRead, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('managed product runtime selects pulse.exe for a Windows target', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-managed-runtime-windows.'));
   try {

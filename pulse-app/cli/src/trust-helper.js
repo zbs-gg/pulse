@@ -44,7 +44,9 @@ const INSTALL_LOCK_PATH = '/var/run/gg.zbs.pulse.presence-trust-install.lock';
 const INSTALL_LOCK_READY = 'pulse-presence-install-lock-ready\n';
 
 function fail(code) {
-  throw new Error(`trust_${code}`);
+  const error = new Error(`trust_${code}`);
+  error.code = `trust_${code}`;
+  throw error;
 }
 
 function defaultRun(command, args, options = {}) {
