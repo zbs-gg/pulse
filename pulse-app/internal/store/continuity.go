@@ -339,6 +339,34 @@ func (s *Store) SaveObservation(obs ContinuityObservation, rawRefsEnabled bool) 
 }
 
 func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
+	var requestedScope *PersonalMemoryScopeSnapshot
+	if scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot(); err != nil {
+		return ResumeBlock{}, err
+	} else if scoped {
+		requestedScope = &scope
+	}
+	return s.buildResume(q, requestedScope)
+}
+
+// BuildResumeForPersonalScope assembles continuity against a server-verified
+// request boundary. The scope is captured before candidate generation so a
+// second project's rows cannot influence search, ranking, counts, or tokens.
+func (s *Store) BuildResumeForPersonalScope(
+	q ResumeQuery,
+	scope PersonalMemoryScopeSnapshot,
+) (ResumeBlock, error) {
+	if scope.ProjectNamespaceID != stableProjectNamespace(scope.RepositoryID) ||
+		!trayBindingDigestPattern.MatchString(scope.BindingDigest) ||
+		!validTrayIdentifier(scope.RepositoryID) || scope.EligibilityRevision < 1 {
+		return ResumeBlock{}, ErrContinuityDeliveryAuthority
+	}
+	return s.buildResume(q, &scope)
+}
+
+func (s *Store) buildResume(
+	q ResumeQuery,
+	requestedScope *PersonalMemoryScopeSnapshot,
+) (ResumeBlock, error) {
 	threadID := normalizeThreadID(q.ThreadID, q.ProjectID, q.SessionID)
 	budget := q.TokenBudget
 	if budget <= 0 {
@@ -359,7 +387,7 @@ func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
 	if err != nil {
 		return ResumeBlock{}, err
 	}
-	memories, err := s.recentResumeMemories(8)
+	memories, err := s.recentResumeMemoriesForScope(8, requestedScope)
 	if err != nil {
 		return ResumeBlock{}, err
 	}
@@ -413,9 +441,9 @@ func (s *Store) BuildResume(q ResumeQuery) (ResumeBlock, error) {
 	// Cross-harness digest ("what's cooking across your harnesses") — the
 	// new-empty-chat greeting. Honest per-host activity + a fun fact; empty when
 	// nothing has been captured (no fabrication).
-	sections.HarnessActivity = s.harnessActivity(3)
+	sections.HarnessActivity = s.harnessActivityForScope(3, requestedScope)
 	if len(sections.HarnessActivity) > 0 {
-		if ff, _ := s.viewerGraphFunFacts(1); len(ff) > 0 {
+		if ff, _ := s.viewerGraphFunFactsForScope(1, requestedScope); len(ff) > 0 {
 			sections.HarnessActivity = append(sections.HarnessActivity, "🌱 "+ff[0])
 		}
 	}
@@ -881,11 +909,21 @@ func (s *Store) harnessActivity(limit int) []string {
 	if err != nil {
 		return nil
 	}
+	if !scoped {
+		return s.harnessActivityForScope(limit, nil)
+	}
+	return s.harnessActivityForScope(limit, &scope)
+}
+
+func (s *Store) harnessActivityForScope(
+	limit int,
+	requestedScope *PersonalMemoryScopeSnapshot,
+) []string {
 	query := `
 		SELECT host, COUNT(*) n, MAX(created_at) last
 		FROM continuity_checkpoints WHERE host != '' GROUP BY host ORDER BY last DESC`
 	args := []any{}
-	if scoped {
+	if requestedScope != nil {
 		query = `
 			SELECT checkpoint.host, COUNT(*) n, MAX(checkpoint.created_at) last
 			  FROM continuity_checkpoints checkpoint
@@ -901,7 +939,7 @@ func (s *Store) harnessActivity(limit int) []string {
 			   )
 			 GROUP BY checkpoint.host
 			 ORDER BY last DESC`
-		args = append(args, scope.ProjectNamespaceID)
+		args = append(args, requestedScope.ProjectNamespaceID)
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -928,7 +966,7 @@ func (s *Store) harnessActivity(limit int) []string {
 			break
 		}
 		var summary string
-		if scoped {
+		if requestedScope != nil {
 			_ = s.db.QueryRow(`
 				SELECT checkpoint.summary
 				  FROM continuity_checkpoints checkpoint
@@ -943,7 +981,7 @@ func (s *Store) harnessActivity(limit int) []string {
 				       (object.memory_scope='project' AND object.project_namespace_id=?)
 				   )
 				 ORDER BY checkpoint.created_at DESC, checkpoint.id DESC
-				 LIMIT 1`, x.host, scope.ProjectNamespaceID).Scan(&summary)
+				 LIMIT 1`, x.host, requestedScope.ProjectNamespaceID).Scan(&summary)
 		} else {
 			_ = s.db.QueryRow(`SELECT summary FROM continuity_checkpoints WHERE host=? ORDER BY created_at DESC LIMIT 1`, x.host).Scan(&summary)
 		}
@@ -965,6 +1003,16 @@ func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !scoped {
+		return s.viewerGraphFunFactsForScope(limit, nil)
+	}
+	return s.viewerGraphFunFactsForScope(limit, &scope)
+}
+
+func (s *Store) viewerGraphFunFactsForScope(
+	limit int,
+	requestedScope *PersonalMemoryScopeSnapshot,
+) ([]string, error) {
 	query := `
 		SELECT f.text
 		  FROM facts f
@@ -973,7 +1021,7 @@ func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
 		 ORDER BY f.confidence DESC, f.created_at DESC, e.canonical_name ASC
 		 LIMIT ?`
 	args := []any{limit}
-	if scoped {
+	if requestedScope != nil {
 		query = `
 			SELECT fact.text
 			  FROM facts fact
@@ -993,7 +1041,7 @@ func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
 			   )
 			 ORDER BY fact.confidence DESC, fact.created_at DESC, entity.canonical_name ASC
 			 LIMIT ?`
-		args = []any{scope.ProjectNamespaceID, limit}
+		args = []any{requestedScope.ProjectNamespaceID, limit}
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1437,12 +1485,21 @@ func (s *Store) recentObservations(threadID string, limit int) ([]ContinuityObse
 }
 
 func (s *Store) recentResumeMemories(limit int) ([]RecalledMemoryItem, error) {
+	var requestedScope *PersonalMemoryScopeSnapshot
+	if scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot(); err != nil {
+		return nil, err
+	} else if scoped {
+		requestedScope = &scope
+	}
+	return s.recentResumeMemoriesForScope(limit, requestedScope)
+}
+
+func (s *Store) recentResumeMemoriesForScope(
+	limit int,
+	requestedScope *PersonalMemoryScopeSnapshot,
+) ([]RecalledMemoryItem, error) {
 	if limit <= 0 || limit > 20 {
 		limit = 8
-	}
-	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
-	if err != nil {
-		return nil, err
 	}
 	query := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
@@ -1452,7 +1509,7 @@ func (s *Store) recentResumeMemories(limit int) ([]RecalledMemoryItem, error) {
 		 ORDER BY created_at DESC
 		 LIMIT ?`
 	args := []any{limit}
-	if scoped {
+	if requestedScope != nil {
 		query = `
 			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
 			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
@@ -1470,7 +1527,7 @@ func (s *Store) recentResumeMemories(limit int) ([]RecalledMemoryItem, error) {
 			   )
 			 ORDER BY capsule.created_at DESC
 			 LIMIT ?`
-		args = []any{scope.ProjectNamespaceID, limit}
+		args = []any{requestedScope.ProjectNamespaceID, limit}
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {

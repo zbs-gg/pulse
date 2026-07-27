@@ -387,6 +387,35 @@ func requestDigest(value any) (string, error) {
 // rejection receipts. Candidate payload validation happens before a DB
 // transaction is opened, so rejected bytes never reach SQLite or its WAL.
 func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.Duration) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.finalizeTurnForAuthority(
+		req, now, grace, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+// FinalizeTurnForVerifiedBinding admits a Personal write only after the server
+// has re-verified the signed workspace binding carried by this request. The
+// product policy epoch is currently fixed at zero by every host adapter.
+func (s *Store) FinalizeTurnForVerifiedBinding(
+	req TurnFinalizeRequest,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.finalizeTurnForAuthority(req, now, grace, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) finalizeTurnForAuthority(
+	req TurnFinalizeRequest,
+	now time.Time,
+	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (TurnFinalizeResult, error) {
 	destination, err := s.trayDestination()
 	if err != nil {
 		return TurnFinalizeResult{}, err
@@ -397,7 +426,6 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 	if req.Schema != TurnFinalizeRequestSchema {
 		return TurnFinalizeResult{}, errors.New("invalid turn finalize schema")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if req.BindingDigest != expectedBinding || req.PolicyEpoch != expectedPolicy || req.ResolverEpoch != expectedResolver {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
@@ -610,6 +638,30 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 }
 
 func (s *Store) FinalizeTurnNoChange(req TurnNoChangeRequest, now time.Time) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.finalizeTurnNoChangeForAuthority(
+		req, now, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) FinalizeTurnNoChangeForVerifiedBinding(
+	req TurnNoChangeRequest,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.finalizeTurnNoChangeForAuthority(req, now, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) finalizeTurnNoChangeForAuthority(
+	req TurnNoChangeRequest,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (TurnFinalizeResult, error) {
 	destination, err := s.trayDestination()
 	if err != nil {
 		return TurnFinalizeResult{}, err
@@ -620,7 +672,6 @@ func (s *Store) FinalizeTurnNoChange(req TurnNoChangeRequest, now time.Time) (Tu
 	if req.Schema != TurnNoChangeRequestSchema {
 		return TurnFinalizeResult{}, errors.New("invalid turn no-change schema")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if req.BindingDigest != expectedBinding || req.PolicyEpoch != expectedPolicy || req.ResolverEpoch != expectedResolver {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
@@ -1163,6 +1214,41 @@ func terminalReadinessCandidateMetadata(payload string) (string, string, error) 
 }
 
 func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion int, now time.Time) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.commitMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+// CommitMemoryTrayCandidateForVerifiedBinding materializes a candidate inside
+// the namespace derived from the request's signed repository identity.
+func (s *Store) CommitMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.commitMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		bindingDigest, 0, resolverEpoch,
+		personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) commitMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	scope personalMemoryScope,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1195,11 +1281,9 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 	if revalidated.kind != row.kind || revalidated.digest != row.digest || string(revalidated.payload) != row.payload {
 		return MemoryWriteReceipt{}, errors.New("stored candidate does not match previewed canonical payload")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
-	scope := s.currentPersonalMemoryScope(row.bindingDigest)
 	if err := backfillPersonalScopeForBindingTx(tx, row.bindingDigest, scope); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1712,6 +1796,41 @@ func deletePrivateSemanticProjectionTx(tx *sql.Tx, _ string) error {
 }
 
 func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int, replacement PrivateMemoryCandidate, now time.Time, grace time.Duration) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.editMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, replacement, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) EditMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	replacement PrivateMemoryCandidate,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.editMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, replacement, now, grace,
+		bindingDigest, 0, resolverEpoch,
+	)
+}
+
+func (s *Store) editMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	replacement PrivateMemoryCandidate,
+	now time.Time,
+	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1727,7 +1846,6 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
@@ -1783,6 +1901,37 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 }
 
 func (s *Store) CancelMemoryTrayCandidate(candidateID string, expectedVersion int, now time.Time) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.cancelMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) CancelMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.cancelMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		bindingDigest, 0, resolverEpoch,
+	)
+}
+
+func (s *Store) cancelMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1795,7 +1944,6 @@ func (s *Store) CancelMemoryTrayCandidate(candidateID string, expectedVersion in
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
@@ -2057,8 +2205,10 @@ func (s *Store) PrepareMemoryCorrectionWithInvocation(
 	now time.Time,
 	grace time.Duration,
 ) (TurnFinalizeResult, error) {
+	bindingDigest, policyEpoch, resolverEpoch := s.productRuntimeAuthority()
 	return s.prepareMemoryCorrectionWithInvocation(
 		targetObjectID, replacement, invocationKey, "", 0, now, grace,
+		bindingDigest, policyEpoch, resolverEpoch,
 	)
 }
 
@@ -2070,6 +2220,8 @@ func (s *Store) prepareMemoryCorrectionWithInvocation(
 	expectedTargetGeneration int,
 	now time.Time,
 	grace time.Duration,
+	bindingDigest string,
+	policyEpoch, resolverEpoch int64,
 ) (TurnFinalizeResult, error) {
 	if !validTrayIdentifier(targetObjectID) {
 		return TurnFinalizeResult{}, errors.New("correction target is invalid")
@@ -2110,8 +2262,7 @@ func (s *Store) prepareMemoryCorrectionWithInvocation(
 		delta.Source.SessionID = sessionID
 		replacement.SemanticDelta = &delta
 	}
-	bindingDigest, policyEpoch, resolverEpoch := s.productRuntimeAuthority()
-	return s.FinalizeTurn(TurnFinalizeRequest{
+	return s.finalizeTurnForAuthority(TurnFinalizeRequest{
 		Schema: TurnFinalizeRequestSchema,
 		Host:   "pulse-cli", SessionID: sessionID,
 		TurnID: "correct_turn_" + invocationID, SourceEventKey: "control:correct:" + invocationID,
@@ -2121,7 +2272,7 @@ func (s *Store) prepareMemoryCorrectionWithInvocation(
 		operation:  "correct", targetObjectID: targetObjectID,
 		expectedTargetContentDigest: expectedTargetContentDigest,
 		expectedTargetGeneration:    expectedTargetGeneration,
-	}, now, grace)
+	}, now, grace, bindingDigest, policyEpoch, resolverEpoch)
 }
 
 // PrepareMemorySummaryCorrectionWithInvocation is the simple Memory Home edit
@@ -2135,8 +2286,11 @@ func (s *Store) PrepareMemorySummaryCorrectionWithInvocation(
 	now time.Time,
 	grace time.Duration,
 ) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	return s.prepareMemorySummaryCorrectionWithInvocation(
 		targetObjectID, summary, invocationKey, 0, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
 	)
 }
 
@@ -2154,8 +2308,31 @@ func (s *Store) PrepareMemorySummaryCorrectionAtGenerationWithInvocation(
 	if expectedGeneration < 1 {
 		return TurnFinalizeResult{}, errors.New("correction target generation is invalid")
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	return s.prepareMemorySummaryCorrectionWithInvocation(
 		targetObjectID, summary, invocationKey, expectedGeneration, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) PrepareMemorySummaryCorrectionAtGenerationWithInvocationForVerifiedBinding(
+	targetObjectID string,
+	summary string,
+	invocationKey string,
+	expectedGeneration int,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if expectedGeneration < 1 || !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.prepareMemorySummaryCorrectionWithInvocation(
+		targetObjectID, summary, invocationKey, expectedGeneration, now, grace,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
 	)
 }
 
@@ -2166,6 +2343,9 @@ func (s *Store) prepareMemorySummaryCorrectionWithInvocation(
 	expectedGeneration int,
 	now time.Time,
 	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
 ) (TurnFinalizeResult, error) {
 	if !validTrayIdentifier(targetObjectID) {
 		return TurnFinalizeResult{}, errors.New("correction target is invalid")
@@ -2174,13 +2354,15 @@ func (s *Store) prepareMemorySummaryCorrectionWithInvocation(
 	if summary == "" {
 		return TurnFinalizeResult{}, errors.New("memory summary is required")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	var payload, targetContentDigest, lifecycle, bindingDigest string
+	var memoryScope, projectNamespace, originalRepository string
 	var targetGeneration int
 	var policyEpoch, resolverEpoch int64
 	err := s.db.QueryRow(`
 		SELECT candidate.payload_json, object.content_digest, object.lifecycle,
-		       object.logical_generation, ledger.binding_digest,
+		       object.logical_generation, object.memory_scope,
+		       object.project_namespace_id, object.original_repository_id,
+		       ledger.binding_digest,
 		       ledger.policy_epoch, ledger.resolver_epoch
 		  FROM private_memory_objects object
 		  JOIN memory_tray_candidates candidate
@@ -2189,12 +2371,18 @@ func (s *Store) prepareMemorySummaryCorrectionWithInvocation(
 		 WHERE object.object_id=?`, targetObjectID,
 	).Scan(
 		&payload, &targetContentDigest, &lifecycle, &targetGeneration,
+		&memoryScope, &projectNamespace, &originalRepository,
 		&bindingDigest, &policyEpoch, &resolverEpoch,
 	)
 	if err != nil {
 		return TurnFinalizeResult{}, err
 	}
 	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	if originalRepository != authority.OriginalRepository ||
+		projectNamespace != authority.ProjectNamespaceID ||
+		(memoryScope != MemoryScopeProject && memoryScope != MemoryScopePersonalGlobal) {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
 	if lifecycle != "active" {
@@ -2213,6 +2401,7 @@ func (s *Store) prepareMemorySummaryCorrectionWithInvocation(
 	return s.prepareMemoryCorrectionWithInvocation(
 		targetObjectID, replacement, invocationKey, targetContentDigest,
 		expectedGeneration, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
 	)
 }
 
@@ -2296,10 +2485,31 @@ func (s *Store) ListPendingMemoryTrayCandidates(limit int) ([]MemoryTrayPendingC
 	if _, err := s.trayDestination(); err != nil {
 		return nil, err
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.listPendingMemoryTrayCandidatesForAuthority(
+		limit, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) ListPendingMemoryTrayCandidatesForVerifiedBinding(
+	limit int,
+	bindingDigest string,
+	resolverEpoch int64,
+) ([]MemoryTrayPendingCandidate, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || resolverEpoch < 1 {
+		return nil, ErrProductRuntimeMismatch
+	}
+	return s.listPendingMemoryTrayCandidatesForAuthority(limit, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) listPendingMemoryTrayCandidatesForAuthority(
+	limit int,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) ([]MemoryTrayPendingCandidate, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	rows, err := s.db.Query(`
 		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
 		  FROM memory_tray_candidates candidate
@@ -2327,10 +2537,33 @@ func (s *Store) GetPendingMemoryTrayCandidate(candidateID string, version int) (
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryTrayPendingCandidate{}, err
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.getPendingMemoryTrayCandidateForAuthority(
+		candidateID, version, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) GetPendingMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	version int,
+	bindingDigest string,
+	resolverEpoch int64,
+) (MemoryTrayPendingCandidate, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || resolverEpoch < 1 {
+		return MemoryTrayPendingCandidate{}, ErrProductRuntimeMismatch
+	}
+	return s.getPendingMemoryTrayCandidateForAuthority(candidateID, version, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) getPendingMemoryTrayCandidateForAuthority(
+	candidateID string,
+	version int,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryTrayPendingCandidate, error) {
 	if !validTrayIdentifier(candidateID) || version < 1 {
 		return MemoryTrayPendingCandidate{}, errors.New("pending Memory Tray candidate identity is invalid")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	return scanPendingMemoryTrayCandidate(s.db.QueryRow(`
 		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
 		  FROM memory_tray_candidates candidate
@@ -2670,6 +2903,43 @@ func (s *Store) MoveCommittedMemoryScope(
 	idempotencyKey string,
 	now time.Time,
 ) (MemoryScopeMoveReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.moveCommittedMemoryScopeForAuthority(
+		objectID, expectedGeneration, targetScope, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) MoveCommittedMemoryScopeForVerifiedBinding(
+	objectID string,
+	expectedGeneration int,
+	targetScope string,
+	idempotencyKey string,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryScopeMoveReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.moveCommittedMemoryScopeForAuthority(
+		objectID, expectedGeneration, targetScope, idempotencyKey, now,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) moveCommittedMemoryScopeForAuthority(
+	objectID string,
+	expectedGeneration int,
+	targetScope string,
+	idempotencyKey string,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
+) (MemoryScopeMoveReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryScopeMoveReceipt{}, err
 	}
@@ -2740,11 +3010,9 @@ func (s *Store) MoveCommittedMemoryScope(
 	if err != nil {
 		return MemoryScopeMoveReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
 		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
 	}
-	authority := s.currentPersonalMemoryScope(expectedBinding)
 	if lifecycle != "active" || originalRepository != authority.OriginalRepository ||
 		projectNamespace != authority.ProjectNamespaceID {
 		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
@@ -2844,7 +3112,12 @@ func (s *Store) MoveCommittedMemoryScope(
 // commit together. Semantic-delta lineage deletion remains fail-closed until
 // its contribution map is available.
 func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.Time) (MemoryWriteReceipt, error) {
-	return s.deleteCommittedMemory(objectID, nil, idempotencyKey, now)
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, nil, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
 }
 
 func (s *Store) DeleteCommittedMemoryGeneration(
@@ -2856,14 +3129,40 @@ func (s *Store) DeleteCommittedMemoryGeneration(
 	if expectedGeneration < 1 {
 		return MemoryWriteReceipt{}, errors.New("delete generation is invalid")
 	}
-	return s.deleteCommittedMemory(objectID, &expectedGeneration, idempotencyKey, now)
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, &expectedGeneration, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
 }
 
-func (s *Store) deleteCommittedMemory(
+func (s *Store) DeleteCommittedMemoryGenerationForVerifiedBinding(
+	objectID string,
+	expectedGeneration int,
+	idempotencyKey string,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if expectedGeneration < 1 || !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, &expectedGeneration, idempotencyKey, now,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) deleteCommittedMemoryForAuthority(
 	objectID string,
 	expectedGeneration *int,
 	idempotencyKey string,
 	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
 ) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
@@ -2876,11 +3175,14 @@ func (s *Store) deleteCommittedMemory(
 		return MemoryWriteReceipt{}, err
 	}
 	defer tx.Rollback()
-	var kind, lifecycle, candidateID, originalLedgerID, destination, bindingDigest string
+	var kind, lifecycle, memoryScope, projectNamespace, originalRepository string
+	var candidateID, originalLedgerID, destination, bindingDigest string
 	var version, generation int
 	var policyEpoch, resolverEpoch int64
 	err = tx.QueryRow(`
-		SELECT object.candidate_kind, object.lifecycle, object.logical_generation,
+		SELECT object.candidate_kind, object.lifecycle, object.memory_scope,
+		       object.project_namespace_id, object.original_repository_id,
+		       object.logical_generation,
 		       candidate.candidate_id,
 		       candidate.version, ledger.ledger_id, ledger.destination_class, ledger.binding_digest,
 		       ledger.policy_epoch, ledger.resolver_epoch
@@ -2890,14 +3192,19 @@ func (s *Store) deleteCommittedMemory(
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
 		 WHERE object.object_id=?`, objectID,
 	).Scan(
-		&kind, &lifecycle, &generation, &candidateID, &version, &originalLedgerID,
+		&kind, &lifecycle, &memoryScope, &projectNamespace, &originalRepository,
+		&generation, &candidateID, &version, &originalLedgerID,
 		&destination, &bindingDigest, &policyEpoch, &resolverEpoch,
 	)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	if originalRepository != authority.OriginalRepository ||
+		projectNamespace != authority.ProjectNamespaceID ||
+		(memoryScope != MemoryScopeProject && memoryScope != MemoryScopePersonalGlobal) {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
 	if lifecycle == "deleted" {

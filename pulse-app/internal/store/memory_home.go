@@ -227,7 +227,36 @@ func (s *Store) BuildMemoryHomeData(query MemoryHomeQuery, deliveries MemoryHome
 	if expectedBinding != query.BindingDigest {
 		return MemoryHomeData{}, ErrProductRuntimeMismatch
 	}
-	projectNamespaceID := s.currentPersonalMemoryScope(query.BindingDigest).ProjectNamespaceID
+	current := s.currentPersonalMemoryScope(query.BindingDigest)
+	return s.buildMemoryHomeDataForScope(query, PersonalMemoryScopeSnapshot{
+		BindingDigest: query.BindingDigest, RepositoryID: query.RepositoryID,
+		ProjectNamespaceID: current.ProjectNamespaceID, EligibilityRevision: 1,
+	}, deliveries)
+}
+
+// BuildMemoryHomeDataForPersonalScope projects Home against a request-scoped
+// signed project boundary. Personal Global remains visible across bindings,
+// while project rows are limited to the verified repository namespace.
+func (s *Store) BuildMemoryHomeDataForPersonalScope(
+	query MemoryHomeQuery,
+	scope PersonalMemoryScopeSnapshot,
+	deliveries MemoryHomeDeliveryFactReader,
+) (MemoryHomeData, error) {
+	if scope.BindingDigest != query.BindingDigest || scope.RepositoryID != query.RepositoryID ||
+		scope.ProjectNamespaceID != stableProjectNamespace(scope.RepositoryID) ||
+		!trayBindingDigestPattern.MatchString(scope.BindingDigest) ||
+		!validTrayIdentifier(scope.RepositoryID) || scope.EligibilityRevision < 1 {
+		return MemoryHomeData{}, ErrProductRuntimeMismatch
+	}
+	return s.buildMemoryHomeDataForScope(query, scope, deliveries)
+}
+
+func (s *Store) buildMemoryHomeDataForScope(
+	query MemoryHomeQuery,
+	scope PersonalMemoryScopeSnapshot,
+	deliveries MemoryHomeDeliveryFactReader,
+) (MemoryHomeData, error) {
+	projectNamespaceID := scope.ProjectNamespaceID
 	activeCount, active, err := queryMemoryHomeCanonicalFactsFiltered(
 		s.db, query.BindingDigest, projectNamespaceID, query.Filter,
 	)
@@ -616,10 +645,10 @@ const memoryHomeCanonicalFactQuery = `
 	   AND presentation.candidate_version=candidate.version
 	   AND presentation.content_digest=candidate.content_digest
 	   AND presentation.binding_digest=ledger.binding_digest
-	 WHERE object.lifecycle='active' AND ledger.binding_digest=?
+	 WHERE object.lifecycle='active'
 	   AND (
 	       object.memory_scope='personal_global' OR
-	       (object.memory_scope='project' AND object.project_namespace_id=?)
+	       (ledger.binding_digest=? AND object.memory_scope='project' AND object.project_namespace_id=?)
 	   )
 	   AND receipt.rowid=(
 	       SELECT latest_receipt.rowid FROM memory_write_receipts latest_receipt
@@ -679,10 +708,10 @@ func queryMemoryHomeCanonicalFacts(
 		    ON candidate.candidate_id=object.created_from_candidate_id
 		   AND candidate.content_digest=object.content_digest
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
-		 WHERE object.lifecycle='active' AND ledger.binding_digest=?
+		 WHERE object.lifecycle='active'
 		   AND (
 		       object.memory_scope='personal_global' OR
-		       (object.memory_scope='project' AND object.project_namespace_id=?)
+		       (ledger.binding_digest=? AND object.memory_scope='project' AND object.project_namespace_id=?)
 		   )`, bindingDigest, projectNamespaceID).Scan(&count); err != nil {
 		return 0, nil, err
 	}
@@ -909,10 +938,9 @@ func queryMemoryHomeFacets(
 		    ON candidate.candidate_id=object.created_from_candidate_id
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
 		 WHERE object.lifecycle='active'
-		   AND ledger.binding_digest=?
 		   AND (
 		       object.memory_scope='personal_global' OR
-		       (object.memory_scope='project' AND object.project_namespace_id=?)
+		       (ledger.binding_digest=? AND object.memory_scope='project' AND object.project_namespace_id=?)
 		   )
 		 ORDER BY object.original_repository_id, object.capture_host`,
 		bindingDigest, projectNamespaceID)

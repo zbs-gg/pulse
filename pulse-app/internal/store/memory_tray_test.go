@@ -1873,6 +1873,21 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 		movedGlobal.WriteReceipt.ReasonCode != "user_moved_to_personal_global" {
 		t.Fatalf("global move=%#v", movedGlobal)
 	}
+	requestBindingB := strings.Repeat("b", 64)
+	requestScopeB, err := s.PersonalMemoryScopeSnapshotForBinding(
+		requestBindingB, "repository_project_b",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestGlobalResume, err := s.BuildResumeForPersonalScope(ResumeQuery{
+		ThreadID: "project-b-request", ProjectID: "repository_project_b",
+	}, requestScopeB)
+	if err != nil || !strings.Contains(
+		requestGlobalResume.ResumeMarkdown, "Keep scope changes explicit and reversible.",
+	) {
+		t.Fatalf("request-scoped global resume=%q err=%v", requestGlobalResume.ResumeMarkdown, err)
+	}
 	replay, err := s.MoveCommittedMemoryScope(
 		created.ObjectID, 1, MemoryScopePersonalGlobal, "move_global_01", now.Add(3*time.Second),
 	)
@@ -1919,6 +1934,25 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 	if movedProject.Scope != MemoryScopeProject || movedProject.LogicalGeneration != 3 ||
 		movedProject.WriteReceipt.ReasonCode != "user_moved_to_project" {
 		t.Fatalf("project move=%#v", movedProject)
+	}
+	requestScopeB, err = s.PersonalMemoryScopeSnapshotForBinding(
+		requestBindingB, "repository_project_b",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestProjectResume, err := s.BuildResumeForPersonalScope(ResumeQuery{
+		ThreadID: "project-b-request", ProjectID: "repository_project_b",
+	}, requestScopeB)
+	if err != nil || strings.Contains(
+		requestProjectResume.ResumeMarkdown, "Keep scope changes explicit and reversible.",
+	) {
+		t.Fatalf("request-scoped project leak=%q err=%v", requestProjectResume.ResumeMarkdown, err)
+	}
+	if len(requestProjectResume.IncludedObjectIDs) != 0 ||
+		requestProjectResume.CoverageCounted != 0 || requestProjectResume.CoverageTotal != 0 ||
+		requestProjectResume.SourceEquivalentTokens != nil {
+		t.Fatalf("foreign request scope influenced token evidence=%#v", requestProjectResume)
 	}
 	if err := s.ConfigureContinuityDeliveryAuthority(testTrayBindingDigest, "repository_project_b"); err != nil {
 		t.Fatal(err)

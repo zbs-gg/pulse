@@ -17,6 +17,21 @@ import (
 	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
+type verifiedMemoryHomeDeliveryReader struct {
+	store     *store.Store
+	authority productBindingAuthority
+}
+
+func (reader verifiedMemoryHomeDeliveryReader) ReadMemoryHomeDeliveryFacts(
+	repositoryID, bindingDigest string,
+	limit int,
+) ([]store.MemoryHomeDeliveryFact, error) {
+	if repositoryID != reader.authority.RepositoryID || bindingDigest != reader.authority.BindingDigest {
+		return nil, store.ErrContinuityDeliveryAuthority
+	}
+	return reader.store.ReadMemoryHomeDeliveryFactsForVerifiedBinding(repositoryID, bindingDigest, limit)
+}
+
 func (s *Server) buildMemoryHome(
 	now time.Time,
 	snapshot personalLiveReadinessSnapshot,
@@ -29,17 +44,46 @@ func (s *Server) buildMemoryHomeFiltered(
 	snapshot personalLiveReadinessSnapshot,
 	filter store.MemoryHomeFilter,
 ) (store.MemoryHomeData, error) {
+	return s.buildMemoryHomeFilteredForAuthority(now, snapshot, filter, nil)
+}
+
+func (s *Server) buildMemoryHomeFilteredForAuthority(
+	now time.Time,
+	snapshot personalLiveReadinessSnapshot,
+	filter store.MemoryHomeFilter,
+	authority *productBindingAuthority,
+) (store.MemoryHomeData, error) {
 	if s == nil || s.cfg.Store == nil {
 		return store.MemoryHomeData{}, fmt.Errorf("Memory Home store is unavailable")
 	}
 	if err := validatePersonalLiveReadiness(snapshot); err != nil {
 		return store.MemoryHomeData{}, fmt.Errorf("Memory Home readiness is invalid")
 	}
-	bindingDigest, repositoryID, ok := s.cfg.Store.ProductRuntimeBoundary()
-	if !ok {
-		return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+	var bindingDigest, repositoryID string
+	var scope store.PersonalMemoryScopeSnapshot
+	requestScoped := authority != nil
+	if requestScoped {
+		bindingDigest, repositoryID = authority.BindingDigest, authority.RepositoryID
+		var err error
+		scope, err = s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(bindingDigest, repositoryID)
+		if err != nil {
+			return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+		}
+	} else {
+		var ok bool
+		bindingDigest, repositoryID, ok = s.cfg.Store.ProductRuntimeBoundary()
+		if !ok {
+			return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+		}
 	}
-	resume, err := s.cfg.Store.BuildResume(store.ResumeQuery{ThreadID: repositoryID, TokenBudget: 1200})
+	resumeQuery := store.ResumeQuery{ThreadID: repositoryID, TokenBudget: 1200}
+	var resume store.ResumeBlock
+	var err error
+	if requestScoped {
+		resume, err = s.cfg.Store.BuildResumeForPersonalScope(resumeQuery, scope)
+	} else {
+		resume, err = s.cfg.Store.BuildResume(resumeQuery)
+	}
 	if err != nil {
 		return store.MemoryHomeData{}, err
 	}
@@ -57,12 +101,21 @@ func (s *Server) buildMemoryHomeFiltered(
 		RenderedBytes: renderedBytes, PulseTokens: (renderedBytes + 3) / 4,
 	}
 	liveReadiness, checkedAt := s.memoryHomeLiveReadiness(snapshot, now)
-	data, err := s.cfg.Store.BuildMemoryHomeData(store.MemoryHomeQuery{
+	homeQuery := store.MemoryHomeQuery{
 		RepositoryID: repositoryID, BindingDigest: bindingDigest, GeneratedAt: now.UTC(),
 		LiveReadiness:   liveReadiness,
 		NextTaskPreview: preview,
 		Filter:          filter,
-	}, s.cfg.Store)
+	}
+	var data store.MemoryHomeData
+	if requestScoped {
+		data, err = s.cfg.Store.BuildMemoryHomeDataForPersonalScope(
+			homeQuery, scope,
+			verifiedMemoryHomeDeliveryReader{store: s.cfg.Store, authority: *authority},
+		)
+	} else {
+		data, err = s.cfg.Store.BuildMemoryHomeData(homeQuery, s.cfg.Store)
+	}
 	if err != nil {
 		return store.MemoryHomeData{}, err
 	}

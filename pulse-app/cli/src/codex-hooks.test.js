@@ -203,6 +203,11 @@ test('ordinary exact ok without pending cards keeps normal Pulse context instead
   assert.equal(output.continue, true);
   assert.equal(output.systemMessage, undefined);
   assert.match(output.hookSpecificOutput.additionalContext, /pulse\.context_lease/);
+  assert.match(output.hookSpecificOutput.additionalContext, /before the single final user-facing response/);
+  assert.match(output.hookSpecificOutput.additionalContext, /current tool-use instruction wins/);
+  assert.match(output.hookSpecificOutput.additionalContext, /ASCII safe slug/);
+  assert.match(output.hookSpecificOutput.additionalContext, /routine capture failure must not alter/);
+  assert.match(output.hookSpecificOutput.additionalContext, /NO_AUTO_CONTEXT checks/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /approval lease/);
 });
 
@@ -234,6 +239,7 @@ test('first UserPromptSubmit bootstraps receipt-backed resume when Codex omitted
   assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
   assert.match(output.hookSpecificOutput.additionalContext, /LUNA-724-TEAL/);
   assert.match(output.hookSpecificOutput.additionalContext, /"scope":"session_start"/);
+  assert.match(output.hookSpecificOutput.additionalContext, /Pulse Personal automatic capture/);
 
   const order = [];
   let offer;
@@ -814,7 +820,8 @@ test('PostToolUse trusts only the plugin-owned product receipt namespace', async
     },
     readFinalizeMarker: () => ({ ledger_id: 'ledger_01' }),
   });
-  assert.match(output.systemMessage, /receipt_01:pending/);
+  assert.deepEqual(output, {});
+  assert.equal(output.systemMessage, undefined);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/memory/receipts/receipt_01');
   assert.doesNotMatch(JSON.stringify(calls), /private input/);
@@ -851,7 +858,7 @@ test('PostToolUse does not announce an uncorroborated receipt forged in tool out
   assert.deepEqual(output, {});
 });
 
-test('Stop blocks once for bounded finalization then closes no-change without recursion', async () => {
+test('Stop finalizes no-change silently without starting a second model pass', async () => {
   const requests = [];
   const success = await handleCodexHook('Stop', {
     ...base,
@@ -864,11 +871,10 @@ test('Stop blocks once for bounded finalization then closes no-change without re
       return { status: 'no_change' };
     },
   });
-  assert.equal(success.decision, 'block');
-  assert.match(success.reason, /one bounded Pulse finalization pass/);
-  assert.match(success.reason, /Use only the pulse-product server/);
-  assert.match(success.reason, /do not call another Pulse or fallback server/);
-  assert.equal(requests.length, 0);
+  assert.deepEqual(success, {});
+  assert.equal(requests[0].path, '/turn/no-change');
+  assert.equal(requests[0].options.body.host, 'codex');
+  assert.equal(requests[0].options.body.turn_id, base.turn_id);
 
   const recursiveSuccess = await handleCodexHook('Stop', {
     ...base,
@@ -882,9 +888,7 @@ test('Stop blocks once for bounded finalization then closes no-change without re
     },
   });
   assert.deepEqual(recursiveSuccess, {});
-  assert.equal(requests[0].path, '/turn/no-change');
-  assert.equal(requests[0].options.body.host, 'codex');
-  assert.equal(requests[0].options.body.turn_id, base.turn_id);
+  assert.equal(requests[1].path, '/turn/no-change');
 
   const firstFailure = await handleCodexHook('Stop', {
     ...base,
@@ -894,7 +898,8 @@ test('Stop blocks once for bounded finalization then closes no-change without re
     resolveRuntime: () => resolved,
     request: async () => { throw new Error('daemon unavailable'); },
   });
-  assert.equal(firstFailure.decision, 'block');
+  assert.equal(firstFailure.continue, true);
+  assert.equal(firstFailure.systemMessage, undefined);
 
   const failures = [];
   const recursive = await handleCodexHook('Stop', {
@@ -907,7 +912,7 @@ test('Stop blocks once for bounded finalization then closes no-change without re
     recordFailure: (_resolved, receipt) => failures.push(receipt),
   });
   assert.equal(recursive.continue, true);
-  assert.match(recursive.systemMessage, /finalize_failed/);
+  assert.equal(recursive.systemMessage, undefined);
   assert.equal(failures[0].status, 'failed');
   assert.equal(failures[0].reason_code, 'finalize_failed');
 });
@@ -931,6 +936,8 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   const mcp = JSON.parse(readFileSync(resolve(pluginRoot, '.mcp.json'), 'utf8'));
   const hooks = JSON.parse(readFileSync(resolve(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
   assert.equal(manifest.name, 'pulse');
+  assert.match(manifest.interface.defaultPrompt, /without a second response/);
+  assert.doesNotMatch(manifest.interface.defaultPrompt, /Memory Tray/);
   assert.equal(manifest.mcpServers, './.mcp.json');
   assert.equal(Object.hasOwn(manifest, 'hooks'), false);
   assert.deepEqual(Object.keys(mcp.mcpServers), ['pulse-product']);

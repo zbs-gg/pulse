@@ -136,6 +136,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	}
 	defer s.Close()
 	var homeBindingVerifier server.HomeBindingVerifier
+	var productBindingVerifier server.ProductBindingVerifier
 	if kind != "" {
 		bindingDigest := os.Getenv("PULSE_BINDING_DIGEST")
 		repositoryID := os.Getenv("PULSE_REPOSITORY_ID")
@@ -162,6 +163,12 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		)
 		if err != nil {
 			return fmt.Errorf("configure live product binding verifier: %w", err)
+		}
+		productBindingVerifier, err = server.NewCommandProductBindingVerifier(
+			os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE"), os.Getenv("PULSE_PRODUCT_AUTHORITY_HELPER"),
+		)
+		if err != nil {
+			return fmt.Errorf("configure request product binding verifier: %w", err)
 		}
 	}
 
@@ -320,6 +327,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		EnhancedPresenceAuthorizer: enhancedPresenceAuthorizer,
 		UnassignedInboxPath:        unassignedInboxPath,
 		HomeBindingVerifier:        homeBindingVerifier,
+		ProductBindingVerifier:     productBindingVerifier,
 	})
 	if err != nil {
 		return err

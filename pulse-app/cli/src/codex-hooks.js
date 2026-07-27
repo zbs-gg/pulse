@@ -54,10 +54,24 @@ import {
 const MAX_HOOK_INPUT = 1 << 20;
 
 const HEALTHY = Symbol('pulse.codex_hook_healthy');
+const WRITE_CORROBORATED = Symbol('pulse.codex_hook_write_corroborated');
 const CODEX_PRODUCT_TOOL = Object.freeze({ codexPluginAlias: true });
+
+const PERSONAL_AUTO_CAPTURE_CONTEXT = `
+Pulse Personal automatic capture (local, private, and silent):
+- During this same normal turn, before the single final user-facing response, call the installed pulse-product pulse_remember tool once only when the work produced a compact durable decision, correction, preference, open loop, or project-state change.
+- Omit tags unless every tag is an ASCII safe slug matching ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$; never use display labels or tags containing spaces.
+- Do not announce routine capture, narrate the tool call, or add a save status, receipt, or second user-facing response. A routine capture failure must not alter the user-facing answer; if the user explicitly asks whether saving succeeded, answer truthfully. If nothing durable changed, do not call a memory tool.
+- The user's current tool-use instruction wins. If this turn forbids tools, do not capture memory.
+- Never store raw prompts, transcripts, secrets, credentials, local paths, one-turn output formatting, evaluation protocol, exact-response instructions, NO_AUTO_CONTEXT checks, or other test-control instructions. An explicit lasting project fact remains eligible when the user identifies it as durable project state.`;
 
 function healthy(output) {
   Object.defineProperty(output, HEALTHY, { value: true });
+  return output;
+}
+
+function corroboratedWrite(output) {
+  Object.defineProperty(output, WRITE_CORROBORATED, { value: true });
   return output;
 }
 
@@ -88,13 +102,16 @@ function recordHookFailure(resolved, receipt) {
       ? join(resolved.runtime.data_dir, 'hook-receipts')
       : undefined;
   if (!directory) return;
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${receipt.receipt_id}.json`);
-  if (existsSync(path)) return;
   const temporary = `${path}.new`;
   try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (existsSync(path)) return;
     writeFileSync(temporary, `${JSON.stringify(receipt)}\n`, { mode: 0o600, flag: 'wx' });
     renameSync(temporary, path);
+  } catch {
+    // Failure evidence is best-effort. A diagnostics path must never break or
+    // restart the user's completed turn.
   } finally {
     rmSync(temporary, { force: true });
   }
@@ -368,7 +385,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
           continue: true,
           hookSpecificOutput: {
             hookEventName: 'UserPromptSubmit',
-            additionalContext: `${context.additionalContext}${approvalContext}`,
+            additionalContext: `${context.additionalContext}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
           },
         }), resolved, bootstrapEvent, deliveryManifest);
       }
@@ -376,7 +393,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}`,
+          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       });
     }
@@ -396,9 +413,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
             }
           }
           if (corroborated.length === 0) return healthy({});
-          return healthy({
-            systemMessage: `Pulse Memory Tray receipt: ${corroborated.map((ref) => `${ref.receipt_id}:${ref.status}`).join(', ')}`,
-          });
+          return corroboratedWrite(healthy({}));
         }
       }
       return healthy({});
@@ -437,13 +452,8 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, event);
         return healthy({});
       } catch {
-        // No truthful finalize receipt marker: request or record one bounded pass.
-      }
-      if (!event.stop_hook_active) {
-        return healthy({
-          decision: 'block',
-          reason: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse-product pulse_remember in one batch. Use only the pulse-product server. If pulse-product is unavailable, do not call another Pulse or fallback server; report that finalization is unavailable. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
-        });
+        // No truthful write marker: close the turn as no-change without
+        // starting another model pass.
       }
       await finalizeNoChange(resolved, event, request);
       return healthy({});
@@ -454,19 +464,11 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     const degradedDiagnostic = typeof degradedReason === 'string'
       ? { pulseTestDiagnostic: degradedReason }
       : {};
-    if (eventName === 'Stop' && event.stop_hook_active) {
+    if (eventName === 'Stop') {
       const receipt = hookFailureReceipt(event, 'finalize_failed', now);
       recordFailure(resolved, receipt);
       return {
         continue: true,
-        systemMessage: `Pulse finalize_failed receipt: ${receipt.receipt_id}`,
-        ...degradedDiagnostic,
-      };
-    }
-    if (eventName === 'Stop') {
-      return {
-        decision: 'block',
-        reason: 'Pulse did not finalize this turn. Retry finalization once before stopping.',
         ...degradedDiagnostic,
       };
     }
@@ -926,7 +928,7 @@ function readinessMilestone(eventName, options) {
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
   if (eventName === 'PostToolUse' &&
       isTrustedPulseProductTool(options.input?.tool_name, CODEX_PRODUCT_TOOL) &&
-      /^Pulse Memory Tray receipt:/.test(options.output?.systemMessage ?? '')) return 'write_receipt';
+      options.output?.[WRITE_CORROBORATED] === true) return 'write_receipt';
   if (eventName === 'Stop' && options.output?.decision !== 'block' && options.output?.continue !== true) {
     return 'turn_finalize';
   }

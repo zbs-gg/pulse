@@ -14,7 +14,7 @@ test('Personal product MCP keeps Git Team Memory unavailable until governed expo
   const workspace = process.cwd();
   writeFileSync(authorityPath, `
     export function resolveProductWorkspaceBinding() {
-      return { binding_digest: '${'a'.repeat(64)}', resolver_epoch: 7, workspace: { canonical_path: ${JSON.stringify(workspace)} } };
+      return { binding_digest: '${'a'.repeat(64)}', resolver_epoch: 7, workspace: { canonical_path: ${JSON.stringify(workspace)}, repository_id: 'repository_test' } };
     }
     export async function callBoundLocalProductTool(_resolved, host, name, input) {
       return { schema: 'pulse.test_local_product_tool.v1', host, name, input };
@@ -22,7 +22,7 @@ test('Personal product MCP keeps Git Team Memory unavailable until governed expo
   `, { mode: 0o600 });
   const keys = [
     'PULSE_HOST_ADAPTER', 'PULSE_PRODUCT_BINDING_MODE', 'PULSE_BINDING_DIGEST',
-    'PULSE_RESOLVER_EPOCH', 'PULSE_HOST_WORKSPACE', 'PULSE_HOST_AUTHORITY_MODULE',
+    'PULSE_RESOLVER_EPOCH', 'PULSE_REPOSITORY_ID', 'PULSE_HOST_WORKSPACE', 'PULSE_HOST_AUTHORITY_MODULE',
     'PULSE_HOST_RUNTIME_MODULE', 'PULSE_RUNTIME_MODE', 'PULSE_MCP_MODE', 'PULSE_DATA_DIR',
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -30,6 +30,7 @@ test('Personal product MCP keeps Git Team Memory unavailable until governed expo
     PULSE_HOST_ADAPTER: 'codex',
     PULSE_PRODUCT_BINDING_MODE: 'personal',
     PULSE_BINDING_DIGEST: 'a'.repeat(64), PULSE_RESOLVER_EPOCH: '7',
+    PULSE_REPOSITORY_ID: 'repository_test',
     PULSE_HOST_WORKSPACE: workspace,
     PULSE_HOST_AUTHORITY_MODULE: pathToFileURL(authorityPath).href,
     PULSE_HOST_RUNTIME_MODULE: pathToFileURL(authorityPath).href,

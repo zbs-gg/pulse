@@ -12,6 +12,9 @@ import { fileURLToPath } from 'node:url';
 import {
   canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
 } from '../src/release-manifest.js';
+import {
+  DESKTOP_TARGET_IDS, desktopTargetDefinition,
+} from '../src/desktop-target.js';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptRoot = dirname(scriptPath);
@@ -32,6 +35,7 @@ const IDENTIFIERS = Object.freeze({
   daemon: 'gg.zbs.pulse.daemon',
   'embedder-runtime': 'gg.zbs.pulse.embedder-runtime',
 });
+const TARGET_ARTIFACT_KINDS = Object.freeze(['daemon', 'embedder-runtime']);
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function fail(code, detail = '') {
@@ -40,11 +44,25 @@ function fail(code, detail = '') {
 
 function parseCLI(argv) {
   const values = {};
+  const targetRoots = {};
+  const allowed = new Set(['channel-key', 'epoch', 'model', 'origin', 'output', 'plugin', 'root-key']);
   for (let index = 0; index < argv.length; index += 2) {
-    if (!argv[index]?.startsWith('--') || argv[index + 1] === undefined) fail('release_catalog_arguments_invalid');
-    const name = argv[index].slice(2);
-    if (Object.hasOwn(values, name)) fail('release_catalog_arguments_invalid');
-    values[name] = argv[index + 1];
+    const option = argv[index];
+    const value = argv[index + 1];
+    if (!option?.startsWith('--') || value === undefined) fail('release_catalog_arguments_invalid');
+    const name = option.slice(2);
+    if (name === 'target') {
+      const separator = value.indexOf('=');
+      const targetID = separator < 1 ? '' : value.slice(0, separator);
+      const targetRoot = separator < 1 ? '' : value.slice(separator + 1);
+      if (!DESKTOP_TARGET_IDS.includes(targetID) || !isAbsolute(targetRoot) || Object.hasOwn(targetRoots, targetID)) {
+        fail('release_catalog_arguments_invalid');
+      }
+      targetRoots[targetID] = resolve(targetRoot);
+      continue;
+    }
+    if (!allowed.has(name) || Object.hasOwn(values, name)) fail('release_catalog_arguments_invalid');
+    values[name] = value;
   }
   const epoch = Number(values.epoch);
   const paths = {
@@ -53,13 +71,13 @@ function parseCLI(argv) {
     outputRoot: values.output ? resolve(values.output) : null,
     pluginRoot: values.plugin ? resolve(values.plugin) : null,
     rootKey: values['root-key'] ? resolve(values['root-key']) : null,
-    targetRoot: values.target ? resolve(values.target) : null,
   };
   if (Object.values(paths).some((value) => !value || !isAbsolute(value)) ||
+      Object.keys(targetRoots).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0') ||
       !Number.isSafeInteger(epoch) || epoch < 1 || typeof values.origin !== 'string') {
     fail('release_catalog_arguments_invalid');
   }
-  return Object.freeze({ ...paths, epoch, origin: values.origin });
+  return Object.freeze({ ...paths, epoch, origin: values.origin, targetRoots: Object.freeze(targetRoots) });
 }
 
 function privateKey(path, label) {
@@ -126,6 +144,13 @@ function commonSigning() {
   });
 }
 
+function windowsSigning() {
+  return Object.freeze({
+    ...commonSigning(),
+    scheme: 'windows-authenticode',
+  });
+}
+
 function appleSigning(kind, teamID) {
   return Object.freeze({
     gatekeeper: true,
@@ -134,6 +159,80 @@ function appleSigning(kind, teamID) {
     scheme: 'apple-developer-id',
     stapled: false,
     team_id: teamID,
+  });
+}
+
+function exactKeys(value, expected) {
+  return value && !Array.isArray(value) && typeof value === 'object' &&
+    Object.keys(value).sort().join('\0') === [...expected].sort().join('\0');
+}
+
+function compatibleCarrier(artifact, kind) {
+  return artifact && !Array.isArray(artifact) && typeof artifact === 'object' &&
+    artifact.filename === `${kind}.tar.gz` && artifact.format === 'tar.gz' &&
+    Number.isSafeInteger(artifact.bytes) && artifact.bytes > 0 && artifact.bytes <= 64 * 1024 * 1024 * 1024 &&
+    SHA256.test(artifact.sha256 ?? '') && SHA256.test(artifact.tree_digest ?? '');
+}
+
+function compatibleVerificationProfile(profile, target) {
+  if (target.platform === 'darwin') {
+    return exactKeys(profile, ['gatekeeper', 'kind', 'notarized', 'stapled', 'team_id']) &&
+      profile.kind === 'apple' && profile.gatekeeper === true && profile.notarized === true &&
+      profile.stapled === false && profile.team_id === '44N4NZ86S5';
+  }
+  if (target.platform === 'win32') {
+    if (!exactKeys(profile, ['kind', 'publisher', 'timestamp_url', 'timestamped']) ||
+        profile.kind !== 'windows' || profile.timestamped !== true ||
+        typeof profile.publisher !== 'string' ||
+        !/^CN=[^,\r\n]{1,128}(?:, ?(?:O|OU|L|S|C)=[^,\r\n]{1,128})*$/.test(profile.publisher)) return false;
+    let timestamp;
+    try { timestamp = new URL(profile.timestamp_url); } catch { return false; }
+    return timestamp.protocol === 'https:' && !timestamp.username && !timestamp.password &&
+      !timestamp.search && !timestamp.hash;
+  }
+  return exactKeys(profile, ['kind', 'policy']) &&
+    profile.kind === 'linux' && profile.policy === 'signed-catalog-tree-v1';
+}
+
+function compatibleTargetFragment(fragment, targetID) {
+  const target = desktopTargetDefinition(targetID);
+  return exactKeys(fragment, [
+    'artifacts', 'attestation_state', 'production_ready', 'schema', 'target', 'verification_profile',
+  ]) && fragment.schema === 'pulse.target_release_build.v2' &&
+    fragment.attestation_state === 'pending-signed-catalog-runtime-proof' && fragment.production_ready === false &&
+    exactKeys(fragment.target, ['architecture', 'libc', 'platform', 'target_id']) &&
+    fragment.target.target_id === targetID && fragment.target.platform === target.platform &&
+    fragment.target.architecture === target.architecture && fragment.target.libc === target.libc &&
+    exactKeys(fragment.artifacts, TARGET_ARTIFACT_KINDS) &&
+    TARGET_ARTIFACT_KINDS.every((kind) => compatibleCarrier(fragment.artifacts[kind], kind)) &&
+    compatibleVerificationProfile(fragment.verification_profile, target);
+}
+
+function exactTargetRoots(targetRoots) {
+  if (!targetRoots || Array.isArray(targetRoots) || typeof targetRoots !== 'object' ||
+      Object.keys(targetRoots).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0')) return false;
+  return DESKTOP_TARGET_IDS.every((targetID) => {
+    const value = targetRoots[targetID];
+    return typeof value === 'string' && isAbsolute(value) && resolve(value) === value;
+  });
+}
+
+function targetSigning(kind, target, profile) {
+  if (target.platform === 'darwin') return appleSigning(kind, profile.team_id);
+  if (target.platform === 'win32') return windowsSigning();
+  return commonSigning();
+}
+
+function targetMinimumOS(target) {
+  return target.platform === 'darwin' ? '13.0' : '0.0';
+}
+
+function verificationHost(target) {
+  return Object.freeze({
+    architecture: target.architecture,
+    libc: target.libc,
+    osVersion: target.platform === 'darwin' ? '26.2' : '0.0',
+    platform: target.platform,
   });
 }
 
@@ -168,11 +267,15 @@ function descriptor({
 }
 
 export function buildPersonalCatalog({
-  channelKey, epoch, modelRoot, origin, outputRoot, pluginRoot, rootKey, targetRoot,
+  channelKey, epoch, modelRoot, origin, outputRoot, pluginRoot, rootKey, targetRoots,
+  testMode = false, testOnlyTrustedKeys,
 } = {}) {
   if (!Number.isSafeInteger(epoch) || epoch < 1 ||
-      [channelKey, modelRoot, outputRoot, pluginRoot, rootKey, targetRoot]
-        .some((value) => typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value)) {
+      [channelKey, modelRoot, outputRoot, pluginRoot, rootKey]
+        .some((value) => typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value) ||
+      !exactTargetRoots(targetRoots) || ![true, false].includes(testMode) ||
+      (testMode !== true && testOnlyTrustedKeys !== undefined) ||
+      (testMode === true && (!Array.isArray(testOnlyTrustedKeys) || testOnlyTrustedKeys.length !== 1))) {
     fail('release_catalog_arguments_invalid');
   }
   let parsedOrigin;
@@ -183,14 +286,20 @@ export function buildPersonalCatalog({
   }
   const rootAuthority = privateKey(rootKey, 'root');
   const channelAuthority = privateKey(channelKey, 'channel');
-  const pinned = pinnedReleaseKeyring();
+  const pinned = testMode === true ? testOnlyTrustedKeys : pinnedReleaseKeyring();
   if (pinned.length !== 1 || pinned[0].key_id !== rootAuthority.keyID || rootAuthority.keyID === channelAuthority.keyID) {
     fail('release_catalog_authority_invalid');
   }
-  const target = canonicalFile(
-    join(targetRoot, 'target-release-fragment.json'),
-    'pulse.target_release_build.v2',
-  );
+  const targetInputs = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
+    const fragment = canonicalFile(
+      join(targetRoots[targetID], 'target-release-fragment.json'),
+      'pulse.target_release_build.v2',
+    );
+    if (!compatibleTargetFragment(fragment, targetID)) fail('release_catalog_fragment_incompatible', targetID);
+    return [targetID, Object.freeze({
+      definition: desktopTargetDefinition(targetID), fragment, root: targetRoots[targetID],
+    })];
+  }));
   const model = canonicalFile(
     join(modelRoot, 'portable-model-fragment.json'),
     'pulse.portable_model_build.v1',
@@ -199,15 +308,8 @@ export function buildPersonalCatalog({
     join(pluginRoot, 'plugin-runtime-fragment.json'),
     'pulse.plugin_runtime_build.v1',
   );
-  if (target.target?.target_id !== 'darwin-arm64' || target.target.platform !== 'darwin' ||
-      target.target.architecture !== 'arm64' || target.target.libc !== null ||
-      target.verification_profile?.kind !== 'apple' || target.verification_profile.team_id !== '44N4NZ86S5' ||
-      model.production_ready !== true || plugin.production_ready !== true || plugin.package_version !== PACKAGE_VERSION ||
-      !['daemon', 'embedder-runtime'].every((kind) => {
-        const artifact = target.artifacts?.[kind];
-        return artifact?.format === 'tar.gz' && SHA256.test(artifact.sha256 ?? '') && SHA256.test(artifact.tree_digest ?? '');
-      }) ||
-      model.artifact?.format !== 'tar.gz' || plugin.artifact?.format !== 'tar.gz') {
+  if (model.production_ready !== true || plugin.production_ready !== true || plugin.package_version !== PACKAGE_VERSION ||
+      !compatibleCarrier(model.artifact, 'model') || !compatibleCarrier(plugin.artifact, 'plugin-runtime')) {
     fail('release_catalog_fragment_incompatible');
   }
   mkdirSync(dirname(outputRoot), { recursive: true, mode: 0o700 });
@@ -215,43 +317,23 @@ export function buildPersonalCatalog({
   let complete = false;
   try {
     const assetRoot = join(outputRoot, 'assets', 'pulse', PACKAGE_VERSION);
-    const targetAssets = join(assetRoot, 'darwin-arm64');
     const commonAssets = join(assetRoot, 'common');
-    copyCarrier(targetRoot, target.artifacts.daemon.filename, target.artifacts.daemon, join(targetAssets, 'daemon.tar.gz'));
-    copyCarrier(
-      targetRoot,
-      target.artifacts['embedder-runtime'].filename,
-      target.artifacts['embedder-runtime'],
-      join(targetAssets, 'embedder-runtime.tar.gz'),
-    );
+    for (const targetID of DESKTOP_TARGET_IDS) {
+      const input = targetInputs[targetID];
+      const targetAssets = join(assetRoot, targetID);
+      for (const kind of TARGET_ARTIFACT_KINDS) {
+        copyCarrier(
+          input.root,
+          input.fragment.artifacts[kind].filename,
+          input.fragment.artifacts[kind],
+          join(targetAssets, `${kind}.tar.gz`),
+        );
+      }
+    }
     copyCarrier(modelRoot, model.artifact.filename, model.artifact, join(commonAssets, 'model.tar.gz'));
     copyCarrier(pluginRoot, plugin.artifact.filename, plugin.artifact, join(commonAssets, 'plugin-runtime.tar.gz'));
     const prefix = `${origin}/pulse/${PACKAGE_VERSION}`;
-    const artifacts = {
-      daemon: descriptor({
-        artifact: target.artifacts.daemon,
-        architecture: 'arm64',
-        epoch,
-        id: `pulse-${PACKAGE_VERSION}-darwin-arm64-daemon`,
-        kind: 'daemon',
-        minimumOS: '13.0',
-        origin,
-        platform: 'darwin',
-        signing: appleSigning('daemon', target.verification_profile.team_id),
-        url: `${prefix}/darwin-arm64/daemon.tar.gz`,
-      }),
-      'embedder-runtime': descriptor({
-        artifact: target.artifacts['embedder-runtime'],
-        architecture: 'arm64',
-        epoch,
-        id: `pulse-${PACKAGE_VERSION}-darwin-arm64-embedder`,
-        kind: 'embedder-runtime',
-        minimumOS: '13.0',
-        origin,
-        platform: 'darwin',
-        signing: appleSigning('embedder-runtime', target.verification_profile.team_id),
-        url: `${prefix}/darwin-arm64/embedder-runtime.tar.gz`,
-      }),
+    const commonArtifacts = {
       model: descriptor({
         artifact: model.artifact,
         architecture: 'all',
@@ -277,6 +359,29 @@ export function buildPersonalCatalog({
         url: `${prefix}/common/plugin-runtime.tar.gz`,
       }),
     };
+    const catalogTargets = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
+      const input = targetInputs[targetID];
+      const artifacts = Object.fromEntries(TARGET_ARTIFACT_KINDS.map((kind) => [kind, descriptor({
+        artifact: input.fragment.artifacts[kind],
+        architecture: input.definition.architecture,
+        epoch,
+        id: `pulse-${PACKAGE_VERSION}-${targetID}-${kind}`,
+        kind,
+        minimumOS: targetMinimumOS(input.definition),
+        origin,
+        platform: input.definition.platform,
+        signing: targetSigning(kind, input.definition, input.fragment.verification_profile),
+        url: `${prefix}/${targetID}/${kind}.tar.gz`,
+      })]));
+      return [targetID, Object.freeze({
+        architecture: input.definition.architecture,
+        artifacts: Object.freeze(artifacts),
+        capabilities: Object.freeze([]),
+        libc: input.definition.libc,
+        platform: input.definition.platform,
+        verification_profile: input.fragment.verification_profile,
+      })];
+    }));
     const now = new Date();
     const issuedAt = new Date(now.valueOf() - 60_000);
     const releaseExpiresAt = new Date(now.valueOf() + 7 * 24 * 60 * 60 * 1000);
@@ -284,8 +389,8 @@ export function buildPersonalCatalog({
     const payload = Object.freeze({
       allowed_origins: [origin],
       common_artifacts: {
-        model: artifacts.model,
-        'plugin-runtime': artifacts['plugin-runtime'],
+        model: commonArtifacts.model,
+        'plugin-runtime': commonArtifacts['plugin-runtime'],
       },
       release: {
         channel: 'preview',
@@ -297,19 +402,7 @@ export function buildPersonalCatalog({
         version: PACKAGE_VERSION,
       },
       schema: 'pulse.personal_preview.release_catalog.v2',
-      targets: {
-        'darwin-arm64': {
-          architecture: 'arm64',
-          artifacts: {
-            daemon: artifacts.daemon,
-            'embedder-runtime': artifacts['embedder-runtime'],
-          },
-          capabilities: [],
-          libc: null,
-          platform: 'darwin',
-          verification_profile: target.verification_profile,
-        },
-      },
+      targets: catalogTargets,
     });
     const authorityPayload = Object.freeze({
       channel: 'preview',
@@ -335,26 +428,31 @@ export function buildPersonalCatalog({
       schema: 'pulse.release_catalog_envelope.v2',
       signature: manifestSignature(payload, channelAuthority),
     });
-    const release = verifyReleaseManifestEnvelope(envelope, {
-      architecture: 'arm64',
-      libc: null,
-      minimumAcceptedEpoch: epoch,
-      now,
-      osVersion: '26.2',
-      packageVersion: PACKAGE_VERSION,
-      platform: 'darwin',
-      trustedKeys: pinned,
+    const releases = DESKTOP_TARGET_IDS.map((targetID) => {
+      const release = verifyReleaseManifestEnvelope(envelope, {
+        ...verificationHost(targetInputs[targetID].definition),
+        minimumAcceptedEpoch: epoch,
+        now,
+        packageVersion: PACKAGE_VERSION,
+        trustedKeys: pinned,
+      });
+      if (release.target_id !== targetID) fail('release_catalog_target_verification_failed', targetID);
+      return release;
     });
+    if (new Set(releases.map((release) => release.manifest_digest)).size !== 1) {
+      fail('release_catalog_target_verification_failed');
+    }
     const manifestPath = join(outputRoot, 'personal-preview-manifest.json');
     writeFileSync(manifestPath, `${canonicalReleaseJSON(envelope)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const receipt = Object.freeze({
-      artifact_count: Object.keys(release.artifacts).length,
+      artifact_count: 2 + DESKTOP_TARGET_IDS.length * TARGET_ARTIFACT_KINDS.length,
       channel_key_id: channelAuthority.keyID,
-      manifest_digest: release.manifest_digest,
-      production_ready: true,
+      manifest_digest: releases[0].manifest_digest,
+      production_ready: testMode !== true,
       root_key_id: rootAuthority.keyID,
-      schema: 'pulse.personal_release_catalog_build.v1',
-      target_id: release.target_id,
+      schema: 'pulse.personal_release_catalog_build.v2',
+      target_count: DESKTOP_TARGET_IDS.length,
+      target_ids: [...DESKTOP_TARGET_IDS],
     });
     writeFileSync(join(outputRoot, 'catalog-build-receipt.json'), `${canonicalReleaseJSON(receipt)}\n`, {
       encoding: 'utf8', flag: 'wx', mode: 0o600,

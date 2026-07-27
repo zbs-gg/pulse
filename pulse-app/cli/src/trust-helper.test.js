@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import {
+  createHash, createPublicKey, generateKeyPairSync, sign,
+} from 'node:crypto';
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -13,6 +15,9 @@ import {
   inspectPresenceTrust,
   installPresenceTrust,
 } from './trust-helper.js';
+import {
+  bindingRegistryAnchor, canonicalJSONStringify,
+} from './workspace-binding.js';
 
 const EXPECTED_IDENTIFIER = 'gg.zbs.pulse.presence-helper';
 const EXPECTED_TEAM = '44N4NZ86S5';
@@ -20,6 +25,7 @@ const EXPECTED_TEAM = '44N4NZ86S5';
 function keyPair() {
   const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   return {
+    privateKey: pair.privateKey,
     publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }),
     otherPublicKey: generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
       .publicKey.export({ type: 'spki', format: 'pem' }),
@@ -31,6 +37,9 @@ function fixture() {
   const paths = {
     helperPath: join(root, 'Library', 'PrivilegedHelperTools', EXPECTED_IDENTIFIER),
     publicKeyPath: join(root, 'Library', 'Application Support', 'Pulse', 'trust', 'workspace-bindings.pub.pem'),
+    anchorPath: join(root, 'Library', 'Application Support', 'Pulse', 'trust', 'workspace-bindings.anchor.json'),
+    registryPath: join(root, 'home', '.pulse', 'supervisor', 'workspace-bindings.json'),
+    migrationJournalPath: join(root, 'home', '.pulse', 'supervisor', 'presence-trust-migration.json'),
     vendoredHelperPath: join(root, 'package', 'vendor', 'pulse-presence-helper', EXPECTED_IDENTIFIER),
   };
   const keys = keyPair();
@@ -55,6 +64,37 @@ function fixture() {
     mkdirSync(dirname(paths.publicKeyPath), { recursive: true });
     writeFileSync(paths.publicKeyPath, pem, { mode: 0o644 });
     chmodSync(paths.publicKeyPath, 0o644);
+  }
+
+  function seedLegacyBootstrap() {
+    const pair = generateKeyPairSync('ed25519');
+    const payload = {
+      schema: 'pulse.workspace-binding-registry.v1',
+      epoch: 1,
+      bindings: [{
+        binding_id: 'binding_bootstrap',
+        mode: 'personal',
+        receipt_id: 'binding-receipt-bootstrap',
+        workspace: { workspace_id: 'workspace_bootstrap' },
+      }],
+    };
+    const payloadBytes = Buffer.from(canonicalJSONStringify(payload));
+    const registryBytes = Buffer.from(`${JSON.stringify({
+      algorithm: 'ed25519',
+      payload,
+      signature: sign(null, payloadBytes, pair.privateKey).toString('base64'),
+    })}\n`);
+    const anchorBytes = Buffer.from(`${canonicalJSONStringify(
+      bindingRegistryAnchor(registryBytes, payload.epoch),
+    )}\n`);
+    seedPublicKey(pair.publicKey.export({ type: 'spki', format: 'pem' }));
+    mkdirSync(dirname(paths.anchorPath), { recursive: true });
+    writeFileSync(paths.anchorPath, anchorBytes, { mode: 0o644 });
+    chmodSync(paths.anchorPath, 0o644);
+    mkdirSync(dirname(paths.registryPath), { recursive: true, mode: 0o700 });
+    writeFileSync(paths.registryPath, registryBytes, { mode: 0o600 });
+    chmodSync(paths.registryPath, 0o600);
+    return { anchorBytes, payload, registryBytes };
   }
 
   function result(status = 0, stdout = '', stderr = '') {
@@ -82,6 +122,18 @@ function fixture() {
     if (command.endsWith(EXPECTED_IDENTIFIER) && args[0] === 'public-key') {
       return result(0, keys.publicKey, '');
     }
+    if (command.endsWith(EXPECTED_IDENTIFIER) && args[0] === 'sign-binding-registry') {
+      const payloadPath = args[args.indexOf('--payload') + 1];
+      const payloadBytes = readFileSync(payloadPath);
+      const keyID = createHash('sha256')
+        .update(createPublicKey(keys.publicKey).export({ type: 'spki', format: 'der' }))
+        .digest('hex');
+      return result(0, `${JSON.stringify({
+        algorithm: 'es256',
+        key_id: keyID,
+        signature: sign('sha256', payloadBytes, keys.privateKey).toString('base64'),
+      })}\n`, '');
+    }
     if (command.endsWith(EXPECTED_IDENTIFIER) && args[0] === 'contract') {
       return result(0, `${JSON.stringify({
         schema: 'pulse.presence_helper.contract.v1',
@@ -98,6 +150,7 @@ function fixture() {
     }
     if (command === '/usr/bin/sudo') {
       const [program, ...sudoArgs] = args;
+      if (program === '-v') return result(0);
       if (program === '/bin/mkdir') {
         if (raceHelperOnDirectoryFailure && sudoArgs.at(-1) === dirname(paths.helperPath)) {
           seedHelper();
@@ -153,7 +206,7 @@ function fixture() {
   }
 
   return {
-    root, paths, keys, calls, run, signatureByPath, seedHelper, seedPublicKey,
+    root, paths, keys, calls, run, signatureByPath, seedHelper, seedLegacyBootstrap, seedPublicKey,
     setFailPublicKeyInstall(value) { failPublicKeyInstall = value; },
     setRaceHelperOnDirectoryFailure(value) { raceHelperOnDirectoryFailure = value; },
     setFailInstalledHelperVerification(value) { failInstalledHelperVerification = value; },
@@ -231,6 +284,21 @@ test('deep trust status rejects a valid but different public key', () => {
   } finally { f.cleanup(); }
 });
 
+test('trust status identifies the valid one-shot bootstrap key as migratable legacy state', () => {
+  const f = fixture();
+  try {
+    f.seedLegacyBootstrap();
+    const status = inspectPresenceTrust(f.options);
+    assert.equal(status.status, 'invalid');
+    assert.equal(status.ready, false);
+    assert.equal(status.public_key.valid, false);
+    assert.equal(status.public_key.bootstrap_legacy, true);
+    assert.ok(status.issues.includes('helper_missing'));
+    assert.ok(status.issues.includes('bootstrap_migration_required'));
+    assert.equal(status.issues.includes('public_key_invalid'), false);
+  } finally { f.cleanup(); }
+});
+
 test('install refuses anything except the exact confirmation phrase before validation or sudo', async () => {
   const f = fixture();
   try {
@@ -284,6 +352,7 @@ test('install validates a fixed vendored helper, installs root artifacts, invoke
     assert.equal(readFileSync(f.paths.publicKeyPath, 'utf8'), f.keys.publicKey);
 
     const firstSudo = f.calls.findIndex((call) => call.command === '/usr/bin/sudo');
+    assert.deepEqual(f.calls[firstSudo].args, ['-v']);
     const sourceCodeChecks = f.calls
       .slice(0, firstSudo)
       .filter((call) => call.command === '/usr/bin/codesign' && call.args.at(-1) === f.paths.vendoredHelperPath);
@@ -300,6 +369,125 @@ test('install validates a fixed vendored helper, installs root artifacts, invoke
     assert.deepEqual(keyInstall.args.slice(0, 7), ['/usr/bin/install', '-o', 'root', '-g', 'wheel', '-m', '0644']);
   } finally { f.cleanup(); }
 });
+
+test('install migrates a valid one-shot bootstrap registry to helper trust without changing its bindings', async () => {
+  const f = fixture();
+  try {
+    f.seedHelper(f.paths.vendoredHelperPath);
+    const legacy = f.seedLegacyBootstrap();
+    const result = await installPresenceTrust({
+      ...f.options, confirmation: INSTALL_CONFIRMATION,
+    });
+    assert.equal(result.installed, true);
+    assert.equal(result.migrated_bootstrap, true);
+    assert.equal(result.status.ready, true);
+    assert.equal(existsSync(f.paths.migrationJournalPath), false);
+
+    const envelope = JSON.parse(readFileSync(f.paths.registryPath, 'utf8'));
+    assert.equal(envelope.algorithm, 'es256');
+    assert.equal(envelope.payload.epoch, legacy.payload.epoch + 1);
+    assert.deepEqual(envelope.payload.bindings, legacy.payload.bindings);
+    const registryBytes = readFileSync(f.paths.registryPath);
+    assert.equal(
+      readFileSync(f.paths.anchorPath, 'utf8'),
+      `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, envelope.payload.epoch))}\n`,
+    );
+    assert.equal(readFileSync(f.paths.publicKeyPath, 'utf8'), f.keys.publicKey);
+    assert.ok(f.calls.some((call) => call.command.endsWith(EXPECTED_IDENTIFIER) &&
+      call.args[0] === 'sign-binding-registry'));
+  } finally { f.cleanup(); }
+});
+
+test('a new install attempt recovers an interrupted mixed bootstrap rotation before retrying', async () => {
+  const f = fixture();
+  try {
+    f.seedHelper(f.paths.vendoredHelperPath);
+    f.seedHelper();
+    const legacy = f.seedLegacyBootstrap();
+    const oldPublicKey = readFileSync(f.paths.publicKeyPath);
+    const nextPayload = { ...legacy.payload, epoch: legacy.payload.epoch + 1 };
+    const nextPayloadBytes = Buffer.from(canonicalJSONStringify(nextPayload));
+    const nextRegistry = Buffer.from(`${JSON.stringify({
+      algorithm: 'es256',
+      payload: nextPayload,
+      signature: sign('sha256', nextPayloadBytes, f.keys.privateKey).toString('base64'),
+    })}\n`);
+    const nextAnchor = Buffer.from(`${canonicalJSONStringify(
+      bindingRegistryAnchor(nextRegistry, nextPayload.epoch),
+    )}\n`);
+    const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+    const journal = {
+      schema: 'pulse.presence_bootstrap_migration.v1',
+      old: {
+        anchor_sha256: digest(legacy.anchorBytes),
+        epoch: legacy.payload.epoch,
+        public_key_sha256: digest(oldPublicKey),
+        registry_sha256: digest(legacy.registryBytes),
+      },
+      new: {
+        anchor_sha256: digest(nextAnchor),
+        epoch: nextPayload.epoch,
+        public_key_sha256: digest(Buffer.from(f.keys.publicKey)),
+        registry_sha256: digest(nextRegistry),
+      },
+    };
+    const keyBackup = `${f.paths.publicKeyPath}.bootstrap-${journal.old.public_key_sha256.slice(0, 16)}`;
+    const anchorBackup = `${f.paths.anchorPath}.bootstrap-${journal.old.anchor_sha256.slice(0, 16)}`;
+    const registryBackup = `${f.paths.registryPath}.bootstrap-${journal.old.registry_sha256.slice(0, 16)}`;
+    copyFileSync(f.paths.publicKeyPath, keyBackup);
+    chmodSync(keyBackup, 0o644);
+    copyFileSync(f.paths.anchorPath, anchorBackup);
+    chmodSync(anchorBackup, 0o644);
+    copyFileSync(f.paths.registryPath, registryBackup);
+    chmodSync(registryBackup, 0o600);
+    writeFileSync(
+      f.paths.migrationJournalPath,
+      `${canonicalJSONStringify(journal)}\n`,
+      { mode: 0o600 },
+    );
+    f.seedPublicKey(f.keys.publicKey);
+
+    const result = await installPresenceTrust({
+      ...f.options, confirmation: INSTALL_CONFIRMATION,
+    });
+    assert.equal(result.migrated_bootstrap, true);
+    assert.equal(result.status.ready, true);
+    assert.equal(existsSync(f.paths.migrationJournalPath), false);
+    assert.equal(existsSync(keyBackup), false);
+    assert.equal(existsSync(anchorBackup), false);
+    assert.equal(existsSync(registryBackup), false);
+    assert.equal(JSON.parse(readFileSync(f.paths.registryPath, 'utf8')).algorithm, 'es256');
+  } finally { f.cleanup(); }
+});
+
+for (const phase of ['public_key_replaced', 'anchor_replaced', 'registry_replaced']) {
+  test(`bootstrap migration restores the exact legacy authority when ${phase} fails`, async () => {
+    const f = fixture();
+    try {
+      f.seedHelper(f.paths.vendoredHelperPath);
+      const legacy = f.seedLegacyBootstrap();
+      const legacyPublicKey = readFileSync(f.paths.publicKeyPath);
+      await assert.rejects(
+        installPresenceTrust({
+          ...f.options,
+          confirmation: INSTALL_CONFIRMATION,
+          onMigrationPhase: (current) => {
+            if (current === phase) throw new Error(`simulated_${phase}`);
+          },
+        }),
+        new RegExp(`simulated_${phase}`),
+      );
+      assert.equal(existsSync(f.paths.helperPath), false);
+      assert.equal(existsSync(f.paths.migrationJournalPath), false);
+      assert.deepEqual(readFileSync(f.paths.publicKeyPath), legacyPublicKey);
+      assert.deepEqual(readFileSync(f.paths.anchorPath), legacy.anchorBytes);
+      assert.deepEqual(readFileSync(f.paths.registryPath), legacy.registryBytes);
+      const status = inspectPresenceTrust(f.options);
+      assert.equal(status.public_key.bootstrap_legacy, true);
+      assert.ok(status.issues.includes('bootstrap_migration_required'));
+    } finally { f.cleanup(); }
+  });
+}
 
 test('fresh install removes the new helper when public-key installation fails', async () => {
   const f = fixture();

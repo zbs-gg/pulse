@@ -244,12 +244,32 @@ func (s *Server) handleTurnFinalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := s.cfg.Store.FinalizeTurn(req, time.Now().UTC(), s.cfg.TrayGracePeriod)
+	var authority *productBindingAuthority
+	var result store.TurnFinalizeResult
+	var err error
+	if s.cfg.ProductBindingVerifier != nil {
+		verified, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if req.BindingDigest != verified.BindingDigest || req.PolicyEpoch != 0 ||
+			req.ResolverEpoch != verified.ResolverEpoch {
+			http.Error(w, "product binding authority mismatch", http.StatusForbidden)
+			return
+		}
+		authority = &verified
+		result, err = s.cfg.Store.FinalizeTurnForVerifiedBinding(
+			req, time.Now().UTC(), s.cfg.TrayGracePeriod,
+			verified.BindingDigest, verified.RepositoryID, verified.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.FinalizeTurn(req, time.Now().UTC(), s.cfg.TrayGracePeriod)
+	}
 	if err != nil {
 		writeMemoryTrayError(w, err)
 		return
 	}
-	result = s.commitTurnResultNow(result)
+	result = s.commitTurnResultNowForAuthority(result, authority)
 	writeJSON(w, result)
 }
 
@@ -259,7 +279,25 @@ func (s *Server) handleTurnNoChange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := s.cfg.Store.FinalizeTurnNoChange(req, time.Now().UTC())
+	var result store.TurnFinalizeResult
+	var err error
+	if s.cfg.ProductBindingVerifier != nil {
+		verified, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if req.BindingDigest != verified.BindingDigest || req.PolicyEpoch != 0 ||
+			req.ResolverEpoch != verified.ResolverEpoch {
+			http.Error(w, "product binding authority mismatch", http.StatusForbidden)
+			return
+		}
+		result, err = s.cfg.Store.FinalizeTurnNoChangeForVerifiedBinding(
+			req, time.Now().UTC(), verified.BindingDigest,
+			verified.RepositoryID, verified.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.FinalizeTurnNoChange(req, time.Now().UTC())
+	}
 	if err != nil {
 		writeMemoryTrayError(w, err)
 		return
@@ -403,26 +441,49 @@ func writeMemoryTrayError(w http.ResponseWriter, err error) {
 // the tool response. A pending candidate remains a durable crash-recovery
 // record, but it is not a user review state.
 func (s *Server) commitTurnResultNow(result store.TurnFinalizeResult) store.TurnFinalizeResult {
+	return s.commitTurnResultNowForAuthority(result, nil)
+}
+
+func (s *Server) commitTurnResultNowForAuthority(
+	result store.TurnFinalizeResult,
+	authority *productBindingAuthority,
+) store.TurnFinalizeResult {
 	for index, receipt := range result.Receipts {
-		result.Receipts[index] = s.commitReceiptNow(receipt)
+		result.Receipts[index] = s.commitReceiptNowForAuthority(receipt, authority)
 	}
 	return result
 }
 
 func (s *Server) commitReceiptNow(receipt store.MemoryWriteReceipt) store.MemoryWriteReceipt {
+	return s.commitReceiptNowForAuthority(receipt, nil)
+}
+
+func (s *Server) commitReceiptNowForAuthority(
+	receipt store.MemoryWriteReceipt,
+	authority *productBindingAuthority,
+) store.MemoryWriteReceipt {
 	if receipt.Status != store.MemoryWritePending {
 		return receipt
 	}
-	committed, err := s.cfg.Store.CommitMemoryTrayCandidate(
-		receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
-	)
+	var committed store.MemoryWriteReceipt
+	var err error
+	if authority != nil {
+		committed, err = s.cfg.Store.CommitMemoryTrayCandidateForVerifiedBinding(
+			receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		committed, err = s.cfg.Store.CommitMemoryTrayCandidate(
+			receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
+		)
+	}
 	if err == nil {
 		s.refreshProductRetrieval(committed)
 		return committed
 	}
 	// The candidate itself is already durable. Retry transient materialization
 	// in the background and return the honest pending receipt on failure.
-	if !errors.Is(err, store.ErrMemoryTrayVersionConflict) &&
+	if authority == nil && !errors.Is(err, store.ErrMemoryTrayVersionConflict) &&
 		!errors.Is(err, store.ErrMemoryTrayTerminal) {
 		s.scheduleReceipt(receipt, 0)
 	}

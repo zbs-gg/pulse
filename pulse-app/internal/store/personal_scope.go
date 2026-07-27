@@ -92,6 +92,14 @@ func (s *Store) currentPersonalMemoryScope(bindingDigest string) personalMemoryS
 	}
 }
 
+func personalMemoryScopeForRepository(repositoryID string) personalMemoryScope {
+	return personalMemoryScope{
+		ProjectNamespaceID: stableProjectNamespace(repositoryID),
+		OriginalRepository: repositoryID,
+		Scope:              MemoryScopeProject,
+	}
+}
+
 func backfillPersonalScopeForBindingTx(
 	tx *sql.Tx,
 	bindingDigest string,
@@ -160,4 +168,28 @@ func (s *Store) CurrentPersonalMemoryScopeSnapshot() (PersonalMemoryScopeSnapsho
 		ProjectNamespaceID:  scope.ProjectNamespaceID,
 		EligibilityRevision: revision,
 	}, true, nil
+}
+
+// PersonalMemoryScopeSnapshotForBinding creates a read boundary only after the
+// server has verified the exact signed workspace binding for this request. It
+// deliberately derives the project namespace from the verified repository ID;
+// callers never provide a namespace ID.
+func (s *Store) PersonalMemoryScopeSnapshotForBinding(
+	bindingDigest, repositoryID string,
+) (PersonalMemoryScopeSnapshot, error) {
+	if s == nil || !s.productTrayRequired() ||
+		!trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) {
+		return PersonalMemoryScopeSnapshot{}, ErrContinuityDeliveryAuthority
+	}
+	var revision int64
+	if err := s.db.QueryRow(`
+		SELECT eligibility_revision
+		  FROM personal_memory_scope_state
+		 WHERE singleton=1`).Scan(&revision); err != nil {
+		return PersonalMemoryScopeSnapshot{}, err
+	}
+	return PersonalMemoryScopeSnapshot{
+		BindingDigest: bindingDigest, RepositoryID: repositoryID,
+		ProjectNamespaceID: stableProjectNamespace(repositoryID), EligibilityRevision: revision,
+	}, nil
 }

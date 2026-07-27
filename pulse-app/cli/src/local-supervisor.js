@@ -401,9 +401,13 @@ function processProof(pid, platformServices) {
 }
 
 function receiptMetadataMatches(runtime, receipt, platformServices) {
+	const principalDaemon = runtime?.kind === 'personal' && receipt?.kind === 'personal';
   if (!receipt || receipt.schema !== 'pulse.local-vault-process.v1' ||
-		receipt.binding_digest !== runtime.binding_digest ||
-		(receipt.repository_id !== undefined && receipt.repository_id !== runtime.repository_id) ||
+		!/^[a-f0-9]{64}$/.test(receipt.binding_digest ?? '') ||
+		(!principalDaemon && receipt.binding_digest !== runtime.binding_digest) ||
+		(receipt.repository_id !== undefined &&
+			(typeof receipt.repository_id !== 'string' || !receipt.repository_id.startsWith('repository_') ||
+				(!principalDaemon && receipt.repository_id !== runtime.repository_id))) ||
 			receipt.kind !== runtime.kind ||
       receipt.store_id !== runtime.store_id || receipt.data_dir !== runtime.data_dir ||
       !Number.isSafeInteger(receipt.pid) || receipt.pid <= 1 || typeof receipt.executable !== 'string' ||

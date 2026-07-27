@@ -26,3 +26,20 @@ The workflow is intentionally unusable until a separate protected
 `Production candidate` run has produced signed/notarized native artifacts and
 the exact content-free candidate receipt. PR fixtures have
 `production:false` and can never cross this boundary.
+
+## Production candidate boundary
+
+`.github/workflows/production-candidate.yml` is manual and main-only. It binds
+one exact successful `Universal` push run, requires the typed confirmation
+`build universal production candidate`, and uses the repository's exact native
+matrix instead of a caller-selected platform list. Separate protected jobs
+build macOS arm64/x64, Linux arm64/x64 GNU, and Windows arm64/x64. Apple and
+Windows credentials are scoped to their own environments; the root/channel
+catalog keys are scoped to `production-catalog`.
+
+The final job verifies all six content-free native proofs, the 14-artifact
+catalog receipt, and the signed manifest embedded in the npm tarball. It emits
+`pulse-production-release-catalog` and `pulse-npm-production-candidate` GitHub
+artifacts with short retention. It never uploads those assets to the release
+origin and never invokes npm publishing or staging. Those remain distinct
+reviewed actions.

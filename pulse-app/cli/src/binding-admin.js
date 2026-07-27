@@ -77,6 +77,51 @@ function selectLocalPort(requested, bindings, workspaceID) {
   fail('port_exhausted');
 }
 
+function exactPersonalTopology(personal, home) {
+  if (!personal || typeof personal !== 'object' || Array.isArray(personal)) {
+    fail('personal_store_invalid');
+  }
+  const storeID = exactID(personal.store_id, 'personal_store_invalid');
+  const expected = {
+    store_id: storeID,
+    data_dir: join(home, '.pulse', 'vaults', 'personal', storeID),
+    base_url: personal.base_url,
+    credential_ref: `keychain:pulse/local/${storeID}`,
+    cache_dir: join(home, '.pulse', 'caches', 'personal', storeID),
+  };
+  let port;
+  try {
+    const endpoint = new URL(personal.base_url);
+    port = Number.parseInt(endpoint.port, 10);
+    if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' ||
+        endpoint.pathname !== '/' || endpoint.search || endpoint.hash ||
+        !Number.isInteger(port) || port < 1024 || port > 65535) {
+      fail('personal_store_invalid');
+    }
+  } catch (error) {
+    if (error?.code === 'binding_admin_personal_store_invalid') throw error;
+    fail('personal_store_invalid');
+  }
+  if (personal.data_dir !== expected.data_dir ||
+      personal.credential_ref !== expected.credential_ref ||
+      personal.cache_dir !== expected.cache_dir) {
+    fail('personal_store_invalid');
+  }
+  return { personal: Object.freeze({ ...expected }), port };
+}
+
+function reusablePersonalTopology(bindings, principalID, home) {
+  const candidates = bindings.filter((binding) =>
+    binding?.mode === 'personal' && binding?.principal_ref === principalID);
+  if (candidates.length === 0) return undefined;
+  const topologies = candidates.map((binding) => exactPersonalTopology(binding.personal, home));
+  const canonical = canonicalJSONStringify(topologies[0].personal);
+  if (topologies.some((topology) => canonicalJSONStringify(topology.personal) !== canonical)) {
+    fail('personal_store_fragmented');
+  }
+  return topologies[0];
+}
+
 function exactCommonsResource(value) {
   let url;
   try { url = new URL(value); } catch { fail('commons_resource_invalid'); }
@@ -390,7 +435,7 @@ async function withRegistryLock(registryPath, action, {
 
 function nextBinding({
   mode, workspace, epoch, home, port, principalID, teamID, commonsStoreID,
-  commonsProjectID, commonsResource,
+  commonsProjectID, commonsResource, personalTopology,
 }) {
   const suffix = randomBytes(10).toString('hex');
   const base = {
@@ -402,6 +447,9 @@ function nextBinding({
     principal_ref: principalID,
   };
   if (mode === 'personal') {
+    if (personalTopology) {
+      return { ...base, personal: { ...personalTopology } };
+    }
     const storeID = `store_personal_${suffix}`;
     return {
       ...base,
@@ -519,10 +567,18 @@ export async function createWorkspaceBinding({
       fail('desk_binding_conflict');
     }
     const epoch = previous.epoch + 1;
-    const selectedPort = selectLocalPort(port, previous.bindings, workspace.workspace_id);
+    const reusablePersonal = mode === 'personal'
+      ? reusablePersonalTopology(previous.bindings, principalID, resolve(home))
+      : undefined;
+    if (reusablePersonal && port !== undefined && port !== reusablePersonal.port) {
+      fail('personal_store_port_mismatch');
+    }
+    const selectedPort = reusablePersonal?.port ??
+      selectLocalPort(port, previous.bindings, workspace.workspace_id);
     const replacement = nextBinding({
       mode, workspace, epoch, home: resolve(home), port: selectedPort, principalID,
       teamID, commonsStoreID, commonsProjectID, commonsResource,
+      personalTopology: reusablePersonal?.personal,
     });
     const bindings = previous.bindings
       .filter((binding) => binding?.workspace?.workspace_id !== workspace.workspace_id);

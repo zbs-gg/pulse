@@ -1,9 +1,8 @@
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +11,7 @@ import {
   pinnedReleaseKeyring,
   verifyReleaseManifestEnvelope,
 } from '../src/release-manifest.js';
+import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from '../src/desktop-target.js';
 import { publicMcpPackageManifest } from './public-package-audit.mjs';
 import {
   EXPECTED_HELPER_CAPABILITIES,
@@ -28,7 +28,6 @@ const vendorRoot = join(cliRoot, 'vendor', 'pulse-preview-source');
 const expectedHelperIdentifier = 'gg.zbs.pulse.presence-helper';
 const expectedHelperTeamID = '44N4NZ86S5';
 const nativeHelper = join(appRoot, 'native', 'pulse-presence-helper', 'dist', expectedHelperIdentifier);
-const nativeHelperCarrier = `${nativeHelper}.dmg`;
 const vendorHelperRoot = join(cliRoot, 'vendor', 'pulse-presence-helper');
 const defaultReleaseManifest = join(cliRoot, 'release', 'personal-preview-manifest.json');
 const productionPackaging = process.env.npm_lifecycle_event === 'prepublishOnly' ||
@@ -133,15 +132,13 @@ if (process.platform === 'darwin') {
   const shippedArchitectures = new Set(architectures.stdout.trim().split(/\s+/).filter(Boolean));
   const minimumVersions = [...buildVersion.stdout.matchAll(/\bminos ([0-9.]+)/g)].map((match) => match[1]);
   const macOSPlatforms = [...buildVersion.stdout.matchAll(/\bplatform MACOS\b/g)];
-  const architectureSetValid = productionPackaging
-    ? shippedArchitectures.size === 1 && shippedArchitectures.has('arm64')
-    : shippedArchitectures.has('arm64') &&
-      [...shippedArchitectures].every((architecture) => architecture === 'arm64' || architecture === 'x86_64');
+  const architectureSetValid = shippedArchitectures.has('arm64') &&
+    [...shippedArchitectures].every((architecture) => architecture === 'arm64' || architecture === 'x86_64');
   if (architectures.status !== 0 || !architectureSetValid ||
       buildVersion.status !== 0 || macOSPlatforms.length !== shippedArchitectures.size ||
       minimumVersions.length !== shippedArchitectures.size ||
       minimumVersions.some((version) => version !== '13.0')) {
-    throw new Error('Pulse presence helper must include Apple Silicon and target macOS 13.0; production release must be arm64-only');
+    throw new Error('optional macOS presence helper must include Apple Silicon and target macOS 13.0');
   }
   const assessment = spawnSync('/usr/bin/codesign', [
     '-vvvv', '-R=notarized', '--check-notarization', nativeHelper,
@@ -180,48 +177,31 @@ if (productionPackaging) {
   if (macOS.status !== 0 || !/^\d+\.\d+(?:\.\d+)?\n?$/.test(macOS.stdout)) {
     throw new Error('refusing production packaging: cannot determine the macOS compatibility version');
   }
-  const verified = verifyReleaseManifestEnvelope(envelope, {
-    architecture: 'arm64',
-    minimumAcceptedEpoch: envelope?.payload?.release?.epoch,
-    now: new Date(),
-    osVersion: macOS.stdout.trim(),
-    packageVersion: packageJSON.version,
-    platform: 'darwin',
-    trustedKeys: pinnedReleaseKeyring(releaseRootPath),
-  });
-  const helperArtifact = verified.artifacts['presence-helper'];
-  if (!existsSync(nativeHelperCarrier)) {
-    throw new Error('refusing production packaging: stapled presence-helper DMG is missing');
-  }
-  execFileSync('/usr/bin/xcrun', ['stapler', 'validate', nativeHelperCarrier], { stdio: 'inherit' });
-  execFileSync('/usr/sbin/spctl', [
-    '-a', '-t', 'open', '--context', 'context:primary-signature', '-vv', nativeHelperCarrier,
-  ], { stdio: 'inherit' });
-  const carrierDigest = createHash('sha256').update(readFileSync(nativeHelperCarrier)).digest('hex');
-  if (helperArtifact.format !== 'dmg' || helperArtifact.bytes !== statSync(nativeHelperCarrier).size || helperArtifact.sha256 !== carrierDigest ||
-      helperArtifact.signing.identifier !== expectedHelperIdentifier ||
-      helperArtifact.signing.team_id !== expectedHelperTeamID) {
-    throw new Error('refusing production packaging: presence helper does not match the signed release manifest');
-  }
-  const verificationRoot = mkdtempSync(join(tmpdir(), 'pulse-package-carrier-'));
-  const mountPoint = join(verificationRoot, 'mount');
-  mkdirSync(mountPoint, { mode: 0o700 });
-  let attached = false;
-  try {
-    execFileSync('/usr/bin/hdiutil', [
-      'attach', '-readonly', '-nobrowse', '-mountpoint', mountPoint, nativeHelperCarrier,
-    ], { stdio: 'inherit' });
-    attached = true;
-    const carrierHelper = join(mountPoint, 'bin', expectedHelperIdentifier);
-    execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', carrierHelper], { stdio: 'inherit' });
-    const innerDigest = createHash('sha256').update(readFileSync(carrierHelper)).digest('hex');
-    const sourceDigest = createHash('sha256').update(readFileSync(nativeHelper)).digest('hex');
-    if (innerDigest !== sourceDigest || !verifyHelperProtocol(carrierHelper)) {
-      throw new Error('refusing production packaging: presence-helper DMG inner binary is incompatible');
+  const now = new Date();
+  const trustedKeys = pinnedReleaseKeyring(releaseRootPath);
+  const verifiedTargets = DESKTOP_TARGET_IDS.map((targetID) => {
+    const target = desktopTargetDefinition(targetID);
+    const verified = verifyReleaseManifestEnvelope(envelope, {
+      architecture: target.architecture,
+      libc: target.libc,
+      minimumAcceptedEpoch: envelope?.payload?.release?.epoch,
+      now,
+      osVersion: target.platform === 'darwin' ? macOS.stdout.trim() : '0.0',
+      packageVersion: packageJSON.version,
+      platform: target.platform,
+      trustedKeys,
+    });
+    if (verified.target_id !== targetID ||
+        Object.values(verified.artifacts).some((artifact) => artifact.format !== 'tar.gz')) {
+      throw new Error(`refusing production packaging: universal target verification failed for ${targetID}`);
     }
-  } finally {
-    if (attached) execFileSync('/usr/bin/hdiutil', ['detach', mountPoint], { stdio: 'inherit' });
-    rmSync(verificationRoot, { recursive: true, force: true });
+    return verified;
+  });
+  if (new Set(verifiedTargets.map((release) => release.manifest_digest)).size !== 1) {
+    throw new Error('refusing production packaging: universal catalog digest mismatch');
+  }
+  if (!verifyHelperProtocol(nativeHelper)) {
+    throw new Error('refusing production packaging: optional macOS presence helper protocol is incompatible');
   }
 }
 rmSync(vendorHelperRoot, { recursive: true, force: true });

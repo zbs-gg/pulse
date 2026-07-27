@@ -97,6 +97,10 @@ type Config struct {
 	// HomeBindingVerifier re-reads the signed workspace authority before every
 	// Home render or mutation so a stale daemon/session cannot survive revoke.
 	HomeBindingVerifier HomeBindingVerifier
+	// ProductBindingVerifier resolves the current signed project boundary for
+	// each Personal daemon request. It lets one principal daemon serve several
+	// project namespaces without trusting caller-selected namespace IDs.
+	ProductBindingVerifier ProductBindingVerifier
 	// ConsolidationReports overrides the daemon-owned report lifecycle manager.
 	// When nil, Personal and Desk stores with an exact product boundary receive
 	// a private manager next to their vault automatically.
@@ -416,7 +420,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Key, Authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Key, Authorization, X-Pulse-Product-Workspace, X-Pulse-Product-Binding, X-Pulse-Product-Repository, X-Pulse-Product-Resolver-Epoch")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}

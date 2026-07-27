@@ -100,6 +100,7 @@
     "build:portable-model": "node scripts/build-portable-model.mjs",
     "build:product-hook-bundle": "node scripts/build-product-hook-bundle.mjs",
     "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
+    "build:npm-production-candidate": "node scripts/build-npm-production-candidate.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
     "build:personal-catalog": "node scripts/build-personal-catalog.mjs",
     "build:plugin-runtime": "node scripts/build-plugin-runtime.mjs",

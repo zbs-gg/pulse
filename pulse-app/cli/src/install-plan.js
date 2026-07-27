@@ -78,6 +78,7 @@ const RELEASE_REASON_CODES = new Set([
   'release_test_asset_url_invalid',
   'release_test_materializer_forbidden',
   'release_test_materializer_spec_invalid',
+  'release_target_catalog_incomplete',
   'release_target_unavailable',
   'trusted_keys_invalid',
   'verification_time_invalid',

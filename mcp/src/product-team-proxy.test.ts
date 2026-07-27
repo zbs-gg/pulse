@@ -14,7 +14,7 @@ test('installed Team MCP keeps Desk tools and proxies only read-only Commons too
   const workspace = process.cwd();
   writeFileSync(authorityPath, `
     export function resolveProductWorkspaceBinding() {
-      return { binding_digest: '${'a'.repeat(64)}', resolver_epoch: 7, workspace: { canonical_path: ${JSON.stringify(workspace)} } };
+      return { binding_digest: '${'a'.repeat(64)}', resolver_epoch: 7, workspace: { canonical_path: ${JSON.stringify(workspace)}, repository_id: 'repository_test' } };
     }
     export async function callBoundTeamTool(_resolved, host, name, input) {
       if (input?.test_error === 'valid' || input?.test_error === 'invalid_contract') {
@@ -45,7 +45,7 @@ test('installed Team MCP keeps Desk tools and proxies only read-only Commons too
   `, { mode: 0o600 });
   const keys = [
     'PULSE_HOST_ADAPTER', 'PULSE_PRODUCT_BINDING_MODE', 'PULSE_BINDING_DIGEST',
-    'PULSE_RESOLVER_EPOCH', 'PULSE_HOST_WORKSPACE', 'PULSE_HOST_AUTHORITY_MODULE',
+    'PULSE_RESOLVER_EPOCH', 'PULSE_REPOSITORY_ID', 'PULSE_HOST_WORKSPACE', 'PULSE_HOST_AUTHORITY_MODULE',
     'PULSE_HOST_RUNTIME_MODULE', 'PULSE_RUNTIME_MODE', 'PULSE_MCP_MODE', 'PULSE_DATA_DIR',
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -54,6 +54,7 @@ test('installed Team MCP keeps Desk tools and proxies only read-only Commons too
     PULSE_PRODUCT_BINDING_MODE: 'team',
     PULSE_BINDING_DIGEST: 'a'.repeat(64),
     PULSE_RESOLVER_EPOCH: '7',
+    PULSE_REPOSITORY_ID: 'repository_test',
     PULSE_HOST_WORKSPACE: workspace,
     PULSE_HOST_AUTHORITY_MODULE: pathToFileURL(authorityPath).href,
     PULSE_HOST_RUNTIME_MODULE: pathToFileURL(authorityPath).href,

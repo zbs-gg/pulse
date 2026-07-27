@@ -17,6 +17,16 @@ test('required universal matrix has six exact native targets with no allowed fai
     'darwin-arm64', 'darwin-x64', 'linux-arm64-gnu',
     'linux-x64-gnu', 'win32-arm64', 'win32-x64',
   ]);
+  assert.deepEqual(githubNativeUniversalMatrix(matrix, 'darwin').include.map((target) => target.target_id), [
+    'darwin-arm64', 'darwin-x64',
+  ]);
+  assert.deepEqual(githubNativeUniversalMatrix(matrix, 'linux').include.map((target) => target.target_id), [
+    'linux-arm64-gnu', 'linux-x64-gnu',
+  ]);
+  assert.deepEqual(githubNativeUniversalMatrix(matrix, 'win32').include.map((target) => target.target_id), [
+    'win32-arm64', 'win32-x64',
+  ]);
+  assert.throws(() => githubNativeUniversalMatrix(matrix, 'freebsd'), /platform is unsupported/);
 });
 
 test('native runner identity rejects musl and maps every supported OS family exactly', () => {

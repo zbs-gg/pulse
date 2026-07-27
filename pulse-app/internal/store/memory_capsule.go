@@ -1162,6 +1162,9 @@ func validateMemoryCapsule(capsule MemoryCapsule) error {
 		if looksSensitiveOrPathLike(summary) {
 			return fmt.Errorf("items[%d].redacted_summary contains secret/path-like text", i)
 		}
+		if looksLikeEphemeralControl(summary) {
+			return fmt.Errorf("items[%d].redacted_summary looks like ephemeral evaluation control", i)
+		}
 		if item.Confidence < 0 || item.Confidence > 1 {
 			return fmt.Errorf("items[%d].confidence must be 0..1", i)
 		}
@@ -1264,6 +1267,13 @@ func looksLikeTranscript(text string) bool {
 		strings.Count(lower, "user:") >= 3 ||
 		strings.Count(lower, "assistant:") >= 3 ||
 		strings.Count(lower, "\n") > 30
+}
+
+func looksLikeEphemeralControl(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "no_auto_context") ||
+		((strings.Contains(lower, "answer with") || strings.Contains(lower, "return")) &&
+			strings.Contains(lower, "exact injected marker"))
 }
 
 func looksSensitiveOrPathLike(text string) bool {

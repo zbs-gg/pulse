@@ -136,6 +136,7 @@ import {
 	boundPulseRequest,
 	ensureActivatedVaultRuntime,
 	inspectProductWorkspaceBinding,
+	productBindingRequestHeaders,
 	readProductActivation,
 	readProductActivationBundle,
 } from './codex-runtime.js';
@@ -1368,6 +1369,7 @@ async function runProductMcpServer(host) {
   process.env.PULSE_MCP_MODE = 'daemon';
   process.env.PULSE_HOST_ADAPTER = host;
   process.env.PULSE_BINDING_DIGEST = resolved.binding.binding_digest;
+  process.env.PULSE_REPOSITORY_ID = resolved.binding.workspace.repository_id;
   process.env.PULSE_RESOLVER_EPOCH = String(resolved.binding.resolver_epoch);
   process.env.PULSE_HOST_WORKSPACE = resolved.binding.workspace.canonical_path;
   process.env.PULSE_PRODUCT_BINDING_MODE = resolved.binding.mode;
@@ -7411,7 +7413,7 @@ async function readBoundedHomeResponse(response) {
 	return Buffer.concat(chunks, total).toString('utf8');
 }
 
-async function requestHomeSession(baseURL, secret, liveReadiness) {
+async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 	requireLoopbackPulseIPC(baseURL);
 	const timeoutMs = boundedHomeTimeout(
 		'PULSE_HOME_REQUEST_TIMEOUT_MS', HOME_REQUEST_TIMEOUT_MS, HOME_REQUEST_TIMEOUT_MAX_MS,
@@ -7429,6 +7431,7 @@ async function requestHomeSession(baseURL, secret, liveReadiness) {
 			method: 'POST',
 			headers: {
 				...buildPulseRequestHeaders(baseURL, { ipcSecret: secret }),
+				...(product ? productBindingRequestHeaders(product) : {}),
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify({ live_readiness: liveReadiness }),
@@ -7624,7 +7627,7 @@ async function runHome(rest) {
 	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
 	const doctor = await homeDoctorReport(product, explicitHost);
-	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness);
+	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness, product);
 	const relay = await startHomeBrowserRelay(session);
 	const interrupt = () => relay.close();
 	process.once('SIGINT', interrupt);

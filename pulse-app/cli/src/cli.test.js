@@ -615,7 +615,10 @@ test('doctor --json reports machine-readable missing setup without a stack trace
 });
 
 test('doctor cursor --json reports the native Cursor product contract', () => {
-  const { result } = run(['doctor', 'cursor', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'cursor', '--json'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
@@ -646,7 +649,10 @@ test('doctor cursor --json reports the native Cursor product contract', () => {
 });
 
 test('doctor presents native presence as optional and scoped only to protected actions', () => {
-  const { result } = run(['doctor', 'claude-code'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'claude-code'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /Authority profile: pulse\.personal_authority_profile\.v1/);
@@ -657,7 +663,10 @@ test('doctor presents native presence as optional and scoped only to protected a
 });
 
 test('Codex doctor exposes the same portable authority profile without making presence a readiness failure', () => {
-  const { result } = run(['doctor', 'codex', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'codex', '--json'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);

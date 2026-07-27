@@ -597,26 +597,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
       prompt: 'must not be stored',
     }),
   });
-  assert.equal(JSON.parse(prompt.stdout).continue, true);
-
-  const preFinalizeStop = run(process.execPath, [hook, 'Stop'], {
-    cwd: workspace,
-    env: hookEnv,
-    input: JSON.stringify({
-      session_id: sessionID,
-      turn_id: 'turn-codex-e2e',
-      transcript_path: join(root, 'must-not-be-read.jsonl'),
-      cwd: workspace,
-      hook_event_name: 'Stop',
-      model: 'gpt-5',
-      permission_mode: 'default',
-      stop_hook_active: false,
-      last_assistant_message: 'must not be stored',
-    }),
-  });
-  const preFinalizeOutput = JSON.parse(preFinalizeStop.stdout);
-  assert.equal(preFinalizeOutput.decision, 'block');
-  assert.match(preFinalizeOutput.reason, /bounded Pulse finalization pass/);
+  const promptOutput = JSON.parse(prompt.stdout);
+  assert.equal(promptOutput.continue, true);
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /before the single final user-facing response/);
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /ASCII safe slug/);
 
   const memoryArguments = {
     schema: 'pulse.memory_capsule.v1',
@@ -726,8 +710,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
     }),
   });
   const postToolOutput = JSON.parse(postTool.stdout);
-  assert.match(postToolOutput.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
-	  assert.match(postToolOutput.systemMessage, /:created/);
+  assert.deepEqual(postToolOutput, {});
 
   const stop = run(process.execPath, [hook, 'Stop'], {
     cwd: workspace,

@@ -15,7 +15,7 @@ about. Local-first, state-aware memory for any AI agent.
 
 ## Host-neutral Personal quickstart (pending signed preview publication)
 
-This branch prepares the Claude Code + Cursor + Codex installer. The command
+This repository prepares the Claude Code + Cursor + Codex installer. The command
 below is a current-support path only after `npm view @zbs-gg/pulse dist-tags
 --json` points `preview` at a release whose `install-plan --json` reports
 `pulse.personal_install_plan.v2` and all three `supported_hosts`. Until then,
@@ -38,6 +38,27 @@ exact native and production evidence is green in the
 [support ledger](docs/release/NATIVE_SUPPORT_LEDGER.md). On unsupported hosts,
 [Safe Mode](#safe-mode--fallback-not-the-product) remains a separately labeled
 compatibility fallback, **not** the engine.
+
+## Current evidence and release status
+
+Personal Pulse is usable for development dogfood on a verified local
+activation. A real Codex lifecycle has written a bounded structured memory,
+shown it in Memory Home, moved it between a project and Personal Global,
+recalled it automatically in fresh tasks only where allowed, and stopped
+recalling it after deletion. The same local vault now keeps project memory and
+Personal Global separate while Memory Home can inspect and manage both.
+
+That is real single-machine product evidence, not a public release claim.
+Packed Claude Code, Cursor, and Codex tests and the six-target native matrix
+cover macOS, Windows, and GNU/Linux on arm64 and x64, but **Gold / production
+release is still blocked** until protected workflows produce and verify the
+signed/notarized artifacts for all six targets and the exact npm candidate is
+separately staged and published. A DMG proves only a macOS carrier and can
+never satisfy the universal release gate by itself.
+
+Memory Home currently labels token evidence as estimated or collecting a
+baseline unless a comparable measured baseline exists. The repository does
+not claim measured token savings from the dogfood run.
 
 ![What the next agent session receives — the Pulse continuity pack](docs/assets/continuity-pack.png)
 
@@ -105,9 +126,10 @@ retrieves the right remembered episode for *this* moment — not just the
 closest text match — shows **why** that memory surfaced, shows what it will
 tell your next agent, and wipes on one command.
 
-Status: developer preview. Host-neutral Claude Code, Cursor, and Codex support
-is pending the matching signed preview publication. Not production,
-not a consumer app yet.
+Status: developer preview. Real Codex Personal dogfood is working on one
+verified local activation. Host-neutral Claude Code, Cursor, and Codex support
+is pending the matching signed preview publication. Not production and not a
+consumer app yet.
 
 If you are an agent asked to evaluate or install Pulse: read
 [`AGENTS.md`](AGENTS.md) and [`llms.txt`](llms.txt). They are written for you.
@@ -203,7 +225,7 @@ Then: `pulse demo --clean` removes the whole demo store.
 
 | Mode | What you get | Needs |
 |---|---|---|
-| Personal Pulse | managed local state-aware retrieval, visible writes, Memory Home, fresh-task continuity | Apple Silicon, Node 20+, Git project, and Claude Code, Cursor, or Codex |
+| Personal Pulse | managed local state-aware retrieval, visible writes, Memory Home, fresh-task continuity | A matching published signed release for the current OS/architecture, Node 20+, a Git project, and Claude Code, Cursor, or Codex. Universal publication is still pending. |
 | Claude Code Local Preview | older source-built preview path | Node 20+, Go toolchain, Claude Code CLI, configured embedder |
 | Safe Mode (fallback) | structured local memory, inspect/wipe, keyword recall | Node 20+, nothing else |
 

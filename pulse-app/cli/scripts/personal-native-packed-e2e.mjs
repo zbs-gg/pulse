@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url';
 
 import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
 import { projectPersonalLiveReadiness } from '../src/personal-live-readiness.js';
+import { productBindingRequestHeaders } from '../src/codex-runtime.js';
 import { exactTarballPulseInvocation } from '../src/release-attestation.js';
+import { resolveWorkspaceBinding } from '../src/workspace-binding.js';
 import { loadBundledWindowsAdapter } from '../src/windows-bootstrap-adapter.js';
 import { releaseTargetDefinition } from './release-builder-core.mjs';
 import { writeProductEdgeFixture } from './product-release-fixture.mjs';
@@ -286,13 +288,16 @@ async function productJSON(runtime, secret, path, { method = 'GET', body } = {})
   return response.json();
 }
 
-function installedRuntime(registryPath, workspace) {
+function installedRuntime(registryPath, workspace, { publicKeyPath, anchorPath }) {
   const envelope = json(readFileSync(registryPath, 'utf8'), 'native packed binding registry is invalid');
   const bindings = envelope?.payload?.bindings;
   assert.equal(Array.isArray(bindings), true);
   assert.equal(bindings.length, 1, `isolated native packed fixture must have one binding for ${workspace}`);
-  const [binding] = bindings;
-  assert.equal(binding.mode, 'personal');
+  const [storedBinding] = bindings;
+  assert.equal(storedBinding.mode, 'personal');
+  const binding = resolveWorkspaceBinding({
+    cwd: workspace, registryPath, publicKeyPath, anchorPath, rootAnchor: false,
+  });
   assert.equal(binding.personal?.base_url.startsWith('http://127.0.0.1:'), true);
   assert.equal(realpathSync(binding.personal.data_dir), binding.personal.data_dir);
   return { binding, runtime: binding.personal };
@@ -404,7 +409,7 @@ async function waitForPackedConsolidationReport(tarball, report, options) {
   return current;
 }
 
-async function readMemoryHomePage(runtime, secret) {
+async function readMemoryHomePage(runtime, secret, binding) {
   const checks = Object.fromEntries([
     'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
     'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
@@ -413,7 +418,11 @@ async function readMemoryHomePage(runtime, secret) {
   const liveReadiness = projectPersonalLiveReadiness(checks, new Date());
   const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': secret,
+      ...productBindingRequestHeaders({ binding }),
+    },
     body: JSON.stringify({ live_readiness: liveReadiness }),
     signal: AbortSignal.timeout(5000),
   });
@@ -427,7 +436,7 @@ async function readMemoryHomePage(runtime, secret) {
   return pageResponse.text();
 }
 
-async function assertVisibleHomeMemory({ candidate, runtime, secret }) {
+async function assertVisibleHomeMemory({ binding, candidate, runtime, secret }) {
   const checks = Object.fromEntries([
     'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
     'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
@@ -438,7 +447,11 @@ async function assertVisibleHomeMemory({ candidate, runtime, secret }) {
   assert.equal(liveReadiness.reason_code, 'codex_hook_lifecycle_required');
   const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': secret,
+      ...productBindingRequestHeaders({ binding }),
+    },
     body: JSON.stringify({ live_readiness: liveReadiness }),
     signal: AbortSignal.timeout(5000),
   });
@@ -568,7 +581,10 @@ try {
   const pluginRoot = installedPluginRoot(codexHome);
   assert.equal(basename(pluginRoot), '0.7.0');
 
-  const { runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace);
+  const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
+    publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,
+    anchorPath: baseEnv.PULSE_BINDING_ANCHOR_PATH,
+  });
   const secret = readFileSync(join(runtime.data_dir, 'secret.key'), 'utf8').trim();
   assert.match(secret, /^[a-f0-9]{64}$/);
   const initialStatus = await productJSON(runtime, secret, '/memory/status');
@@ -610,14 +626,9 @@ try {
     extra: { prompt: 'Do not store this raw prompt.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstPrompt.continue, true);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /before the single final user-facing response/);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /ASCII safe slug/);
   markFirstValueStage('prompt_submit');
-  const preFinalize = codexHook(pluginRoot, 'Stop', codexHookInput({
-    eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
-    extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
-  }), { cwd: workspace, env: hookEnv });
-  assert.equal(preFinalize.decision, 'block');
-  assert.match(preFinalize.reason, /bounded Pulse finalization pass/);
-  markFirstValueStage('stop_block');
 
   const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';
   const memoryArguments = {
@@ -654,8 +665,7 @@ try {
       tool_use_id: 'tool-native-packed-remember', tool_response: callResult,
     },
   }), { cwd: workspace, env: hookEnv });
-  assert.match(postTool.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
-  assert.match(postTool.systemMessage, /:created/);
+  assert.deepEqual(postTool, {});
   markFirstValueStage('post_tool');
   const firstStop = codexHook(pluginRoot, 'Stop', codexHookInput({
     eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
@@ -674,7 +684,7 @@ try {
   assert.equal(committedCard.projection_status, 'complete');
   assert.equal(committedCard.candidate.capsule.items[0].redacted_summary, summary);
   markFirstValueStage('committed_card');
-  await assertVisibleHomeMemory({ candidate: committedCard, runtime, secret });
+  await assertVisibleHomeMemory({ binding, candidate: committedCard, runtime, secret });
   markFirstValueStage('visible_card');
   const terminalCard = await waitForTerminalCandidate(runtime, secret, committedCard.candidate_id);
   assert.equal(['created', 'updated', 'deduplicated'].includes(terminalCard.latest_receipt.status), true);
@@ -778,7 +788,7 @@ try {
   assert.equal(mcpConsolidation.report_digest, consolidation.report_digest);
   assert.deepEqual(mcpConsolidation.totals, consolidation.totals);
 
-  const consolidationHome = await readMemoryHomePage(runtime, secret);
+  const consolidationHome = await readMemoryHomePage(runtime, secret, binding);
   for (const text of [
     'Memory ocean', 'What Pulse found on this computer', 'Where memory for this project is written',
     'Which sources were inspected', 'canonical_vault_01', 'release_artifact_01', 'backup_01',

@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { canonicalReleaseJSON, releaseKeyID } from './release-manifest.js';
 import { readActivatedArtifactSet } from './artifact-installer.js';
+import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from './desktop-target.js';
 import { acquireInstallLock } from './install-journal.js';
 import { createPlatformServices } from './platform-services.js';
 import {
@@ -95,6 +96,48 @@ function fixture() {
       tree_digest: treeDigest(tree(files[kind])), url, version: '0.7.0',
     };
   }
+  const targets = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
+    const target = desktopTargetDefinition(targetID);
+    const capabilities = target.platform === 'darwin' ? ['presence-helper'] : [];
+    const kinds = ['daemon', 'embedder-runtime', ...(capabilities.length > 0 ? ['presence-helper'] : [])];
+    const targetArtifacts = Object.fromEntries(kinds.map((kind) => {
+      const url = `https://releases.zbs.gg/pulse/0.7.0/${targetID}/${kind}.tar.gz`;
+      const signing = target.platform === 'darwin' ? artifacts[kind].signing : {
+        gatekeeper: false,
+        identifier: null,
+        notarized: false,
+        scheme: target.platform === 'win32' ? 'windows-authenticode' : 'release-manifest',
+        stapled: false,
+        team_id: null,
+      };
+      carriers.set(url, Buffer.from(`carrier:${kind}`));
+      return [kind, {
+        ...artifacts[kind],
+        architecture: target.architecture,
+        id: `pulse-${targetID}-${kind}`,
+        minimum_os: target.platform === 'darwin' ? '13.0' : '0.0',
+        platform: target.platform,
+        signing,
+        url,
+      }];
+    }));
+    const verificationProfile = target.platform === 'darwin' ? {
+      gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5',
+    } : target.platform === 'win32' ? {
+      kind: 'windows', publisher: 'CN=ZBS GG Inc.',
+      timestamp_url: 'https://timestamp.digicert.com', timestamped: true,
+    } : {
+      kind: 'linux', policy: 'signed-catalog-tree-v1',
+    };
+    return [targetID, {
+      architecture: target.architecture,
+      artifacts: targetArtifacts,
+      capabilities,
+      libc: target.libc,
+      platform: target.platform,
+      verification_profile: verificationProfile,
+    }];
+  }));
   const payload = {
     allowed_origins: ['https://releases.zbs.gg'],
     common_artifacts: {
@@ -107,20 +150,7 @@ function fixture() {
       package: '@zbs-gg/pulse', version: '0.7.0',
     },
     schema: 'pulse.personal_preview.release_catalog.v2',
-    targets: {
-      'darwin-arm64': {
-        architecture: 'arm64',
-        artifacts: {
-          daemon: artifacts.daemon,
-          'embedder-runtime': artifacts['embedder-runtime'],
-          'presence-helper': artifacts['presence-helper'],
-        },
-        capabilities: ['presence-helper'], libc: null, platform: 'darwin',
-        verification_profile: {
-          gatekeeper: true, kind: 'apple', notarized: true, stapled: false, team_id: '44N4NZ86S5',
-        },
-      },
-    },
+    targets,
   };
   const authorityPayload = {
     channel: 'preview', epoch: 7, expires_at: '2026-08-02T00:00:00.000Z',
@@ -423,7 +453,7 @@ test('legacy v1 is historical-only and an unavailable target leaves zero install
       architecture: 'arm64', dataDir, manifestPath,
       now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
       packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
-    }), (error) => error.code === 'release_target_unavailable');
+    }), (error) => error.code === 'release_target_catalog_incomplete');
     assert.equal(existsSync(dataDir), false, 'unavailable target must fail before the install lock mutates state');
   } finally {
     rmSync(root, { recursive: true, force: true });

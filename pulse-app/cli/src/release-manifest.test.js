@@ -361,14 +361,18 @@ test('fixture verification profile is explicit and cannot satisfy production ver
   ), 'artifact_signing_invalid');
 });
 
-test('missing current target and capability-artifact confusion fail closed', () => {
+test('a production catalog missing any target and capability-artifact confusion fail closed', () => {
   const root = keyFixture();
   const channel = keyFixture();
   const missing = catalogPayload(channel);
   delete missing.targets['linux-x64-gnu'];
   expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, missing), verifyOptions(root, {
     architecture: 'x64', libc: 'gnu', platform: 'linux',
-  })), 'release_target_unavailable');
+  })), 'release_target_catalog_incomplete');
+
+  expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, missing), verifyOptions(root, {
+    architecture: 'arm64', platform: 'darwin',
+  })), 'release_target_catalog_incomplete');
 
   const confused = catalogPayload(channel);
   confused.targets['win32-x64'].capabilities = ['presence-helper'];
@@ -538,6 +542,9 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   assert.equal(schema.properties.schema.const, 'pulse.personal_preview.release_catalog.v2');
   assert.equal(schema.properties.common_artifacts.additionalProperties, false);
   assert.deepEqual(schema.properties.targets.propertyNames.enum, DESKTOP_TARGET_IDS);
+  assert.deepEqual(schema.properties.targets.required, DESKTOP_TARGET_IDS);
+  assert.equal(schema.properties.targets.minProperties, DESKTOP_TARGET_IDS.length);
+  assert.equal(schema.properties.targets.maxProperties, DESKTOP_TARGET_IDS.length);
   assert.deepEqual(schema.$defs.artifact.required.includes('tree_digest'), true);
   assert.deepEqual(schema.$defs.artifact.properties.format.enum, ['tar.gz']);
   assert.equal(schema.$defs.target.required.includes('verification_profile'), true);
@@ -546,7 +553,8 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   assert.match(keys[0].key_id, /^[a-f0-9]{64}$/);
   const packager = readFileSync(new URL('../scripts/prepare-preview-vendor.mjs', import.meta.url), 'utf8');
   assert.match(packager, /refusing production packaging: canonical signed Personal release manifest is missing/);
-  assert.match(packager, /presence helper does not match the signed release manifest/);
+  assert.match(packager, /DESKTOP_TARGET_IDS\.map/);
+  assert.match(packager, /universal catalog digest mismatch/);
   const builder = readFileSync(new URL('../scripts/build-presence-helper.mjs', import.meta.url), 'utf8');
   assert.match(builder, /PULSE_PRODUCTION_RELEASE/);
   assert.match(builder, /notarytool[^\n]+submit/);

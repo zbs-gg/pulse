@@ -468,6 +468,9 @@ test('safe release failure codes remain visible while arbitrary codes are reject
   const expired = buildPersonalInstallPlan({ ...base, releaseReasonCode: 'manifest_expired' });
   assert.ok(expired.reason_codes.includes('manifest_expired'));
   assert.equal(expired.reason_codes.includes('release_manifest_unavailable'), false);
+  const incomplete = buildPersonalInstallPlan({ ...base, releaseReasonCode: 'release_target_catalog_incomplete' });
+  assert.ok(incomplete.reason_codes.includes('release_target_catalog_incomplete'));
+  assert.equal(incomplete.outcome, 'action_required');
   assert.throws(() => buildPersonalInstallPlan({ ...base, releaseReasonCode: 'secret_/tmp/leak' }),
     /install_plan_release_reason_invalid/);
 });

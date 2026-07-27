@@ -42,6 +42,7 @@ runtime/windows-bootstrap/catalog.json
 runtime/windows-bootstrap/win32-arm64/pulse-platform-adapter.exe
 runtime/windows-bootstrap/win32-x64/pulse-platform-adapter.exe
 scripts/build-embedder-runtime.mjs
+scripts/build-npm-production-candidate.mjs
 scripts/build-personal-catalog.mjs
 scripts/build-personal-release.mjs
 scripts/build-plugin-runtime.mjs
@@ -274,6 +275,7 @@ vendor/pulse-preview-source/pulse-app/internal/server/memory_home.go
 vendor/pulse-preview-source/pulse-app/internal/server/memory_presentation.go
 vendor/pulse-preview-source/pulse-app/internal/server/personal_live_readiness.go
 vendor/pulse-preview-source/pulse-app/internal/server/principal_context.go
+vendor/pulse-preview-source/pulse-app/internal/server/product_binding_request.go
 vendor/pulse-preview-source/pulse-app/internal/server/privileged_ui_security.go
 vendor/pulse-preview-source/pulse-app/internal/server/project_source.go
 vendor/pulse-preview-source/pulse-app/internal/server/security_event.go

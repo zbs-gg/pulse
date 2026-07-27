@@ -16,7 +16,7 @@ function runBoundMCP(host: 'claude-code' | 'cursor' | 'codex') {
 export function resolveProductWorkspaceBinding() {
   return {
     binding_digest: '${'a'.repeat(64)}', resolver_epoch: 7,
-    workspace: {canonical_path: ${JSON.stringify(workspace)}}
+    workspace: {canonical_path: ${JSON.stringify(workspace)}, repository_id: 'repository_test'}
   };
 }
 export function consumeHostToolLease() {
@@ -48,6 +48,7 @@ export function consumeHostToolLease() {
       ...process.env,
       PULSE_RUNTIME_MODE: 'local-stdio', PULSE_MCP_MODE: 'daemon', PULSE_HOST_ADAPTER: host,
       PULSE_BINDING_DIGEST: 'a'.repeat(64), PULSE_RESOLVER_EPOCH: '7',
+      PULSE_REPOSITORY_ID: 'repository_test',
       PULSE_HOST_WORKSPACE: workspace,
       PULSE_HOST_AUTHORITY_MODULE: pathToFileURL(authorityPath).href,
       PULSE_HOST_RUNTIME_MODULE: pathToFileURL(authorityPath).href,
@@ -65,6 +66,12 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
     const tools = messages.find((message) => message.id === 2)?.result?.tools;
     const remember = tools.find((tool: { name: string }) => tool.name === 'pulse_remember');
     assert.deepEqual(remember.inputSchema.properties.source.properties.host, { type: 'string', const: host });
+    assert.deepEqual(remember.inputSchema.properties.items.items.properties.tags, {
+      type: 'array',
+      items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' },
+      maxItems: 20,
+      description: 'Optional ASCII safe slugs. Omit tags when a concept needs spaces.',
+    });
     const consolidation = tools.find((tool: { name: string }) => tool.name === 'pulse_consolidation_report');
     assert.ok(consolidation, `${host} must expose the same consolidation report tool`);
     assert.deepEqual(consolidation.inputSchema.required, ['action']);
