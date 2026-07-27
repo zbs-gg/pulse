@@ -323,35 +323,110 @@ function codexHookInput({ eventName, root, sessionID, turnID, workspace, extra =
   };
 }
 
-function callInstalledMCP(pluginRoot, toolName, toolArguments, { cwd, env }) {
-  const input = [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+function startInstalledMCP(pluginRoot, { cwd, env }) {
+  const child = spawn(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
+    cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  let stdout = '';
+  let stderr = '';
+  let nextID = 1;
+  let closed = false;
+  const pending = new Map();
+  const failPending = (error) => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  };
+  const exited = new Promise((accept) => {
+    child.once('error', (error) => {
+      failPending(error);
+      accept({ error });
+    });
+    child.once('close', (status, signal) => {
+      const error = status === 0 || closed
+        ? undefined
+        : new Error(`installed MCP exited ${status ?? signal}: ${stderr.slice(-2000)}`);
+      if (error) failPending(error);
+      accept({ status, signal, error });
+    });
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-8192);
+  });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    for (let newline = stdout.indexOf('\n'); newline >= 0; newline = stdout.indexOf('\n')) {
+      const line = stdout.slice(0, newline).trim();
+      stdout = stdout.slice(newline + 1);
+      if (!line) continue;
+      let message;
+      try { message = JSON.parse(line); } catch {
+        failPending(new Error('native packed MCP output is invalid'));
+        continue;
+      }
+      const waiter = pending.get(message.id);
+      if (!waiter) continue;
+      pending.delete(message.id);
+      clearTimeout(waiter.timer);
+      if (message.error) waiter.reject(new Error(`native packed MCP error ${message.error.code}`));
+      else waiter.resolve(message.result);
+    }
+  });
+  const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+  const request = (method, params) => new Promise((resolveRequest, reject) => {
+    const id = nextID++;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`native packed MCP ${method} timed out`));
+    }, 30_000);
+    pending.set(id, { reject, resolve: resolveRequest, timer });
+    send({ jsonrpc: '2.0', id, method, params });
+  });
+  const ready = (async () => {
+    const initialized = await request('initialize', {
       protocolVersion: '2024-11-05', capabilities: {},
       clientInfo: { name: 'pulse-native-packed-e2e', version: '1' },
-    } },
-    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
-    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: toolName, arguments: toolArguments,
-    } },
-  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
-  const result = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
-    cwd, env, input, timeout: 30_000,
+    });
+    assert.equal(initialized?.serverInfo?.name, 'pulse-mcp');
+    send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+    return request('tools/list', {});
+  })();
+  return Object.freeze({
+    ready,
+    async call(toolName, toolArguments) {
+      const listed = await ready;
+      assert.equal(listed?.tools?.some((tool) => tool.name === toolName), true,
+        `installed MCP does not expose ${toolName}`);
+      const callResult = await request('tools/call', { name: toolName, arguments: toolArguments });
+      assert.equal(Array.isArray(callResult?.content), true);
+      assert.notEqual(callResult.isError, true, callResult.content?.[0]?.text);
+      return {
+        callResult,
+        output: json(callResult.content[0].text, `native packed ${toolName} output is invalid`),
+      };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      child.stdin.end();
+      let killTimer;
+      const outcome = await Promise.race([
+        exited,
+        new Promise((accept) => {
+          killTimer = setTimeout(() => {
+            terminateCommandTree(child);
+            accept({ error: new Error('installed MCP did not stop') });
+          }, 5000);
+        }),
+      ]);
+      clearTimeout(killTimer);
+      if (outcome.error) throw outcome.error;
+    },
   });
-  const messages = result.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) =>
-    json(line, 'native packed MCP output is invalid'));
-  assert.equal(messages.find((message) => message.id === 1)?.result?.serverInfo?.name, 'pulse-mcp');
-  assert.equal(messages.find((message) => message.id === 2)?.result?.tools?.some((tool) =>
-    tool.name === toolName), true, `installed MCP does not expose ${toolName}`);
-  const callResult = messages.find((message) => message.id === 3)?.result;
-  assert.equal(Array.isArray(callResult?.content), true);
-  assert.notEqual(callResult.isError, true, callResult.content?.[0]?.text);
-  return { callResult, output: json(callResult.content[0].text, `native packed ${toolName} output is invalid`) };
-}
-
-function rememberThroughInstalledMCP(pluginRoot, memoryArguments, options) {
-  const result = callInstalledMCP(pluginRoot, 'pulse_remember', memoryArguments, options);
-  return { callResult: result.callResult, remembered: result.output };
 }
 
 function seedSyntheticConsolidationArtifacts(home) {
@@ -499,6 +574,7 @@ const host = process.env.PULSE_NATIVE_PACKED_HOST ?? 'codex';
 if (host !== 'codex') throw new Error('the first native packed proof currently calibrates Codex');
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'pulse-native-packed.')));
 let keep = process.env.PULSE_KEEP_NATIVE_PACKED_ROOT === '1';
+let installedMCP;
 try {
   const home = join(root, 'home');
   const codexHome = join(home, '.codex');
@@ -609,6 +685,10 @@ try {
       ['PULSE_TRUST_MODE', 'PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR'].includes(name)),
   );
   const hookEnv = { ...freshHostEnv, PLUGIN_DATA: join(root, 'plugin-data') };
+  // A real host starts one stdio MCP server for the session and keeps it alive.
+  // Start it alongside SessionStart so MCP boot overlaps host startup instead
+  // of charging a synthetic one-shot Node launch to the first tool call.
+  installedMCP = startInstalledMCP(pluginRoot, { cwd: workspace, env: hookEnv });
   const firstSessionID = 'session-native-packed-first';
   const firstTurnID = 'turn-native-packed-first';
   const firstSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
@@ -651,9 +731,7 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.deepEqual(preTool, {});
   markFirstValueStage('pre_tool');
-  const { callResult, remembered } = rememberThroughInstalledMCP(pluginRoot, memoryArguments, {
-    cwd: workspace, env: hookEnv,
-  });
+  const { callResult, output: remembered } = await installedMCP.call('pulse_remember', memoryArguments);
   assert.equal(remembered.status, 'candidates');
   assert.equal(remembered.receipts.length, 1);
   assert.equal(remembered.receipts[0].status, 'created');
@@ -796,12 +874,10 @@ try {
   assert.equal(consolidationStatus.report_digest, consolidation.report_digest);
   assert.deepEqual(consolidationStatus.totals, consolidation.totals);
 
-  const mcpConsolidation = callInstalledMCP(
-    pluginRoot,
+  const mcpConsolidation = (await installedMCP.call(
     'pulse_consolidation_report',
     { action: 'status', report_id: consolidation.invocation_id },
-    { cwd: workspace, env: hookEnv },
-  ).output;
+  )).output;
   assert.equal(mcpConsolidation.report_digest, consolidation.report_digest);
   assert.deepEqual(mcpConsolidation.totals, consolidation.totals);
 
@@ -812,6 +888,8 @@ try {
   ]) assert.equal(consolidationHome.includes(text), true, `Memory Home missing ${text}`);
   assert.equal(consolidationHome.includes(sourceFixtures[0].path), false);
   assert.equal(consolidationHome.includes(sourceFixtures[1].path), false);
+  await installedMCP.close();
+  installedMCP = undefined;
 
   const consolidationReceipt = {
     schema: 'pulse.personal_consolidation_report_fixture.v1',
@@ -896,6 +974,7 @@ try {
   process.stderr.write(`Native packed fixture root preserved at ${root}\n`);
   throw error;
 } finally {
+  try { await installedMCP?.close(); } catch { /* cleanup must preserve the primary assertion */ }
   stopFixtureProcesses(root);
   if (!keep) rmSync(root, { recursive: true, force: true });
 }
