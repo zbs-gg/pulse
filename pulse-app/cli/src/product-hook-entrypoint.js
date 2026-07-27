@@ -57,9 +57,6 @@ function productHookWitnessPaths(resolved, environment = process.env) {
   return [
     ...authority,
     join(dataDir, 'capture-state.json'),
-    join(dataDir, 'runtime', 'product-daemon.json'),
-    join(dataDir, 'secret.key'),
-    resolved.runtime.pid_file,
   ].filter((path) => typeof path === 'string' && existsSync(path));
 }
 
