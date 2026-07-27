@@ -377,20 +377,23 @@ function startInstalledMCP(pluginRoot, { cwd, env }) {
     }
   });
   const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
-  const request = (method, params) => new Promise((resolveRequest, reject) => {
+  const request = (method, params, timeoutMs = 30_000) => new Promise((resolveRequest, reject) => {
     const id = nextID++;
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`native packed MCP ${method} timed out`));
-    }, 30_000);
+    }, timeoutMs);
     pending.set(id, { reject, resolve: resolveRequest, timer });
     send({ jsonrpc: '2.0', id, method, params });
   });
   const ready = (async () => {
+    // The parent intentionally runs synchronous native hook launchers while
+    // the host-owned MCP boots. Allow their combined Windows ARM64 wall time
+    // before the event loop can consume the already-buffered response.
     const initialized = await request('initialize', {
       protocolVersion: '2024-11-05', capabilities: {},
       clientInfo: { name: 'pulse-native-packed-e2e', version: '1' },
-    });
+    }, 60_000);
     assert.equal(initialized?.serverInfo?.name, 'pulse-mcp');
     send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
     return request('tools/list', {});
