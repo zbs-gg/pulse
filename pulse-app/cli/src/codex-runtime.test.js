@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import {
 	acquireVaultActivationLock,
+	boundPulseRequest,
   callBoundLocalProductTool,
   callBoundTeamTool,
   consumeCodexToolLease,
@@ -48,6 +50,40 @@ function tinySafetensors() {
 	prefix.writeBigUInt64LE(BigInt(header.length));
 	return Buffer.concat([prefix, header, Buffer.alloc(4)]);
 }
+
+test('bound Personal request carries the exact signed project authority to one principal daemon', async (t) => {
+	const dataDir = mkdtempSync(join(tmpdir(), 'pulse-bound-request.'));
+	writeFileSync(join(dataDir, 'secret.key'), 'a'.repeat(64), { mode: 0o600 });
+	let captured;
+	const server = createServer((request, response) => {
+		captured = request.headers;
+		response.setHeader('Content-Type', 'application/json');
+		response.end('{"ok":true}');
+	});
+	await new Promise((resolvePromise, reject) => {
+		server.once('error', reject);
+		server.listen(0, '127.0.0.1', resolvePromise);
+	});
+	t.after(() => server.close());
+	const address = server.address();
+	const workspace = '/workspace/eye';
+	const resolved = {
+		binding: {
+			binding_digest: 'b'.repeat(64), resolver_epoch: 3,
+			workspace: { canonical_path: workspace, repository_id: 'repository_eye' },
+		},
+		runtime: { data_dir: dataDir, base_url: `http://127.0.0.1:${address.port}` },
+	};
+	const response = await boundPulseRequest(resolved, '/continuity/resume', { body: {} });
+	assert.deepEqual(response, { ok: true });
+	assert.equal(captured['x-pulse-product-binding'], 'b'.repeat(64));
+	assert.equal(captured['x-pulse-product-repository'], 'repository_eye');
+	assert.equal(captured['x-pulse-product-resolver-epoch'], '3');
+	assert.equal(
+		Buffer.from(captured['x-pulse-product-workspace'], 'base64url').toString('utf8'),
+		workspace,
+	);
+});
 
 async function managedActivationFixture(dataDir, { presenceHelper = true } = {}) {
 	const installRoot = join(dataDir, 'artifacts');

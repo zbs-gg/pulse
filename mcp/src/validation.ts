@@ -81,6 +81,12 @@ function looksSensitiveOrPathLike(text: string): boolean {
   return SECRET_MARKERS.some((marker) => lower.includes(marker));
 }
 
+function looksLikeEphemeralControl(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes('no_auto_context') ||
+    ((lower.includes('answer with') || lower.includes('return')) && lower.includes('exact injected marker'));
+}
+
 function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     fail(`invalid ${what}: expected an object`);
@@ -110,6 +116,7 @@ function safeText(field: string, value: unknown, max: number, required: boolean)
   if (trimmed.length > max) fail(`${field} is too long`);
   if (looksLikeTranscript(trimmed)) fail(`${field} looks like raw transcript`);
   if (looksSensitiveOrPathLike(trimmed)) fail(`${field} contains secret/path-like text`);
+  if (looksLikeEphemeralControl(trimmed)) fail(`${field} looks like ephemeral evaluation control`);
   return trimmed;
 }
 

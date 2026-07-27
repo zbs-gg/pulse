@@ -17,9 +17,41 @@ import (
 	"github.com/nkkmnk/pulse/internal/userpresence"
 )
 
+type verifiedMemoryHomeDeliveryReader struct {
+	store     *store.Store
+	authority productBindingAuthority
+}
+
+func (reader verifiedMemoryHomeDeliveryReader) ReadMemoryHomeDeliveryFacts(
+	repositoryID, bindingDigest string,
+	limit int,
+) ([]store.MemoryHomeDeliveryFact, error) {
+	if repositoryID != reader.authority.RepositoryID || bindingDigest != reader.authority.BindingDigest {
+		return nil, store.ErrContinuityDeliveryAuthority
+	}
+	return reader.store.ReadMemoryHomeDeliveryFactsForVerifiedBinding(repositoryID, bindingDigest, limit)
+}
+
 func (s *Server) buildMemoryHome(
 	now time.Time,
 	snapshot personalLiveReadinessSnapshot,
+) (store.MemoryHomeData, error) {
+	return s.buildMemoryHomeFiltered(now, snapshot, store.MemoryHomeFilter{})
+}
+
+func (s *Server) buildMemoryHomeFiltered(
+	now time.Time,
+	snapshot personalLiveReadinessSnapshot,
+	filter store.MemoryHomeFilter,
+) (store.MemoryHomeData, error) {
+	return s.buildMemoryHomeFilteredForAuthority(now, snapshot, filter, nil)
+}
+
+func (s *Server) buildMemoryHomeFilteredForAuthority(
+	now time.Time,
+	snapshot personalLiveReadinessSnapshot,
+	filter store.MemoryHomeFilter,
+	authority *productBindingAuthority,
 ) (store.MemoryHomeData, error) {
 	if s == nil || s.cfg.Store == nil {
 		return store.MemoryHomeData{}, fmt.Errorf("Memory Home store is unavailable")
@@ -27,11 +59,31 @@ func (s *Server) buildMemoryHome(
 	if err := validatePersonalLiveReadiness(snapshot); err != nil {
 		return store.MemoryHomeData{}, fmt.Errorf("Memory Home readiness is invalid")
 	}
-	bindingDigest, repositoryID, ok := s.cfg.Store.ProductRuntimeBoundary()
-	if !ok {
-		return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+	var bindingDigest, repositoryID string
+	var scope store.PersonalMemoryScopeSnapshot
+	requestScoped := authority != nil
+	if requestScoped {
+		bindingDigest, repositoryID = authority.BindingDigest, authority.RepositoryID
+		var err error
+		scope, err = s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(bindingDigest, repositoryID)
+		if err != nil {
+			return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+		}
+	} else {
+		var ok bool
+		bindingDigest, repositoryID, ok = s.cfg.Store.ProductRuntimeBoundary()
+		if !ok {
+			return store.MemoryHomeData{}, fmt.Errorf("Memory Home product boundary is unavailable")
+		}
 	}
-	resume, err := s.cfg.Store.BuildResume(store.ResumeQuery{ThreadID: repositoryID, TokenBudget: 1200})
+	resumeQuery := store.ResumeQuery{ThreadID: repositoryID, TokenBudget: 1200}
+	var resume store.ResumeBlock
+	var err error
+	if requestScoped {
+		resume, err = s.cfg.Store.BuildResumeForPersonalScope(resumeQuery, scope)
+	} else {
+		resume, err = s.cfg.Store.BuildResume(resumeQuery)
+	}
 	if err != nil {
 		return store.MemoryHomeData{}, err
 	}
@@ -49,11 +101,21 @@ func (s *Server) buildMemoryHome(
 		RenderedBytes: renderedBytes, PulseTokens: (renderedBytes + 3) / 4,
 	}
 	liveReadiness, checkedAt := s.memoryHomeLiveReadiness(snapshot, now)
-	data, err := s.cfg.Store.BuildMemoryHomeData(store.MemoryHomeQuery{
+	homeQuery := store.MemoryHomeQuery{
 		RepositoryID: repositoryID, BindingDigest: bindingDigest, GeneratedAt: now.UTC(),
 		LiveReadiness:   liveReadiness,
 		NextTaskPreview: preview,
-	}, s.cfg.Store)
+		Filter:          filter,
+	}
+	var data store.MemoryHomeData
+	if requestScoped {
+		data, err = s.cfg.Store.BuildMemoryHomeDataForPersonalScope(
+			homeQuery, scope,
+			verifiedMemoryHomeDeliveryReader{store: s.cfg.Store, authority: *authority},
+		)
+	} else {
+		data, err = s.cfg.Store.BuildMemoryHomeData(homeQuery, s.cfg.Store)
+	}
 	if err != nil {
 		return store.MemoryHomeData{}, err
 	}
@@ -201,6 +263,11 @@ type memoryHomeTemplateData struct {
 	ConsolidationAction      string
 	ConsolidationActionLabel string
 	ConsolidationHealthLabel string
+	HasMemoryFilter          bool
+	HasMoreMemories          bool
+	HasPreviousMemories      bool
+	NextMemoryOffset         int
+	PreviousMemoryOffset     int
 }
 
 func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
@@ -222,7 +289,16 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		HasProtectedActions:   profileHasValidProtectedActions(page.EnhancedPresenceProfile),
 		CanProtectedWipe:      profileAuthorizes(page.EnhancedPresenceProfile, userpresence.ActionVaultWipe),
 		Attempts:              attempts,
+		HasMemoryFilter:       memoryHomeFilterActive(page.Data.Filter),
 	}
+	pageSize := page.Data.Filter.PageSize
+	if pageSize == 0 {
+		pageSize = 50
+	}
+	view.HasMoreMemories = page.Data.Filter.PageOffset+len(page.Data.Memories.LatestActive) < page.Data.Memories.ActiveCount
+	view.HasPreviousMemories = page.Data.Filter.PageOffset > 0
+	view.NextMemoryOffset = page.Data.Filter.PageOffset + pageSize
+	view.PreviousMemoryOffset = max(0, page.Data.Filter.PageOffset-pageSize)
 	if page.Data.Consolidation != nil {
 		view.HasConsolidation = true
 		view.ConsolidationCanonical, view.ConsolidationImports, view.ConsolidationArtifacts =
@@ -250,6 +326,12 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		return "", err
 	}
 	return output.String(), nil
+}
+
+func memoryHomeFilterActive(filter store.MemoryHomeFilter) bool {
+	return filter.Text != "" || filter.Project != "" || filter.Harness != "" ||
+		filter.DateFrom != "" || filter.DateTo != "" || filter.Scope != "" ||
+		filter.Sharing != ""
 }
 
 func memoryHomeConsolidationGroups(
@@ -426,9 +508,9 @@ func memoryHomeUnassignedActivities(
 	for _, value := range activity {
 		label := "Deleted from Inbox"
 		if value.Action == "assign" {
-			label = "Moved to this project’s Tray"
+			label = "Saved to this project"
 			if value.BindingDigest != "" && value.BindingDigest != currentBindingDigest {
-				label = "Moved to another project’s Tray"
+				label = "Saved to another project"
 			}
 		}
 		result = append(result, memoryHomeUnassignedActivity{
@@ -474,14 +556,23 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     :root { color-scheme:light; --bg:#f5f3ee; --paper:#fffdfa; --ink:#1d211f; --muted:#6b716c; --line:#deddd7; --green:#2f694f; --green-soft:#e4efe7; --amber:#8a6428; --amber-soft:#f6ecd8; --red:#8b4646; --red-soft:#f4e2e0; --blue:#355f76; --blue-soft:#e4eef3; font:15px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     * { box-sizing:border-box; } [hidden] { display:none!important; }
     body { margin:0; color:var(--ink); background:var(--bg); }
-    main { width:min(1120px,100%); margin:0 auto; padding:28px clamp(18px,4vw,52px) 72px; }
-    h1,h2,h3,p { margin:0; } h1 { font-size:clamp(32px,5vw,58px); line-height:1.02; letter-spacing:-.04em; max-width:780px; } h2 { font-size:20px; } h3 { font-size:16px; }
+    main { width:min(1120px,100%); margin:0 auto; padding:22px clamp(18px,4vw,52px) 72px; }
+    h1,h2,h3,p { margin:0; } h1 { font-size:clamp(28px,4vw,34px); line-height:1.08; letter-spacing:-.035em; max-width:780px; } h2 { font-size:20px; } h3 { font-size:16px; }
     p { color:var(--muted); } code,pre,textarea { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-    .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:52px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
     .brand { display:flex; align-items:center; gap:10px; font-weight:750; letter-spacing:-.02em; }
     .pulse-dot { width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 0 6px var(--green-soft); }
     .boundary { display:flex; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:13px; }
     .pill { padding:5px 9px; border:1px solid var(--line); border-radius:999px; background:rgba(255,255,255,.58); }
+    .app-nav { display:flex; align-items:center; gap:4px; margin-right:auto; }
+    .app-nav a { min-height:38px; padding:8px 12px; border-radius:999px; color:var(--muted); text-decoration:none; }
+    .app-nav a[aria-current="page"] { color:var(--ink); background:var(--paper); box-shadow:inset 0 0 0 1px var(--line); }
+    .status-banner { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin:0 0 22px; padding:12px 15px; border:1px solid var(--line); border-left-width:4px; border-radius:14px; background:var(--paper); }
+    .status-banner p { font-size:13px; } .status-banner strong { display:block; margin-bottom:2px; }
+    .feed { margin-top:0; }
+    .feed-head { display:flex; align-items:end; justify-content:space-between; gap:18px; margin-bottom:14px; }
+    .feed-head p { margin-top:4px; }
+    .feed-count { flex:0 0 auto; color:var(--muted); font-size:13px; }
     .hero { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(260px,.75fr); gap:26px; align-items:end; padding-bottom:34px; border-bottom:1px solid var(--line); }
     .eyebrow { margin-bottom:14px; color:var(--green); font-weight:700; text-transform:uppercase; letter-spacing:.08em; font-size:12px; }
     .hero-copy { margin-top:17px; max-width:680px; font-size:17px; }
@@ -490,13 +581,28 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .status-ready { border-left:5px solid var(--green); } .status-partial,.status-warming { border-left:5px solid var(--amber); } .status-blocked { border-left:5px solid var(--red); } .status-action { border-left:5px solid var(--blue); }
     .metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin:30px 0 46px; background:var(--line); border:1px solid var(--line); border-radius:18px; overflow:hidden; }
     .metric { min-height:142px; padding:22px; background:var(--paper); } .metric .value { display:block; margin:11px 0 5px; font-size:34px; line-height:1; font-weight:750; letter-spacing:-.04em; } .metric small { color:var(--muted); }
-    section { margin-top:46px; } .section-head { display:flex; justify-content:space-between; gap:18px; align-items:end; margin-bottom:16px; } .section-head p { max-width:590px; }
+    section { margin-top:38px; } .section-head { display:flex; justify-content:space-between; gap:18px; align-items:end; margin-bottom:16px; } .section-head p { max-width:590px; }
     .tray { display:grid; gap:14px; } .tray-card { padding:22px; border:1px solid #dbcba8; border-radius:18px; background:#fffaf0; }
     .tray-card header { display:flex; justify-content:space-between; gap:12px; margin-bottom:14px; } .kind { color:var(--amber); font-weight:700; text-transform:uppercase; font-size:12px; letter-spacing:.07em; }
     .summary { font-size:18px; color:var(--ink); }
-    details { margin-top:16px; } summary { cursor:pointer; color:var(--muted); } textarea { width:100%; min-height:150px; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:white; resize:vertical; }
+    details { margin-top:12px; } summary { cursor:pointer; color:var(--muted); } textarea { width:100%; min-height:120px; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:white; resize:vertical; }
     .controls { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; } button { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:999px; background:white; color:var(--ink); cursor:pointer; } button.primary { background:var(--ink); color:white; border-color:var(--ink); } button.danger { background:var(--red); color:white; border-color:var(--red); } button:disabled { cursor:not-allowed; opacity:.58; }
-    .memory-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } .memory { min-height:150px; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--paper); } .memory .meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; color:var(--muted); font-size:12px; }
+    .filters { display:grid; grid-template-columns:minmax(220px,2fr) repeat(5,minmax(130px,1fr)); gap:8px; align-items:end; margin:14px 0 16px; }
+    .filter-field { display:grid; gap:5px; color:var(--muted); font-size:12px; } .filter-field input,.filter-field select { min-height:40px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; background:var(--paper); color:var(--ink); }
+    .filter-actions,.pagination { display:flex; gap:8px; align-items:center; flex-wrap:wrap; } .pagination { margin-top:14px; }
+    .memory-list { display:grid; grid-template-columns:minmax(0,820px); gap:10px; } .memory { padding:16px; border:1px solid var(--line); border-radius:16px; background:var(--paper); } .memory .meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:8px; color:var(--muted); font-size:12px; }
+    .memory .summary { font-size:16px; line-height:1.45; }
+    .memory-actions { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px; margin-top:10px; }
+    .memory-actions details,.memory-actions form { margin:0; }
+    .memory-actions summary { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:999px; background:white; color:var(--ink); list-style:none; }
+    .memory-actions summary::-webkit-details-marker { display:none; }
+    .memory-editor { width:min(680px,calc(100vw - 72px)); padding-top:2px; }
+    .technical { margin-top:10px; font-size:12px; }
+    .secondary-details { margin-top:38px; padding-top:18px; border-top:1px solid var(--line); }
+    .secondary-details > summary { font-weight:700; color:var(--ink); }
+    .secondary-body { padding-top:4px; }
+    .project-card,.team-soon { max-width:820px; padding:18px; border:1px solid var(--line); border-radius:16px; background:var(--paper); }
+    .project-card .boundary { margin-top:10px; }
     .preview { padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; }
     .authority-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
     .ocean { padding:clamp(22px,4vw,34px); border:1px solid var(--line); border-radius:22px; background:var(--paper); }
@@ -525,10 +631,11 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .receipt { margin-top:14px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
     .logout { margin:0; } .logout button { background:transparent; }
     @media (max-width:760px) {
-      .topbar { display:grid; grid-template-columns:1fr auto; align-items:start; margin-bottom:40px; }
-      .boundary { grid-column:1 / -1; grid-row:2; }
+      .topbar { display:grid; grid-template-columns:1fr auto; align-items:start; margin-bottom:18px; }
+      .app-nav { grid-column:1 / -1; grid-row:2; margin-top:8px; }
       .logout { grid-column:2; grid-row:1; }
-      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals { grid-template-columns:1fr; }
+      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals,.filters { grid-template-columns:1fr; }
+      .status-banner,.feed-head { align-items:flex-start; flex-direction:column; gap:8px; }
       .ocean-head,.ocean-next { align-items:flex-start; flex-direction:column; }
       .source-row { grid-template-columns:1fr; gap:4px; }
       .section-head { flex-direction:column; align-items:flex-start; gap:8px; }
@@ -541,25 +648,72 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
 <main>
   <div class="topbar">
     <div class="brand"><span class="pulse-dot"></span>Pulse</div>
-    <div class="boundary"><span class="pill">{{.StoreLabel}}</span><span class="pill">Current project <code>{{.Data.Boundary.RepositoryID}}</code></span><span class="pill">Device local</span><span class="pill">Private</span></div>
+    <nav class="app-nav" aria-label="Memory Home"><a href="#memories" aria-current="page">Memories</a><a href="#projects">Projects</a><a href="#team">Team · Soon</a></nav>
     {{if .CSRFToken}}<form class="logout" method="post" action="logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button>Lock Home</button></form>{{end}}
   </div>
 
-  <div class="hero">
-    <div>
-      <div class="eyebrow">Memory status</div>
-      <h1>{{.StatusTitle}}</h1>
-      <p class="hero-copy">{{.StatusDetail}}</p>
-      <p class="meta">Exact check: <code>{{.Data.Readiness.ReasonCode}}</code> · checked {{.Data.Readiness.CheckedAt}}</p>
-    </div>
-    <div class="action status-{{.StatusTone}}"><strong>Next action</strong><p>{{.Data.Readiness.NextAction.Label}}</p></div>
-  </div>
+  {{if ne .StatusTone "ready"}}<div class="status-banner status-{{.StatusTone}}" role="status"><div><strong>{{.StatusTitle}}</strong><p>{{.StatusDetail}}</p></div><p>Next: {{.Data.Readiness.NextAction.Label}}</p></div>{{end}}
 
+  <section class="feed" id="memories" aria-labelledby="memories-title">
+    <div class="feed-head"><div><div class="eyebrow">Personal memory</div><h1 id="memories-title">Memories</h1><p>Useful structured memories saved automatically for this project and Personal Global.</p></div><div class="feed-count">{{.MemoryCount}} matching</div></div>
+    <form class="filters" method="get" action="" aria-label="Filter memories">
+      <label class="filter-field">Search<input type="search" name="q" maxlength="160" value="{{.Data.Filter.Text}}" placeholder="Words in memory"></label>
+      <label class="filter-field">Project<select name="project"><option value="">All visible</option>{{range .Data.Facets.Projects}}<option value="{{.Value}}"{{if eq $.Data.Filter.Project .Value}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+      <label class="filter-field">Harness<select name="harness"><option value="">All harnesses</option>{{range .Data.Facets.Harness}}<option value="{{.Value}}"{{if eq $.Data.Filter.Harness .Value}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+      <label class="filter-field">From<input type="date" name="from" value="{{.Data.Filter.DateFrom}}"></label>
+      <label class="filter-field">To<input type="date" name="to" value="{{.Data.Filter.DateTo}}"></label>
+      <label class="filter-field">Scope<select name="scope"><option value="">Any scope</option><option value="project"{{if eq .Data.Filter.Scope "project"}} selected{{end}}>Project</option><option value="personal_global"{{if eq .Data.Filter.Scope "personal_global"}} selected{{end}}>Personal Global</option></select></label>
+      <label class="filter-field">Sharing<select name="sharing"><option value="">Any evidence</option><option value="device_only"{{if eq .Data.Filter.Sharing "device_only"}} selected{{end}}>Device only</option><option value="local_git"{{if eq .Data.Filter.Sharing "local_git"}} selected{{end}}>Local Git</option><option value="remote_git"{{if eq .Data.Filter.Sharing "remote_git"}} selected{{end}}>Remote Git</option><option value="unknown"{{if eq .Data.Filter.Sharing "unknown"}} selected{{end}}>Unknown</option></select></label>
+      <div class="filter-actions"><button class="primary" type="submit">Filter</button>{{if .HasMemoryFilter}}<a href="./">Clear</a>{{end}}</div>
+    </form>
+    {{if .HasLatestMemory}}<div class="memory-list">{{range .Data.Memories.LatestActive}}<article class="memory"><div class="meta"><span>{{.Kind}} · {{.Host}} · {{.ProjectLabel}} · {{if eq .Scope "personal_global"}}Personal Global{{else}}Project{{end}} · {{if eq .SharingState "local_git"}}Local Git{{else if eq .SharingState "remote_git"}}Remote Git{{else if eq .SharingState "device_only"}}Device only{{else}}Sharing unknown{{end}}</span><span>{{.CreatedAt}}</span></div><p class="receipt">{{.SessionLabel}}</p><p class="summary">{{.RedactedSummary}}</p><div class="memory-actions"><details><summary>Edit</summary><form class="memory-editor" method="post" action="memory/{{.ObjectID}}/edit" data-home-mutation data-home-pending-label="Saving edit…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_generation" value="{{.LogicalGeneration}}"><textarea name="summary" maxlength="1200">{{.EditableSummary}}</textarea><div class="controls"><button class="primary" type="submit">Save edit</button></div></form></details><form method="post" action="memory/{{.ObjectID}}/move" data-home-mutation data-home-pending-label="Moving memory…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_generation" value="{{.LogicalGeneration}}">{{if eq .Scope "personal_global"}}<input type="hidden" name="target_scope" value="project"><button>Move to {{.ProjectLabel}}</button>{{else}}<input type="hidden" name="target_scope" value="personal_global"><button>Move to Personal Global</button>{{end}}</form><form method="post" action="memory/{{.ObjectID}}/delete" data-home-mutation data-home-pending-label="Deleting memory…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_generation" value="{{.LogicalGeneration}}"><button>Delete</button></form></div><details class="technical"><summary>Technical details</summary><div class="receipt">Object {{.ObjectID}} · Generation {{.LogicalGeneration}} · Scope {{.Scope}} · Namespace {{.ProjectNamespaceID}} · Original project {{.OriginalRepositoryID}} · Host {{.Host}} · Session {{.SessionRef}}<br>Terminal receipt {{.TerminalReceiptID}}{{if .PresentationReceiptID}} · Presentation receipt {{.PresentationReceiptID}}{{end}}</div></details></article>{{end}}</div>{{else if .HasMemoryFilter}}<div class="empty">No memories match these filters. Clear one filter or widen the date range.</div>{{else}}<div class="empty">No canonical memory yet. Useful memories will appear here automatically.</div>{{end}}
+    {{if or .HasPreviousMemories .HasMoreMemories}}<div class="pagination">
+      {{if .HasPreviousMemories}}<form method="get" action=""><input type="hidden" name="q" value="{{.Data.Filter.Text}}"><input type="hidden" name="project" value="{{.Data.Filter.Project}}"><input type="hidden" name="harness" value="{{.Data.Filter.Harness}}"><input type="hidden" name="from" value="{{.Data.Filter.DateFrom}}"><input type="hidden" name="to" value="{{.Data.Filter.DateTo}}"><input type="hidden" name="scope" value="{{.Data.Filter.Scope}}"><input type="hidden" name="sharing" value="{{.Data.Filter.Sharing}}"><input type="hidden" name="offset" value="{{.PreviousMemoryOffset}}"><button>Previous</button></form>{{end}}
+      {{if .HasMoreMemories}}<form method="get" action=""><input type="hidden" name="q" value="{{.Data.Filter.Text}}"><input type="hidden" name="project" value="{{.Data.Filter.Project}}"><input type="hidden" name="harness" value="{{.Data.Filter.Harness}}"><input type="hidden" name="from" value="{{.Data.Filter.DateFrom}}"><input type="hidden" name="to" value="{{.Data.Filter.DateTo}}"><input type="hidden" name="scope" value="{{.Data.Filter.Scope}}"><input type="hidden" name="sharing" value="{{.Data.Filter.Sharing}}"><input type="hidden" name="offset" value="{{.NextMemoryOffset}}"><button>Next</button></form>{{end}}
+    </div>{{end}}
+  </section>
+
+  {{if .HasPending}}
+  <section id="memory-tray">
+    <div class="section-head"><div><div class="eyebrow">Automatic retry</div><h2>Memory activity</h2></div><p>Useful memory is saved immediately. A card appears here only while Pulse retries a transient write problem.</p></div>
+    <div class="tray">
+      {{range .Pending}}
+      <article class="tray-card" data-candidate-id="{{.CandidateID}}" data-candidate-version="{{.Version}}">
+        <header><span class="kind">{{.Kind}}</span><span class="pill">Retrying</span></header>
+        <p class="summary">{{.Summary}}</p>
+        <details><summary>Edit the exact structured record</summary>
+          <form method="post" action="tray/{{.CandidateID}}/edit" data-home-mutation>
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_version" value="{{.Version}}">
+            <textarea name="candidate_json">{{.CandidateJSON}}</textarea>
+            <div class="controls"><button class="primary" type="submit">Save edit</button></div>
+          </form>
+        </details>
+        <div class="controls">
+          <form method="post" action="tray/{{.CandidateID}}/cancel" data-home-mutation data-home-pending-label="Deleting memory…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_version" value="{{.Version}}"><button>Delete</button></form>
+        </div>
+        <p class="receipt" data-home-status aria-live="polite">Pulse is retrying automatically. Opening Home is never required.</p>
+      </article>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+
+  <section id="projects" aria-labelledby="projects-title">
+    <div class="section-head"><div><div class="eyebrow">Where memory lives</div><h2 id="projects-title">Projects</h2></div><p>Verified projects represented in this bound vault. Fragmented legacy stores are never silently opened or merged.</p></div>
+    {{range .Data.Facets.Projects}}<article class="project-card"><strong>{{.Label}}</strong><p>Memories from this project are in the bound {{$.StoreLabel}} vault. Session labels come only from safe capture metadata.</p><div class="boundary"><span class="pill">Device local</span><span class="pill">Canonical vault</span></div><details class="technical"><summary>Technical details</summary><div class="receipt">Repository <code>{{.Value}}</code></div></details></article>{{else}}<article class="project-card"><strong>Current project</strong><p>No canonical memories have been captured here yet.</p><details class="technical"><summary>Technical details</summary><div class="receipt">Repository <code>{{.Data.Boundary.RepositoryID}}</code></div></details></article>{{end}}
+  </section>
+
+  <section id="team" aria-labelledby="team-title">
+    <div class="team-soon"><div class="eyebrow">Team · Soon</div><h2 id="team-title">Team memory is not connected</h2><p>This is a placeholder only. No Team backend, login, publication, or remote request runs from Memory Home.</p></div>
+  </section>
+
+  <details class="secondary-details"><summary>Status and evidence</summary><div class="secondary-body">
   <div class="metrics" aria-label="Memory proof">
     <div class="metric"><span>Saved memories</span><span class="value">{{.MemoryCount}}</span><small>Canonical, active, private records</small></div>
     <div class="metric"><span>Continuity</span><span class="value" style="font-size:25px">{{.ContextState}}</span><small>{{if .HasContext}}Receipt-backed delivery{{if .ContextHost}} via {{.ContextHost}}{{end}}{{else}}Waiting for a fresh task{{end}}</small></div>
     <div class="metric"><span>Token economy</span><span class="value">{{.EconomyValue}}</span><small>{{.EconomyDetail}}{{if .EstimatedPercent}} · {{.EstimatedPercent}}{{end}}</small></div>
   </div>
+  <div class="action status-{{.StatusTone}}"><strong>{{.StatusTitle}}</strong><p>{{.StatusDetail}}</p><p class="receipt">Exact check: <code>{{.Data.Readiness.ReasonCode}}</code> · checked {{.Data.Readiness.CheckedAt}} · next: {{.Data.Readiness.NextAction.Label}}</p></div>
 
   <section id="memory-ocean" aria-labelledby="memory-ocean-title">
     <div class="ocean">
@@ -625,7 +779,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
 
   {{if .UnassignedEnabled}}
   <section id="unassigned-inbox">
-    <div class="section-head"><div><div class="eyebrow">Not in any project yet</div><h2>Unassigned Inbox</h2></div><p>These structured records are local and non-retrievable. Choose this exact project to move one into its ordinary Memory Tray, or delete it.</p></div>
+    <div class="section-head"><div><div class="eyebrow">Not in any project yet</div><h2>Unassigned Inbox</h2></div><p>These structured records are local and non-retrievable. Save one to this exact project, or delete it.</p></div>
     {{if .UnassignedUnavailable}}<div class="empty">Inbox is unavailable. No queued content was read or moved. Repair its private local file, then refresh Home.</div>{{else if .HasUnassigned}}
     <div class="tray">
       {{range .Unassigned}}
@@ -633,7 +787,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
         <header><span class="kind">{{.Kind}}</span><span class="pill">Unassigned · {{.Host}}</span></header>
         <p class="summary">{{.Summary}}</p>
         <div class="controls">
-          <form method="post" action="unassigned/{{.ItemID}}/assign" data-home-mutation data-home-pending-label="Moving the exact digest to this project’s Tray…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="content_digest" value="{{.ContentDigest}}"><input type="hidden" name="expected_binding_digest" value="{{$.Data.Boundary.BindingDigest}}"><button class="primary">Move to this project’s Tray</button></form>
+          <form method="post" action="unassigned/{{.ItemID}}/assign" data-home-mutation data-home-pending-label="Saving to this project…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="content_digest" value="{{.ContentDigest}}"><input type="hidden" name="expected_binding_digest" value="{{$.Data.Boundary.BindingDigest}}"><button class="primary">Save to this project</button></form>
           <form method="post" action="unassigned/{{.ItemID}}/delete" data-home-mutation data-home-confirm="Delete this unassigned memory?" data-home-pending-label="Deleting the exact Inbox card…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="content_digest" value="{{.ContentDigest}}"><input type="hidden" name="expected_binding_digest" value="{{$.Data.Boundary.BindingDigest}}"><button>Delete</button></form>
         </div>
         <p class="receipt">Not counted as memory · captured {{.CreatedAt}} · digest {{.ContentDigest}}</p>
@@ -644,37 +798,6 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     {{if .HasUnassignedActivity}}<div class="memory-list" style="margin-top:14px">{{range .UnassignedActivity}}<article class="memory attempt"><div class="meta"><span>{{.ActionLabel}}</span><span>{{.CreatedAt}}</span></div><p class="summary">{{.Status}}</p><div class="receipt">Inbox receipt {{.ReceiptID}} · digest {{.ContentDigest}}</div></article>{{end}}</div>{{end}}
   </section>
   {{end}}
-
-  {{if .HasPending}}
-  <section id="memory-tray">
-    <div class="section-head"><div><div class="eyebrow">Before Pulse saves</div><h2>Memory Tray</h2></div><p>See every proposed record. Edit it, save it now, or cancel it during the visible delay.</p></div>
-    <div class="tray">
-      {{range .Pending}}
-      <article class="tray-card" data-candidate-id="{{.CandidateID}}" data-candidate-version="{{.Version}}">
-        <header><span class="kind">{{.Kind}}</span><span class="pill">Pending</span></header>
-        <p class="summary">{{.Summary}}</p>
-        <details><summary>Edit the exact structured record</summary>
-          <form method="post" action="tray/{{.CandidateID}}/edit" data-home-mutation>
-            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_version" value="{{.Version}}">
-            <textarea name="candidate_json">{{.CandidateJSON}}</textarea>
-            <div class="controls"><button class="primary" type="submit">Save edit</button></div>
-          </form>
-        </details>
-        <div class="controls">
-          <form method="post" action="tray/{{.CandidateID}}/commit" data-home-mutation><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_version" value="{{.Version}}"><button class="primary">Save after delay</button></form>
-          <form method="post" action="tray/{{.CandidateID}}/cancel" data-home-mutation><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_version" value="{{.Version}}"><button>Cancel</button></form>
-        </div>
-        <p class="receipt" data-home-status aria-live="polite">Visible delay starts after this card is shown.</p>
-      </article>
-      {{end}}
-    </div>
-  </section>
-  {{end}}
-
-  <section>
-    <div class="section-head"><div><div class="eyebrow">Canonical memory</div><h2>Latest memories</h2></div><p>Only successfully committed records appear here. Attempts stay separate.</p></div>
-    {{if .HasLatestMemory}}<div class="memory-list">{{range .Data.Memories.LatestActive}}<article class="memory"><div class="meta"><span>{{.Kind}}</span><span>{{.CreatedAt}}</span></div><p class="summary">{{.RedactedSummary}}</p><div class="receipt">Object {{.ObjectID}} · Host {{.Host}} · Session {{.SessionRef}}<br>Terminal receipt {{.TerminalReceiptID}} · Presentation receipt {{.PresentationReceiptID}}</div></article>{{end}}</div>{{else}}<div class="empty">No canonical memory yet. The first approved Tray card will appear here with its receipt.</div>{{end}}
-  </section>
 
   {{if .HasAttempts}}
   <section id="memory-attempts">
@@ -687,6 +810,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     <div class="section-head"><div><div class="eyebrow">Cross-task continuity</div><h2>What the next task receives</h2></div><p>This is a bounded preview, not a promise that the host consumed it.</p></div>
     {{if .HasNextPreview}}<div class="preview"><pre>{{.Data.NextTaskPreview.RedactedResume}}</pre><div class="receipt">{{.Data.NextTaskPreview.PulseTokens}} Pulse tokens · preview only · digest {{.Data.NextTaskPreview.PayloadDigest}}</div></div>{{else}}<div class="empty">No safe preview is available yet. Pulse will not expose path-like, secret-like, or raw transcript content here.</div>{{end}}
   </section>
+  </div></details>
   <script src="assets/home.js" defer></script>
 </main>
 </body>

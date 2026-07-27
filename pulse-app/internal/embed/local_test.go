@@ -33,8 +33,13 @@ func TestLocalHelperProcess(t *testing.T) {
 	if mode == "startup-extra" {
 		startup["unexpected"] = true
 	}
-	if mode == "env" && os.Getenv("COHERE_API_KEY") != "" {
-		startup["unexpected"] = "secret environment leaked"
+	if mode == "env" {
+		switch {
+		case os.Getenv("COHERE_API_KEY") != "":
+			startup["unexpected"] = "secret environment leaked"
+		case os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE") != "/trusted/node":
+			startup["unexpected"] = "trusted Node runtime was not forwarded"
+		}
 	}
 	line, _ := json.Marshal(startup)
 	fmt.Fprintln(os.Stdout, string(line))
@@ -145,6 +150,7 @@ func TestManagedLocalV2UsesExactRunnerAndBoundedArgs(t *testing.T) {
 
 func TestManagedLocalDoesNotPassRemoteProviderEnvironment(t *testing.T) {
 	t.Setenv("COHERE_API_KEY", "must-not-reach-managed-helper")
+	t.Setenv("PULSE_PRODUCT_AUTHORITY_NODE", "/trusted/node")
 	client := managedTestClient(t, "env")
 	t.Cleanup(func() { _ = client.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

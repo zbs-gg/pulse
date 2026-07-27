@@ -8,10 +8,13 @@ import {
   composeBoundResumeEvidence,
   createContinuityDeliveryOffer,
   createContinuityDeliveryObservation,
+  hasContinuitySessionDelivery,
   observePendingContinuityDelivery,
+  persistContinuityDelivery,
   recordContinuityObservationTicket,
   renderCommonsResume,
 } from './product-compositor.js';
+import { annotateContinuityDelivery } from './host-adapter.js';
 import { TeamRemoteClientError } from './team-remote-client.js';
 
 const WORKSPACE = {
@@ -178,6 +181,56 @@ test('native lifecycle identity stays stable while divergent payload replay chan
   assert.notEqual(divergent.offer.payload_digest, first.offer.payload_digest);
 });
 
+test('delivery persistence retries one transient local timeout with the exact idempotency key', async () => {
+  const runtime = resolved('personal');
+  const event = {
+    host: 'codex', event: 'session_start', session_id: 'session_1',
+    source_event_key: `event_${'b'.repeat(64)}`,
+  };
+  const output = annotateContinuityDelivery({}, runtime, event, {
+    object_ids: ['memory_1'], evidence_ids: [],
+  });
+  const calls = [];
+  const delivery = await persistContinuityDelivery(output, 'remembered context', {
+    request: async (_resolved, path, options) => {
+      calls.push({ path, options });
+      if (calls.length === 1) {
+        const error = new Error('local request exceeded its bounded deadline');
+        error.name = 'TimeoutError';
+        throw error;
+      }
+      return { schema: 'pulse.continuity_delivery_receipt.v1', state: 'offered_to_host' };
+    },
+  });
+  assert.equal(delivery.receipt.state, 'offered_to_host');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, '/continuity/delivery/offers');
+  assert.equal(calls[0].options.timeoutMs, 2500);
+  assert.equal(calls[1].options.idempotencyKey, calls[0].options.idempotencyKey);
+  assert.deepEqual(calls[1].options.body, calls[0].options.body);
+});
+
+test('delivery persistence does not retry a deterministic conflict', async () => {
+  const runtime = resolved('personal');
+  const event = {
+    host: 'codex', event: 'session_start', session_id: 'session_1',
+    source_event_key: `event_${'c'.repeat(64)}`,
+  };
+  const output = annotateContinuityDelivery({}, runtime, event, {
+    object_ids: ['memory_1'], evidence_ids: [],
+  });
+  let calls = 0;
+  await assert.rejects(persistContinuityDelivery(output, 'changed context', {
+    request: async () => {
+      calls += 1;
+      const error = new Error('delivery conflict');
+      error.status = 409;
+      throw error;
+    },
+  }), /delivery conflict/);
+  assert.equal(calls, 1);
+});
+
 test('a later same-session host event promotes only a receipt-backed content-free offer ticket', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-continuity-observation-'));
   try {
@@ -205,6 +258,7 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     const ticketDirectory = join(root, 'runtime', 'continuity-observations');
     const ticketPath = join(ticketDirectory, readdirSync(ticketDirectory)[0]);
     assert.doesNotMatch(readFileSync(ticketPath, 'utf8'), /remembered context payload|memory_1/);
+    assert.equal(hasContinuitySessionDelivery(runtime, start), false);
 
     const promptEvent = {
       host: 'claude-code', native_event: 'UserPromptSubmit', event: 'turn_start',
@@ -227,7 +281,21 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     assert.deepEqual(calls[0].options.body, expected.body);
     assert.equal(calls[0].options.idempotencyKey, expected.idempotencyKey);
     assert.deepEqual(readdirSync(ticketDirectory), []);
+    const observedDirectory = join(root, 'runtime', 'continuity-observed');
+    const observedFiles = readdirSync(observedDirectory);
+    assert.equal(observedFiles.length, 1);
+    assert.doesNotMatch(readFileSync(join(observedDirectory, observedFiles[0]), 'utf8'),
+      /remembered context payload|memory_1/);
+    assert.equal(hasContinuitySessionDelivery(runtime, promptEvent), true);
     assert.equal(await observePendingContinuityDelivery(runtime, promptEvent, { request: async () => assert.fail() }), undefined);
+
+    const stopEvent = {
+      host: 'claude-code', native_event: 'Stop', event: 'turn_finalize',
+      source: 'stop', session_id: 'session_1',
+      source_event_key: `event_${'d'.repeat(64)}`,
+    };
+    const stopObservation = createContinuityDeliveryObservation(ticket, stopEvent);
+    assert.equal(stopObservation.body.session_ref, ticket.session_ref);
 
     assert.throws(() => createContinuityDeliveryObservation(ticket, {
       ...promptEvent, host: 'cursor',

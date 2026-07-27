@@ -18,6 +18,6 @@
     "developerName": "ZBS.GG",
     "category": "Productivity",
     "capabilities": ["Read", "Write"],
-    "defaultPrompt": "Use Pulse to continue this project from its inspected memory and show every proposed private write in Memory Tray."
+    "defaultPrompt": "Use Pulse to continue this project from inspected local memory. Capture only compact durable changes during the normal turn, silently and without a second response."
   }
 }

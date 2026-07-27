@@ -64,10 +64,10 @@ function hostResult(target, status, { activated = false } = {}) {
 }
 
 function activationSummary(hosts) {
-  const verified = hosts.filter((host) => host.verified).length;
+  const ready = hosts.filter((host) => host.mcp_ready).length;
   return Object.freeze({
-    product_ready: verified > 0,
-    parity: verified === hosts.length ? 'complete' : verified > 0 ? 'degraded' : 'blocked',
+    product_ready: ready > 0,
+    parity: ready === hosts.length ? 'complete' : ready > 0 ? 'degraded' : 'blocked',
     hosts: Object.freeze(hosts),
   });
 }
@@ -120,7 +120,7 @@ export async function activateDetectedPersonalHosts({ context, hosts, registry, 
     let before;
     try {
       const priorResult = previous.get(target.host);
-      if (priorResult?.installed === true) {
+      if (priorResult?.mcp_ready === true) {
         attempts.set(target.host, { activated: priorResult.activated });
         continue;
       }

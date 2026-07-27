@@ -384,8 +384,18 @@ function validateCatalogPayload(payload, options) {
   for (const name of COMMON_ARTIFACTS) validateCatalogArtifact(name, payload.common_artifacts[name], payload.release, allowedOrigins, {
     platform: 'all', architecture: 'all',
   });
-  if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object' ||
-      Object.keys(payload.targets).some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) fail('release_target_catalog_invalid');
+  if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object') {
+    fail('release_target_catalog_invalid');
+  }
+  const targetIDs = Object.keys(payload.targets).sort();
+  if (targetIDs.length < 1 || targetIDs.some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) {
+    fail('release_target_catalog_invalid');
+  }
+  const fixtureOnlyCatalog = options.allowFixtureVerification === true &&
+    targetIDs.every((targetID) => payload.targets[targetID]?.verification_profile?.kind === 'fixture');
+  if (!fixtureOnlyCatalog && targetIDs.join('\0') !== DESKTOP_TARGET_IDS.join('\0')) {
+    fail('release_target_catalog_incomplete');
+  }
   for (const [targetID, target] of Object.entries(payload.targets)) {
     validateCatalogTarget(targetID, target, payload.release, allowedOrigins, options);
   }

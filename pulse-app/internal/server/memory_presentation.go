@@ -137,8 +137,8 @@ func NewMemoryPresentationService(cfg MemoryPresentationServiceConfig) (*MemoryP
 	if !validMemoryPresentationPath(cfg.ExpectedPath) {
 		return nil, errors.New("memory presentation: exact Home path is required")
 	}
-	if cfg.GracePeriod < time.Second || cfg.GracePeriod > 30*time.Second {
-		return nil, errors.New("memory presentation: grace must be between 1s and 30s")
+	if cfg.GracePeriod < 0 || cfg.GracePeriod > 30*time.Second {
+		return nil, errors.New("memory presentation: write delay must be between 0s and 30s")
 	}
 	if cfg.CapabilityTTL < time.Second || cfg.CapabilityTTL > memoryPresentationMaxCapabilityTTL {
 		return nil, errors.New("memory presentation: capability TTL must be between 1s and 2m")

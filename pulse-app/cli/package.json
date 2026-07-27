@@ -69,13 +69,16 @@
     "vendor/pulse-preview-source",
     "vendor/pulse-mcp-dist",
     "vendor/pulse-presence-helper",
-    "release",
+    "release/README.md",
+    "release/personal-preview-manifest.json",
+    "release/personal-preview-manifest.schema.json",
+    "release/pulse-release-root.pem",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.4.0",
-    "tar-stream": "3.2.0"
+    "tar-stream": "3.1.7"
   },
   "scripts": {
     "check": "node src/cli.js --help",
@@ -94,9 +97,13 @@
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
+    "build:portable-model": "node scripts/build-portable-model.mjs",
     "build:product-hook-bundle": "node scripts/build-product-hook-bundle.mjs",
     "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
+    "build:npm-production-candidate": "node scripts/build-npm-production-candidate.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
+    "build:personal-catalog": "node scripts/build-personal-catalog.mjs",
+    "build:plugin-runtime": "node scripts/build-plugin-runtime.mjs",
     "fixture:target-release": "node scripts/target-release-fixture.mjs",
     "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
     "prepack": "node scripts/build-product-hook-bundle.mjs && node scripts/prepare-preview-vendor.mjs",

@@ -123,10 +123,24 @@ export async function persistContinuityDelivery(output, payload, {
     return request(resolved, '/continuity/delivery/offers', {
       body: offer,
       idempotencyKey,
-      timeoutMs: 1200,
+      timeoutMs: 2500,
     });
   });
-  const receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  let receipt;
+  try {
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  } catch (error) {
+    const status = error?.status;
+    const code = error?.code ?? error?.cause?.code;
+    const transient = error?.name === 'TimeoutError' || error?.name === 'AbortError' ||
+      ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
+      status === 408 || status === 425 || status === 429 || status >= 500;
+    if (!transient) throw error;
+    // The native source event supplies an exact idempotency key. Retrying the
+    // same offer can recover a slow local daemon without creating a second
+    // delivery fact when the first request committed before its timeout.
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  }
   return Object.freeze({ resolved: source.resolved, receipt, ...measurement });
 }
 
@@ -145,12 +159,24 @@ function continuityObservationDirectory(resolved) {
   return join(dataDir, 'runtime', 'continuity-observations');
 }
 
+function continuityObservedDirectory(resolved) {
+  return join(resolve(resolved.runtime.data_dir), 'runtime', 'continuity-observed');
+}
+
 function continuityObservationTicketPath(resolved, host, sessionRef) {
   if (!['codex', 'claude-code', 'cursor'].includes(host) ||
       !/^session:[a-f0-9]{64}$/.test(sessionRef ?? '')) {
     throw new Error('continuity_observation_identity_invalid');
   }
   return join(continuityObservationDirectory(resolved), `${host}-${sessionRef.slice('session:'.length)}.json`);
+}
+
+function continuityObservedMarkerPath(resolved, host, sessionRef) {
+  if (!['codex', 'claude-code', 'cursor'].includes(host) ||
+      !/^session:[a-f0-9]{64}$/.test(sessionRef ?? '')) {
+    throw new Error('continuity_observation_identity_invalid');
+  }
+  return join(continuityObservedDirectory(resolved), `${host}-${sessionRef.slice('session:'.length)}.json`);
 }
 
 function observationTicket(delivery) {
@@ -221,9 +247,66 @@ function readObservationTicket(resolved, event, platformServices) {
   return { path, ticket };
 }
 
+function observationMarker(ticket, receipt) {
+  if (receipt?.schema !== 'pulse.continuity_delivery_receipt.v1' ||
+      receipt.state !== 'host_observed' || !isStableHostID(receipt.receipt_id) ||
+      receipt.context_id !== ticket.context_id || receipt.parent_receipt_id !== ticket.offer_receipt_id ||
+      receipt.binding_digest !== ticket.binding_digest || receipt.repository_id !== ticket.repository_id ||
+      receipt.host !== ticket.host || receipt.session_ref !== ticket.session_ref ||
+      typeof receipt.created_at !== 'string' || Number.isNaN(Date.parse(receipt.created_at))) {
+    throw new Error('continuity_observation_receipt_invalid');
+  }
+  return Object.freeze({
+    schema: 'pulse.continuity_observed_marker.v1',
+    offer_receipt_id: ticket.offer_receipt_id,
+    observation_receipt_id: receipt.receipt_id,
+    context_id: ticket.context_id,
+    binding_digest: ticket.binding_digest,
+    repository_id: ticket.repository_id,
+    host: ticket.host,
+    session_ref: ticket.session_ref,
+    observed_at: receipt.created_at,
+  });
+}
+
+function readObservedMarker(resolved, event, platformServices) {
+  const sessionRef = continuitySessionRef(event?.session_id);
+  const path = continuityObservedMarkerPath(resolved, event?.host, sessionRef);
+  const bytes = platformServices.readPrivateFile(path, { missing: true, minBytes: 1, maxBytes: 4096 });
+  if (bytes === null) return undefined;
+  let marker;
+  try { marker = JSON.parse(bytes); } catch { throw new Error('continuity_observed_marker_invalid'); }
+  const fields = [
+    'binding_digest', 'context_id', 'host', 'observation_receipt_id', 'observed_at',
+    'offer_receipt_id', 'repository_id', 'schema', 'session_ref',
+  ];
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker) ||
+      Object.keys(marker).sort().join('\0') !== fields.join('\0') ||
+      marker.schema !== 'pulse.continuity_observed_marker.v1' ||
+      !isStableHostID(marker.offer_receipt_id) || !isStableHostID(marker.observation_receipt_id) ||
+      !isStableHostID(marker.context_id) ||
+      marker.binding_digest !== resolved.binding.binding_digest ||
+      marker.repository_id !== resolved.binding.workspace.repository_id ||
+      marker.host !== event.host || marker.session_ref !== sessionRef ||
+      typeof marker.observed_at !== 'string' || Number.isNaN(Date.parse(marker.observed_at))) {
+    throw new Error('continuity_observed_marker_invalid');
+  }
+  return marker;
+}
+
+export function hasContinuitySessionDelivery(resolved, event, {
+  platformServices = defaultPlatformServices,
+} = {}) {
+  return readObservedMarker(resolved, event, platformServices) !== undefined;
+}
+
 export function createContinuityDeliveryObservation(ticket, event) {
-  if (event?.event !== 'turn_start' || event?.native_event !== 'UserPromptSubmit' ||
-      event?.source !== 'prompt_submitted' || !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '') ||
+  const promptObservation = event?.event === 'turn_start' &&
+    event?.native_event === 'UserPromptSubmit' && event?.source === 'prompt_submitted';
+  const stopObservation = event?.event === 'turn_finalize' &&
+    event?.native_event === 'Stop' && event?.source === 'stop';
+  if ((!promptObservation && !stopObservation) ||
+      !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '') ||
       event.host !== ticket?.host || continuitySessionRef(event.session_id) !== ticket?.session_ref) {
     throw new Error('continuity_observation_event_invalid');
   }
@@ -270,6 +353,14 @@ export async function observePendingContinuityDelivery(resolved, event, {
         receipt.host !== pending.ticket.host || receipt.session_ref !== pending.ticket.session_ref) {
       throw new Error('continuity_observation_receipt_invalid');
     }
+    const marker = observationMarker(pending.ticket, receipt);
+    const markerDirectory = continuityObservedDirectory(resolved);
+    platformServices.ensurePrivateDirectory(markerDirectory);
+    platformServices.atomicWritePrivateFile(
+      continuityObservedMarkerPath(resolved, marker.host, marker.session_ref),
+      `${JSON.stringify(marker)}\n`,
+      { ensureParent: false, maxBytes: 4096 },
+    );
     platformServices.removePrivateFile(pending.path, { missing: false });
     return receipt;
   } finally {

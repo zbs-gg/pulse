@@ -54,14 +54,37 @@ export function activateClaudePlugin(edge, {
   requireSuccess(run([
     before.installed ? 'update' : 'install', 'pulse@zbs-gg', '--scope', 'user',
   ]), before.installed ? 'update' : 'install');
-  requireSuccess(run(['enable', 'pulse@zbs-gg', '--scope', 'user']), 'enable');
+  if (!before.enabled) {
+    requireSuccess(run(['enable', 'pulse@zbs-gg', '--scope', 'user']), 'enable');
+  }
 
   const afterResult = run(['list', '--json']);
   requireSuccess(afterResult, 'list_after');
-  const after = parseClaudePluginList(afterResult.stdout);
-  const verified = inspect(after, edge);
+  let after = parseClaudePluginList(afterResult.stdout);
+  let verified = inspect(after, edge);
+  let reinstalled = false;
+  if (!verified?.ok && before.installed) {
+    // Claude treats a same-version update as a no-op even when the signed
+    // marketplace bytes changed. Replace only Pulse, preserve its data, and
+    // prove the installed tree again instead of accepting the stale cache.
+    requireSuccess(run([
+      'uninstall', 'pulse@zbs-gg', '--scope', 'user', '--keep-data',
+    ]), 'reinstall_uninstall');
+    requireSuccess(run(['install', 'pulse@zbs-gg', '--scope', 'user']), 'reinstall_install');
+    let reinstalledResult = run(['list', '--json']);
+    requireSuccess(reinstalledResult, 'list_after_reinstall');
+    after = parseClaudePluginList(reinstalledResult.stdout);
+    if (!after.enabled) {
+      requireSuccess(run(['enable', 'pulse@zbs-gg', '--scope', 'user']), 'reinstall_enable');
+      reinstalledResult = run(['list', '--json']);
+      requireSuccess(reinstalledResult, 'list_after_reinstall_enable');
+      after = parseClaudePluginList(reinstalledResult.stdout);
+    }
+    verified = inspect(after, edge);
+    reinstalled = true;
+  }
   if (!verified?.ok) throw new Error(`claude_plugin_verification_failed:${verified?.reason ?? 'unknown'}`);
-  return { ...verified, plugin: after, reused: before.installed };
+  return { ...verified, plugin: after, reinstalled, reused: before.installed && !reinstalled };
 }
 
 export function disableClaudePlugin({

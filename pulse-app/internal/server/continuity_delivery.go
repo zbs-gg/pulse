@@ -57,8 +57,20 @@ func (s *Server) handleContinuityDeliveryOffer(w http.ResponseWriter, r *http.Re
 		http.Error(w, "invalid continuity delivery offer", http.StatusBadRequest)
 		return
 	}
+	verifiedBinding := false
+	if s.cfg.ProductBindingVerifier != nil {
+		authority, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if body.BindingDigest != authority.BindingDigest || body.RepositoryID != authority.RepositoryID {
+			http.Error(w, "continuity delivery authority mismatch", http.StatusForbidden)
+			return
+		}
+		verifiedBinding = true
+	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	receipt, err := s.cfg.Store.RecordContinuityOffer(r.Context(), store.ContinuityDeliveryOfferRequest{
+	request := store.ContinuityDeliveryOfferRequest{
 		ContextID: body.ContextID, IdempotencyKey: idempotencyKey, Purpose: body.Purpose,
 		BindingDigest: body.BindingDigest, RepositoryID: body.RepositoryID, Host: body.Host,
 		SessionRef: body.SessionRef, SourceEventDigest: body.SourceEventDigest,
@@ -67,7 +79,14 @@ func (s *Server) handleContinuityDeliveryOffer(w http.ResponseWriter, r *http.Re
 		RenderedBytes: body.RenderedBytes, PulseTokens: body.PulseTokens,
 		BaselineKind: body.BaselineKind, SourceEquivalentTokens: body.SourceEquivalentTokens,
 		CoverageCounted: body.CoverageCounted, CoverageTotal: body.CoverageTotal,
-	}, time.Now().UTC())
+	}
+	var receipt store.ContinuityDeliveryReceipt
+	var err error
+	if verifiedBinding {
+		receipt, err = s.cfg.Store.RecordContinuityOfferForVerifiedBinding(r.Context(), request, time.Now().UTC())
+	} else {
+		receipt, err = s.cfg.Store.RecordContinuityOffer(r.Context(), request, time.Now().UTC())
+	}
 	if err != nil {
 		writeContinuityDeliveryError(w, err)
 		return
@@ -82,11 +101,30 @@ func (s *Server) handleContinuityDeliveryObservation(w http.ResponseWriter, r *h
 		http.Error(w, "invalid continuity delivery observation", http.StatusBadRequest)
 		return
 	}
-	receipt, err := s.cfg.Store.RecordContinuityHostObserved(r.Context(), store.ContinuityDeliveryObservationRequest{
+	verifiedBinding := false
+	if s.cfg.ProductBindingVerifier != nil {
+		authority, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if body.BindingDigest != authority.BindingDigest || body.RepositoryID != authority.RepositoryID {
+			http.Error(w, "continuity delivery authority mismatch", http.StatusForbidden)
+			return
+		}
+		verifiedBinding = true
+	}
+	request := store.ContinuityDeliveryObservationRequest{
 		ContextID: body.ContextID, IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
 		BindingDigest: body.BindingDigest, RepositoryID: body.RepositoryID, Host: body.Host,
 		SessionRef: body.SessionRef, SourceEventDigest: body.SourceEventDigest,
-	}, time.Now().UTC())
+	}
+	var receipt store.ContinuityDeliveryReceipt
+	var err error
+	if verifiedBinding {
+		receipt, err = s.cfg.Store.RecordContinuityHostObservedForVerifiedBinding(r.Context(), request, time.Now().UTC())
+	} else {
+		receipt, err = s.cfg.Store.RecordContinuityHostObserved(r.Context(), request, time.Now().UTC())
+	}
 	if err != nil {
 		writeContinuityDeliveryError(w, err)
 		return

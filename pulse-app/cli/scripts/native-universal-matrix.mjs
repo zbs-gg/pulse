@@ -45,9 +45,12 @@ export function loadNativeUniversalMatrix(path = matrixPath) {
   return Object.freeze({ ...value, targets: Object.freeze(targets) });
 }
 
-export function githubNativeUniversalMatrix(value = loadNativeUniversalMatrix()) {
+export function githubNativeUniversalMatrix(value = loadNativeUniversalMatrix(), platform) {
+  if (platform !== undefined && !['darwin', 'linux', 'win32'].includes(platform)) {
+    throw new Error('native universal matrix platform is unsupported');
+  }
   return {
-    include: value.targets.map((target) => ({
+    include: value.targets.filter((target) => platform === undefined || target.platform === platform).map((target) => ({
       ...target,
       host: value.harness.host,
       harness_package: value.harness.package,
@@ -77,6 +80,13 @@ export function currentNativeTargetID({
 
 function main() {
   const matrix = loadNativeUniversalMatrix();
+  const platformIndex = process.argv.indexOf('--github-platform');
+  if (platformIndex >= 0) {
+    const platform = process.argv[platformIndex + 1];
+    if (process.argv.length !== 4 || !platform) throw new Error('native universal matrix arguments are invalid');
+    process.stdout.write(JSON.stringify(githubNativeUniversalMatrix(matrix, platform)));
+    return;
+  }
   if (process.argv.includes('--github')) {
     process.stdout.write(JSON.stringify(githubNativeUniversalMatrix(matrix)));
     return;

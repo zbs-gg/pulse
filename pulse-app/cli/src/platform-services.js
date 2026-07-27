@@ -108,7 +108,10 @@ function posixCandidates(platform, home, env, pathAPI) {
     claude: [pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude'],
     codex: [
       ...nativePackedCodexCandidates(env, pathAPI),
-      pathAPI.join(home, '.local', 'bin', 'codex'), '/usr/local/bin/codex', '/usr/bin/codex',
+      pathAPI.join(home, '.local', 'bin', 'codex'),
+      ...(platform === 'darwin' ? ['/opt/homebrew/bin/codex'] : []),
+      '/usr/local/bin/codex',
+      '/usr/bin/codex',
     ],
     git: platform === 'darwin'
       ? ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git']

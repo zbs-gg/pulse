@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,11 +85,40 @@ function requireProductionAuthority(targetID) {
   if (currentTargetID() !== targetID) fail('production_release_native_target_required');
 }
 
-function executablePaths(staging, target) {
-  return Object.freeze({
-    daemon: join(staging.daemon, 'bin', target.daemon_name),
-    'embedder-runtime': join(staging.embedder, 'bin', target.platform === 'win32' ? 'pulse-embedder.exe' : 'pulse-embedder'),
+function nativeCodePaths(root, platform) {
+  const values = [];
+  const visit = (directory) => {
+    for (const name of readdirSync(directory).sort()) {
+      const itemPath = join(directory, name);
+      const stat = lstatSync(itemPath);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) fail('native_release_tree_invalid');
+      if (stat.isDirectory()) {
+        visit(itemPath);
+        continue;
+      }
+      const header = readFileSync(itemPath).subarray(0, 4);
+      const magic = header.toString('hex');
+      const machO = new Set([
+        'feedface', 'feedfacf', 'cefaedfe', 'cffaedfe',
+        'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca',
+      ]).has(magic);
+      const portableExecutable = header.subarray(0, 2).toString('ascii') === 'MZ';
+      if ((platform === 'darwin' && machO) || (platform === 'win32' && portableExecutable)) values.push(itemPath);
+    }
+  };
+  visit(root);
+  return values;
+}
+
+function buildEmbedderLauncher(work, target) {
+  const output = join(work, target.platform === 'win32' ? 'pulse-embedder.exe' : 'pulse-embedder');
+  run('go', [
+    'build', '-trimpath', '-ldflags=-s -w -buildid=', '-o', output, './cmd/pulse-embedder-launcher',
+  ], {
+    cwd: appRoot,
+    env: { CGO_ENABLED: '0', GOARCH: target.goarch, GOOS: target.goos },
   });
+  return output;
 }
 
 function applePolicy() {
@@ -100,26 +131,42 @@ function applePolicy() {
   });
 }
 
-function signAndSubmitApple(executables, work) {
+function signAndSubmitApple(staging, work) {
   const identity = process.env.PULSE_APPLE_SIGNING_IDENTITY;
   const profile = process.env.PULSE_NOTARYTOOL_PROFILE;
   if (typeof identity !== 'string' || !identity.endsWith(`(${APPLE_TEAM_ID})`) || /[\r\n\0]/.test(identity) ||
       typeof profile !== 'string' || profile.length < 1 || profile.length > 128 || /[\r\n\0]/.test(profile)) {
     fail('apple_release_credentials_required');
   }
-  for (const [kind, path] of Object.entries(executables)) {
-    run('/usr/bin/codesign', [
-      '--force', '--options', 'runtime', '--timestamp', '--identifier', APPLE_IDENTIFIERS[kind], '--sign', identity, path,
-    ]);
-    run('/usr/bin/codesign', ['--verify', '--strict', '--verbose=4', path]);
-    // Apple can notarize a standalone CLI binary submitted in a ZIP, but cannot
-    // staple the resulting ticket to that binary or to the ZIP. Runtime proof
-    // therefore requires Gatekeeper's Notarized Developer ID evidence online.
+  const roots = Object.freeze({ daemon: staging.daemon, 'embedder-runtime': staging.embedder });
+  for (const [kind, root] of Object.entries(roots)) {
+    const primary = join(
+      root,
+      'bin',
+      kind === 'daemon' ? 'pulse' : 'pulse-embedder',
+    );
+    const nativePaths = nativeCodePaths(root, 'darwin');
+    if (!nativePaths.includes(primary)) fail('apple_native_release_closure_invalid');
+    const ordered = [...nativePaths.filter((itemPath) => itemPath !== primary), primary];
+    for (let index = 0; index < ordered.length; index += 1) {
+      const itemPath = ordered[index];
+      const identifier = itemPath === primary
+        ? APPLE_IDENTIFIERS[kind]
+        : `${APPLE_IDENTIFIERS[kind]}.native.${index + 1}`;
+      run('/usr/bin/codesign', [
+        '--force', '--options', 'runtime', '--timestamp', '--identifier', identifier, '--sign', identity, itemPath,
+      ]);
+      run('/usr/bin/codesign', ['--verify', '--strict', '--verbose=4', itemPath]);
+    }
+    // Notarize the complete native closure, including ONNX Runtime libraries,
+    // rather than proving only the launcher that loads them.
     const submission = join(work, `${kind}-notary-submission.zip`);
-    run('/usr/bin/ditto', ['-c', '-k', '--keepParent', path, submission]);
+    run('/usr/bin/ditto', ['-c', '-k', '--keepParent', root, submission]);
     run('/usr/bin/xcrun', ['notarytool', 'submit', submission, '--keychain-profile', profile, '--wait']);
     rmSync(submission, { force: true });
-    run('/usr/sbin/spctl', ['-a', '-t', 'execute', '-vv', path]);
+    for (const itemPath of nativePaths) {
+      run('/usr/bin/codesign', ['-vvvv', '-R=notarized', '--check-notarization', itemPath]);
+    }
   }
   return applePolicy();
 }
@@ -136,23 +183,28 @@ function windowsPolicy() {
   return Object.freeze({ kind: 'windows', publisher, timestamp_url: parsed.href, timestamped: true });
 }
 
-function signWindows(executables) {
+function signWindows(staging) {
   const tool = process.env.PULSE_SIGNTOOL_PATH;
   const thumbprint = process.env.PULSE_WINDOWS_CERTIFICATE_SHA1;
   if (!tool || !isAbsolute(tool) || resolve(tool) !== tool) fail('windows_signtool_required');
   if (typeof thumbprint !== 'string' || !/^[A-Fa-f0-9]{40}$/.test(thumbprint)) fail('windows_certificate_required');
   const policy = windowsPolicy();
-  for (const path of Object.values(executables)) {
-    run(tool, ['sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', policy.timestamp_url, '/sha1', thumbprint, path]);
-    run(tool, ['verify', '/pa', '/all', '/v', path]);
+  const nativePaths = [
+    ...nativeCodePaths(staging.daemon, 'win32'),
+    ...nativeCodePaths(staging.embedder, 'win32'),
+  ];
+  if (nativePaths.length < 2) fail('windows_native_release_closure_invalid');
+  for (const itemPath of nativePaths) {
+    run(tool, ['sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', policy.timestamp_url, '/sha1', thumbprint, itemPath]);
+    run(tool, ['verify', '/pa', '/all', '/v', itemPath]);
   }
   return policy;
 }
 
-function verificationPolicy({ mode, target }, executables, work) {
+function verificationPolicy({ mode, target }, staging, work) {
   if (mode === 'fixture') return Object.freeze({ fixture_id: `pr-${target.target_id}`, kind: 'fixture', production: false });
-  if (target.platform === 'darwin') return signAndSubmitApple(executables, work);
-  if (target.platform === 'win32') return signWindows(executables);
+  if (target.platform === 'darwin') return signAndSubmitApple(staging, work);
+  if (target.platform === 'win32') return signWindows(staging);
   return Object.freeze({ kind: 'linux', policy: 'signed-catalog-tree-v1' });
 }
 
@@ -171,11 +223,11 @@ async function buildSelectedTarget(options) {
       fixture: options.mode === 'fixture',
       outputRoot: staging.embedder,
       platform: target.platform,
-      runnerInput: options.runnerInput,
+      runnerInput: options.runnerInput ?? buildEmbedderLauncher(work, target),
       sourceRoot: portableEmbedderRoot,
       targetRuntimeRoot: options.targetRuntimeRoot,
     });
-    const policy = verificationPolicy({ mode: options.mode, target }, executablePaths(staging, target), work);
+    const policy = verificationPolicy({ mode: options.mode, target }, staging, work);
     const artifacts = {};
     for (const [kind, root] of Object.entries(staging)) {
       const artifactKind = kind === 'embedder' ? 'embedder-runtime' : kind;

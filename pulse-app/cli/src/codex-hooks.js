@@ -26,6 +26,7 @@ import {
   isPulseRuntimeAuthorityMutation,
   isGuardedCodexTool,
   isTrustedPulseProductTool,
+  isUntrustedPulseMemoryWriteTool,
   normalizeCodexHook,
   renderAdditionalContext,
   renderGitTeamMemoryCards,
@@ -44,6 +45,7 @@ import { ensureBoundPortableProjectID } from './project-source.js';
 import { syncCommittedGitTeamMemory } from './git-team-memory.js';
 import {
   composeBoundResumeEvidence,
+  hasContinuitySessionDelivery,
   observePendingContinuityDelivery,
   persistContinuityDelivery,
   recordContinuityObservationTicket,
@@ -52,9 +54,24 @@ import {
 const MAX_HOOK_INPUT = 1 << 20;
 
 const HEALTHY = Symbol('pulse.codex_hook_healthy');
+const WRITE_CORROBORATED = Symbol('pulse.codex_hook_write_corroborated');
+const CODEX_PRODUCT_TOOL = Object.freeze({ codexPluginAlias: true });
+
+const PERSONAL_AUTO_CAPTURE_CONTEXT = `
+Pulse Personal automatic capture (local, private, and silent):
+- During this same normal turn, before the single final user-facing response, call the installed pulse-product pulse_remember tool once only when the work produced a compact durable decision, correction, preference, open loop, or project-state change.
+- Omit tags unless every tag is an ASCII safe slug matching ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$; never use display labels or tags containing spaces.
+- Do not announce routine capture, narrate the tool call, or add a save status, receipt, or second user-facing response. A routine capture failure must not alter the user-facing answer; if the user explicitly asks whether saving succeeded, answer truthfully. If nothing durable changed, do not call a memory tool.
+- The user's current tool-use instruction wins. If this turn forbids tools, do not capture memory.
+- Never store raw prompts, transcripts, secrets, credentials, local paths, one-turn output formatting, evaluation protocol, exact-response instructions, NO_AUTO_CONTEXT checks, or other test-control instructions. An explicit lasting project fact remains eligible when the user identifies it as durable project state.`;
 
 function healthy(output) {
   Object.defineProperty(output, HEALTHY, { value: true });
+  return output;
+}
+
+function corroboratedWrite(output) {
+  Object.defineProperty(output, WRITE_CORROBORATED, { value: true });
   return output;
 }
 
@@ -85,13 +102,16 @@ function recordHookFailure(resolved, receipt) {
       ? join(resolved.runtime.data_dir, 'hook-receipts')
       : undefined;
   if (!directory) return;
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${receipt.receipt_id}.json`);
-  if (existsSync(path)) return;
   const temporary = `${path}.new`;
   try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (existsSync(path)) return;
     writeFileSync(temporary, `${JSON.stringify(receipt)}\n`, { mode: 0o600, flag: 'wx' });
     renameSync(temporary, path);
+  } catch {
+    // Failure evidence is best-effort. A diagnostics path must never break or
+    // restart the user's completed turn.
   } finally {
     rmSync(temporary, { force: true });
   }
@@ -217,6 +237,15 @@ function noChangeBody(resolved, event) {
   };
 }
 
+function promptBootstrapSessionEvent(event) {
+  return Object.freeze({
+    ...event,
+    native_event: 'SessionStart',
+    event: 'session_start',
+    source: 'prompt_bootstrap',
+  });
+}
+
 async function finalizeNoChange(resolved, event, request) {
   try {
     return await request(resolved, '/turn/no-change', {
@@ -271,13 +300,18 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         'Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.',
       ));
     }
+    if (isUntrustedPulseMemoryWriteTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
+      return healthy(preToolDenied(
+        'Pulse Personal memory writes require the pulse-product server. Legacy or lookalike Pulse servers cannot create Personal memory.',
+      ));
+    }
     if (!isGuardedCodexTool(rawInput.tool_name)) return {};
     try {
       const resolved = resolveRuntime(rawInput);
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.readTurnContext ?? readCodexTurnContext)(resolved, stopEvent, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (isTrustedPulseProductTool(rawInput.tool_name)) {
+      if (isTrustedPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
         (dependencies.writeToolLease ?? writeCodexToolLease)(
           resolved, stopEvent, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -314,6 +348,13 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       }), resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {
+      let hadObservedSessionDelivery = false;
+      try {
+        hadObservedSessionDelivery =
+          await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
+            platformServices: dependencies.platformServices,
+          });
+      } catch { /* missing observation proof requires the prompt bootstrap */ }
       try {
         await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
           request: dependencies.deliveryRequest ?? request,
@@ -331,16 +372,33 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       const approvalContext = approval
         ? `\nPulse shared-memory approval lease (host-owned; single-use): ${JSON.stringify(approval)}`
         : '';
+      if (!hadObservedSessionDelivery) {
+        const bootstrapEvent = promptBootstrapSessionEvent(event);
+        const context = await resumeContext(resolved, bootstrapEvent, request, dependencies);
+        const deliveryManifest = approvalContext
+          ? {
+              object_ids: context.manifest.object_ids,
+              evidence_ids: context.manifest.evidence_ids,
+            }
+          : context.manifest;
+        return annotateContinuityDelivery(healthy({
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: `${context.additionalContext}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
+          },
+        }), resolved, bootstrapEvent, deliveryManifest);
+      }
       return healthy({
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}`,
+          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       });
     }
     if (eventName === 'PostToolUse') {
-      if (isTrustedPulseProductTool(rawInput.tool_name)) {
+      if (isTrustedPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
         const refs = extractPulseReceiptRefs(rawInput.tool_response);
         if (refs.length > 0) {
           const stopEvent = canonicalCodexTurnEvent(rawInput);
@@ -355,9 +413,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
             }
           }
           if (corroborated.length === 0) return healthy({});
-          return healthy({
-            systemMessage: `Pulse Memory Tray receipt: ${corroborated.map((ref) => `${ref.receipt_id}:${ref.status}`).join(', ')}`,
-          });
+          return corroboratedWrite(healthy({}));
         }
       }
       return healthy({});
@@ -379,6 +435,12 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       return healthy({});
     }
     if (eventName === 'Stop') {
+      try {
+        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
+          request: dependencies.deliveryRequest ?? request,
+          platformServices: dependencies.platformServices,
+        });
+      } catch { /* delivery evidence remains pending and never blocks turn finalization */ }
       const presentation = await presentGitTeamMemoryCards(resolved, event, rawInput, request, dependencies);
       if (presentation) {
         await finalizeNoChange(resolved, event, request);
@@ -390,13 +452,8 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, event);
         return healthy({});
       } catch {
-        // No truthful finalize receipt marker: request or record one bounded pass.
-      }
-      if (!event.stop_hook_active) {
-        return healthy({
-          decision: 'block',
-          reason: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse-product pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
-        });
+        // No truthful write marker: close the turn as no-change without
+        // starting another model pass.
       }
       await finalizeNoChange(resolved, event, request);
       return healthy({});
@@ -407,19 +464,11 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     const degradedDiagnostic = typeof degradedReason === 'string'
       ? { pulseTestDiagnostic: degradedReason }
       : {};
-    if (eventName === 'Stop' && event.stop_hook_active) {
+    if (eventName === 'Stop') {
       const receipt = hookFailureReceipt(event, 'finalize_failed', now);
       recordFailure(resolved, receipt);
       return {
         continue: true,
-        systemMessage: `Pulse finalize_failed receipt: ${receipt.receipt_id}`,
-        ...degradedDiagnostic,
-      };
-    }
-    if (eventName === 'Stop') {
-      return {
-        decision: 'block',
-        reason: 'Pulse did not finalize this turn. Retry finalization once before stopping.',
         ...degradedDiagnostic,
       };
     }
@@ -804,7 +853,8 @@ function readinessSessionRef(value) {
 function terminalReadinessFact(fact) {
 	const at = readinessFactTime(fact?.created_at);
 	if (at === undefined || !['created', 'updated', 'deduplicated'].includes(fact?.status) ||
-		fact?.active !== true || !readinessID(fact.receipt_id) || !readinessID(fact.presentation_receipt_id) ||
+		fact?.active !== true || !readinessID(fact.receipt_id) ||
+		(fact.presentation_receipt_id !== undefined && !readinessID(fact.presentation_receipt_id)) ||
 		!readinessID(fact.object_id) || !readinessDigest(fact.content_digest) ||
 		!readinessID(fact.memory_kind) || fact.memory_kind === 'system_event' ||
 		!readinessID(fact.conversation_scope) || fact.conversation_scope === 'install_event' ||
@@ -858,16 +908,25 @@ export function projectReadinessLifecycleInputs(memories = [], deliveries = []) 
 	if (!terminal) return result;
 	result.terminal_memory = terminal.fact;
 	result.state = 'context_offer_pending';
-	const offered = earliestReadinessFact(deliveries.map((fact) =>
-		matchingContextReadinessFact(fact, terminal.fact, terminal.at, 'offered_to_host')).filter(Boolean));
-	if (!offered) return result;
-	result.offered_to_host = offered.fact;
+	const offers = deliveries.map((fact) =>
+		matchingContextReadinessFact(fact, terminal.fact, terminal.at, 'offered_to_host')).filter(Boolean);
+	offers.sort((left, right) => {
+		if (left.at < right.at) return -1;
+		if (left.at > right.at) return 1;
+		return String(left.fact.context_id).localeCompare(String(right.fact.context_id));
+	});
+	if (offers.length === 0) return result;
+	result.offered_to_host = offers[0].fact;
 	result.state = 'host_observation_pending';
-	const observed = earliestReadinessFact(deliveries.map((fact) =>
-		matchingContextReadinessFact(fact, terminal.fact, offered.at, 'host_observed', offered.fact)).filter(Boolean));
-	if (!observed) return result;
-	result.host_observed = observed.fact;
-	result.state = 'ready';
+	for (const offered of offers) {
+		const observed = earliestReadinessFact(deliveries.map((fact) =>
+			matchingContextReadinessFact(fact, terminal.fact, offered.at, 'host_observed', offered.fact)).filter(Boolean));
+		if (!observed) continue;
+		result.offered_to_host = offered.fact;
+		result.host_observed = observed.fact;
+		result.state = 'ready';
+		break;
+	}
 	return result;
 }
 
@@ -876,8 +935,9 @@ function readinessMilestone(eventName, options) {
 		options.output?.hookSpecificOutput?.hookEventName === 'SessionStart') return 'session_context';
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
-  if (eventName === 'PostToolUse' && isTrustedPulseProductTool(options.input?.tool_name) &&
-      /^Pulse Memory Tray receipt:/.test(options.output?.systemMessage ?? '')) return 'write_receipt';
+  if (eventName === 'PostToolUse' &&
+      isTrustedPulseProductTool(options.input?.tool_name, CODEX_PRODUCT_TOOL) &&
+      options.output?.[WRITE_CORROBORATED] === true) return 'write_receipt';
   if (eventName === 'Stop' && options.output?.decision !== 'block' && options.output?.continue !== true) {
     return 'turn_finalize';
   }

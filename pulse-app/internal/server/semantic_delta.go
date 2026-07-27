@@ -30,7 +30,7 @@ func (s *Server) handleGraphDelta(w http.ResponseWriter, r *http.Request) {
 			writeMemoryTrayError(w, err)
 			return
 		}
-		s.scheduleTurnResult(result)
+		result = s.commitTurnResultNow(result)
 		writeJSON(w, result)
 		return
 	}

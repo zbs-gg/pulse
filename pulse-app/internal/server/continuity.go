@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html"
 	"net/http"
+	"path/filepath"
 	"strconv"
 
 	"github.com/nkkmnk/pulse/internal/store"
@@ -27,12 +28,56 @@ func (s *Server) handleContinuityResume(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	resume, err := s.cfg.Store.BuildResume(req)
-	if err != nil {
-		http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+	if s.cfg.Store.StoreKind() != store.StoreKindPersonal && s.cfg.Store.StoreKind() != store.StoreKindDesk {
+		resume, err := s.cfg.Store.BuildResume(req)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resume)
 		return
 	}
-	writeJSON(w, resume)
+	if s.cfg.ProductBindingVerifier == nil {
+		resume, err := s.cfg.Store.BuildResume(req)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resume)
+		return
+	}
+	authority, ok := s.requireProductBindingAuthority(w, r)
+	if !ok {
+		return
+	}
+	if err := s.cfg.Store.RegisterPersonalProjectLabel(
+		authority.RepositoryID, filepath.Base(authority.Workspace),
+	); err != nil {
+		http.Error(w, "continuity resume authority unavailable", http.StatusForbidden)
+		return
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		scope, err := s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(
+			authority.BindingDigest, authority.RepositoryID,
+		)
+		if err != nil {
+			http.Error(w, "continuity resume authority unavailable", http.StatusForbidden)
+			return
+		}
+		resume, err := s.cfg.Store.BuildResumeForPersonalScope(req, scope)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		latest, err := s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(
+			authority.BindingDigest, authority.RepositoryID,
+		)
+		if err == nil && latest.EligibilityRevision == scope.EligibilityRevision {
+			writeJSON(w, resume)
+			return
+		}
+	}
+	http.Error(w, "continuity eligibility changed; retry", http.StatusConflict)
 }
 
 func (s *Server) handleContinuityCheckpoint(w http.ResponseWriter, r *http.Request) {

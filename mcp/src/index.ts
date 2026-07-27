@@ -12,7 +12,7 @@ import {
   existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -88,7 +88,7 @@ async function assertProductBindingCurrent(): Promise<void> {
     resolveProductWorkspaceBinding(options: { cwd: string }): {
       binding_digest: string;
       resolver_epoch: number;
-      workspace: { canonical_path: string };
+      workspace: { canonical_path: string; repository_id: string };
     };
   };
   if (PRODUCT_UNASSIGNED_REASON) {
@@ -102,6 +102,7 @@ async function assertProductBindingCurrent(): Promise<void> {
   }
   const current = authority.resolveProductWorkspaceBinding({ cwd: process.cwd() });
   if (current.binding_digest !== process.env.PULSE_BINDING_DIGEST ||
+      current.workspace.repository_id !== process.env.PULSE_REPOSITORY_ID ||
       current.resolver_epoch !== Number(process.env.PULSE_RESOLVER_EPOCH) ||
       realpathSync(current.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
       realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
@@ -452,6 +453,22 @@ async function pulseFetch<T>(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
+  if (PRODUCT_HOST_ADAPTER) {
+    const workspace = process.env.PULSE_HOST_WORKSPACE ?? '';
+    const bindingDigest = process.env.PULSE_BINDING_DIGEST ?? '';
+    const repositoryID = process.env.PULSE_REPOSITORY_ID ?? '';
+    const resolverEpoch = process.env.PULSE_RESOLVER_EPOCH ?? '';
+    if (!isAbsolute(workspace) || Buffer.byteLength(workspace, 'utf8') > 4096 ||
+        !/^[a-f0-9]{64}$/.test(bindingDigest) ||
+        !/^repository_[A-Za-z0-9._:-]{1,240}$/.test(repositoryID) ||
+        !/^[1-9][0-9]*$/.test(resolverEpoch)) {
+      throw new Error('Pulse product request authority is unavailable; restart this task');
+    }
+    headers['X-Pulse-Product-Workspace'] = Buffer.from(workspace, 'utf8').toString('base64url');
+    headers['X-Pulse-Product-Binding'] = bindingDigest;
+    headers['X-Pulse-Product-Repository'] = repositoryID;
+    headers['X-Pulse-Product-Resolver-Epoch'] = resolverEpoch;
+  }
   const apiKey = resolveApiKey();
   if (apiKey) {
     headers['X-Pulse-Key'] = apiKey;
@@ -481,7 +498,10 @@ function productRuntimeResolution() {
     binding: {
       binding_digest: process.env.PULSE_BINDING_DIGEST ?? '',
       resolver_epoch: Number(process.env.PULSE_RESOLVER_EPOCH),
-      workspace: { canonical_path: process.env.PULSE_HOST_WORKSPACE ?? '' },
+      workspace: {
+        canonical_path: process.env.PULSE_HOST_WORKSPACE ?? '',
+        repository_id: process.env.PULSE_REPOSITORY_ID ?? '',
+      },
     },
     runtime: { data_dir: PULSE_DATA_DIR },
   };
@@ -747,8 +767,13 @@ export function createPulseMcpServer(
                 },
                 tags: {
                   type: 'array',
-                  items: { type: 'string' },
+                  items: {
+                    type: 'string',
+                    pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$',
+                  },
                   maxItems: 20,
+                  description:
+                    'Optional ASCII safe slugs. Omit tags when a concept needs spaces.',
                 },
               },
               required: [

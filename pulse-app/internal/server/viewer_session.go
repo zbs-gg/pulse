@@ -56,6 +56,8 @@ type viewerSessionView struct {
 	TrustedSurfaceInstance string
 	AbsoluteExpiresAt      time.Time
 	LiveReadiness          personalLiveReadinessSnapshot
+	ProductAuthority       productBindingAuthority
+	HasProductAuthority    bool
 }
 
 type viewerSessionRecord struct {
@@ -66,6 +68,8 @@ type viewerSessionRecord struct {
 	lastSeenAt             time.Time
 	absoluteExpiresAt      time.Time
 	liveReadiness          personalLiveReadinessSnapshot
+	productAuthority       productBindingAuthority
+	hasProductAuthority    bool
 	sequence               uint64
 }
 
@@ -120,6 +124,24 @@ func newViewerSessionManager(cfg viewerSessionConfig) (*viewerSessionManager, er
 }
 
 func (s *viewerSessionManager) Create(liveReadiness personalLiveReadinessSnapshot) (viewerSessionView, error) {
+	return s.create(liveReadiness, productBindingAuthority{}, false)
+}
+
+func (s *viewerSessionManager) CreateForProduct(
+	liveReadiness personalLiveReadinessSnapshot,
+	authority productBindingAuthority,
+) (viewerSessionView, error) {
+	if !validProductBindingAuthority(authority) {
+		return viewerSessionView{}, errors.New("viewer session: invalid product authority")
+	}
+	return s.create(liveReadiness, authority, true)
+}
+
+func (s *viewerSessionManager) create(
+	liveReadiness personalLiveReadinessSnapshot,
+	authority productBindingAuthority,
+	hasAuthority bool,
+) (viewerSessionView, error) {
 	if s == nil {
 		return viewerSessionView{}, errViewerSessionUnauthorized
 	}
@@ -171,7 +193,8 @@ func (s *viewerSessionManager) Create(liveReadiness personalLiveReadinessSnapsho
 	record := viewerSessionRecord{
 		routeScope: routeScope, csrfToken: csrfToken, trustedSurfaceInstance: trustedSurface,
 		createdAt: now, lastSeenAt: now, absoluteExpiresAt: now.Add(s.absoluteTTL),
-		liveReadiness: liveReadiness, sequence: s.nextSequence,
+		liveReadiness: liveReadiness, productAuthority: authority,
+		hasProductAuthority: hasAuthority, sequence: s.nextSequence,
 	}
 	s.sessions[digest] = record
 	return record.view(id), nil
@@ -402,6 +425,7 @@ func (record viewerSessionRecord) view(id string) viewerSessionView {
 	return viewerSessionView{
 		ID: id, RouteScope: record.routeScope, CSRFToken: record.csrfToken, TrustedSurfaceInstance: record.trustedSurfaceInstance,
 		AbsoluteExpiresAt: record.absoluteExpiresAt, LiveReadiness: record.liveReadiness,
+		ProductAuthority: record.productAuthority, HasProductAuthority: record.hasProductAuthority,
 	}
 }
 

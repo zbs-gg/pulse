@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { includeRuntimePath, normalizePrivateTree } from '../src/codex-install.js';
@@ -57,7 +57,13 @@ function pruneEmptyDirectories(root) {
 	visit(root, true);
 }
 
-export function writeProductEdgeFixture(target) {
+export function writeProductEdgeFixture(target, { runtimeNodeModulesRoot } = {}) {
+	if (runtimeNodeModulesRoot !== undefined) {
+		const info = lstatSync(runtimeNodeModulesRoot);
+		if (!info.isDirectory() || info.isSymbolicLink()) {
+			throw new Error('product edge runtime dependencies are invalid');
+		}
+	}
 	mkdirSync(join(target, 'marketplace', '.agents', 'plugins'), { recursive: true, mode: 0o700 });
 	mkdirSync(join(target, 'marketplace', '.claude-plugin'), { recursive: true, mode: 0o700 });
 	cpSync(join(repoRoot, '.agents', 'plugins', 'marketplace.json'),
@@ -78,8 +84,23 @@ export function writeProductEdgeFixture(target) {
 		});
 	cpSync(cliRoot, join(target, 'runtime'), {
 		recursive: true, dereference: true,
-		filter: (sourcePath) => includeRuntimePath(cliRoot, sourcePath),
+		filter: (sourcePath) => {
+			if (!includeRuntimePath(cliRoot, sourcePath)) return false;
+			if (runtimeNodeModulesRoot === undefined) return true;
+			const relative = sourcePath.slice(cliRoot.length + 1).split('\\').join('/');
+			return relative !== 'node_modules' && !relative.startsWith('node_modules/');
+		},
 	});
+	if (runtimeNodeModulesRoot !== undefined) {
+		cpSync(runtimeNodeModulesRoot, join(target, 'runtime', 'node_modules'), {
+			recursive: true, dereference: true,
+			filter: (sourcePath) => {
+				const relativePath = relative(runtimeNodeModulesRoot, sourcePath);
+				if (relativePath.split(sep).includes('.bin')) return false;
+				return !lstatSync(sourcePath).isSymbolicLink();
+			},
+		});
+	}
 	const mcpDist = join(repoRoot, 'mcp', 'dist');
 	if (!existsSync(join(mcpDist, 'index.js'))) {
 		throw new Error('synthetic product edge requires a built MCP distribution');

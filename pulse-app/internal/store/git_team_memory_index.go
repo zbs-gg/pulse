@@ -426,8 +426,9 @@ func (s *Store) ReconcileGitTeamMemoryIndex(
 				portable_project_id, memory_id, version, candidate_digest, status, kind, content,
 				confidence, approver_label, approved_at, authority_digest, source_refs_json,
 				warnings_json, file_path, content_sha256, publication_id, publication_path,
-				object_commit_hash, manifest_commit_hash, event_id, indexed_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				object_commit_hash, manifest_commit_hash, event_id, indexed_at,
+				repository_id, binding_digest
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(portable_project_id, memory_id) DO UPDATE SET
 				version=excluded.version, candidate_digest=excluded.candidate_digest,
 				status=excluded.status, kind=excluded.kind, content=excluded.content,
@@ -438,13 +439,16 @@ func (s *Store) ReconcileGitTeamMemoryIndex(
 				publication_id=excluded.publication_id, publication_path=excluded.publication_path,
 				object_commit_hash=excluded.object_commit_hash,
 				manifest_commit_hash=excluded.manifest_commit_hash,
-				event_id=excluded.event_id, indexed_at=excluded.indexed_at`,
+				event_id=excluded.event_id, indexed_at=excluded.indexed_at,
+				repository_id=excluded.repository_id,
+				binding_digest=excluded.binding_digest`,
 			pack.projectID, document.MemoryID, document.Version, document.CandidateDigest,
 			document.Status, document.Kind, document.Content, document.Confidence,
 			document.ApproverLabel, document.ApprovedAt, document.ApprovalAuthority,
 			string(refsJSON), string(warningsJSON), object.file.Path, object.file.SHA256,
 			object.publicationID, object.publicationPath, object.file.CommitHash,
-			object.manifestCommitHash, nullableInt64(eventID), indexedAt); err != nil {
+			object.manifestCommitHash, nullableInt64(eventID), indexedAt,
+			req.RepositoryID, req.BindingDigest); err != nil {
 			return GitTeamMemoryIndexReceipt{}, nil, err
 		}
 	}

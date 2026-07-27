@@ -52,6 +52,25 @@ function dataArtifact(root, name) {
   };
 }
 
+function emptyDataArtifact(root, name) {
+  const contents = Buffer.alloc(0);
+  const path = join(root, name);
+  writeFileSync(path, contents, { mode: 0o600 });
+  const file = {
+    bytes: 0, executable: false, mode: 0o600, path: name,
+    sha256: createHash('sha256').update(contents).digest('hex'),
+  };
+  const tree = { files: [file], schema: 'pulse.artifact_tree.v1' };
+  return {
+    descriptor: {
+      executable: false, signing: { identifier: null, scheme: 'release-manifest', team_id: null },
+      tree_digest: createHash('sha256').update(JSON.stringify(tree)).digest('hex'),
+    },
+    root,
+    tree,
+  };
+}
+
 function completeArtifacts(root, platform) {
   const values = {};
   for (const kind of ['daemon', 'embedder-runtime', 'model', 'plugin-runtime']) {
@@ -84,7 +103,7 @@ test('fixture evidence is explicit and can never satisfy production policy', () 
   }
 });
 
-test('Apple policy verifies every inner executable with exact Team ID, identifier, and notarized Gatekeeper evidence', () => {
+test('Apple policy verifies every inner executable with exact Team ID, identifier, and notarized other-code evidence', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-attest-apple.'));
   try {
     const artifacts = completeArtifacts(root, 'darwin');
@@ -103,9 +122,6 @@ test('Apple policy verifies every inner executable with exact Team ID, identifie
             : 'gg.zbs.pulse.daemon';
           return { status: 0, stderr: `Identifier=${identifier}\nTeamIdentifier=44N4NZ86S5\nAuthority=Developer ID Application: ZBS GG Inc. (44N4NZ86S5)\n` };
         }
-        if (command === '/usr/sbin/spctl') {
-          return { status: 0, stderr: 'accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: ZBS GG Inc. (44N4NZ86S5)\n' };
-        }
         return { status: 0, stderr: '' };
       },
       target: {
@@ -115,7 +131,8 @@ test('Apple policy verifies every inner executable with exact Team ID, identifie
     });
     assert.equal(receipt.production, true);
     assert.equal(receipt.executables_verified, 2);
-    assert.equal(calls.some(([command]) => command === '/usr/sbin/spctl'), true);
+    assert.equal(calls.some(([command, args]) =>
+      command === '/usr/bin/codesign' && args.includes('--check-notarization')), true);
     expectCode(() => attestSelectedTarget({
       artifacts, catalogVerified: true, manifestDigest: 'a'.repeat(64), mode: 'production', platform: 'darwin',
       run: () => ({ status: 0, stderr: '' }),
@@ -180,6 +197,31 @@ test('Linux production policy is signed catalog plus exact tree and never shells
       artifacts, catalogVerified: false, manifestDigest: 'a'.repeat(64), mode: 'production', platform: 'linux',
       target: { platform: 'linux', verification_profile: { kind: 'linux', policy: 'signed-catalog-tree-v1' } },
     }), 'linux_signed_catalog_required');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('signed data trees allow canonical zero-byte package files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-attest-empty-data.'));
+  try {
+    const artifacts = completeArtifacts(root, 'linux');
+    const pluginRoot = join(root, 'plugin-runtime');
+    artifacts['plugin-runtime'] = emptyDataArtifact(pluginRoot, 'empty-module.js');
+    const receipt = attestSelectedTarget({
+      artifacts,
+      catalogVerified: true,
+      manifestDigest: 'a'.repeat(64),
+      mode: 'production',
+      platform: 'linux',
+      run: () => { throw new Error('must not execute'); },
+      target: {
+        platform: 'linux',
+        verification_profile: { kind: 'linux', policy: 'signed-catalog-tree-v1' },
+      },
+    });
+    assert.equal(receipt.production, true);
+    assert.equal(receipt.executables_verified, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

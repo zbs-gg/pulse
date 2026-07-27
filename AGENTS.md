@@ -20,9 +20,11 @@ new Cloud tasks; it must not install Pulse, start a user daemon, inspect
 the first incomplete unit. Cloud fixture evidence never replaces the native
 product/release gates named in that plan.
 
-The product promise is concrete: a normal memory is shown before it is saved,
-survives into a fresh task in a verified host, carries provenance and retrieval reasons,
-and appears in Memory Home with honest token-economy evidence.
+The product promise is concrete: normal work produces a bounded structured
+memory that deterministic product code validates and saves automatically; it
+survives into a fresh task in a verified host, carries provenance and retrieval
+reasons, and appears in Memory Home with honest token-economy evidence and
+edit, scope, and delete controls.
 
 ## 1. Audit before installing
 
@@ -42,7 +44,8 @@ and appears in Memory Home with honest token-economy evidence.
    - raw transcript capture and backend model calls are off by default;
    - old chats are not imported;
    - Personal memory never enters Git automatically;
-   - Memory Home shows every pending write before the save delay starts.
+   - Memory Home shows every saved structured memory with its receipt and
+     management controls; there is no approval timer or grace-period flow.
 5. Ask for explicit confirmation. Do not translate `--yes` into security or
    data approval.
 
@@ -81,19 +84,21 @@ continuity is ready. Confirm that doctor reports:
 - backend model calls off;
 - exact native plugin activation and one observed lifecycle in that host.
 
-Memory Home is the user surface. It shows readiness, pending cards, recent
-saved memories, what a fresh task received, acknowledgement state, and token
-evidence labeled `collecting`, `estimated`, or `measured`. Never invent a
-savings multiplier or convert `collecting` into a claim.
+Memory Home is the user surface. It shows readiness, recent saved memories,
+their write receipts and controls, what a fresh task received,
+acknowledgement state, and token evidence labeled `collecting`, `estimated`,
+or `measured`. Never invent a savings multiplier or convert `collecting` into
+a claim.
 
 ## 4. Prove one real memory
 
-Continue normal work in a verified host. Let the active harness propose one compact,
-structured memory. The user must see the card in Memory Home before the review
-delay begins. After save, start a fresh task in the same project and
-confirm that Pulse offers the memory with provenance and retrieval reasons.
-Then open Memory Home again and point to the saved-memory and continuity
-receipts. Do not use the simulated demo as a substitute for this proof.
+Continue normal work in a verified host. Let the active harness propose one
+compact structured memory. Confirm that deterministic product validation
+automatically created a durable write receipt and that Memory Home shows the
+saved card. Start a fresh task in the same project and confirm that Pulse
+offers the memory with provenance and retrieval reasons. Then open Memory Home
+again and point to the saved-memory and continuity receipts. Do not use the
+simulated demo as a substitute for this proof.
 
 ## Repair and removal
 
@@ -131,3 +136,16 @@ claim applies to it.
 - push Personal memory into Git;
 - print an IPC secret, browser session credential, or release signing key;
 - say “saved” without a receipt or “ready” without the doctor verdict.
+
+## Temporary Personal recovery lane
+
+When the current branch is `codex/personal-real-dogfood`, read
+`docs/recovery/PERSONAL_DOGFOOD.md` before changing code.
+
+In this lane, use native Codex tools by default. Do not invoke Superpowers,
+`ce-work`, or `lfg`; do not create another worktree; and do not expand into
+Team, historical import, dashboard redesign, or release-matrix work. Keep one
+short plan with at most three vertical units and at most two bounded
+subagents. The acceptance gate is a real Codex conversation that produces a
+visible, automatically saved memory and delivers that same memory to a newly
+opened real Codex task.

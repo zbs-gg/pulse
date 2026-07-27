@@ -356,7 +356,49 @@ test('npm preview release is manual, OIDC-only, staged, and still requires human
   assert.match(release, /Long-lived publication tokens are forbidden/);
 });
 
-test('production presence carrier uses the same exact-tree contract as the installer', () => {
+test('production candidate builds one protected exact six-target catalog without publishing', () => {
+  const workflow = readFileSync(join(root, '.github', 'workflows', 'production-candidate.yml'), 'utf8');
+  assert.match(workflow, /^name: Production candidate$/m);
+  assert.match(workflow, /^\s*workflow_dispatch:/m);
+  assert.match(workflow, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(workflow, /test "\$RELEASE_CONFIRMATION" = 'build universal production candidate'/);
+  assert.match(workflow, /\.github\/workflows\/verify\.yml/);
+  for (const environment of [
+    'production-linux', 'production-apple', 'production-windows',
+    'production-model', 'production-catalog', 'production-candidate',
+  ]) assert.match(workflow, new RegExp(`environment: ${environment}`));
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    assert.match(workflow, new RegExp(`--github-platform ${platform}`));
+  }
+  for (const targetID of [
+    'darwin-arm64', 'darwin-x64', 'linux-arm64-gnu',
+    'linux-x64-gnu', 'win32-arm64', 'win32-x64',
+  ]) assert.match(workflow, new RegExp(`pulse-production-target-${targetID}`));
+  assert.match(workflow, /PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved/);
+  assert.match(workflow, /npm run build:personal-catalog/);
+  assert.match(workflow, /npm run build:npm-production-candidate/);
+  assert.match(workflow, /pulse-production-release-catalog/);
+  assert.match(workflow, /pulse-npm-production-candidate/);
+  assert.doesNotMatch(workflow, /npm publish|npm stage publish|npm stage approve|continue-on-error/);
+  assert.ok(workflow.indexOf('npm run build:personal-catalog') <
+    workflow.indexOf('npm run build:npm-production-candidate'));
+
+  const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    packageJSON.scripts?.['build:npm-production-candidate'],
+    'node scripts/build-npm-production-candidate.mjs',
+  );
+  const builder = readFileSync(
+    join(root, 'pulse-app', 'cli', 'scripts', 'build-npm-production-candidate.mjs'), 'utf8',
+  );
+  assert.match(builder, /DESKTOP_TARGET_IDS/);
+  assert.match(builder, /pulse\.native_universal_target_evidence\.v1/);
+  assert.match(builder, /evidence\.production !== false/);
+  assert.match(builder, /production: true/);
+  assert.match(builder, /support_claim: false/);
+});
+
+test('optional macOS presence carrier stays exact-tree while npm packaging requires the universal catalog', () => {
 	const builder = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'build-presence-helper.mjs'), 'utf8',
 	);
@@ -365,11 +407,19 @@ test('production presence carrier uses the same exact-tree contract as the insta
 	assert.match(builder, /join\(carrierRoot, 'bin'\)/);
 	assert.match(builder, /--identifier', EXPECTED_IDENTIFIER/);
 	assert.match(builder, /join\(mountPoint, 'bin', EXPECTED_IDENTIFIER\)/);
+	assert.match(builder, /'--check-notarization'/);
+	assert.doesNotMatch(builder, /spctl'[^]*'-t', 'exec'/);
 
 	const packager = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
 	);
-	assert.match(packager, /join\(mountPoint, 'bin', expectedHelperIdentifier\)/);
+	assert.match(packager, /'--check-notarization'/);
+	assert.match(packager, /DESKTOP_TARGET_IDS\.map/);
+	assert.match(packager, /verified\.target_id !== targetID/);
+	assert.match(packager, /artifact\.format !== 'tar\.gz'/);
+	assert.match(packager, /verifyHelperProtocol\(nativeHelper\)/);
+	assert.doesNotMatch(packager, /nativeHelperCarrier|hdiutil|stapler|helperArtifact\.format !== 'dmg'/);
+	assert.doesNotMatch(packager, /spctl'[^]*'-t', 'exec'/);
 });
 
 test('target release builder emits native artifacts and production stays explicitly authorized', () => {
@@ -385,6 +435,7 @@ test('target release builder emits native artifacts and production stays explici
 	assert.match(builder, /target-build-approved/);
 	assert.ok(builder.indexOf('requireProductionAuthority') < builder.lastIndexOf('buildDaemonTarget'));
 	assert.match(builder, /notarytool', 'submit'/);
+	assert.match(builder, /'--check-notarization'/);
 	assert.match(builder, /production_ready: false/);
 
 	const fixture = readFileSync(
@@ -395,4 +446,22 @@ test('target release builder emits native artifacts and production stays explici
 	}
 	assert.match(fixture, /allowFixtureVerification: true/);
 	assert.match(fixture, /production_ready: false/);
+
+	const catalogBuilder = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'build-personal-catalog.mjs'), 'utf8',
+	);
+	assert.match(catalogBuilder, /DESKTOP_TARGET_IDS/);
+	assert.match(catalogBuilder, /Object\.keys\(targetRoots\)\.sort\(\)\.join\('\\0'\) !== DESKTOP_TARGET_IDS\.join\('\\0'\)/);
+	assert.match(catalogBuilder, /target_count: DESKTOP_TARGET_IDS\.length/);
+	assert.match(catalogBuilder, /artifact_count: 2 \+ DESKTOP_TARGET_IDS\.length \* TARGET_ARTIFACT_KINDS\.length/);
+	assert.doesNotMatch(catalogBuilder, /target\.target\?\.target_id !== 'darwin-arm64'/);
+
+	const releaseReadme = readFileSync(
+		join(root, 'pulse-app', 'cli', 'release', 'README.md'), 'utf8',
+	);
+	for (const targetID of [
+		'darwin-arm64', 'darwin-x64', 'linux-arm64-gnu',
+		'linux-x64-gnu', 'win32-arm64', 'win32-x64',
+	]) assert.match(releaseReadme, new RegExp(`--target ${targetID}=`));
+	assert.match(releaseReadme, /there is no one-platform production\s+catalog mode/i);
 });

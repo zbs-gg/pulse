@@ -895,7 +895,13 @@ export function installCodexRuntime(packageRoot, dataDir, options = {}) {
     cpSync(packageRoot, next, {
       recursive: true,
       dereference: true,
-      filter: (sourcePath) => includeRuntimePath(packageRoot, sourcePath),
+      // A signed product edge already names one release-owned, fully verified
+      // runtime snapshot. Copy that tree byte-for-byte so the installed digest
+      // remains the digest we verified above. The allowlist remains necessary
+      // for the historical unsigned package-root install path.
+      ...(options.signedEdge
+        ? {}
+        : { filter: (sourcePath) => includeRuntimePath(packageRoot, sourcePath) }),
     });
     if (!existsSync(join(next, 'node_modules'))) {
       const hoisted = resolve(packageRoot, '..', '..');

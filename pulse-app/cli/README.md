@@ -90,8 +90,9 @@ detected compatible native plugin, and opens Memory Home. It stops rather than s
 authority or full retrieval is unavailable.
 
 Only `Pulse <host> automatic lifecycle ready.` means that host is ready. The
-real proof is one normal memory shown before save and then offered to a fresh
-task with provenance, retrieval reasons, and receipts in Memory Home.
+real proof is one normal memory automatically saved after deterministic
+validation and then offered to a fresh task with provenance, retrieval
+reasons, and receipts in Memory Home.
 
 ### What `pulse demo` proves
 

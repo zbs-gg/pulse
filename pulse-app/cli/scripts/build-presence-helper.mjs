@@ -197,18 +197,20 @@ if (productionRelease) {
   verifyCarrierInner();
 }
 
-const assessment = spawnSync('/usr/sbin/spctl', ['-a', '-vv', '-t', 'exec', output], {
+const assessment = spawnSync('/usr/bin/codesign', [
+  '-vvvv', '-R=notarized', '--check-notarization', output,
+], {
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 if ((productionRelease || process.env.PULSE_REQUIRE_NOTARIZED === '1') && assessment.status !== 0) {
   rmSync(carrier, { force: true });
   rmSync(output, { force: true });
-  throw new Error(`presence helper is signed but not accepted by Gatekeeper: ${assessment.stderr.trim()}`);
+  throw new Error(`presence helper has no accepted notarization evidence: ${assessment.stderr.trim()}`);
 }
 
 console.error(`[pulse] signed presence helper: ${output}`);
 console.error(`[pulse] presence helper carrier: ${carrier}`);
 if (assessment.status !== 0) {
-  console.error('[pulse] warning: Gatekeeper does not report a notarized ticket; internal preview installs must use an unquarantined npm package.');
+  console.error('[pulse] warning: codesign does not report notarization evidence; internal preview installs must use an unquarantined npm package.');
 }

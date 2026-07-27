@@ -762,17 +762,43 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 	}
 	retention := retentionFilter(q.Scope)
 
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	querySQL := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
 		 WHERE redacted_summary LIKE ?
 		   AND status = 'active'
-		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
+		   AND privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
 		   AND (? = '' OR retention = ?)
 		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		append([]any{"%" + query + "%"}, append(privacyArgs(ceiling), retention, retention, limit)...)...,
-	)
+		 LIMIT ?`
+	args := append([]any{"%" + query + "%"}, append(privacyArgs(ceiling), retention, retention, limit)...)
+	if scoped {
+		querySQL = `
+			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
+			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
+			  FROM memory_capsules capsule
+			  JOIN private_memory_objects object ON object.object_id=capsule.id
+			 WHERE capsule.redacted_summary LIKE ?
+			   AND capsule.status='active'
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			   AND capsule.privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
+			   AND (? = '' OR capsule.retention = ?)
+			 ORDER BY capsule.created_at DESC
+			 LIMIT ?`
+		args = append(
+			[]any{"%" + query + "%", scope.ProjectNamespaceID},
+			append(privacyArgs(ceiling), retention, retention, limit)...,
+		)
+	}
+	rows, err := s.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -793,10 +819,18 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 		return out, nil
 	}
 
-	return s.recallMemoryFallback(query, ceiling, retention, limit)
+	var scopePtr *PersonalMemoryScopeSnapshot
+	if scoped {
+		scopePtr = &scope
+	}
+	return s.recallMemoryFallback(query, ceiling, retention, limit, scopePtr)
 }
 
-func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int) ([]RecalledMemoryItem, error) {
+func (s *Store) recallMemoryFallback(
+	query, ceiling, retention string,
+	limit int,
+	scope *PersonalMemoryScopeSnapshot,
+) ([]RecalledMemoryItem, error) {
 	terms := significantTerms(query)
 	if len(terms) == 0 {
 		return []RecalledMemoryItem{}, nil
@@ -819,15 +853,47 @@ func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int
 	args = append(args, likeArgs...)             // ORDER BY term-coverage score
 	args = append(args, limit)
 
-	rows, err := s.db.Query(`
+	querySQL := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
-		 WHERE (`+strings.Join(where, " OR ")+`)
+		 WHERE (` + strings.Join(where, " OR ") + `)
 		   AND status = 'active'
-		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
+		   AND privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
 		   AND (? = '' OR retention = ?)
-		 ORDER BY (`+strings.Join(score, " + ")+`) DESC, created_at DESC
-		 LIMIT ?`, args...)
+		 ORDER BY (` + strings.Join(score, " + ") + `) DESC, created_at DESC
+		 LIMIT ?`
+	if scope != nil {
+		scopedWhere := make([]string, len(where))
+		scopedScore := make([]string, len(score))
+		for index := range where {
+			scopedWhere[index] = strings.ReplaceAll(where[index], "redacted_summary", "capsule.redacted_summary")
+			scopedScore[index] = strings.ReplaceAll(score[index], "redacted_summary", "capsule.redacted_summary")
+		}
+		querySQL = `
+			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
+			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
+			  FROM memory_capsules capsule
+			  JOIN private_memory_objects object ON object.object_id=capsule.id
+			 WHERE (` + strings.Join(scopedWhere, " OR ") + `)
+			   AND capsule.status='active'
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			   AND capsule.privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
+			   AND (? = '' OR capsule.retention = ?)
+			 ORDER BY (` + strings.Join(scopedScore, " + ") + `) DESC, capsule.created_at DESC
+			 LIMIT ?`
+		args = make([]any, 0, len(terms)*2+4)
+		args = append(args, likeArgs...)
+		args = append(args, scope.ProjectNamespaceID)
+		args = append(args, privacyArgs(ceiling)...)
+		args = append(args, retention, retention)
+		args = append(args, likeArgs...)
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,6 +1162,9 @@ func validateMemoryCapsule(capsule MemoryCapsule) error {
 		if looksSensitiveOrPathLike(summary) {
 			return fmt.Errorf("items[%d].redacted_summary contains secret/path-like text", i)
 		}
+		if looksLikeEphemeralControl(summary) {
+			return fmt.Errorf("items[%d].redacted_summary looks like ephemeral evaluation control", i)
+		}
 		if item.Confidence < 0 || item.Confidence > 1 {
 			return fmt.Errorf("items[%d].confidence must be 0..1", i)
 		}
@@ -1198,6 +1267,13 @@ func looksLikeTranscript(text string) bool {
 		strings.Count(lower, "user:") >= 3 ||
 		strings.Count(lower, "assistant:") >= 3 ||
 		strings.Count(lower, "\n") > 30
+}
+
+func looksLikeEphemeralControl(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "no_auto_context") ||
+		((strings.Contains(lower, "answer with") || strings.Contains(lower, "return")) &&
+			strings.Contains(lower, "exact injected marker"))
 }
 
 func looksSensitiveOrPathLike(text string) bool {

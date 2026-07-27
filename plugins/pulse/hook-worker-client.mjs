@@ -218,10 +218,6 @@ function writeOutput(output, stream = process.stdout) {
   });
 }
 
-function isSessionStart(eventName) {
-  return eventName === 'SessionStart' || eventName === 'sessionStart';
-}
-
 export async function runHookWorkerClient({
   host,
   eventName,
@@ -230,33 +226,47 @@ export async function runHookWorkerClient({
   resolveEnvironment,
   inputStream = process.stdin,
   outputStream = process.stdout,
+  services = {},
 } = {}) {
   if (!['claude-code', 'codex', 'cursor'].includes(host) || typeof eventName !== 'string' ||
       typeof pluginRoot !== 'string' || typeof resolveEnvironment !== 'function') {
     throw new Error('hook_worker_client_invalid');
   }
-  const input = await readHookInput(inputStream);
-  const workspace = workerWorkspace(pluginRoot, input);
+  const readInput = services.readHookInput ?? readHookInput;
+  const resolveWorkspace = services.workerWorkspace ?? workerWorkspace;
+  const receiptForWorkspace = services.workerReceiptPath ?? workerReceiptPath;
+  const readReceipt = services.privateReceipt ?? privateReceipt;
+  const receiptIsValid = services.validReceipt ?? validReceipt;
+  const dispatch = services.dispatchWorker ?? dispatchWorker;
+  const ensure = services.ensureWorker ?? ensureWorker;
+  const emit = services.writeOutput ?? writeOutput;
+  const input = await readInput(inputStream);
+  const workspace = resolveWorkspace(pluginRoot, input);
   const boundedInput = typeof input.cwd === 'string'
     ? input
     : { ...input, cwd: workspace.workspacePath };
-  const receiptPath = workerReceiptPath(host, workspace.digest);
-  let expected = isSessionStart(eventName) ? await resolveEnvironment() : undefined;
-  let receipt = privateReceipt(receiptPath);
-  if (validReceipt(receipt, { host, workspaceDigest: workspace.digest, expected })) {
+  const receiptPath = receiptForWorkspace(host, workspace.digest);
+  let receipt = readReceipt(receiptPath);
+  // A live receipt represents an exact, owner-private worker generation whose
+  // runtime and plugin bytes were fully verified before it started. Reuse that
+  // bounded generation at a new session boundary: the worker still refreshes
+  // binding recovery and authority witnesses for SessionStart. If the worker
+  // is gone or its 120-second lease expired, fall back to the full product
+  // environment proof before starting the next generation.
+  if (receiptIsValid(receipt, { host, workspaceDigest: workspace.digest })) {
     try {
-      const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
-      await writeOutput(output, outputStream);
+      const output = await dispatch(receipt, { host, eventName, input: boundedInput });
+      await emit(output, outputStream);
       return;
     } catch (error) {
       if (error?.code === 'hook_worker_execution_failed') throw error;
     }
   }
 
-  expected ??= await resolveEnvironment();
-  receipt = await ensureWorker({ host, expected, receiptPath, workspace });
-  const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
-  await writeOutput(output, outputStream);
+  const expected = await resolveEnvironment();
+  receipt = await ensure({ host, expected, receiptPath, workspace });
+  const output = await dispatch(receipt, { host, eventName, input: boundedInput });
+  await emit(output, outputStream);
 }
 
 export const __hookWorkerClientTest = Object.freeze({

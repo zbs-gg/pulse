@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { acquireInstallLock } from './install-journal.js';
+import { acquireInstallLock, writeInstallJournal } from './install-journal.js';
 import {
   executePersonalInstallCommand,
-  installPlanApprovalDigest,
+  hasMatchingResumableInstallJournal,
   nativePackedFixtureApprovalDigest,
   requestConsent,
 } from './personal-install-command.js';
@@ -51,7 +51,57 @@ function plan(overrides = {}) {
   };
 }
 
-test('a non-TTY agent install uses a plan-bound macOS human confirmation', async () => {
+function resumableRelease(overrides = {}) {
+  return {
+    epoch: 7,
+    manifest_digest: 'a'.repeat(64),
+    version: '0.7.0',
+    artifacts: [
+      { id: 'pulse-0.7.0-plugin-runtime' },
+      { id: 'pulse-0.7.0-darwin-arm64-daemon' },
+    ],
+    ...overrides,
+  };
+}
+
+function writeResumableJournal(dataDir, release = resumableRelease()) {
+  writeInstallJournal(join(dataDir, 'runtime', 'install-journal.json'), {
+    artifact_ids: release.artifacts.map((artifact) => artifact.id).sort(),
+    manifest_digest: release.manifest_digest,
+    phase: 'candidate_staged',
+    previous_activation_digest: null,
+    release_epoch: release.epoch,
+    release_version: release.version,
+    schema: 'pulse.personal_install_journal.v1',
+  });
+}
+
+test('repair reuses one disclosure consent only for the exact resumable release', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-command-resume.'));
+  try {
+    const release = resumableRelease();
+    writeResumableJournal(dataDir, release);
+    const exactPlan = plan({
+      current_state: { install_receipt: 'resumable' },
+      release,
+    });
+    assert.equal(hasMatchingResumableInstallJournal({
+      dataDir, mode: 'repair', plan: exactPlan,
+    }), true);
+    assert.equal(hasMatchingResumableInstallJournal({
+      dataDir, mode: 'install', plan: exactPlan,
+    }), false);
+    assert.equal(hasMatchingResumableInstallJournal({
+      dataDir,
+      mode: 'repair',
+      plan: { ...exactPlan, release: { ...release, manifest_digest: 'b'.repeat(64) } },
+    }), false);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('a non-TTY agent install uses a project-bound macOS human confirmation without internal IDs', async () => {
   const exactPlan = plan();
   const calls = [];
   const approved = await requestConsent({
@@ -66,9 +116,10 @@ test('a non-TTY agent install uses a plan-bound macOS human confirmation', async
   });
   assert.equal(approved, true);
   assert.equal(calls[0].command, '/usr/bin/osascript');
-  assert.match(calls[0].args[1], new RegExp(installPlanApprovalDigest(exactPlan).slice(0, 16)));
-  assert.match(calls[0].args[1], /workspace_test/);
+  assert.match(calls[0].args[1], /Pulse checked project and is ready/);
   assert.match(calls[0].args[1], /codex/);
+  assert.match(calls[0].args[1], /saved automatically.*edited or deleted/i);
+  assert.doesNotMatch(calls[0].args[1], /workspace_test|repository_test|Plan:/);
 
   const denied = await requestConsent({
     input: { isTTY: false }, output: { isTTY: false }, plan: exactPlan, platform: 'darwin',
@@ -196,7 +247,6 @@ test('one-command orchestration carries the immutable plan into a healthy instal
   const stderr = sink();
   const expectedPlan = plan();
   let receivedPlan;
-  let homeOpened = false;
   const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
   const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
   const executed = await executePersonalInstallCommand({
@@ -221,7 +271,6 @@ test('one-command orchestration carries the immutable plan into a healthy instal
     input: { isTTY: false },
     lock: () => () => {},
     mode: 'install',
-    openHome: async () => { homeOpened = true; },
     output: stdout,
   });
 
@@ -230,16 +279,62 @@ test('one-command orchestration carries the immutable plan into a healthy instal
   assert.equal(executed.result.reason_code, 'already_installed');
   assert.equal(executed.result.receipt_ref, 'receipt_command_ready');
   assert.equal(JSON.parse(stdout.value()).outcome, 'ready');
-  assert.equal(homeOpened, false, 'machine-readable installs must not open a browser');
 });
 
-test('interactive one-command install opens Memory Home after releasing the install lock', async () => {
+test('same-release repair resumes without prompting for disclosure again', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-command-resume.'));
+  const stdout = sink();
+  const stderr = sink();
+  const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
+  const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
+  const release = resumableRelease();
+  writeResumableJournal(dataDir, release);
+  let prompted = false;
+  try {
+    const executed = await executePersonalInstallCommand({
+      argv: [],
+      buildDependencies: () => ({
+        inspectRuntime: async () => ({ ready: true }), provisionRuntime: async () => {},
+        inspectPrincipal: async () => principal, createPrincipal: async () => principal,
+        inspectBinding: async () => ({ ready: true, binding }), createBinding: async () => binding,
+        inspectCore: async () => ({
+          ready: true,
+          full_retrieval: true,
+          context: { edge: { release_manifest_digest: release.manifest_digest } },
+        }),
+        activateCore: async () => {},
+        inspectActivation: async () => readyActivation(), activateHosts: async () => readyActivation(),
+        inspectHealth: async () => ({ ready: true, full_retrieval: true }),
+        writeReceipt: async () => 'receipt_command_ready',
+      }),
+      buildPlan: () => plan({
+        current_state: { install_receipt: 'resumable' },
+        release,
+      }),
+      consentPrompt: async () => { prompted = true; return false; },
+      dataDir,
+      errorOutput: stderr,
+      input: { isTTY: true },
+      lock: () => () => {},
+      mode: 'repair',
+      output: stdout,
+    });
+
+    assert.equal(executed.exitCode, 0);
+    assert.equal(executed.result.reason_code, 'already_installed');
+    assert.equal(prompted, false);
+    assert.match(stdout.value(), /already approved for this exact release/i);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('interactive one-command install ends with Continue working and does not force Memory Home', async () => {
   const stdout = sink();
   const stderr = sink();
   const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
   const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
   let lockReleased = false;
-  let homeOpened = false;
   const executed = await executePersonalInstallCommand({
     argv: [],
     buildDependencies: () => ({
@@ -259,14 +354,18 @@ test('interactive one-command install opens Memory Home after releasing the inst
     input: { isTTY: true },
     lock: () => () => { lockReleased = true; },
     mode: 'install',
-    openHome: async () => {
-      assert.equal(lockReleased, true, 'Home must open only after the install transaction unlocks');
-      homeOpened = true;
-    },
     output: stdout,
   });
 
   assert.equal(executed.exitCode, 0);
-  assert.equal(homeOpened, true);
-  assert.match(executed.result.next_action, /Run pulse home/);
+  assert.equal(lockReleased, true);
+  assert.match(executed.result.next_action, /Continue working/);
+  assert.match(executed.result.next_action, /Optional: run pulse home/);
+  assert.match(stdout.value(), /Pulse turns useful context.*Memory Home/i);
+  assert.match(stdout.value(), /saved automatically/i);
+  assert.match(stdout.value(), /Pulse Personal is ready/);
+  assert.match(stdout.value(), /Continue working/);
+  assert.match(stdout.value(), /Optional: run pulse home/);
+  assert.doesNotMatch(stdout.value(), /Memory Home will open/i);
+  assert.doesNotMatch(stdout.value(), /workspace_test|repository_test|Current state:|Local writes:|Host parity:/);
 });

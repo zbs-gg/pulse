@@ -75,8 +75,9 @@ type Config struct {
 	Health health.Provider
 	// Billing describes the current Pulse distribution mode for /memory/status.
 	Billing BillingStatus
-	// TrayGracePeriod controls the visible private-write preview window for
-	// Personal/Desk product stores. Zero selects the product default (10s).
+	// TrayGracePeriod is retained for wire/schema compatibility with older
+	// runtimes. Ordinary Personal writes are immediate; zero is the product
+	// default and no per-card review window is created.
 	TrayGracePeriod time.Duration
 	// HomeOrigin is the exact loopback origin for the credential-free Personal
 	// or Desk Memory Home. Empty keeps the Home surface disabled (legacy Local
@@ -96,6 +97,10 @@ type Config struct {
 	// HomeBindingVerifier re-reads the signed workspace authority before every
 	// Home render or mutation so a stale daemon/session cannot survive revoke.
 	HomeBindingVerifier HomeBindingVerifier
+	// ProductBindingVerifier resolves the current signed project boundary for
+	// each Personal daemon request. It lets one principal daemon serve several
+	// project namespaces without trusting caller-selected namespace IDs.
+	ProductBindingVerifier ProductBindingVerifier
 	// ConsolidationReports overrides the daemon-owned report lifecycle manager.
 	// When nil, Personal and Desk stores with an exact product boundary receive
 	// a private manager next to their vault automatically.
@@ -150,11 +155,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.StartupNonce != "" && !validStartupNonce(cfg.StartupNonce) {
 		return nil, errors.New("server: startup nonce must be 32 lowercase-hex bytes")
 	}
-	if cfg.TrayGracePeriod == 0 {
-		cfg.TrayGracePeriod = 10 * time.Second
-	}
-	if cfg.TrayGracePeriod < time.Second || cfg.TrayGracePeriod > 30*time.Second {
-		return nil, errors.New("server: TrayGracePeriod must be between 1s and 30s")
+	if cfg.TrayGracePeriod < 0 || cfg.TrayGracePeriod > 30*time.Second {
+		return nil, errors.New("server: TrayGracePeriod must be between 0s and 30s")
 	}
 	if cfg.EnhancedPresenceAuthorizer == nil {
 		cfg.EnhancedPresenceAuthorizer = userpresence.NewUnavailableAuthorizer("enhanced_presence_unavailable")
@@ -243,6 +245,8 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 		homePresentation, err := NewMemoryPresentationService(MemoryPresentationServiceConfig{
+			// Presentation is optional audit evidence, never an approval or
+			// persistence gate.
 			Store: cfg.Store, Schedule: server.schedulePresentedMemory,
 			ExpectedOrigin: cfg.HomeOrigin, ExpectedPath: memoryPresentationScopedHomePath,
 			GracePeriod: cfg.TrayGracePeriod, CapabilityTTL: 45 * time.Second,
@@ -416,7 +420,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Key, Authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Key, Authorization, X-Pulse-Product-Workspace, X-Pulse-Product-Binding, X-Pulse-Product-Repository, X-Pulse-Product-Resolver-Epoch")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}

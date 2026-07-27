@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +31,7 @@ const (
 var (
 	errHomeUnassignedRejected = errors.New("unassigned card was rejected before Tray creation")
 	errHomeBindingStale       = errors.New("Home product binding is no longer current")
+	homeFilterIdentifier      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$`)
 )
 
 type homeSessionRequest struct {
@@ -80,6 +84,9 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/tray/{id}/edit", s.handleHomeTrayEdit)
 		r.Post("/tray/{id}/cancel", s.handleHomeTrayCancel)
 		r.Post("/tray/{id}/commit", s.handleHomeTrayCommit)
+		r.Post("/memory/{id}/edit", s.handleHomeMemoryEdit)
+		r.Post("/memory/{id}/move", s.handleHomeMemoryMove)
+		r.Post("/memory/{id}/delete", s.handleHomeMemoryDelete)
 		r.Post("/unassigned/{id}/assign", s.handleHomeUnassignedAssign)
 		r.Post("/unassigned/{id}/delete", s.handleHomeUnassignedDelete)
 		r.Post("/consolidation/start", s.handleHomeConsolidationStart)
@@ -161,7 +168,10 @@ func (s *Server) handleHomeProtectedWipeBegin(w http.ResponseWriter, r *http.Req
 		return
 	}
 	bindingDigest, repositoryID, boundaryOK := s.cfg.Store.ProductRuntimeBoundary()
-	if !boundaryOK || bindingDigest != snapshot.BindingDigest {
+	if !boundaryOK || bindingDigest != snapshot.BindingDigest ||
+		(session.HasProductAuthority &&
+			(bindingDigest != session.ProductAuthority.BindingDigest ||
+				repositoryID != session.ProductAuthority.RepositoryID)) {
 		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
 	}
@@ -286,7 +296,7 @@ func (s *Server) handleHomeProtectedWipeComplete(w http.ResponseWriter, r *http.
 		writeHomeProtectedWipeError(w, userpresence.ErrEnhancedCeremonyInvalid)
 		return
 	}
-	if err := s.verifyHomeBinding(r.Context()); err != nil {
+	if err := s.verifyHomeSessionBinding(r.Context(), session); err != nil {
 		http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
 		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
@@ -402,11 +412,29 @@ func (s *Server) handleHomeSessionIssue(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if err := s.verifyHomeBinding(r.Context()); err != nil {
+	var authority *productBindingAuthority
+	if s.cfg.ProductBindingVerifier != nil {
+		verified, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if err := s.cfg.Store.RegisterPersonalProjectLabel(
+			verified.RepositoryID, filepath.Base(verified.Workspace),
+		); err != nil {
+			http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
+			return
+		}
+		authority = &verified
+	} else if err := s.verifyHomeBinding(r.Context()); err != nil {
 		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
 	}
-	session, err := s.homeSessions.Create(request.LiveReadiness)
+	var session viewerSessionView
+	if authority != nil {
+		session, err = s.homeSessions.CreateForProduct(request.LiveReadiness, *authority)
+	} else {
+		session, err = s.homeSessions.Create(request.LiveReadiness)
+	}
 	if err != nil {
 		http.Error(w, "Home session unavailable", http.StatusServiceUnavailable)
 		return
@@ -439,8 +467,13 @@ func parseHomeSessionRequest(w http.ResponseWriter, r *http.Request) (homeSessio
 }
 
 func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || r.URL.RawQuery != "" || r.URL.Fragment != "" {
+	if r.Method != http.MethodGet || r.URL.Fragment != "" {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	filter, filterOK := parseHomeMemoryFilter(r)
+	if !filterOK {
+		http.Error(w, "invalid memory filters", http.StatusBadRequest)
 		return
 	}
 	session, err := s.homeSessions.Authenticate(r)
@@ -450,17 +483,31 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Memory Home is locked. Run pulse home again.", http.StatusUnauthorized)
 		return
 	}
-	if err := s.verifyHomeBinding(r.Context()); err != nil {
+	if err := s.verifyHomeSessionBinding(r.Context(), session); err != nil {
 		http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
 		http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 		return
 	}
-	data, err := s.buildMemoryHome(s.homeNow(), session.LiveReadiness)
+	var authority *productBindingAuthority
+	if session.HasProductAuthority {
+		authority = &session.ProductAuthority
+	}
+	data, err := s.buildMemoryHomeFilteredForAuthority(
+		s.homeNow(), session.LiveReadiness, filter, authority,
+	)
 	if err != nil {
 		http.Error(w, "Memory Home data is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	candidates, err := s.cfg.Store.ListPendingMemoryTrayCandidates(50)
+	var candidates []store.MemoryTrayPendingCandidate
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		candidates, err = s.cfg.Store.ListPendingMemoryTrayCandidatesForVerifiedBinding(
+			50, authority.BindingDigest, authority.ResolverEpoch,
+		)
+	} else {
+		candidates, err = s.cfg.Store.ListPendingMemoryTrayCandidates(50)
+	}
 	if err != nil {
 		http.Error(w, "Memory Tray is unavailable", http.StatusServiceUnavailable)
 		return
@@ -492,9 +539,64 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Memory Home render failed", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'unsafe-inline'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, page)
+}
+
+func parseHomeMemoryFilter(r *http.Request) (store.MemoryHomeFilter, bool) {
+	if r == nil {
+		return store.MemoryHomeFilter{}, false
+	}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return store.MemoryHomeFilter{}, false
+	}
+	allowed := map[string]bool{
+		"q": true, "project": true, "harness": true, "from": true,
+		"to": true, "scope": true, "sharing": true, "offset": true,
+	}
+	for key, entries := range values {
+		if !allowed[key] || len(entries) != 1 {
+			return store.MemoryHomeFilter{}, false
+		}
+	}
+	one := func(key string) string {
+		return strings.TrimSpace(values.Get(key))
+	}
+	filter := store.MemoryHomeFilter{
+		Text: one("q"), Project: one("project"), Harness: one("harness"),
+		DateFrom: one("from"), DateTo: one("to"), Scope: one("scope"),
+		Sharing: one("sharing"), PageSize: 50,
+	}
+	if len([]rune(filter.Text)) > 160 ||
+		(filter.Project != "" && !homeFilterIdentifier.MatchString(filter.Project)) ||
+		(filter.Harness != "" && filter.Harness != "codex" &&
+			filter.Harness != "claude-code" && filter.Harness != "cursor") ||
+		(filter.Scope != "" && filter.Scope != store.MemoryScopeProject &&
+			filter.Scope != store.MemoryScopePersonalGlobal) ||
+		(filter.Sharing != "" && filter.Sharing != "device_only" &&
+			filter.Sharing != "local_git" && filter.Sharing != "remote_git" &&
+			filter.Sharing != "unknown") {
+		return store.MemoryHomeFilter{}, false
+	}
+	for _, date := range []string{filter.DateFrom, filter.DateTo} {
+		if date == "" {
+			continue
+		}
+		parsed, err := time.Parse("2006-01-02", date)
+		if err != nil || parsed.Format("2006-01-02") != date {
+			return store.MemoryHomeFilter{}, false
+		}
+	}
+	if rawOffset := one("offset"); rawOffset != "" {
+		offset, err := strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 || offset > 100_000 {
+			return store.MemoryHomeFilter{}, false
+		}
+		filter.PageOffset = offset
+	}
+	return filter, true
 }
 
 func (s *Server) handleHomeScript(w http.ResponseWriter, r *http.Request) {
@@ -520,15 +622,19 @@ func (s *Server) handleHomePresent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	candidate, ok := s.currentHomeCandidate(candidateID, candidateVersion)
+	candidate, ok := s.currentHomeCandidateForSession(session, candidateID, candidateVersion)
 	if !ok {
 		http.Error(w, "candidate changed", http.StatusConflict)
 		return
 	}
-	bindingDigest, _, boundaryOK := s.cfg.Store.ProductRuntimeBoundary()
-	if !boundaryOK {
-		http.Error(w, "Home boundary unavailable", http.StatusServiceUnavailable)
-		return
+	bindingDigest := session.ProductAuthority.BindingDigest
+	if !session.HasProductAuthority {
+		var boundaryOK bool
+		bindingDigest, _, boundaryOK = s.cfg.Store.ProductRuntimeBoundary()
+		if !boundaryOK {
+			http.Error(w, "Home boundary unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	binding := MemoryPresentationBinding{
 		BrowserSessionID: session.ID, CSRFToken: session.CSRFToken,
@@ -561,7 +667,8 @@ func (s *Server) handleHomeLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHomeTrayEdit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHomeMutation(w, r); !ok {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
 		return
 	}
 	version, ok := exactHomeVersion(r)
@@ -581,17 +688,35 @@ func (s *Server) handleHomeTrayEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid structured memory", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.cfg.Store.EditMemoryTrayCandidate(
-		chi.URLParam(r, "id"), version, candidate, s.homeNow(), s.cfg.TrayGracePeriod,
-	); err != nil {
+	var receipt store.MemoryWriteReceipt
+	var err error
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		receipt, err = s.cfg.Store.EditMemoryTrayCandidateForVerifiedBinding(
+			chi.URLParam(r, "id"), version, candidate, s.homeNow(), s.cfg.TrayGracePeriod,
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		receipt, err = s.cfg.Store.EditMemoryTrayCandidate(
+			chi.URLParam(r, "id"), version, candidate, s.homeNow(), s.cfg.TrayGracePeriod,
+		)
+	}
+	if err != nil {
 		writeHomeMutationError(w, err)
 		return
+	}
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		_ = s.commitReceiptNowForAuthority(receipt, &authority)
+	} else {
+		_ = s.commitReceiptNow(receipt)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleHomeTrayCancel(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHomeMutation(w, r); !ok {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
 		return
 	}
 	version, ok := exactHomeVersion(r)
@@ -599,7 +724,17 @@ func (s *Server) handleHomeTrayCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.cfg.Store.CancelMemoryTrayCandidate(chi.URLParam(r, "id"), version, s.homeNow()); err != nil {
+	var err error
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		_, err = s.cfg.Store.CancelMemoryTrayCandidateForVerifiedBinding(
+			chi.URLParam(r, "id"), version, s.homeNow(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		_, err = s.cfg.Store.CancelMemoryTrayCandidate(chi.URLParam(r, "id"), version, s.homeNow())
+	}
+	if err != nil {
 		writeHomeMutationError(w, err)
 		return
 	}
@@ -607,7 +742,8 @@ func (s *Server) handleHomeTrayCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHomeTrayCommit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHomeMutation(w, r); !ok {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
 		return
 	}
 	version, ok := exactHomeVersion(r)
@@ -615,12 +751,162 @@ func (s *Server) handleHomeTrayCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	receipt, err := s.cfg.Store.CommitMemoryTrayCandidate(chi.URLParam(r, "id"), version, s.homeNow())
+	var receipt store.MemoryWriteReceipt
+	var err error
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		receipt, err = s.cfg.Store.CommitMemoryTrayCandidateForVerifiedBinding(
+			chi.URLParam(r, "id"), version, s.homeNow(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		receipt, err = s.cfg.Store.CommitMemoryTrayCandidate(chi.URLParam(r, "id"), version, s.homeNow())
+	}
 	if err != nil {
 		writeHomeMutationError(w, err)
 		return
 	}
 	s.refreshProductRetrieval(receipt)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeMemoryDelete(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "expected_generation") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	objectID := chi.URLParam(r, "id")
+	expectedGeneration, parseErr := strconv.Atoi(r.PostForm.Get("expected_generation"))
+	if parseErr != nil || expectedGeneration < 1 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-home-memory-delete-v2", objectID, strconv.Itoa(expectedGeneration),
+	}, "\x1f")))
+	idempotencyKey := fmt.Sprintf("home_delete_%x", digest[:])
+	var receipt store.MemoryWriteReceipt
+	var err error
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		receipt, err = s.cfg.Store.DeleteCommittedMemoryGenerationForVerifiedBinding(
+			objectID, expectedGeneration, idempotencyKey, s.homeNow(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		receipt, err = s.cfg.Store.DeleteCommittedMemoryGeneration(
+			objectID, expectedGeneration, idempotencyKey, s.homeNow(),
+		)
+	}
+	if err != nil {
+		writeHomeMutationError(w, err)
+		return
+	}
+	s.refreshProductRetrieval(receipt)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeMemoryMove(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(
+		r, viewerSessionCSRFFormField, "expected_generation", "target_scope",
+	) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	expectedGeneration, err := strconv.Atoi(r.PostForm.Get("expected_generation"))
+	targetScope := r.PostForm.Get("target_scope")
+	if err != nil || expectedGeneration < 1 ||
+		(targetScope != store.MemoryScopeProject &&
+			targetScope != store.MemoryScopePersonalGlobal) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	objectID := chi.URLParam(r, "id")
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-home-memory-move-v1", objectID,
+		strconv.Itoa(expectedGeneration), targetScope,
+	}, "\x1f")))
+	idempotencyKey := fmt.Sprintf("home_move_%x", digest[:])
+	var result store.MemoryScopeMoveReceipt
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		result, err = s.cfg.Store.MoveCommittedMemoryScopeForVerifiedBinding(
+			objectID, expectedGeneration, targetScope, idempotencyKey, s.homeNow(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.MoveCommittedMemoryScope(
+			objectID, expectedGeneration, targetScope, idempotencyKey, s.homeNow(),
+		)
+	}
+	if err != nil {
+		writeHomeMutationError(w, err)
+		return
+	}
+	s.refreshProductRetrieval(result.WriteReceipt)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeMemoryEdit(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(
+		r, viewerSessionCSRFFormField, "summary", "expected_generation",
+	) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	objectID := chi.URLParam(r, "id")
+	summary := strings.TrimSpace(r.PostForm.Get("summary"))
+	expectedGeneration, parseErr := strconv.Atoi(r.PostForm.Get("expected_generation"))
+	if summary == "" || len([]rune(summary)) > 1200 ||
+		parseErr != nil || expectedGeneration < 1 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-home-memory-edit-v2", objectID,
+		strconv.Itoa(expectedGeneration), summary,
+	}, "\x1f")))
+	var result store.TurnFinalizeResult
+	var err error
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		result, err = s.cfg.Store.PrepareMemorySummaryCorrectionAtGenerationWithInvocationForVerifiedBinding(
+			objectID, summary, fmt.Sprintf("home_edit_%x", digest[:]),
+			expectedGeneration, s.homeNow(), s.cfg.TrayGracePeriod,
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.PrepareMemorySummaryCorrectionAtGenerationWithInvocation(
+			objectID, summary, fmt.Sprintf("home_edit_%x", digest[:]),
+			expectedGeneration, s.homeNow(), s.cfg.TrayGracePeriod,
+		)
+	}
+	if err != nil {
+		writeHomeMutationError(w, err)
+		return
+	}
+	if len(result.Receipts) != 1 {
+		writeHomeMutationError(w, errors.New("Memory Home edit returned no durable receipt"))
+		return
+	}
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		_ = s.commitReceiptNowForAuthority(result.Receipts[0], &authority)
+	} else {
+		_ = s.commitReceiptNow(result.Receipts[0])
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -664,6 +950,7 @@ func (s *Server) handleHomeUnassignedAssign(w http.ResponseWriter, r *http.Reque
 					return errHomeUnassignedRejected
 				}
 			}
+			s.scheduleTurnResult(result)
 			return nil
 		},
 	)
@@ -716,7 +1003,7 @@ func (s *Server) homeNow() time.Time {
 func (s *Server) requireHomeMutation(w http.ResponseWriter, r *http.Request) (viewerSessionView, bool) {
 	session, err := s.homeSessions.ValidateMutation(w, r)
 	if err == nil {
-		if verifyErr := s.verifyHomeBinding(r.Context()); verifyErr != nil {
+		if verifyErr := s.verifyHomeSessionBinding(r.Context(), session); verifyErr != nil {
 			http.SetCookie(w, s.homeSessions.ClearCookie(session.RouteScope))
 			http.Error(w, "The project binding changed. Run pulse home again.", http.StatusConflict)
 			return viewerSessionView{}, false
@@ -725,6 +1012,22 @@ func (s *Server) requireHomeMutation(w http.ResponseWriter, r *http.Request) (vi
 	}
 	writeHomeMutationError(w, err)
 	return viewerSessionView{}, false
+}
+
+func (s *Server) verifyHomeSessionBinding(ctx context.Context, session viewerSessionView) error {
+	if session.HasProductAuthority {
+		authority := session.ProductAuthority
+		if s == nil || s.cfg.Store == nil || s.cfg.ProductBindingVerifier == nil ||
+			!validProductBindingAuthority(authority) ||
+			s.cfg.ProductBindingVerifier.VerifyBinding(
+				ctx, authority.Workspace, authority.BindingDigest,
+				authority.RepositoryID, authority.ResolverEpoch,
+			) != nil {
+			return errHomeBindingStale
+		}
+		return nil
+	}
+	return s.verifyHomeBinding(ctx)
 }
 
 func (s *Server) verifyHomeBinding(ctx context.Context) error {
@@ -787,6 +1090,21 @@ func (s *Server) currentHomeCandidate(candidateID string, version int) (store.Me
 	return candidate, err == nil
 }
 
+func (s *Server) currentHomeCandidateForSession(
+	session viewerSessionView,
+	candidateID string,
+	version int,
+) (store.MemoryTrayPendingCandidate, bool) {
+	if !session.HasProductAuthority {
+		return s.currentHomeCandidate(candidateID, version)
+	}
+	authority := session.ProductAuthority
+	candidate, err := s.cfg.Store.GetPendingMemoryTrayCandidateForVerifiedBinding(
+		candidateID, version, authority.BindingDigest, authority.ResolverEpoch,
+	)
+	return candidate, err == nil
+}
+
 func writeHomeMutationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errViewerSessionMethodNotAllowed):
@@ -803,10 +1121,10 @@ func writeHomeMutationError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrMemoryPresentationExpired), errors.Is(err, ErrMemoryPresentationReplay):
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, store.ErrMemoryTrayGraceActive):
-		http.Error(w, "The visible review delay is still active.", http.StatusTooEarly)
+		http.Error(w, "The memory save is still finishing. Refresh Home.", http.StatusTooEarly)
 	case errors.Is(err, store.ErrMemoryTrayVersionConflict), errors.Is(err, store.ErrMemoryTrayTerminal),
 		errors.Is(err, store.ErrMemoryTrayNotPresented), errors.Is(err, store.ErrProductRuntimeMismatch),
-		errors.Is(err, store.ErrMemoryPresentationConflict):
+		errors.Is(err, store.ErrMemoryPresentationConflict), errors.Is(err, store.ErrMemoryScopeConflict):
 		http.Error(w, "The memory card changed. Refresh Home.", http.StatusConflict)
 	default:
 		http.Error(w, "Memory Home action failed", http.StatusBadRequest)
@@ -1045,12 +1363,12 @@ const memoryHomeBrowserScript = `(() => {
         expected_version: card.dataset.candidateVersion,
       });
       if (!response.ok) {
-        show(card, "Review delay did not start. Refresh Home to retry.");
+        show(card, "Activity audit is unavailable. Pulse keeps retrying the save automatically.");
         return;
       }
-      show(card, "Shown to you. The review delay is running.");
+      show(card, "Visible here. Automatic save continues in the background.");
     } catch (_) {
-      show(card, "Review delay could not be confirmed. Refresh Home to retry.");
+      show(card, "Activity audit is unavailable. Pulse keeps retrying the save automatically.");
     }
   };
 

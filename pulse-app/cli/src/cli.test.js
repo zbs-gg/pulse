@@ -446,7 +446,11 @@ test('install-plan claude-code prints human-readable trust plan', () => {
 });
 
 test('install-plan --json exposes the host-neutral Personal product contract without mutation', () => {
-  const { home, result } = run(['install-plan', '--json']);
+  const missingReleaseRoot = mkdtempSync(join(tmpdir(), 'pulse-cli-missing-release.'));
+  const { home, result } = run(['install-plan', '--json'], {
+    PULSE_RELEASE_TEST_MODE: '1',
+    PULSE_RELEASE_MANIFEST_PATH: join(missingReleaseRoot, 'personal-preview-manifest.json'),
+  });
 
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
@@ -458,17 +462,20 @@ test('install-plan --json exposes the host-neutral Personal product contract wit
   assert.equal(plan.privacy.raw_transcript_capture, 'off');
   assert.equal(plan.privacy.backend_model_calls, 'off');
   assert.match(plan.reason_codes.join('\n'), /workspace_not_git/);
+  assert.equal(plan.release, null);
   assert.match(plan.reason_codes.join('\n'), /release_manifest_unavailable/);
   assert.equal(existsSync(join(home, '.pulse')), false);
 });
 
-test('non-interactive Personal install prints disclosure and cancels before product state', () => {
+test('non-interactive Personal install explains the prerequisite before product state', () => {
   const { home, result } = run(['install']);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout, /Pulse Personal install/);
-  assert.match(result.stdout, /Nothing above is written until you approve/);
-  assert.match(result.stdout, /action_required/);
+  assert.match(result.stdout, /Pulse Personal/);
+  assert.match(result.stdout, /cards in Memory Home/);
+  assert.match(result.stdout, /Technical details: pulse install-plan --json/);
+  assert.doesNotMatch(result.stdout, /Current state:|Local writes:|Workspace:|Repository:/);
+  assert.match(result.stdout, /workspace_not_git/);
   assert.equal(existsSync(join(home, '.pulse')), false);
 });
 
@@ -529,6 +536,34 @@ test('preflight derives resume evidence from a durable runtime journal after pro
   assert.equal(JSON.parse(result.stdout).current_state.install_receipt, 'resumable');
 });
 
+test('a resumable release journal outranks a zero-step blocked receipt from an interrupted download', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-blocked-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-resume-blocked-cwd.'));
+  const dataDir = join(home, 'pulse-data');
+  mkdirSync(join(dataDir, 'runtime'), { recursive: true, mode: 0o700 });
+  spawnSync('/usr/bin/git', ['init', '-q'], { cwd, encoding: 'utf8' });
+  writeFileSync(join(dataDir, 'runtime', 'install-journal.json'), JSON.stringify({
+    schema: 'pulse.personal_install_journal.v1',
+    phase: 'downloading',
+    manifest_digest: 'a'.repeat(64),
+  }), { mode: 0o600 });
+  const initial = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+  assert.equal(initial.status, 0, initial.stderr);
+  const workspace = JSON.parse(initial.stdout).detected.workspace;
+  mkdirSync(join(dataDir, 'receipts', 'install'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(dataDir, 'receipts', 'install', `${workspace.workspace_id}.json`), JSON.stringify({
+    schema: 'pulse.personal_install_receipt.v1',
+    outcome: 'blocked',
+    workspace_id: workspace.workspace_id,
+    repository_id: workspace.repository_id,
+  }), { mode: 0o600 });
+
+  const resumed = runInWorkspace(['install-plan', '--json'], cwd, home, { PULSE_DATA_DIR: dataDir });
+
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).current_state.install_receipt, 'resumable');
+});
+
 test('preflight keeps a staged release generation resumable while host lifecycle completes', () => {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-staged-cwd.'));
@@ -580,7 +615,10 @@ test('doctor --json reports machine-readable missing setup without a stack trace
 });
 
 test('doctor cursor --json reports the native Cursor product contract', () => {
-  const { result } = run(['doctor', 'cursor', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'cursor', '--json'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
@@ -611,7 +649,10 @@ test('doctor cursor --json reports the native Cursor product contract', () => {
 });
 
 test('doctor presents native presence as optional and scoped only to protected actions', () => {
-  const { result } = run(['doctor', 'claude-code'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'claude-code'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /Authority profile: pulse\.personal_authority_profile\.v1/);
@@ -622,7 +663,10 @@ test('doctor presents native presence as optional and scoped only to protected a
 });
 
 test('Codex doctor exposes the same portable authority profile without making presence a readiness failure', () => {
-  const { result } = run(['doctor', 'codex', '--json'], { PATH: '/tmp/pulse-missing-tools' });
+  const { result } = run(['doctor', 'codex', '--json'], {
+    PATH: '/tmp/pulse-missing-tools',
+    PULSE_TRUST_MODE: 'test',
+  });
 
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);

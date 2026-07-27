@@ -98,6 +98,31 @@ test('activation skips prior verified mutation but returns fresh evidence for ev
   assert.deepEqual(calls, ['activate:cursor', 'inspect:claude-code', 'inspect:cursor']);
 });
 
+test('activation retries a prior installed host whose MCP never became ready', async () => {
+  const calls = [];
+  const claudeState = { ready: false };
+  const result = await activateDetectedPersonalHosts({
+    context: { store_id: 'store_personal_test' },
+    hosts: hosts('claude-code'),
+    registry: {
+      'claude-code': adapter(claudeState, calls, 'claude-code'),
+      codex: adapter({ ready: false }, calls, 'codex'),
+      cursor: adapter({ ready: false }, calls, 'cursor'),
+    },
+    prior: {
+      product_ready: false,
+      parity: 'blocked',
+      hosts: [{
+        host: 'claude-code', detected: true, compatible: true, installed: true, mcp_ready: false,
+        activated: true, verified: false, lifecycle_ready: false, reload_required: false,
+        milestones: [], reason_code: 'claude_code_activation_failed',
+      }],
+    },
+  });
+  assert.equal(result.hosts[0].mcp_ready, true);
+  assert.deepEqual(calls, ['activate:claude-code', 'inspect:claude-code']);
+});
+
 test('a prior verified host that disappears cannot make the final result ready', async () => {
   const claudeState = { ready: false };
   const registry = {
@@ -145,7 +170,7 @@ test('inspection never activates and reports zero verified hosts as not ready', 
   assert.deepEqual(calls, ['inspect:cursor']);
 });
 
-test('static plugin readiness remains reload-required until a real lifecycle is observed', async () => {
+test('static plugin readiness completes installation while lifecycle evidence remains pending', async () => {
   const calls = [];
   const registry = {
     'claude-code': adapter({ ready: false }, calls, 'claude-code'),
@@ -155,8 +180,8 @@ test('static plugin readiness remains reload-required until a real lifecycle is 
   const result = await inspectDetectedPersonalHosts({
     context: { store_id: 'store_personal_test' }, hosts: hosts('codex'), registry,
   });
-  assert.equal(result.product_ready, false);
-  assert.equal(result.parity, 'blocked');
+  assert.equal(result.product_ready, true);
+  assert.equal(result.parity, 'complete');
   assert.deepEqual(result.hosts[0], {
     host: 'codex', detected: true, compatible: true, installed: true, mcp_ready: true,
     activated: true, verified: false, lifecycle_ready: false, reload_required: true,
