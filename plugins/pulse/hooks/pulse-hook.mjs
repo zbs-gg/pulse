@@ -46,7 +46,10 @@ if (eventName === '--prewarm') {
     }))}\n`);
   } catch (error) {
     const message = String(error?.message ?? '');
-    const code = message.includes('product locator')
+    const exactCode = [error?.code, message].find((value) =>
+      typeof value === 'string' && /^(?:hook_worker|codex_prewarm)_[a-z0-9_]+$/i.test(value));
+    const code = exactCode
+      ?? (message.includes('product locator')
       ? 'codex_prewarm_locator_invalid'
       : message.includes('integration is disconnected')
         ? 'codex_prewarm_access_missing'
@@ -58,9 +61,10 @@ if (eventName === '--prewarm') {
               ? 'codex_prewarm_plugin_mismatch'
               : message.includes('hook runtime is missing')
                 ? 'codex_prewarm_entrypoint_missing'
-                : /^hook_worker_[a-z0-9_]+$/i.test(error?.code ?? '')
-                  ? error.code
-                  : 'codex_prewarm_unclassified';
+                : typeof error?.code === 'string' &&
+                    /^(?:platform_|pulse_windows_plugin_adapter_)[a-z0-9_]+$/i.test(error.code)
+                  ? `codex_prewarm_${error.code}`
+                  : 'codex_prewarm_unclassified');
     process.stderr.write(`${JSON.stringify({
       schema: 'pulse.hook_worker_prewarm_error.v1', content_free: true, code,
     })}\n`);

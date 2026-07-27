@@ -57,7 +57,11 @@ function invokeBinary({ binaryPath, operation, payload }) {
       envelope.schema !== RESPONSE_SCHEMA || typeof envelope.ok !== 'boolean') {
     fail('pulse_windows_plugin_adapter_protocol_invalid');
   }
-  if (result.status !== 0 || !envelope.ok) fail('pulse_windows_plugin_adapter_failed');
+  if (result.status !== 0 || !envelope.ok) {
+    const reason = ['lock_occupied', 'not_found', 'operation_failed', 'operation_unsupported', 'unsafe']
+      .includes(envelope.error) ? envelope.error : 'failed';
+    fail(`pulse_windows_plugin_adapter_${reason}`);
+  }
   return envelope.result;
 }
 
