@@ -11,6 +11,11 @@
   "files": [
     "src/cli.js",
     "src/consolidation-report.js",
+    "src/historical-ingest-schema.js",
+    "src/historical-ingest-protocol.js",
+    "src/codex-subscription-runner.js",
+    "src/historical-ingest-worker.js",
+    "src/historical-ingest.js",
     "src/capture-state.js",
     "src/cli-idempotency.js",
     "src/host-adapter.js",

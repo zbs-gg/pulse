@@ -39,6 +39,29 @@ a newer client. The stable CLI was upgraded to `0.144.6`; the identical
 synthetic probe then passed. The token count includes Codex harness overhead
 and is not a throughput or cost comparison.
 
+## Historical-ingest runner qualification (2026-07-22)
+
+The product runner repeated the synthetic gate through the installed CLI after
+its fail-closed contract landed. This was still a synthetic, no-history call;
+it does not change the private-quality decision above.
+
+| Field | Result |
+|---|---|
+| Contract digest | `02bfe327fb6e958c05e28b84f2bfd66534d235e12f0c9e9ee8d5c357571232bc` |
+| Canary output digest | `437ade3c69f6efa459ef83a53d9b3eb0bd13ea0f7142835270708454216efbb1` |
+| Auth / model / effort | ChatGPT / `gpt-5.6-luna` / `low` |
+| Codex CLI | `0.144.6` |
+| Isolation | owner-private temporary `HOME` and `CODEX_HOME`; auth-only projection; config, rules, plugins, apps, MCP surfaces, hooks, memories, shell/unified exec, browser/computer use, multi-agent, and Chronicle disabled |
+| Tool events | `0` |
+| Reported tokens | input `19,552`; cached input `8,960`; output `280`; reasoning output `188` |
+| Persisted residue | none; only the two content-free digests and aggregate usage above were recorded |
+
+The first product-runner attempt failed before model execution because the
+canonical schema used `allOf`, which Codex Structured Outputs rejects. The
+runner now derives a closed Codex-compatible response schema and then applies
+the stricter canonical Pulse validator independently, including scope,
+derivation, temporal, provenance, and material-kind rules.
+
 ## Frozen private baseline identity
 
 Only content-free identities and aggregate thresholds are recorded here. The

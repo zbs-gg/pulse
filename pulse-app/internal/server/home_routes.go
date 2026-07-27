@@ -92,6 +92,14 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/consolidation/start", s.handleHomeConsolidationStart)
 		r.Post("/consolidation/{id}/cancel", s.handleHomeConsolidationCancel)
 		r.Post("/consolidation/{id}/resume", s.handleHomeConsolidationResume)
+		r.Post("/history/{job}/items/{candidate}/review", s.handleHomeHistoricalReviewItem)
+		r.Post("/history/{job}/authorize-egress", s.handleHomeHistoricalAuthorizeEgress)
+		r.Get("/history/{job}/items/{candidate}/evidence", s.handleHomeHistoricalEvidence)
+		r.Post("/history/{job}/entities/preview", s.handleHomeHistoricalEntityPreview)
+		r.Post("/history/{job}/entities/apply", s.handleHomeHistoricalEntityApply)
+		r.Post("/history/{job}/complete", s.handleHomeHistoricalReviewComplete)
+		r.Post("/history/{job}/prepare-apply", s.handleHomeHistoricalPrepareApply)
+		r.Post("/history/{job}/apply", s.handleHomeHistoricalApply)
 		r.Post("/protected/wipe/begin", s.handleHomeProtectedWipeBegin)
 		r.Post("/protected/wipe/complete", s.handleHomeProtectedWipeComplete)
 	})
@@ -526,7 +534,7 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	page, err := renderMemoryHomeHTML(memoryHomePage{
-		Data: data, Pending: cards,
+		Data: data, Pending: cards, Historical: s.memoryHomeHistoricalReview(),
 		EnhancedPresenceProfile: s.cfg.EnhancedPresenceAuthorizer.Profile(),
 		UnassignedEnabled:       s.cfg.UnassignedInboxPath != "", UnassignedUnavailable: unassignedUnavailable,
 		Unassigned: memoryHomeUnassignedCards(unassignedSnapshot.Cards),
@@ -1347,6 +1355,124 @@ const memoryHomeBrowserScript = `(() => {
     cancelButton.addEventListener("click", () => cancelProtectedWipe(card));
   });
 
+  const historyCards = [...document.querySelectorAll("[data-history-card]")];
+  const historyFilters = [...document.querySelectorAll("[data-history-filter]")];
+  const historyFilterStatus = document.querySelector("[data-history-filter-status]");
+  const applyHistoryFilters = () => {
+    const selected = Object.fromEntries(historyFilters.map((filter) => [filter.dataset.historyFilter, filter.value]));
+    let visible = 0;
+    historyCards.forEach((card) => {
+      const rootMatches = !selected.root || (card.dataset.root || "").split(" ").includes(selected.root);
+      const matches = rootMatches && (!selected.kind || card.dataset.kind === selected.kind) &&
+        (!selected.scope || card.dataset.scope === selected.scope) &&
+        (!selected.disposition || card.dataset.disposition === selected.disposition);
+      card.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    if (historyFilterStatus) historyFilterStatus.textContent = visible + " of " + historyCards.length + " candidates shown.";
+  };
+  historyFilters.forEach((filter) => filter.addEventListener("change", applyHistoryFilters));
+  if (historyCards.length) applyHistoryFilters();
+  try {
+    const focusCandidate = window.sessionStorage.getItem("pulse.home.history.focus");
+    if (focusCandidate) {
+      window.sessionStorage.removeItem("pulse.home.history.focus");
+      const target = historyCards.find((card) => card.dataset.historyCandidateId === focusCandidate) || document.querySelector("#historical-review-title");
+      if (target) target.focus();
+    }
+  } catch (_) {}
+
+  [...document.querySelectorAll("[data-history-evidence]")].forEach((button) => {
+    button.addEventListener("click", async () => {
+      const output = button.parentElement.querySelector("[data-history-evidence-output]");
+      if (!output || button.disabled) return;
+      button.disabled = true;
+      output.hidden = false;
+      output.textContent = "Loading bounded evidence…";
+      try {
+        const response = await fetch(button.dataset.historyEvidence, {credentials: "same-origin"});
+        output.textContent = response.ok ? await response.text() : "Evidence changed or is unavailable. Refresh Home.";
+      } catch (_) {
+        output.textContent = "Evidence could not be loaded. Refresh Home.";
+      } finally {
+        button.disabled = false;
+        output.focus();
+      }
+    });
+  });
+
+  [...document.querySelectorAll("[data-history-entity-form]")].forEach((form) => {
+    const output = form.querySelector("[data-history-entity-preview]");
+    const confirm = form.querySelector("[data-history-entity-confirm]");
+    const clearPreview = () => {
+      delete form.dataset.historyPreviewDigest;
+      confirm.disabled = true;
+      output.hidden = true;
+      output.replaceChildren();
+    };
+    form.addEventListener("input", clearPreview);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearPreview();
+      output.hidden = false;
+      output.textContent = "Building an exact affected-material preview…";
+      try {
+        const response = await fetch(form.action, {
+          method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": "application/x-www-form-urlencoded"},
+          body: new URLSearchParams(new FormData(form)).toString(),
+        });
+        if (!response.ok) {
+          output.textContent = "The entity rewrite is invalid or this revision changed. Refresh Home.";
+          return;
+        }
+        const preview = await response.json();
+        if (!preview || preview.schema !== "pulse.historical_ingest.entity_rewrite_preview.v1" ||
+            !/^[0-9a-f]{64}$/.test(preview.preview_digest) || !Array.isArray(preview.affected) || preview.affected.length < 1) {
+          output.textContent = "Pulse returned an invalid entity preview. Nothing changed.";
+          return;
+        }
+        const heading = document.createElement("strong");
+        heading.textContent = preview.affected.length + " candidate(s) will change:";
+        const list = document.createElement("ul");
+        preview.affected.forEach((item) => {
+          const row = document.createElement("li");
+          row.textContent = item.kind + " · " + item.old_candidate_id + " → " + item.new_candidate_id +
+            " · scope " + item.scope.kind + " · " + item.source_refs.length + " provenance link(s)";
+          list.append(row);
+        });
+        output.replaceChildren(heading, list);
+        form.dataset.historyPreviewDigest = preview.preview_digest;
+        confirm.disabled = false;
+        output.focus();
+      } catch (_) {
+        output.textContent = "The entity preview could not be built. Nothing changed.";
+      }
+    });
+    confirm.addEventListener("click", async () => {
+      if (!form.dataset.historyPreviewDigest || confirm.disabled) return;
+      confirm.disabled = true;
+      const values = new URLSearchParams(new FormData(form));
+      values.set("preview_digest", form.dataset.historyPreviewDigest);
+      output.textContent = "Creating a new immutable review revision…";
+      try {
+        const response = await fetch(form.dataset.applyAction, {
+          method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": "application/x-www-form-urlencoded"}, body: values.toString(),
+        });
+        if (response.ok) {
+          try { window.sessionStorage.setItem("pulse.home.history.focus", preview.affected[0].new_candidate_id); } catch (_) {}
+          window.location.reload();
+          return;
+        }
+        output.textContent = "The preview expired or the revision changed. Nothing changed; preview again.";
+      } catch (_) {
+        output.textContent = "The entity correction could not be confirmed. Nothing changed; preview again.";
+      }
+      delete form.dataset.historyPreviewDigest;
+    });
+  });
+
   const cards = [...document.querySelectorAll("[data-candidate-id]")];
   const intersectingCards = new Set();
   const scheduledCards = new Set();
@@ -1460,6 +1586,10 @@ const memoryHomeBrowserScript = `(() => {
           : (detail ? detail + " Refresh Home and try again." : "Action failed. Refresh Home and try again.");
         showMutationFailure(form, message);
         return;
+      }
+      const historyCard = form.closest("[data-history-candidate-id]");
+      if (historyCard) {
+        try { window.sessionStorage.setItem("pulse.home.history.focus", historyCard.dataset.historyCandidateId); } catch (_) {}
       }
       window.location.reload();
     } catch (_) {

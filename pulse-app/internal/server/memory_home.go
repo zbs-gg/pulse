@@ -225,6 +225,7 @@ type memoryHomeUnassignedActivity struct {
 type memoryHomePage struct {
 	Data                    store.MemoryHomeData
 	Pending                 []memoryHomePendingCard
+	Historical              memoryHomeHistoricalReview
 	EnhancedPresenceProfile userpresence.EnhancedPresenceProfile
 	UnassignedEnabled       bool
 	UnassignedUnavailable   bool
@@ -555,8 +556,8 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
   <style>
     :root { color-scheme:light; --bg:#f5f3ee; --paper:#fffdfa; --ink:#1d211f; --muted:#6b716c; --line:#deddd7; --green:#2f694f; --green-soft:#e4efe7; --amber:#8a6428; --amber-soft:#f6ecd8; --red:#8b4646; --red-soft:#f4e2e0; --blue:#355f76; --blue-soft:#e4eef3; font:15px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     * { box-sizing:border-box; } [hidden] { display:none!important; }
-    body { margin:0; color:var(--ink); background:var(--bg); }
-    main { width:min(1120px,100%); margin:0 auto; padding:22px clamp(18px,4vw,52px) 72px; }
+    body { margin:0; color:var(--ink); background:var(--bg); overflow-x:hidden; }
+    main { width:min(1120px,100%); min-width:0; margin:0 auto; padding:22px clamp(18px,4vw,52px) 72px; }
     h1,h2,h3,p { margin:0; } h1 { font-size:clamp(28px,4vw,34px); line-height:1.08; letter-spacing:-.035em; max-width:780px; } h2 { font-size:20px; } h3 { font-size:16px; }
     p { color:var(--muted); } code,pre,textarea { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
     .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
@@ -603,7 +604,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .secondary-body { padding-top:4px; }
     .project-card,.team-soon { max-width:820px; padding:18px; border:1px solid var(--line); border-radius:16px; background:var(--paper); }
     .project-card .boundary { margin-top:10px; }
-    .preview { padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; }
+    .preview { min-width:0; padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--paper); } .preview pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#3b413d; } .preview p,.preview code { overflow-wrap:anywhere; }
     .authority-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
     .ocean { padding:clamp(22px,4vw,34px); border:1px solid var(--line); border-radius:22px; background:var(--paper); }
     .ocean-head { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; }
@@ -622,6 +623,29 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .source-row { display:grid; grid-template-columns:minmax(150px,.8fr) minmax(160px,1fr) auto; gap:14px; align-items:center; padding:11px 0; border-bottom:1px solid var(--line); }
     .source-row:last-child { border-bottom:0; }
     .source-row small { color:var(--muted); }
+    .history-review { padding:clamp(22px,4vw,34px); border:1px solid var(--line); border-radius:22px; background:var(--paper); }
+    .history-answers,.history-counts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:18px; }
+    .history-answer,.history-count { min-width:0; padding:17px; border:1px solid var(--line); border-radius:15px; background:#fff; }
+    .history-answer strong,.history-count strong { display:block; margin-bottom:5px; }
+    .history-count strong { font-size:27px; line-height:1; }
+    .history-toolbar { display:flex; flex-wrap:wrap; gap:10px; margin:20px 0 14px; padding:14px; border-radius:15px; background:var(--blue-soft); }
+    .history-toolbar label { display:grid; gap:4px; min-width:145px; color:var(--blue); font-size:12px; font-weight:700; }
+    select,input[type="text"] { width:100%; min-width:0; min-height:44px; max-width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:10px; background:white; color:var(--ink); font:inherit; }
+    .history-cards { display:grid; gap:14px; }
+    .history-card { min-width:0; padding:20px; border:1px solid var(--line); border-radius:17px; background:#fff; }
+    .history-card.blocking { border-color:#d9b36d; background:#fffaf0; }
+    .history-card.excluded { opacity:.72; }
+    .history-card header { display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; margin-bottom:12px; }
+    .history-badges { display:flex; flex-wrap:wrap; gap:7px; }
+    .history-card .summary { overflow-wrap:anywhere; }
+    .history-meta { display:flex; flex-wrap:wrap; gap:7px; margin-top:13px; }
+    .history-edit-grid { display:grid; min-width:0; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .history-edit-grid > *,.history-final > * { min-width:0; }
+    .history-edit-grid label { display:grid; gap:5px; color:var(--muted); font-size:12px; }
+    .history-edit-grid .wide { grid-column:1 / -1; }
+    .history-evidence { max-height:300px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:13px; border:1px solid var(--line); border-radius:12px; background:var(--bg); color:#3b413d; }
+    .history-final { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:18px; margin-top:18px; padding-top:18px; border-top:1px solid var(--line); }
+    .history-final p,.history-final code { max-width:100%; overflow-wrap:anywhere; word-break:break-word; }
     .protected-wipe { margin-top:14px; padding:22px; border:1px solid #d7b4b0; border-radius:18px; background:var(--red-soft); }
     .protected-wipe h3 { margin-bottom:8px; } .protected-wipe .warning { margin-top:10px; color:var(--ink); }
     .protected-wipe-review,.protected-wipe-receipt { margin-top:16px; padding:16px; border:1px solid #ca9b96; border-radius:14px; background:var(--paper); outline-offset:4px; }
@@ -634,9 +658,11 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       .topbar { display:grid; grid-template-columns:1fr auto; align-items:start; margin-bottom:18px; }
       .app-nav { grid-column:1 / -1; grid-row:2; margin-top:8px; }
       .logout { grid-column:2; grid-row:1; }
-      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals,.filters { grid-template-columns:1fr; }
+      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals,.filters,.history-answers,.history-counts,.history-edit-grid { grid-template-columns:1fr; }
+      .history-edit-grid .wide { grid-column:auto; }
       .status-banner,.feed-head { align-items:flex-start; flex-direction:column; gap:8px; }
       .ocean-head,.ocean-next { align-items:flex-start; flex-direction:column; }
+      .history-final { align-items:flex-start; flex-direction:column; }
       .source-row { grid-template-columns:1fr; gap:4px; }
       .section-head { flex-direction:column; align-items:flex-start; gap:8px; }
       .section-head p { max-width:100%; }
@@ -749,6 +775,101 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       {{end}}
     </div>
   </section>
+
+  {{if or .Historical.Available .Historical.Unavailable}}
+  <section id="historical-review" aria-labelledby="historical-review-title">
+    <div class="history-review">
+      <div class="ocean-head">
+        <div><div class="eyebrow">Historical memory dry run</div><h2 id="historical-review-title" tabindex="-1">{{.Historical.StateLabel}}</h2><p>{{.Historical.StateDetail}}</p></div>
+        {{if .Historical.Available}}<div class="ocean-state" role="status" aria-live="polite">{{.Historical.State}}</div>{{end}}
+      </div>
+      {{if .Historical.Unavailable}}<div class="empty" style="margin-top:18px">The canonical memory vault is unchanged. Inspect or remove the private historical sidecar before retrying.</div>{{else}}
+      <div class="history-answers">
+        <div class="history-answer"><strong>What Pulse read</strong><p>{{.Historical.SourceRootCount}} frozen root session trees across {{.Historical.SourceFileCount}} path-free source aliases ({{.Historical.SourceBytes}} captured), producing {{.Historical.TotalUnits}} isolated extraction turns from {{.Historical.EvidenceBytes}} normalized evidence. Raw source files were not changed.</p></div>
+        <div class="history-answer"><strong>What Pulse will write</strong><p>{{if .Historical.HasManifest}}{{.Historical.WriteCount}} structured private candidates in this revision; {{.Historical.ExcludedCount}} excluded. This is still a dry run.{{else}}No candidate manifest exists yet. Extraction and review cannot imply a future write.{{end}}</p></div>
+      </div>
+      {{if .Historical.CanAuthorizeEgress}}
+      <div class="history-final">
+        <div><strong>Allow {{.Historical.TotalUnits}} isolated Luna turns for this exact snapshot?</strong><p>Pulse will send {{.Historical.EvidenceBytes}} of normalized records from these {{.Historical.SourceRootCount}} root trees to <strong>GPT-5.6 Luna · low</strong> through your existing Codex/ChatGPT subscription. Local paths, attachments, credentials, hidden reasoning, inherited summaries, and raw source files are excluded. This may consume significant subscription quota; Pulse pauses on quota and never falls back to an API or another model. This creates a dry-run manifest only; it cannot write memory.</p><p class="receipt">Snapshot <code>{{.Historical.SnapshotDigest}}</code> · {{.Historical.SourceFileCount}} files · {{.Historical.TotalUnits}} model turns</p></div>
+        <form method="post" action="history/{{.Historical.JobID}}/authorize-egress" data-home-mutation data-home-pending-label="Authorizing only this frozen snapshot…">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="snapshot_digest" value="{{.Historical.SnapshotDigest}}"><input type="hidden" name="runner_contract_digest" value="{{.Historical.RunnerContract}}"><input type="hidden" name="confirmation_digest" value="{{.Historical.EgressConfirmationDigest}}">
+          <button class="primary">Authorize {{.Historical.TotalUnits}} Luna turns</button>
+        </form>
+      </div>
+      {{end}}
+      {{if .Historical.HasManifest}}
+      <div class="history-counts" aria-label="Historical review progress">
+        <div class="history-count"><span>Reviewed</span><strong>{{.Historical.ReviewedCount}} / {{.Historical.CandidateCount}}</strong><p>Explicit keep, edit, or exclude decisions.</p></div>
+        <div class="history-count"><span>Blocking decisions left</span><strong>{{.Historical.RemainingRequired}}</strong><p>Hypotheses, conflicts, inferred items, unassigned scope, or unavailable evidence.</p></div>
+      </div>
+      {{if .Historical.Cards}}
+      <div class="history-toolbar" aria-label="Filter historical candidates">
+        <label>Root session<select data-history-filter="root"><option value="">All roots</option>{{range .Historical.RootOptions}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select></label>
+        <label>Kind<select data-history-filter="kind"><option value="">All kinds</option><option>event</option><option>decision</option><option>assertion</option><option>person</option><option>project</option><option>relation</option><option>state</option><option>continuity</option></select></label>
+        <label>Scope<select data-history-filter="scope"><option value="">All scopes</option><option>project</option><option>global</option><option>unassigned</option></select></label>
+        <label>Disposition<select data-history-filter="disposition"><option value="">All dispositions</option><option>pending</option><option>kept</option><option>excluded</option></select></label>
+      </div>
+      <p class="receipt" data-history-filter-status role="status" aria-live="polite"></p>
+      <div class="history-cards">
+        {{range .Historical.Cards}}
+        <article class="history-card {{if .RequiresReview}}blocking{{end}} {{if eq .Disposition "excluded"}}excluded{{end}}" data-history-card data-history-candidate-id="{{.CandidateID}}" data-root="{{.RootIDs}}" data-kind="{{.Kind}}" data-scope="{{.ScopeKind}}" data-disposition="{{.Disposition}}" tabindex="-1">
+          <header><div class="history-badges"><span class="kind">{{.Kind}}</span><span class="pill">{{.Disposition}}</span>{{range .RequirementLabels}}<span class="pill">{{.}}</span>{{end}}</div><span class="pill">{{.Confidence}} confidence</span></header>
+          {{if eq .Kind "relation"}}<p class="receipt">{{.RelationSubject}} → {{.RelationObject}}</p>{{end}}
+          <p class="summary">{{.PrimaryText}}</p>
+          <div class="history-meta"><span class="pill">{{.EpistemicStatus}}</span><span class="pill">{{.Derivation}}</span><span class="pill">{{.ScopeKind}}{{if .ProjectID}} · {{.ProjectID}}{{end}}</span><span class="pill">{{.SourceCount}} source ref(s)</span>{{if .RootLabel}}<span class="pill">{{.RootLabel}}</span>{{end}}</div>
+          {{if $.Historical.CanMutate}}
+          <div class="controls">
+            <form method="post" action="history/{{$.Historical.JobID}}/items/{{.CandidateID}}/review" data-home-mutation data-home-pending-label="Keeping this exact candidate…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{$.Historical.Revision}}"><input type="hidden" name="expected_digest" value="{{$.Historical.ManifestDigest}}"><input type="hidden" name="action" value="kept"><button class="primary">Keep</button></form>
+            <form method="post" action="history/{{$.Historical.JobID}}/items/{{.CandidateID}}/review" data-home-mutation data-home-pending-label="Excluding this exact candidate…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{$.Historical.Revision}}"><input type="hidden" name="expected_digest" value="{{$.Historical.ManifestDigest}}"><input type="hidden" name="action" value="excluded"><button>Exclude</button></form>
+          </div>
+          <details><summary>Edit text, scope, time, and status</summary>
+            <form method="post" action="history/{{$.Historical.JobID}}/items/{{.CandidateID}}/review" data-home-mutation data-home-pending-label="Creating a corrected review revision…">
+              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{$.Historical.Revision}}"><input type="hidden" name="expected_digest" value="{{$.Historical.ManifestDigest}}"><input type="hidden" name="action" value="edit">
+              <div class="history-edit-grid">
+                <label class="wide">Primary text<input type="text" name="primary_text" value="{{.PrimaryText}}" maxlength="1200" required></label>
+                <label>Scope<select name="scope_kind"><option value="project" {{if eq .ScopeKind "project"}}selected{{end}}>project</option><option value="global" {{if eq .ScopeKind "global"}}selected{{end}}>global</option><option value="unassigned" {{if eq .ScopeKind "unassigned"}}selected{{end}}>unassigned</option></select></label>
+                <label>Project ID<input type="text" name="project_id" value="{{.ProjectID}}" placeholder="Only for project scope"></label>
+                <label>Valid from<input type="text" name="valid_from" value="{{.ValidFrom}}" required></label>
+                <label>Valid to<input type="text" name="valid_to" value="{{.ValidTo}}" placeholder="Optional RFC3339"></label>
+                <label>Knowledge status<select name="epistemic_status">{{if ne .Derivation "inferred"}}<option value="explicit" {{if eq .EpistemicStatus "explicit"}}selected{{end}}>explicit</option>{{end}}<option value="hypothesis" {{if eq .EpistemicStatus "hypothesis"}}selected{{end}}>hypothesis</option><option value="conflict" {{if eq .EpistemicStatus "conflict"}}selected{{end}}>conflict</option></select></label>
+                {{if eq .Kind "continuity"}}<label>Continuity status<select name="continuity_status"><option value="open" {{if eq .ContinuityStatus "open"}}selected{{end}}>open</option><option value="closed" {{if eq .ContinuityStatus "closed"}}selected{{end}}>closed</option><option value="historical" {{if eq .ContinuityStatus "historical"}}selected{{end}}>historical</option></select></label>{{else}}<input type="hidden" name="continuity_status" value="">{{end}}
+              </div>
+              <div class="controls"><button class="primary">Save correction</button></div>
+            </form>
+          </details>
+          {{else}}<p class="receipt">This job state is read-only. Start or resume a fresh snapshot to change it.</p>{{end}}
+          <details><summary>Evidence</summary>{{if .EvidenceAvailable}}<button type="button" data-history-evidence="history/{{$.Historical.JobID}}/items/{{.CandidateID}}/evidence">Load bounded source evidence</button><pre class="history-evidence" data-history-evidence-output hidden tabindex="-1"></pre>{{else}}<p class="receipt">Evidence is unavailable. Keep or exclude explicitly before review can finish.</p>{{end}}</details>
+          <p class="receipt">Candidate {{.CandidateID}}</p>
+        </article>
+        {{end}}
+      </div>
+      {{else}}<div class="empty" style="margin-top:18px">The exact selected roots produced no structured candidates. There is nothing to approve or apply.</div>{{end}}
+      {{if and .Historical.Cards .Historical.CanMutate}}<details><summary>Merge or split an entity reference</summary>
+        <p class="receipt">Preview first. Merge rewrites every matching subject/object reference; split rewrites only the comma-separated candidate IDs you name. The preview lists every affected candidate, scope, provenance count, and resulting ID.</p>
+        <form action="history/{{.Historical.JobID}}/entities/preview" data-history-entity-form data-apply-action="history/{{.Historical.JobID}}/entities/apply">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{.Historical.Revision}}"><input type="hidden" name="expected_digest" value="{{.Historical.ManifestDigest}}">
+          <div class="history-edit-grid">
+            <label>Operation<select name="mode"><option value="merge">merge all matching references</option><option value="split">split selected candidates</option></select></label>
+            <label>Current entity ID<input type="text" name="from_entity_id" required></label>
+            <label>Resulting entity ID<input type="text" name="to_entity_id" required></label>
+            <label class="wide">Candidate IDs for split<input type="text" name="selected_candidates" placeholder="candidate_…, candidate_…"></label>
+          </div>
+          <div class="controls"><button type="submit">Preview affected graph material</button><button type="button" class="primary" data-history-entity-confirm disabled>Confirm this review correction</button></div>
+          <div class="history-evidence" data-history-entity-preview hidden tabindex="-1" role="status" aria-live="polite"></div>
+        </form>
+      </details>{{end}}
+      <div class="history-final">
+        <div><strong>Revision {{.Historical.Revision}}</strong><p>Manifest <code>{{.Historical.ManifestDigest}}</code>. Finishing review creates another immutable digest and still writes nothing.</p></div>
+        {{if .Historical.CanComplete}}<form method="post" action="history/{{.Historical.JobID}}/complete" data-home-mutation data-home-pending-label="Freezing the reviewed revision…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{.Historical.Revision}}"><input type="hidden" name="manifest_digest" value="{{.Historical.ManifestDigest}}"><input type="hidden" name="destination_store_id" value="{{.Historical.DestinationStoreID}}"><input type="hidden" name="repository_id" value="{{.Historical.RepositoryID}}"><input type="hidden" name="confirmation_digest" value="{{.Historical.ConfirmationDigest}}"><button class="primary">Finish review — do not write yet</button></form>
+        {{else if .Historical.CanPrepareApply}}<form method="post" action="history/{{.Historical.JobID}}/prepare-apply" data-home-mutation data-home-pending-label="Compiling the exact write set…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{.Historical.Revision}}"><input type="hidden" name="manifest_digest" value="{{.Historical.ManifestDigest}}"><input type="hidden" name="destination_store_id" value="{{.Historical.DestinationStoreID}}"><input type="hidden" name="repository_id" value="{{.Historical.RepositoryID}}"><button class="primary">Prepare exact write set — still do not write</button></form>
+        {{else if .Historical.CanApply}}<div><p class="receipt">Write set <code>{{.Historical.WriteSetDigest}}</code> · destination generation {{.Historical.DestinationGeneration}} · {{.Historical.PlannedCreatedCount}} create · {{.Historical.PlannedDeduplicatedCount}} exact deduplicate</p><form method="post" action="history/{{.Historical.JobID}}/apply" data-home-mutation data-home-pending-label="Backing up the vault and applying the exact write set…"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="expected_revision" value="{{.Historical.Revision}}"><input type="hidden" name="manifest_digest" value="{{.Historical.ManifestDigest}}"><input type="hidden" name="write_set_digest" value="{{.Historical.WriteSetDigest}}"><input type="hidden" name="destination_store_id" value="{{.Historical.DestinationStoreID}}"><input type="hidden" name="destination_generation" value="{{.Historical.DestinationGeneration}}"><input type="hidden" name="confirmation_digest" value="{{.Historical.ApplyConfirmationDigest}}"><button class="primary">Back up and import these {{.Historical.WriteCount}} memories</button></form></div>
+        {{else if .Historical.BatchReceiptID}}<span class="pill">Committed receipt · {{.Historical.BatchReceiptID}}</span>{{else if .Historical.ReviewComplete}}<span class="pill">Review frozen · refresh to verify the write set</span>{{else}}<button disabled>Finish blocking decisions first</button>{{end}}
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+  </section>
+  {{end}}
 
   <section id="authority-profile">
     <div class="section-head"><div><div class="eyebrow">Security boundary</div><h2>Protected actions</h2></div><p>Ordinary memory and Memory Home do not require enhanced verification. This profile controls only destructive vault and binding actions.</p></div>

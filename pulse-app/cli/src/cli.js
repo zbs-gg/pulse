@@ -68,6 +68,7 @@ import {
   formatConsolidationReport,
   requestConsolidationReport,
 } from './consolidation-report.js';
+import { runHistoricalIngestCommand } from './historical-ingest.js';
 import {
   activateDetectedPersonalHosts,
   inspectDetectedPersonalHosts,
@@ -251,6 +252,8 @@ Usage:
   pulse migrate preview-people-graph <graph-dir-or-people-index> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate commit <preview-json-file> --confirm "import pulse graph" [--privacy private|sensitive|normal] [--open]
   pulse home [--host claude-code|codex|cursor] [--base <url>] [--data-dir <path>]
+  pulse history ingest codex [--roots 50]
+  pulse history status|explain|usage|resume|cancel|home [--job <job_id>]
   pulse viewer [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]   legacy inspection surface
   pulse status
   pulse export
@@ -10368,6 +10371,20 @@ async function main() {
     await runHome(args.slice(1));
     return;
   }
+
+	if (command === 'history') {
+		await recoverBindingAuthority();
+		const resolved = resolveCodexMcpRuntime(process.cwd());
+		requireLoopbackPulseIPC(resolved.runtime.base_url);
+		await runHistoricalIngestCommand({
+			argv: args.slice(1), dataDir: resolved.runtime.data_dir,
+			request: (method, route, body) => boundPulseRequest(resolved, route, {
+				method, ...(body === undefined ? {} : { body }), timeoutMs: method === 'POST' && route === '/memory/historical-ingest/jobs' ? 5 * 60_000 : 30_000,
+			}),
+			openHome: () => runHome([]),
+		});
+		return;
+	}
 
   if (command === 'viewer') {
     await runViewer(args.slice(1));
