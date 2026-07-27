@@ -12,10 +12,11 @@ const PRIVATE_JSON_LIMIT = 1024 * 1024;
 const TREE_MAX_ENTRIES = 100_000;
 const TREE_MAX_DEPTH = 128;
 const TREE_MAX_BYTES = 16 * 1024 * 1024 * 1024;
-// Windows process startup and ACL walks are expensive. A SessionStart still
-// proves every signed tree and writes this owner-private bounded receipt.
-// Events inside its short window avoid another native process, bind the exact
-// workspace and authority files, and rehash the edge they are about to execute.
+// Windows process startup and ACL walks are expensive. A new worker generation
+// still proves every signed tree and writes this owner-private bounded receipt.
+// Events and session boundaries inside its short exact lease reuse that worker,
+// while SessionStart refreshes binding recovery and authority witnesses inside
+// it. Cache reuse binds the exact workspace and rehashes the selected edge.
 // Hooks load one self-contained bundle; MCP loads the wider CLI/MCP runtime.
 // The large third-party node_modules tree and the already-running daemon remain
 // covered by the short lease established by the full native proof. Any selected
