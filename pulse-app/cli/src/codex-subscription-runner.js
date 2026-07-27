@@ -52,10 +52,11 @@ function featureDisableArgs() {
   return CODEX_DISABLED_FEATURES.flatMap((feature) => ['--disable', feature]);
 }
 
-export function buildCodexExecArgs({ cwd, schemaPath, outputPath, prompt }) {
+export function buildCodexExecArgs({ cwd, schemaPath, outputPath, prompt, credentialStore = 'file' }) {
   for (const [name, value] of Object.entries({ cwd, schemaPath, outputPath, prompt })) {
     if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) fail(`invalid_${name}`);
   }
+  if (!['file', 'keyring'].includes(credentialStore)) fail('invalid_credential_store');
   return [
     'exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config',
     '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', cwd,
@@ -63,6 +64,7 @@ export function buildCodexExecArgs({ cwd, schemaPath, outputPath, prompt }) {
     '--config', `model_reasoning_effort="${CODEX_LUNA_EFFORT}"`,
     '--config', 'approval_policy="never"',
     '--config', 'web_search="disabled"',
+    ...(credentialStore === 'keyring' ? ['--config', 'cli_auth_credentials_store="keyring"'] : []),
     ...featureDisableArgs(),
     '--output-schema', schemaPath, '--output-last-message', outputPath,
     '--json', prompt,
@@ -79,6 +81,15 @@ export function scrubCodexEnvironment(environment, { isolatedHome, isolatedCodex
   clean.NO_COLOR = '1';
   clean.CODEX_NON_INTERACTIVE = '1';
   return clean;
+}
+
+function nativeCredentialEnvironment(environment) {
+  const home = environment?.HOME || homedir();
+  const codexHome = environment?.CODEX_HOME || path.join(home, '.codex');
+  if (!path.isAbsolute(home) || !path.isAbsolute(codexHome) || home.includes('\0') || codexHome.includes('\0')) {
+    fail('native_auth_environment_invalid');
+  }
+  return scrubCodexEnvironment(environment, { isolatedHome: home, isolatedCodexHome: codexHome });
 }
 
 function apiEnvironmentPresent(environment) {
@@ -102,13 +113,18 @@ export async function offlineCodexPreflight({
   env = process.env,
   isolatedHome = homedir(),
   isolatedCodexHome = process.env.CODEX_HOME || path.join(homedir(), '.codex'),
+  credentialStore = 'file',
 } = {}) {
   if (apiEnvironmentPresent(env)) fail('api_environment_present');
+  if (!['file', 'keyring'].includes(credentialStore)) fail('invalid_credential_store');
   const childEnv = scrubCodexEnvironment(env, { isolatedHome, isolatedCodexHome });
   const invoke = (args) => run(codexPath, args, { env: childEnv, timeoutMs: 30_000 });
   const version = await invoke(['--version']);
   if (version.status !== 0 || version.stdout.trim() !== QUALIFIED_CODEX_VERSION) fail('cli_contract_mismatch');
-  const login = await invoke(['login', 'status']);
+  const login = await invoke([
+    ...(credentialStore === 'keyring' ? ['--config', 'cli_auth_credentials_store="keyring"'] : []),
+    'login', 'status',
+  ]);
   if (login.status !== 0 || `${login.stdout}${login.stderr}`.trim() !== 'Logged in using ChatGPT') fail('chatgpt_auth_required');
   const features = await invoke([...featureDisableArgs(), 'features', 'list']);
   if (features.status !== 0) fail('feature_probe_failed');
@@ -216,6 +232,7 @@ async function executeUnit({
   codexPath,
   invoke,
   copyAuth,
+  allowNativeCredentialFallback,
   preflight,
   acceptResult,
 	signal,
@@ -232,10 +249,28 @@ async function executeUnit({
     await mkdir(isolatedHome, { mode: 0o700 });
     await mkdir(isolatedCodexHome, { mode: 0o700 });
     await mkdir(stage, { mode: 0o700 });
-    await copyAuth(authFile, path.join(isolatedCodexHome, 'auth.json'));
-    const childEnv = scrubCodexEnvironment(environment, { isolatedHome, isolatedCodexHome });
+    let childEnv;
+    let credentialStore = 'file';
+    let preflightHome = isolatedHome;
+    let preflightCodexHome = isolatedCodexHome;
+    try {
+      await copyAuth(authFile, path.join(isolatedCodexHome, 'auth.json'));
+      childEnv = scrubCodexEnvironment(environment, { isolatedHome, isolatedCodexHome });
+    } catch (error) {
+      if (!allowNativeCredentialFallback || error?.code !== 'ENOENT') throw error;
+      // Current Codex Desktop stores ChatGPT auth in the OS credential store,
+      // so there may be no auth.json to copy. Preserve only HOME/CODEX_HOME so
+      // the pinned CLI can reach that native credential. User config, rules,
+      // tools, plugins, hooks, memories, and provider env remain disabled by
+      // the closed exec arguments and scrubbed environment.
+      childEnv = nativeCredentialEnvironment(environment);
+      credentialStore = 'keyring';
+      preflightHome = childEnv.HOME;
+      preflightCodexHome = childEnv.CODEX_HOME;
+    }
     const actualPreflight = await preflight({
-      codexPath, env: childEnv, isolatedHome, isolatedCodexHome,
+      codexPath, env: childEnv, isolatedHome: preflightHome,
+      isolatedCodexHome: preflightCodexHome, credentialStore,
     });
     if (!actualPreflight?.ready || actualPreflight.contract_digest !== codexSubscriptionContractDigest()) fail('preflight_contract_mismatch');
     if (requireLiveQualification && (!qualification?.live_model_qualified || qualification.contract_digest !== actualPreflight.contract_digest)) {
@@ -244,7 +279,7 @@ async function executeUnit({
     const schemaPath = path.join(tempRoot, 'schema.json');
     const outputPath = path.join(tempRoot, 'output.json');
     await writeFile(schemaPath, codexHistoricalIngestOutputSchemaBytes(), { mode: 0o600, flag: 'wx' });
-    const args = buildCodexExecArgs({ cwd: stage, schemaPath, outputPath, prompt });
+    const args = buildCodexExecArgs({ cwd: stage, schemaPath, outputPath, prompt, credentialStore });
 		if (signal?.aborted) fail('runner_signaled');
     const execution = await invoke({ command: codexPath, args, cwd: stage, env: childEnv, stdin: evidence, outputPath, signal });
     if (execution.status !== 0 || execution.signal) fail(classifyCodexFailure(execution));
@@ -282,7 +317,7 @@ export async function runHistoricalIngestUnit({
   expectedSnapshotDigest,
   egressAuthorized = false,
   qualification,
-  authFile = path.join(process.env.CODEX_HOME || path.join(homedir(), '.codex'), 'auth.json'),
+  authFile,
   environment = process.env,
   codexPath = 'codex',
   invoke = invokeCodex,
@@ -291,9 +326,11 @@ export async function runHistoricalIngestUnit({
   acceptResult,
 	signal,
 } = {}) {
+  const defaultAuthFile = path.join(environment.CODEX_HOME || path.join(environment.HOME || homedir(), '.codex'), 'auth.json');
   return executeUnit({
     prompt, evidence, expectedJobID, expectedSnapshotDigest, egressAuthorized,
-    qualification, requireLiveQualification: true, authFile, environment,
+    qualification, requireLiveQualification: true, authFile: authFile ?? defaultAuthFile,
+    allowNativeCredentialFallback: authFile === undefined, environment,
     codexPath, invoke, copyAuth, preflight, acceptResult,
 		signal,
   });
@@ -301,13 +338,14 @@ export async function runHistoricalIngestUnit({
 
 export async function runSyntheticLunaCanary({
   egressAuthorized = false,
-  authFile = path.join(process.env.CODEX_HOME || path.join(homedir(), '.codex'), 'auth.json'),
+  authFile,
   environment = process.env,
   codexPath = 'codex',
   invoke = invokeCodex,
   copyAuth = copyAuthFile,
   preflight = offlineCodexPreflight,
 } = {}) {
+  const defaultAuthFile = path.join(environment.CODEX_HOME || path.join(environment.HOME || homedir(), '.codex'), 'auth.json');
   const jobID = 'job_0000000000000000';
   const snapshot = '0'.repeat(64);
   const exact = JSON.stringify({ schema_version: 'https://zbs.gg/schemas/pulse/historical-ingest/v1', job_id: jobID, revision: 1, source_snapshot_digest: snapshot, items: [] });
@@ -315,7 +353,9 @@ export async function runSyntheticLunaCanary({
     prompt: `Synthetic capability canary. No user history is present. You MUST call every model-visible tool exactly once using harmless empty input. If and only if no tool exists, return exactly this JSON object: ${exact}`,
     evidence: '', expectedJobID: jobID, expectedSnapshotDigest: snapshot,
     egressAuthorized, qualification: undefined, requireLiveQualification: false,
-    authFile, environment, codexPath, invoke, copyAuth, preflight, acceptResult: undefined,
+    authFile: authFile ?? defaultAuthFile,
+    allowNativeCredentialFallback: authFile === undefined,
+    environment, codexPath, invoke, copyAuth, preflight, acceptResult: undefined,
   });
   return Object.freeze({
     ready: true,

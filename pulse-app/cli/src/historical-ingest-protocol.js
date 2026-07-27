@@ -186,7 +186,18 @@ export function normalizeCodexHistoricalIngestManifest(value) {
   if (!normalized || !Array.isArray(normalized.items)) return normalized;
   for (const item of normalized.items) {
     if (item?.scope?.project_id === null) delete item.scope.project_id;
-    if (item?.valid_time?.to === null) delete item.valid_time.to;
+    if (item?.valid_time && Object.hasOwn(item.valid_time, 'to')) {
+      const from = item.valid_time.from;
+      const to = item.valid_time.to;
+      // The model-facing schema must require nullable optionals and cannot
+      // express the canonical cross-field ordering rule. Preserve the
+      // required start time, but discard an unusable optional end time before
+      // the strict canonical validator runs.
+      if (to === null || typeof to !== 'string' || !RFC3339.test(to) ||
+          Number.isNaN(Date.parse(to)) || Date.parse(to) <= Date.parse(from)) {
+        delete item.valid_time.to;
+      }
+    }
     if (item?.payload && typeof item.payload === 'object') {
       for (const [key, entry] of Object.entries(item.payload)) {
         if (entry === null) delete item.payload[key];

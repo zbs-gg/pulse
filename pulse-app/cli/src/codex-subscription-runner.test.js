@@ -65,6 +65,7 @@ test('runner pins Luna low, isolation flags, closed schema, and every qualified 
   for (const feature of CODEX_DISABLED_FEATURES) {
     assert.ok(args.some((value, index) => value === '--disable' && args[index + 1] === feature), feature);
   }
+  assert.equal(args.includes('cli_auth_credentials_store="keyring"'), false);
 });
 
 test('runner environment cannot select an API key or alternate provider', () => {
@@ -77,6 +78,72 @@ test('runner environment cannot select an API key or alternate provider', () => 
     PATH: '/bin', HOME: '/private/home', CODEX_HOME: '/private/codex',
     NO_COLOR: '1', CODEX_NON_INTERACTIVE: '1',
   });
+});
+
+test('missing default auth file falls back to native Codex credential authority without provider env', async () => {
+  const expected = manifest();
+  const qualification = {
+    ready: true,
+    live_model_qualified: true,
+    auth: 'chatgpt',
+    cli_version: 'codex-cli 0.144.6',
+    model: CODEX_LUNA_MODEL,
+    effort: 'low',
+    contract_digest: codexSubscriptionContractDigest(),
+  };
+  let observed;
+  let observedPreflight;
+  await runHistoricalIngestUnit({
+    prompt: 'trusted instructions',
+    evidence: 'bounded private evidence',
+    expectedJobID: expected.job_id,
+    expectedSnapshotDigest: digest,
+    egressAuthorized: true,
+    qualification,
+    environment: {
+      PATH: '/bin', HOME: '/native/home', CODEX_HOME: '/native/codex',
+      PULSE_TEST_MARKER: 'preserved',
+    },
+    invoke: async (request) => {
+      observed = request;
+      await writeFile(request.outputPath, JSON.stringify(expected), { mode: 0o600 });
+      return { status: 0, signal: null, stdout: successfulEvents(), stderr: '' };
+    },
+    copyAuth: async () => {
+      const error = new Error('missing');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    preflight: async (options) => {
+      observedPreflight = options;
+      return { ...qualification, live_model_qualified: false };
+    },
+  });
+  assert.equal(observed.env.HOME, '/native/home');
+  assert.equal(observed.env.CODEX_HOME, '/native/codex');
+  assert.equal(observed.env.PULSE_TEST_MARKER, 'preserved');
+  assert.equal(observed.env.OPENAI_API_KEY, undefined);
+  assert.equal(observed.env.CODEX_PROVIDER, undefined);
+  assert.ok(observed.args.includes('cli_auth_credentials_store="keyring"'));
+  assert.equal(observedPreflight.isolatedHome, '/native/home');
+  assert.equal(observedPreflight.isolatedCodexHome, '/native/codex');
+  assert.equal(observedPreflight.credentialStore, 'keyring');
+});
+
+test('explicit missing auth file never falls back to native credentials', async () => {
+  let invoked = false;
+  await assert.rejects(() => runHistoricalIngestUnit({
+    prompt: 'trusted', evidence: 'private', expectedJobID: 'job_0123456789abcdef',
+    expectedSnapshotDigest: digest, egressAuthorized: true, authFile: '/explicit/auth.json',
+    qualification: { live_model_qualified: true, contract_digest: codexSubscriptionContractDigest() },
+    copyAuth: async () => {
+      const error = new Error('missing');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    invoke: async () => { invoked = true; },
+  }), /missing/);
+  assert.equal(invoked, false);
 });
 
 test('offline preflight proves only pinned local CLI, ChatGPT auth, Luna catalog, and disabled features', async () => {
@@ -202,6 +269,20 @@ test('Codex output schema stays closed without unsupported conditionals and norm
     },
   ] });
   assert.deepEqual(normalizeCodexHistoricalIngestManifest(withIncompleteConditionalItem).items.map((item) => item.candidate_id), ['candidate_fedcba9876543210']);
+});
+
+test('Codex normalization discards an invalid optional end time before canonical validation', () => {
+  const value = manifest({ items: [{
+    candidate_id: 'candidate_fedcba9876543210', kind: 'decision', confidence: 0.8, privacy: 'private',
+    epistemic_status: 'explicit', derivation: 'direct',
+    valid_time: { from: '2026-07-22T00:00:00Z', to: '2026-07-21T00:00:00Z' },
+    scope: { kind: 'unassigned', project_id: null },
+    source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:2' }],
+    payload: { title: null, summary: 'keep this decision', subject_id: null, predicate: null, object_value: null, object_id: null, entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
+  }] });
+  const normalized = normalizeCodexHistoricalIngestManifest(value);
+  assert.equal(Object.hasOwn(normalized.items[0].valid_time, 'to'), false);
+  assert.deepEqual(assertHistoricalIngestManifest(normalized), normalized);
 });
 
 test('unit run sends evidence only on stdin and returns a content-free receipt', async () => {
