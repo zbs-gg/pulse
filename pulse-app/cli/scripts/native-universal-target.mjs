@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  currentNativeTargetID, exactHarnessVersionPattern, loadNativeUniversalMatrix,
+  calibratedCursorVersionPattern, currentNativeTargetID, exactHarnessVersionPattern, loadNativeUniversalMatrix,
   nativeHarnessCommandUsesShell,
 } from './native-universal-matrix.mjs';
 
@@ -123,7 +123,7 @@ if (harness.host === 'codex') {
     const version = process.env.PULSE_CURSOR_VERSION;
     assert.equal(typeof version === 'string', true,
       'Cursor proof requires verified vendor version metadata');
-    assert.match(version, /^3\.13(?:\.\d+)*$/);
+    assert.match(version, calibratedCursorVersionPattern(harness.version));
     harnessExecutable = { ...fileSHA256(cursorExecutable), kind: 'vendor_executable' };
   }
   stdoutRuns.push(command(process.execPath, [npmExecPath, 'run', '--silent', 'test:personal-multiharness']));

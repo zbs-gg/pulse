@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  currentNativeTargetID, exactHarnessVersionPattern, githubNativeUniversalMatrix,
+  calibratedCursorVersionPattern, currentNativeTargetID, exactHarnessVersionPattern, githubNativeUniversalMatrix,
   loadNativeUniversalMatrix, nativeHarnessCommandUsesShell,
 } from '../scripts/native-universal-matrix.mjs';
 
@@ -12,6 +12,16 @@ test('calibrated version matching accepts vendor labels without accepting adjace
   assert.match('claude 2.1.220', claude);
   assert.doesNotMatch('12.1.220', claude);
   assert.doesNotMatch('2.1.2201', claude);
+});
+
+test('Cursor calibration accepts only its numeric patch and package revision family', () => {
+  const cursor = calibratedCursorVersionPattern('3.13');
+  assert.match('3.13', cursor);
+  assert.match('3.13.10', cursor);
+  assert.match('3.13.10-1784845440', cursor);
+  assert.doesNotMatch('3.130.10', cursor);
+  assert.doesNotMatch('3.14.0', cursor);
+  assert.doesNotMatch('3.13.10-beta', cursor);
 });
 
 test('Windows uses a command shell only for the two pinned npm CLI shims', () => {

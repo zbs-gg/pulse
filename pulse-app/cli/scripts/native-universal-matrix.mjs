@@ -17,6 +17,12 @@ export function exactHarnessVersionPattern(version) {
   return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`);
 }
 
+export function calibratedCursorVersionPattern(version) {
+  assert.match(version, /^\d+\.\d+$/);
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}(?:\\.\\d+)*(?:-\\d+)?$`);
+}
+
 export function nativeHarnessCommandUsesShell(command, platform = process.platform) {
   return platform === 'win32' && ['claude', 'codex'].includes(command);
 }

@@ -849,7 +849,19 @@ function personalHostWorkerPrewarmTimeout(platform = process.platform) {
 }
 
 function contentFreePrewarmFailure(result, elapsedMs) {
-  const hookCode = String(result?.stderr ?? '').match(/\bhook_worker_[a-z0-9_]{1,96}\b/i)?.[0] ?? null;
+  const stderr = String(result?.stderr ?? '');
+  let childCode = stderr.match(/\b(?:hook_worker|codex_prewarm)_[a-z0-9_]{1,96}\b/i)?.[0] ?? null;
+  for (const line of stderr.split(/\r?\n/)) {
+    try {
+      const diagnostic = JSON.parse(line);
+      if (diagnostic?.schema === 'pulse.hook_worker_prewarm_error.v1' &&
+          diagnostic.content_free === true &&
+          /^(?:hook_worker|codex_prewarm)_[a-z0-9_]{1,96}$/i.test(diagnostic.code ?? '')) {
+        childCode = diagnostic.code;
+        break;
+      }
+    } catch { /* ignore non-JSON runtime diagnostics */ }
+  }
   const errorCode = typeof result?.error?.code === 'string' && /^[A-Z0-9_]{1,64}$/i.test(result.error.code)
     ? result.error.code : null;
   return {
@@ -861,7 +873,7 @@ function contentFreePrewarmFailure(result, elapsedMs) {
       : errorCode ? 'launcher_spawn_failed'
         : result?.status === 0 ? 'receipt_invalid' : 'launcher_exit',
     error_code: errorCode,
-    hook_code: hookCode,
+    hook_code: childCode,
     status: Number.isSafeInteger(result?.status) ? result.status : null,
     signal: typeof result?.signal === 'string' && /^[A-Z0-9_]{1,32}$/i.test(result.signal)
       ? result.signal : null,

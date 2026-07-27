@@ -984,6 +984,9 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   const workerClient = readFileSync(resolve(pluginRoot, 'hook-worker-client.mjs'), 'utf8');
   assert.match(launcher, /runHookWorkerClient\(/);
   assert.match(launcher, /host: 'codex'/);
+  assert.match(launcher, /resolveProductEnvironment has already verified/);
+  assert.doesNotMatch(launcher, /readFileSync/);
+  assert.match(launcher, /pulse\.hook_worker_prewarm_error\.v1/);
   assert.doesNotMatch(launcher, /spawn\(/);
   assert.match(workerClient, /workspace_digest: receipt\.workspace_digest/);
   assert.match(workerClient, /cwd: dirname\(process\.execPath\)/);
