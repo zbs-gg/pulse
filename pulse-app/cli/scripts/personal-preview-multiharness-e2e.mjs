@@ -210,6 +210,14 @@ try {
     detectClaude: detector('claude-code', selected, incompatible),
     detectCodex: detector('codex', selected, incompatible),
     detectCursor: detector('cursor', selected, incompatible),
+    detectWorkspace: (path) => ({
+      schema: 'pulse.workspace-identity.v1',
+      workspace_id: 'workspace_multiharness_fixture',
+      repository_id: 'repository_multiharness_fixture',
+      canonical_path: resolve(path),
+      git_common_dir: join(resolve(path), '.git'),
+      checkout_kind: 'primary',
+    }),
     release: verifiedRelease(),
     detectResources: () => ({
       disk_free_bytes: 20 * 1024 ** 3,

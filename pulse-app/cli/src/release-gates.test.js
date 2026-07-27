@@ -419,6 +419,7 @@ test('production release is split into immutable inputs, origin publication, and
   assert.match(multiharness, /process\.platform === 'linux'/);
   assert.match(multiharness, /\[process\.execPath, npmArgs\]/);
   assert.match(multiharness, /process\.platform === 'win32' \? 'git\.exe'/);
+  assert.match(multiharness, /workspace_id: 'workspace_multiharness_fixture'/);
 
   const packager = readFileSync(
     join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
