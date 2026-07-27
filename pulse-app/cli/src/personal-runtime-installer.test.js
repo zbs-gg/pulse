@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 
+import { loadNativeUniversalMatrix } from '../scripts/native-universal-matrix.mjs';
 import { canonicalReleaseJSON, releaseKeyID } from './release-manifest.js';
 import { readActivatedArtifactSet } from './artifact-installer.js';
 import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from './desktop-target.js';
@@ -17,6 +18,7 @@ import {
   inspectPersonalRelease,
   inspectPersonalRuntime,
   provisionPersonalRuntime,
+  refreshPersonalReleaseSnapshot,
 } from './personal-runtime-installer.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -235,6 +237,49 @@ function resignCatalog(value) {
   ).toString('base64');
 }
 
+function v3Fixture(value, { expiresAt = '2026-08-14T00:00:00.000Z' } = {}) {
+  const payload = structuredClone(value.envelope.payload);
+  delete payload.release.expires_at;
+  delete payload.release.issued_at;
+  payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
+  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json';
+  payload.host_policy = {
+    harnesses: loadNativeUniversalMatrix().harnesses.map((harness) => structuredClone(harness)),
+  };
+  const artifactSet = {
+    payload,
+    schema: 'pulse.personal_release_artifact_set.v1',
+    signature: {
+      algorithm: 'ed25519', key_id: payload.release.key_id,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), value.channelPrivateKey).toString('base64'),
+    },
+  };
+  const channel = value.envelope.authority.payload.keys[0];
+  const snapshotPayload = {
+    artifact_set: {
+      sha256: digest(Buffer.from(`${canonicalReleaseJSON(artifactSet)}\n`)),
+      url: 'https://releases.zbs.gg/pulse/0.7.0/epoch-7/catalog/artifact-set.json',
+    },
+    channel: { ...channel, valid_from_epoch: 7, valid_through_epoch: 7 },
+    expires_at: expiresAt,
+    issued_at: '2026-07-15T00:00:00.000Z',
+    package: '@zbs-gg/pulse',
+    release_epoch: 7,
+    revoked_key_ids: [],
+    schema: 'pulse.release_snapshot.v1',
+    version: '0.7.0',
+  };
+  const snapshot = {
+    payload: snapshotPayload,
+    schema: 'pulse.release_snapshot_envelope.v1',
+    signature: {
+      algorithm: 'ed25519', key_id: value.keyID,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(snapshotPayload)), value.rootPrivateKey).toString('base64'),
+    },
+  };
+  return { artifactSet, snapshot, snapshotBytes: `${canonicalReleaseJSON(snapshot)}\n` };
+}
+
 test('fixture release verification is available only through explicit test mode', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-personal-fixture-release.'));
   const manifestPath = join(root, 'manifest.json');
@@ -359,6 +404,98 @@ test('empty Personal install stages a complete candidate then publishes one atom
         valid_from_epoch: 1, valid_through_epoch: 20,
       }],
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('v3 installer refreshes a bounded snapshot, caches it privately, and keeps an activated vault ready offline after expiry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime-v3.'));
+  const manifestPath = join(root, 'artifact-set.json');
+  const dataDir = join(root, 'data');
+  const snapshotPath = join(dataDir, 'runtime', 'release-snapshot.json');
+  const value = fixture();
+  const release = v3Fixture(value);
+  const trustedKeys = [{
+    key_id: value.keyID, public_key_pem: value.publicKey,
+    valid_from_epoch: 1, valid_through_epoch: 20,
+  }];
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(release.artifactSet)}\n`, { mode: 0o600 });
+  let snapshotRequests = 0;
+  try {
+    const refreshed = await refreshPersonalReleaseSnapshot({
+      architecture: 'arm64', dataDir, manifestPath,
+      fetchImpl: async (url, init) => {
+        snapshotRequests += 1;
+        assert.equal(url, release.artifactSet.payload.snapshot_url);
+        assert.equal(init.redirect, 'manual');
+        assert.equal(init.signal instanceof AbortSignal, true);
+        return new Response(release.snapshotBytes, { status: 200 });
+      },
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
+    });
+    assert.equal(refreshed.refreshed, true);
+    assert.equal(snapshotRequests, 1);
+    assert.equal(readFileSync(snapshotPath, 'utf8'), release.snapshotBytes);
+    assert.equal((await import('node:fs')).statSync(snapshotPath).mode & 0o077, 0);
+
+    const installed = await provisionPersonalRuntime({
+      architecture: 'arm64', dataDir, manifestPath, snapshotPath,
+      fetchImpl: async (url) => {
+        const bytes = value.carriers.get(String(url));
+        return new Response(bytes, { status: 200, headers: { etag: `"${digest(bytes)}"` } });
+      },
+      materializers: value.materializers,
+      now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
+    });
+    assert.equal(installed.release.schema, 'pulse.verified_release_manifest.v3');
+    assert.equal(commitPersonalRuntimeRelease(installed.release, { dataDir }), 7);
+    const offline = inspectPersonalRuntime({
+      architecture: 'arm64', dataDir, manifestPath, snapshotPath,
+      now: new Date('2026-08-15T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
+    });
+    assert.equal(offline.ready, true);
+    assert.equal(offline.reason_code, 'catalog_refresh_required');
+    assert.equal(offline.release.snapshot_refresh_required, true);
+    assert.throws(() => inspectPersonalRelease({
+      architecture: 'arm64', dataDir, manifestPath, snapshotPath,
+      now: new Date('2026-08-15T00:00:00.000Z'), osVersion: '14.5',
+      packageVersion: '0.7.0', platform: 'darwin', testMode: true, trustedKeys,
+    }), (error) => error?.code === 'release_snapshot_expired');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('v3 snapshot refresh rejects redirects and oversized responses without caching them', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime-v3-fail.'));
+  const manifestPath = join(root, 'artifact-set.json');
+  const dataDir = join(root, 'data');
+  const value = fixture();
+  const release = v3Fixture(value);
+  const options = {
+    architecture: 'arm64', dataDir, manifestPath,
+    now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+    packageVersion: '0.7.0', platform: 'darwin', testMode: true,
+    trustedKeys: [{
+      key_id: value.keyID, public_key_pem: value.publicKey,
+      valid_from_epoch: 1, valid_through_epoch: 20,
+    }],
+  };
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(release.artifactSet)}\n`, { mode: 0o600 });
+  try {
+    await assert.rejects(refreshPersonalReleaseSnapshot({
+      ...options, fetchImpl: async () => new Response('', { status: 302, headers: { location: 'https://evil.example' } }),
+    }), (error) => error?.code === 'release_snapshot_redirect_forbidden');
+    await assert.rejects(refreshPersonalReleaseSnapshot({
+      ...options, fetchImpl: async () => new Response(release.snapshotBytes, {
+        status: 200, headers: { 'content-length': String(2 * 1024 * 1024 + 1) },
+      }),
+    }), (error) => error?.code === 'release_snapshot_unsafe');
+    assert.equal(existsSync(join(dataDir, 'runtime', 'release-snapshot.json')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

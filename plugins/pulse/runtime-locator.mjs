@@ -307,6 +307,7 @@ function createTrustServices({
   platform = process.platform,
   architecture = process.arch,
   windowsAdapter,
+  windowsExecutionCatalogRoot,
 } = {}) {
   if (!['darwin', 'linux', 'win32'].includes(platform)) {
     throw new Error('Pulse product platform is unsupported');
@@ -314,7 +315,9 @@ function createTrustServices({
   if (platform === 'win32') {
     let adapter = windowsAdapter;
     const nativeAdapter = () => {
-      adapter ??= loadPluginWindowsAdapter({ architecture });
+      adapter ??= loadPluginWindowsAdapter({
+        architecture, executionCatalogRoot: windowsExecutionCatalogRoot,
+      });
       return adapter;
     };
     return Object.freeze({
@@ -750,13 +753,32 @@ export function resolveProductEnvironment({
   if (!['hook', 'runtime'].includes(edgeProfile)) {
     throw new Error('Pulse product execution edge is missing or invalid.');
   }
-  const trust = createTrustServices({ platform, architecture, windowsAdapter });
   const productHome = resolve(env.PULSE_HOME || join(homedir(), '.pulse'));
   const codexHome = resolve(env.CODEX_HOME || join(homedir(), '.codex'));
   const sharedPath = join(productHome, 'product-locators.json');
   const legacyCodexPath = join(codexHome, 'pulse', 'product-locators.json');
   const locatorPath = existsSync(sharedPath) ? sharedPath : legacyCodexPath;
   const canonical = canonicalWorkspace(cwd);
+  // Codex may keep signed plugin bytes in a Windows vendor cache that does not
+  // permit direct execution of nested binaries. The plugin catalog remains the
+  // trust anchor: loadPluginWindowsAdapter hashes its adapter first, then runs
+  // only a byte-identical copy from the already activated shared runtime. The
+  // preliminary locator is routing input only; the adapter rereads and proves
+  // the locator, activation, runtime, plugin, and daemon before returning.
+  let windowsExecutionCatalogRoot;
+  if (platform === 'win32' && windowsAdapter === undefined) {
+    const preliminaryLocator = preliminaryPrivateJSON(locatorPath);
+    const key = workspaceDigest(canonical);
+    const dataDir = preliminaryLocator?.entries?.[key]?.data_dir;
+    if (typeof dataDir === 'string' && isAbsolute(dataDir)) {
+      windowsExecutionCatalogRoot = join(
+        resolve(dataDir), 'runtime', 'codex', 'current', 'runtime', 'windows-bootstrap',
+      );
+    }
+  }
+  const trust = createTrustServices({
+    platform, architecture, windowsAdapter, windowsExecutionCatalogRoot,
+  });
   const pluginRoot = dirname(fileURLToPath(import.meta.url));
   const proofInput = {
       edgeProfile, host, locatorPath, pluginRoot, productHome, workspacePath: canonical,

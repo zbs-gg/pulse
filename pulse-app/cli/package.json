@@ -72,12 +72,14 @@
     "release/README.md",
     "release/personal-preview-manifest.json",
     "release/personal-preview-manifest.schema.json",
+    "release/personal-release-artifact-set.schema.json",
+    "release/release-snapshot.schema.json",
     "release/pulse-release-root.pem",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.4.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "tar-stream": "3.1.7"
   },
   "scripts": {
@@ -90,6 +92,7 @@
     "test:personal-native-packed": "node scripts/personal-native-packed-e2e.mjs",
     "test:personal-consolidation-report": "node scripts/personal-consolidation-report-e2e.mjs",
     "test:native-universal-target": "node scripts/native-universal-target.mjs",
+    "test:native-vendor-session": "node scripts/native-vendor-session-e2e.mjs",
     "attest:personal-preview": "node scripts/personal-preview-release-attestation.mjs",
     "test:git-team-memory": "node scripts/git-team-memory-e2e.mjs",
     "test:codex-product:real-mlx": "PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs",
@@ -101,6 +104,10 @@
     "build:product-hook-bundle": "node scripts/build-product-hook-bundle.mjs",
     "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
     "build:npm-production-candidate": "node scripts/build-npm-production-candidate.mjs",
+    "build:npm-production-inputs": "node scripts/build-npm-production-inputs.mjs",
+    "build:public-soak-receipt": "node scripts/build-public-soak-receipt.mjs",
+    "build:gold-promotion-receipt": "node scripts/build-gold-promotion-receipt.mjs",
+    "generate:native-support-ledger": "node scripts/generate-native-support-ledger.mjs",
     "build:personal-release": "node scripts/build-personal-release.mjs",
     "build:personal-catalog": "node scripts/build-personal-catalog.mjs",
     "build:plugin-runtime": "node scripts/build-plugin-runtime.mjs",

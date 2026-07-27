@@ -61,6 +61,31 @@ test('native packed Codex calibration path is available only under the exact iso
   assert.equal(production.hostCandidates().codex.includes(executable), false);
 });
 
+test('protected vendor harness paths are accepted only inside a GitHub runner temp root', () => {
+  const executable = '/runner/temp/vendor/codex';
+  const services = createPlatformServices({
+    platform: 'linux', architecture: 'x64', home: '/runner/temp/home',
+    env: {
+      CI: 'true',
+      GITHUB_ACTIONS: 'true',
+      PULSE_PROTECTED_HARNESS_AUTHORITY: 'production_candidate',
+      PULSE_PROTECTED_HARNESS_CODEX_EXECUTABLE: executable,
+      RUNNER_TEMP: '/runner/temp',
+    },
+  });
+  assert.equal(services.hostCandidates().codex[0], executable);
+  for (const env of [
+    { CI: 'true', GITHUB_ACTIONS: 'true', PULSE_PROTECTED_HARNESS_AUTHORITY: 'fixture', RUNNER_TEMP: '/runner/temp' },
+    { CI: 'true', GITHUB_ACTIONS: 'true', PULSE_PROTECTED_HARNESS_AUTHORITY: 'public_registry', RUNNER_TEMP: '/other' },
+  ]) {
+    const rejected = createPlatformServices({
+      platform: 'linux', architecture: 'x64', home: '/runner/temp/home',
+      env: { ...env, PULSE_PROTECTED_HARNESS_CODEX_EXECUTABLE: executable },
+    });
+    assert.equal(rejected.hostCandidates().codex.includes(executable), false);
+  }
+});
+
 test('Windows Git discovery includes the native bin executable used by hosted runners', () => {
   const services = createPlatformServices({
     platform: 'win32', architecture: 'x64', home: 'C:\\Users\\Pulse',

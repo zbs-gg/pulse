@@ -22,6 +22,8 @@ package.json
 release/README.md
 release/personal-preview-manifest.json
 release/personal-preview-manifest.schema.json
+release/personal-release-artifact-set.schema.json
+release/release-snapshot.schema.json
 release/pulse-release-root.pem
 runtime/embedder-portable/runner.mjs
 runtime/embedder-portable/target-runtime/package-lock.json
@@ -43,6 +45,10 @@ runtime/windows-bootstrap/win32-arm64/pulse-platform-adapter.exe
 runtime/windows-bootstrap/win32-x64/pulse-platform-adapter.exe
 scripts/build-embedder-runtime.mjs
 scripts/build-npm-production-candidate.mjs
+scripts/build-npm-production-inputs.mjs
+scripts/build-public-soak-receipt.mjs
+scripts/build-gold-promotion-receipt.mjs
+scripts/generate-native-support-ledger.mjs
 scripts/build-personal-catalog.mjs
 scripts/build-personal-release.mjs
 scripts/build-plugin-runtime.mjs
@@ -57,10 +63,12 @@ scripts/codex-product-e2e.mjs
 scripts/codex-team-packaging-contract.mjs
 scripts/connector-smoke.mjs
 scripts/export-portable-model.py
+scripts/generate-release-security-evidence.mjs
 scripts/git-team-memory-e2e.mjs
 scripts/native-universal-matrix.json
 scripts/native-universal-matrix.mjs
 scripts/native-universal-target.mjs
+scripts/native-vendor-session-e2e.mjs
 scripts/personal-consolidation-report-e2e.mjs
 scripts/personal-native-packed-e2e.mjs
 scripts/personal-preview-clean-room.mjs
@@ -68,6 +76,9 @@ scripts/personal-preview-interruption-e2e.mjs
 scripts/personal-preview-multiharness-e2e.mjs
 scripts/personal-preview-release-attestation.mjs
 scripts/prepare-preview-vendor.mjs
+scripts/publish-r2-release.mjs
+scripts/publish-r2-snapshot-refresh.mjs
+scripts/refresh-release-snapshot.mjs
 scripts/product-release-fixture.mjs
 scripts/public-package-audit.mjs
 scripts/release-builder-core.mjs
@@ -76,6 +87,8 @@ scripts/sign-release-manifest.mjs
 scripts/target-release-fixture.mjs
 scripts/target-release-fixture.test.mjs
 scripts/verify-npm-stage-candidate.mjs
+scripts/validate-native-evidence-set.mjs
+scripts/verify-release-private-key.mjs
 src/artifact-installer.js
 src/binding-admin.js
 src/capture-state.js

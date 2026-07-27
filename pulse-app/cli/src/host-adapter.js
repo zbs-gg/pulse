@@ -381,17 +381,19 @@ export function verifyGitTeamMemoryCardBlock(message, expected) {
   return message.split(expected.block).length === 2;
 }
 
-export function contextLease(binding, now, ttlMs = 30_000) {
+export function contextLease(binding, now, ttlMs = 30_000, memorySnapshotDigest) {
   if (!binding || !/^[a-f0-9]{64}$/.test(binding.binding_digest ?? '') ||
-      !Number.isSafeInteger(binding.resolver_epoch) || binding.resolver_epoch < 1) {
+      !Number.isSafeInteger(binding.resolver_epoch) || binding.resolver_epoch < 1 ||
+      (memorySnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(memorySnapshotDigest))) {
     throw new Error('invalid_binding_lease_source');
   }
   return {
-    schema: 'pulse.context_lease.v1',
+    schema: memorySnapshotDigest === undefined ? 'pulse.context_lease.v1' : 'pulse.context_lease.v3',
     binding_digest: `sha256:${binding.binding_digest}`,
     policy_epoch: 0,
-    membership_generation: 0,
-    object_generation: 0,
+    ...(memorySnapshotDigest === undefined
+      ? { membership_generation: 0, object_generation: 0 }
+      : { resolver_epoch: binding.resolver_epoch, memory_snapshot_digest: memorySnapshotDigest }),
     expires_at: new Date(now.valueOf() + ttlMs).toISOString(),
   };
 }

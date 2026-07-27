@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
 import { acquireInstallLock, readInstallJournal } from './install-journal.js';
@@ -76,6 +77,62 @@ export function nativePackedFixtureApprovalDigest(plan) {
     .digest('hex');
 }
 
+export function protectedHarnessApproval(plan, {
+  authority, dataDir, packageSHA256, sourceCommit, workspace,
+} = {}) {
+  if (!['production_candidate', 'public_registry'].includes(authority) ||
+      !/^[a-f0-9]{64}$/.test(packageSHA256 ?? '') || !/^[a-f0-9]{40}$/.test(sourceCommit ?? '') ||
+      ![dataDir, workspace].every((path) => typeof path === 'string' && isAbsolute(path) && resolve(path) === path)) {
+    throw new TypeError('protected_harness_approval_invalid');
+  }
+  return Object.freeze({
+    authority,
+    data_dir: dataDir,
+    package_sha256: packageSHA256,
+    plan_digest: installPlanApprovalDigest(plan),
+    schema: 'pulse.protected_harness_install_approval.v1',
+    source_commit: sourceCommit,
+    workspace,
+  });
+}
+
+function pathInside(root, path) {
+  const local = relative(root, path);
+  return local !== '' && local !== '..' && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+}
+
+function protectedHarnessConsent({ cwd, dataDir, env, home, plan, platform }) {
+  if (env.GITHUB_ACTIONS !== 'true' || env.CI !== 'true' ||
+      !['production_candidate', 'public_registry'].includes(env.PULSE_PROTECTED_HARNESS_AUTHORITY) ||
+      !/^[a-f0-9]{64}$/.test(env.PULSE_PROTECTED_HARNESS_PACKAGE_SHA256 ?? '') ||
+      !/^[a-f0-9]{40}$/.test(env.PULSE_PROTECTED_HARNESS_SOURCE_COMMIT ?? '')) return false;
+  const root = env.RUNNER_TEMP;
+  const approvalPath = env.PULSE_PROTECTED_HARNESS_APPROVAL_PATH;
+  if (![root, approvalPath, cwd, dataDir, home].every((path) =>
+    typeof path === 'string' && isAbsolute(path) && resolve(path) === path)) return false;
+  if (![approvalPath, cwd, dataDir, home].every((path) => pathInside(root, path))) return false;
+  let rootInfo;
+  let approvalInfo;
+  try {
+    rootInfo = lstatSync(root);
+    approvalInfo = lstatSync(approvalPath);
+  } catch { return false; }
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || !approvalInfo.isFile() ||
+      approvalInfo.isSymbolicLink() || approvalInfo.nlink !== 1 || approvalInfo.size < 2 ||
+      approvalInfo.size > 16 * 1024 || (platform !== 'win32' && (approvalInfo.mode & 0o077) !== 0)) return false;
+  let approval;
+  try { approval = JSON.parse(readFileSync(approvalPath, 'utf8')); } catch { return false; }
+  const expected = protectedHarnessApproval(plan, {
+    authority: env.PULSE_PROTECTED_HARNESS_AUTHORITY,
+    dataDir,
+    packageSHA256: env.PULSE_PROTECTED_HARNESS_PACKAGE_SHA256,
+    sourceCommit: env.PULSE_PROTECTED_HARNESS_SOURCE_COMMIT,
+    workspace: cwd,
+  });
+  return readFileSync(approvalPath, 'utf8') === `${JSON.stringify(expected)}\n` &&
+    JSON.stringify(approval) === JSON.stringify(expected) && plan.detected?.workspace?.canonical_path === cwd;
+}
+
 function appleScriptString(value) {
   return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
@@ -99,6 +156,7 @@ export async function requestConsent({
     plan,
   });
   if (fixture && env.PULSE_NATIVE_PACKED_FIXTURE_APPROVAL === nativePackedFixtureApprovalDigest(plan)) return true;
+  if (protectedHarnessConsent({ cwd, dataDir, env, home, plan, platform })) return true;
   if (!input.isTTY || !output.isTTY) {
     if (platform !== 'darwin') return false;
     const hosts = (plan.detected?.hosts ?? [])
@@ -184,7 +242,7 @@ export async function executePersonalInstallCommand({
     throw new TypeError('personal_install_command_invalid');
   }
   const json = argv.includes('--json');
-  const plan = buildPlan();
+  const plan = await buildPlan();
   if (json) writeLine(errorOutput, formatPersonalInstallPlan(plan));
   else writeLine(output, formatPersonalInstallIntroduction(plan));
 

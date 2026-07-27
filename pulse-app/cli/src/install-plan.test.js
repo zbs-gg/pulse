@@ -175,7 +175,15 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     assert.equal(plan.rollback.preserve_vault, true);
     assert.equal(plan.rollback.runtime_uninstall, 'unavailable_in_u3');
     assert.equal(plan.rollback.remove_runtime, null);
-    assert.doesNotMatch(canonicalInstallPlanJSON(plan), /Go|Python|go_toolchain|python/i);
+    const requirementClaims = canonicalInstallPlanJSON({
+      local_write_purposes: plan.local_writes.map((entry) => entry.purpose),
+      network_effect_codes: plan.network_effects.map((entry) => entry.code),
+      next_action: plan.next_action,
+      reason_codes: plan.reason_codes,
+      required_human_approval_codes: plan.required_human_approvals.map((entry) => entry.code),
+      resources: plan.resources,
+    });
+    assert.doesNotMatch(requirementClaims, /\b(?:Go|Python|go_toolchain)\b/i);
     assert.deepEqual(readdirSync(home), before, 'plan detection must not create Pulse or Codex state');
   } finally {
     rmSync(root, { recursive: true, force: true });

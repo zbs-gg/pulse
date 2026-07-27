@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runHookWorkerClient } from '../../../plugins/pulse/hook-worker-client.mjs';
+import {
+  __hookWorkerClientTest, prewarmHookWorker, runHookWorkerClient,
+} from '../../../plugins/pulse/hook-worker-client.mjs';
 
 const digest = 'a'.repeat(64);
 const input = { cwd: '/workspace/pulse', session_id: 'session-one' };
 const workspace = { digest, workspacePath: input.cwd };
 const receipt = { generation: 'existing' };
+
+test('clean Windows worker startup has an install-only native-check budget', () => {
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('win32'), 120_000);
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('darwin'), 20_000);
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('linux'), 20_000);
+});
 
 function clientServices(overrides = {}) {
   return {
@@ -84,4 +92,37 @@ test('worker execution failures stay fail-closed without spawning a replacement 
   }), /hook_worker_execution_failed/);
   assert.equal(environmentResolutions, 0);
   assert.equal(replacements, 0);
+});
+
+test('install prewarm proves the exact environment before reusing or starting a worker', async () => {
+  let environmentResolutions = 0;
+  let replacements = 0;
+  const expected = {
+    entrypointPath: '/private/runtime/entrypoint.mjs',
+    hookDigest: 'b'.repeat(64),
+    productEnvironment: {
+      PULSE_PLUGIN_TREE_DIGEST: 'c'.repeat(64),
+      PULSE_RUNTIME_DIGEST: 'd'.repeat(64),
+    },
+  };
+  const result = await prewarmHookWorker({
+    host: 'codex', pluginRoot: '/signed/plugin', workspacePath: '/workspace/pulse',
+    resolveEnvironment: async () => { environmentResolutions += 1; return expected; },
+    services: clientServices({
+      validReceipt: (candidate, validation) => {
+        assert.equal(validation.expected, expected);
+        return candidate?.generation === 'replacement';
+      },
+      ensureWorker: async () => { replacements += 1; return { generation: 'replacement' }; },
+    }),
+  });
+  assert.equal(environmentResolutions, 1);
+  assert.equal(replacements, 1);
+  assert.deepEqual(result, {
+    schema: 'pulse.hook_worker_prewarm.v1', host: 'codex', workspace_digest: digest,
+    hook_digest: expected.hookDigest,
+    plugin_digest: expected.productEnvironment.PULSE_PLUGIN_TREE_DIGEST,
+    runtime_digest: expected.productEnvironment.PULSE_RUNTIME_DIGEST,
+    reused: false,
+  });
 });

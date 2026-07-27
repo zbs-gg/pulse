@@ -73,6 +73,23 @@ const RELEASE_REASON_CODES = new Set([
   'release_package_version_invalid',
   'release_root_invalid',
   'release_signature_invalid',
+  'release_snapshot_artifact_set_invalid',
+  'release_snapshot_artifact_set_mismatch',
+  'release_snapshot_expired',
+  'release_snapshot_fields_invalid',
+  'release_snapshot_identity_invalid',
+  'release_snapshot_invalid',
+  'release_snapshot_noncanonical',
+  'release_snapshot_not_yet_valid',
+  'release_snapshot_origin_invalid',
+  'release_snapshot_redirect_forbidden',
+  'release_snapshot_revocations_invalid',
+  'release_snapshot_schema_invalid',
+  'release_snapshot_signature_invalid',
+  'release_snapshot_unavailable',
+  'release_snapshot_unsafe',
+  'release_snapshot_url_invalid',
+  'release_snapshot_validity_invalid',
   'release_test_asset_invalid',
   'release_test_asset_root_invalid',
   'release_test_asset_url_invalid',
@@ -124,14 +141,14 @@ export function detectInstallResources({ home = homedir(), platformServices = de
 
 function releaseStatus(release) {
   if (!release) return null;
-  if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2'].includes(release.schema) ||
+  if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2', 'pulse.verified_release_manifest.v3'].includes(release.schema) ||
       typeof release.version !== 'string' || !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
       !/^[a-f0-9]{64}$/.test(release.manifest_digest ?? '') ||
       typeof release.target_id !== 'string' || typeof release.historical_only !== 'boolean' ||
       !Array.isArray(release.capabilities) || !release.artifacts || Array.isArray(release.artifacts)) {
     throw new TypeError('install_plan_release_invalid');
   }
-  if (release.schema === 'pulse.verified_release_manifest.v2' &&
+  if (['pulse.verified_release_manifest.v2', 'pulse.verified_release_manifest.v3'].includes(release.schema) &&
       (!release.verification_profile || Array.isArray(release.verification_profile) ||
        typeof release.verification_profile !== 'object')) {
     throw new TypeError('install_plan_release_invalid');

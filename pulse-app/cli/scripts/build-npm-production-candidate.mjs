@@ -13,6 +13,7 @@ import { extract } from 'tar-stream';
 
 import { DESKTOP_TARGET_IDS } from '../src/desktop-target.js';
 import { loadNativeUniversalMatrix } from './native-universal-matrix.mjs';
+import { validateNativeEvidenceSet } from './validate-native-evidence-set.mjs';
 
 const SHA40 = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -35,11 +36,6 @@ function canonical(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
   }
   fail('npm_production_candidate_value_invalid');
-}
-
-function exactObject(value, keys) {
-  return value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
 }
 
 function regularFile(path, maximumBytes, minimumBytes = 1) {
@@ -69,6 +65,8 @@ function digestFile(path) {
 }
 
 function evidenceFiles(root) {
+  const matrix = loadNativeUniversalMatrix();
+  const expectedCount = matrix.harnesses.length * matrix.targets.length;
   let rootInfo;
   try { rootInfo = lstatSync(root); } catch { fail('npm_production_candidate_evidence_missing'); }
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) fail('npm_production_candidate_evidence_unsafe');
@@ -83,60 +81,23 @@ function evidenceFiles(root) {
       if (info.isDirectory()) visit(path, depth + 1);
       else if (info.isFile() && info.nlink === 1 && name.endsWith('.json')) files.push(path);
       else fail('npm_production_candidate_evidence_unsafe');
-      if (files.length > DESKTOP_TARGET_IDS.length) fail('npm_production_candidate_evidence_ambiguous');
+      if (files.length > expectedCount) fail('npm_production_candidate_evidence_ambiguous');
     }
   };
   visit(root, 0);
-  if (files.length !== DESKTOP_TARGET_IDS.length) fail('npm_production_candidate_evidence_incomplete');
+  if (files.length !== expectedCount) fail('npm_production_candidate_evidence_incomplete');
   return files;
 }
 
-function validTokenEconomy(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) &&
-    ['collecting_baseline', 'estimated', 'measured'].includes(value.state);
-}
-
 function validateUniversalEvidence(root, commit) {
-  const matrix = loadNativeUniversalMatrix();
-  const declared = new Map(matrix.targets.map((target) => [target.target_id, target]));
-  const seen = new Set();
-  for (const path of evidenceFiles(root)) {
-    regularFile(path, 512 * 1024);
-    let evidence;
-    try { evidence = JSON.parse(readFileSync(path, 'utf8')); } catch { fail('npm_production_candidate_evidence_invalid'); }
-    const targetID = evidence?.target?.target_id;
-    const target = declared.get(targetID);
-    if (!target || seen.has(targetID) ||
-        evidence.schema !== 'pulse.native_universal_target_evidence.v1' ||
-        evidence.authority !== 'pr-fixture' || evidence.production !== false || evidence.support_claim !== false ||
-        evidence.commit !== commit || !exactObject(evidence.target, ['architecture', 'libc', 'platform', 'runner', 'target_id']) ||
-        canonical(evidence.target) !== canonical(target) ||
-        evidence.harness?.host !== matrix.harness.host || evidence.harness?.package !== matrix.harness.package ||
-        evidence.harness?.version !== matrix.harness.version ||
-        !SHA256.test(evidence.package?.sha256 ?? '') || !Number.isSafeInteger(evidence.package?.bytes) || evidence.package.bytes < 1 ||
-        evidence.runtime?.full_retrieval !== true || evidence.runtime?.lifecycle_ready !== true ||
-        evidence.first_value?.boundary !== 'fresh_session_context' || evidence.first_value?.visible_card !== true ||
-        evidence.first_value?.same_object_recalled !== true || !Number.isSafeInteger(evidence.first_value?.milliseconds) ||
-        evidence.first_value.milliseconds < 0 || evidence.first_value.milliseconds > 60_000 ||
-        !validTokenEconomy(evidence.token_economy) ||
-        evidence.consolidation?.phase !== 'report_ready' || evidence.consolidation?.cli_parity !== true ||
-        evidence.consolidation?.mcp_parity !== true || evidence.consolidation?.memory_home_visible !== true ||
-        evidence.consolidation?.sources_byte_preserved !== true ||
-        evidence.consolidation?.mutation_authority_exercised !== false) {
-      fail('npm_production_candidate_evidence_invalid');
-    }
-    const kinds = ['daemon', 'embedder-runtime', 'model', 'plugin-runtime'];
-    if (!Array.isArray(evidence.release?.artifact_ids) ||
-        kinds.some((kind) => evidence.release.artifact_ids.filter((id) =>
-          typeof id === 'string' && id.endsWith(`-${kind}`)).length !== 1) ||
-        evidence.release.artifact_ids.filter((id) => typeof id === 'string' && id.endsWith('-presence-helper')).length !==
-          (target.platform === 'darwin' ? 1 : 0)) {
-      fail('npm_production_candidate_evidence_invalid');
-    }
-    seen.add(targetID);
-  }
-  if (canonical([...seen].sort()) !== canonical(DESKTOP_TARGET_IDS)) {
-    fail('npm_production_candidate_evidence_incomplete');
+  evidenceFiles(root);
+  try {
+    const result = validateNativeEvidenceSet(root, { authority: 'production_candidate' });
+    if (result.source_commit !== commit) fail('npm_production_candidate_evidence_invalid');
+    return result;
+  } catch (error) {
+    if (error?.code?.startsWith('npm_production_candidate_')) throw error;
+    fail('npm_production_candidate_evidence_invalid');
   }
 }
 
@@ -183,9 +144,9 @@ async function packageDocuments(path) {
 }
 
 export async function buildNpmProductionCandidate({
-  catalogRoot, commit, evidenceRoot, outputRoot, tarballPath, universalRunID,
+  catalogRoot, commit, evidenceRoot, outputRoot, securityRoot, tarballPath, universalRunID,
 } = {}) {
-  if (![catalogRoot, evidenceRoot, outputRoot, tarballPath].every((path) =>
+  if (![catalogRoot, evidenceRoot, outputRoot, securityRoot, tarballPath].every((path) =>
     typeof path === 'string' && isAbsolute(path) && resolve(path) === path) ||
       !SHA40.test(commit ?? '') || !Number.isSafeInteger(universalRunID) || universalRunID < 1 ||
       existsSync(outputRoot)) {
@@ -195,20 +156,29 @@ export async function buildNpmProductionCandidate({
   if (!SAFE_TARBALL.test(tarballName)) fail('npm_production_candidate_arguments_invalid');
   const receipt = readCanonicalJSON(
     join(catalogRoot, 'catalog-build-receipt.json'),
-    'pulse.personal_release_catalog_build.v2',
+    'pulse.personal_release_catalog_build.v3',
   );
   const manifest = readCanonicalJSON(
     join(catalogRoot, 'personal-preview-manifest.json'),
-    'pulse.release_catalog_envelope.v2',
+    'pulse.personal_release_artifact_set.v1',
+  );
+  const snapshot = readCanonicalJSON(
+    join(catalogRoot, 'snapshot.json'),
+    'pulse.release_snapshot_envelope.v1',
   );
   if (receipt.value.production_ready !== true || receipt.value.target_count !== DESKTOP_TARGET_IDS.length ||
       receipt.value.artifact_count !== 2 + DESKTOP_TARGET_IDS.length * 2 ||
+      receipt.value.host_target_count !== 18 || receipt.value.release_epoch !== 8 ||
       canonical(receipt.value.target_ids) !== canonical(DESKTOP_TARGET_IDS) ||
       Object.keys(manifest.value.payload?.targets ?? {}).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0') ||
-      manifest.value.payload?.release?.package !== PACKAGE_NAME) {
+      manifest.value.payload?.release?.package !== PACKAGE_NAME ||
+      snapshot.value.payload?.artifact_set?.sha256 !== receipt.value.artifact_set_digest ||
+      snapshot.value.payload?.release_epoch !== receipt.value.release_epoch ||
+      digestFile(join(catalogRoot, 'personal-preview-manifest.json')) !== receipt.value.artifact_set_digest ||
+      digestFile(join(catalogRoot, 'snapshot.json')) !== receipt.value.snapshot_digest) {
     fail('npm_production_candidate_catalog_invalid');
   }
-  validateUniversalEvidence(evidenceRoot, commit);
+  const evidence = validateUniversalEvidence(evidenceRoot, commit);
   const packageDocumentsValue = await packageDocuments(tarballPath);
   const packageJSON = packageDocumentsValue.packageJSON;
   if (packageDocumentsValue.manifestBytes !== manifest.bytes || packageJSON?.name !== PACKAGE_NAME ||
@@ -216,12 +186,37 @@ export async function buildNpmProductionCandidate({
     fail('npm_production_candidate_package_mismatch');
   }
   const sha256 = digestFile(tarballPath);
+  const security = readCanonicalJSON(
+    join(securityRoot, 'dependency-receipt.json'),
+    'pulse.release_dependency_receipt.v1',
+  );
+  if (security.value.package !== PACKAGE_NAME || security.value.version !== packageJSON.version ||
+      security.value.package_sha256 !== sha256 || security.value.audit?.high !== 0 ||
+      security.value.audit?.critical !== 0 || !Number.isSafeInteger(security.value.dependency_count) ||
+      security.value.dependency_count < 1 ||
+      digestFile(join(securityRoot, 'sbom.cdx.json')) !== security.value.sbom_sha256 ||
+      digestFile(join(securityRoot, 'licenses.json')) !== security.value.license_inventory_sha256) {
+    fail('npm_production_candidate_security_invalid');
+  }
+  if (evidence.package_sha256 !== sha256 ||
+      evidence.artifact_set_digest !== receipt.value.artifact_set_digest ||
+      evidence.snapshot_digest !== receipt.value.snapshot_digest) fail('npm_production_candidate_evidence_invalid');
+  const matrix = loadNativeUniversalMatrix();
   const candidate = Object.freeze({
+    artifact_set_digest: receipt.value.artifact_set_digest,
     commit,
+    host_target_count: matrix.harnesses.length * matrix.targets.length,
+    hosts: matrix.harnesses.map((harness) => harness.host).sort(),
+    dependency_count: security.value.dependency_count,
+    license_inventory_sha256: security.value.license_inventory_sha256,
     package: PACKAGE_NAME,
     production: true,
+    production_ready: true,
+    release_epoch: receipt.value.release_epoch,
     schema: 'pulse.npm_production_candidate.v1',
     sha256,
+    sbom_sha256: security.value.sbom_sha256,
+    snapshot_digest: receipt.value.snapshot_digest,
     support_claim: false,
     targets: [...DESKTOP_TARGET_IDS],
     tarball: tarballName,
@@ -239,6 +234,10 @@ export async function buildNpmProductionCandidate({
     writeFileSync(join(outputRoot, 'candidate.json'), `${canonical(candidate)}\n`, {
       encoding: 'utf8', flag: 'wx', mode: 0o600,
     });
+    for (const name of ['dependency-receipt.json', 'licenses.json', 'sbom.cdx.json']) {
+      copyFileSync(join(securityRoot, name), join(outputRoot, name));
+      chmodSync(join(outputRoot, name), 0o600);
+    }
     complete = true;
     return candidate;
   } finally {
@@ -251,14 +250,14 @@ function parseCLI(argv) {
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
-    if (!['--catalog', '--commit', '--evidence', '--output', '--tarball', '--universal-run-id'].includes(name) ||
+    if (!['--catalog', '--commit', '--evidence', '--output', '--security', '--tarball', '--universal-run-id'].includes(name) ||
         value === undefined || Object.hasOwn(values, name)) {
       fail('npm_production_candidate_arguments_invalid');
     }
     values[name] = value;
   }
-  if (Object.keys(values).length !== 6 ||
-      ![values['--catalog'], values['--evidence'], values['--output'], values['--tarball']].every(isAbsolute)) {
+  if (Object.keys(values).length !== 7 ||
+      ![values['--catalog'], values['--evidence'], values['--output'], values['--security'], values['--tarball']].every(isAbsolute)) {
     fail('npm_production_candidate_arguments_invalid');
   }
   const universalRunID = Number(values['--universal-run-id']);
@@ -267,6 +266,7 @@ function parseCLI(argv) {
     commit: values['--commit'],
     evidenceRoot: resolve(values['--evidence']),
     outputRoot: resolve(values['--output']),
+    securityRoot: resolve(values['--security']),
     tarballPath: resolve(values['--tarball']),
     universalRunID,
   });

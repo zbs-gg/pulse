@@ -52,7 +52,7 @@ jobs:
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
           test "$RELEASE_CONFIRMATION" = 'build universal production candidate'
           [[ "$UNIVERSAL_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
-          [[ "$RELEASE_EPOCH" =~ ^[1-9][0-9]{0,9}$ ]]
+          test "$RELEASE_EPOCH" = 8
           test -z "${NODE_AUTH_TOKEN:-}"
           test -z "${NPM_TOKEN:-}"
       - name: Require successful Universal run for this commit
@@ -72,23 +72,25 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern 'pulse-native-*' \
             --dir universal-evidence
-          test "$(find universal-evidence -type f -name '*.json' | wc -l | tr -d ' ')" = 6
+          test "$(find universal-evidence -type f -name '*.json' | wc -l | tr -d ' ')" = 18
+          node pulse-app/cli/scripts/validate-native-evidence-set.mjs \
+            --directory universal-evidence --authority fixture
       - id: matrix
         name: Freeze exact native production matrices
         working-directory: pulse-app/cli
         shell: bash
         run: |
           node scripts/native-universal-matrix.mjs --check
-          echo "darwin=$(node scripts/native-universal-matrix.mjs --github-platform darwin)" >> "$GITHUB_OUTPUT"
-          echo "linux=$(node scripts/native-universal-matrix.mjs --github-platform linux)" >> "$GITHUB_OUTPUT"
-          echo "win32=$(node scripts/native-universal-matrix.mjs --github-platform win32)" >> "$GITHUB_OUTPUT"
+          echo "darwin=$(node scripts/native-universal-matrix.mjs --github-platform darwin --github-host codex)" >> "$GITHUB_OUTPUT"
+          echo "linux=$(node scripts/native-universal-matrix.mjs --github-platform linux --github-host codex)" >> "$GITHUB_OUTPUT"
+          echo "win32=$(node scripts/native-universal-matrix.mjs --github-platform win32 --github-host codex)" >> "$GITHUB_OUTPUT"
       - name: Preserve exact content-free Universal evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pulse-production-universal-evidence
           path: universal-evidence
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   linux-target:
     name: Production / ${{ matrix.target_id }}
@@ -134,7 +136,7 @@ jobs:
           name: pulse-production-target-${{ matrix.target_id }}
           path: ${{ runner.temp }}/pulse-target-${{ matrix.target_id }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   macos-target:
     name: Production / ${{ matrix.target_id }}
@@ -225,7 +227,7 @@ jobs:
           name: pulse-production-target-${{ matrix.target_id }}
           path: ${{ runner.temp }}/pulse-target-${{ matrix.target_id }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
       - name: Upload notarized presence helper
         if: matrix.target_id == 'darwin-arm64'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -233,7 +235,7 @@ jobs:
           name: pulse-production-presence-helper
           path: pulse-app/native/pulse-presence-helper/dist/gg.zbs.pulse.presence-helper
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
       - name: Remove ephemeral Apple signing authority
         if: always()
         shell: bash
@@ -309,7 +311,7 @@ jobs:
           name: pulse-production-target-${{ matrix.target_id }}
           path: ${{ runner.temp }}\pulse-target-${{ matrix.target_id }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
       - name: Remove ephemeral Authenticode authority
         if: always()
         shell: pwsh
@@ -367,7 +369,7 @@ jobs:
           name: pulse-production-portable-model
           path: ${{ runner.temp }}/pulse-portable-model
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   plugin-runtime:
     name: Production / host-neutral runtime
@@ -401,10 +403,10 @@ jobs:
           name: pulse-production-plugin-runtime
           path: ${{ runner.temp }}/pulse-plugin-runtime
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   catalog:
-    name: Sign exact six-target catalog
+    name: Sign immutable epoch-8 artifact set and 30-day snapshot
     needs: [authorize, linux-target, macos-target, windows-target, portable-model, plugin-runtime]
     environment: production-catalog
     runs-on: ubuntu-24.04
@@ -443,6 +445,13 @@ jobs:
           printf '%s' "$RELEASE_CHANNEL_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/pulse-release-keys/channel.pem"
           chmod 600 "$RUNNER_TEMP/pulse-release-keys/root.pem" "$RUNNER_TEMP/pulse-release-keys/channel.pem"
           npm ci --ignore-scripts --prefix pulse-app/cli
+      - name: Require the private root to match the committed public root
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node scripts/verify-release-private-key.mjs
+          "$RUNNER_TEMP/pulse-release-keys/root.pem"
+          "$GITHUB_WORKSPACE/pulse-app/cli/release/pulse-release-root.pem"
       - name: Build and verify the exact universal catalog
         working-directory: pulse-app/cli
         shell: bash
@@ -467,14 +476,14 @@ jobs:
           name: pulse-production-release-catalog
           path: ${{ runner.temp }}/pulse-production-catalog
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
       - name: Remove private catalog authorities
         if: always()
         shell: bash
         run: rm -rf "$RUNNER_TEMP/pulse-release-keys"
 
   candidate:
-    name: Build immutable npm production candidate
+    name: Build immutable npm candidate inputs
     needs: [authorize, catalog, macos-target]
     environment: production-candidate
     runs-on: ${{ fromJSON(needs.authorize.outputs.darwin).include[0].runner }}
@@ -497,10 +506,6 @@ jobs:
         with:
           name: pulse-production-presence-helper
           path: pulse-app/native/pulse-presence-helper/dist
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: pulse-production-universal-evidence
-          path: ${{ runner.temp }}/pulse-production-universal-evidence
       - name: Pack the exact universal npm bytes
         shell: bash
         run: |
@@ -509,36 +514,48 @@ jobs:
           install -m 600 \
             "$RUNNER_TEMP/pulse-production-catalog/personal-preview-manifest.json" \
             pulse-app/cli/release/personal-preview-manifest.json
+          install -m 600 \
+            "$RUNNER_TEMP/pulse-production-catalog/snapshot.json" \
+            pulse-app/cli/release/personal-release-snapshot.json
           mkdir "$RUNNER_TEMP/pulse-npm-pack"
-          PULSE_REQUIRE_RELEASE_MANIFEST=1 npm pack \
+          PULSE_REQUIRE_RELEASE_MANIFEST=1 \
+          PULSE_RELEASE_SNAPSHOT_PATH="$GITHUB_WORKSPACE/pulse-app/cli/release/personal-release-snapshot.json" \
+          npm pack \
             --prefix pulse-app/cli \
             --pack-destination "$RUNNER_TEMP/pulse-npm-pack"
-      - name: Bind npm bytes to catalog and all six native proofs
+      - name: Bind unpublished npm bytes to catalog and security evidence
         working-directory: pulse-app/cli
         shell: bash
         run: |
           tarballs=("$RUNNER_TEMP"/pulse-npm-pack/*.tgz)
           test "${#tarballs[@]}" = 1
-          npm run build:npm-production-candidate -- \
+          mkdir "$RUNNER_TEMP/pulse-production-audit"
+          npm install --ignore-scripts --no-audit --no-fund --omit=dev \
+            --prefix "$RUNNER_TEMP/pulse-production-audit" "${tarballs[0]}"
+          npm audit --omit=dev --audit-level=high --json \
+            --prefix "$RUNNER_TEMP/pulse-production-audit" \
+            > "$RUNNER_TEMP/pulse-production-audit.json"
+          node scripts/generate-release-security-evidence.mjs \
+            --audit "$RUNNER_TEMP/pulse-production-audit.json" \
+            --install-root "$RUNNER_TEMP/pulse-production-audit" \
+            --output "$RUNNER_TEMP/pulse-production-security" \
+            --tarball "${tarballs[0]}"
+          npm run build:npm-production-inputs -- \
             --catalog "$RUNNER_TEMP/pulse-production-catalog" \
             --commit "$GITHUB_SHA" \
-            --evidence "$RUNNER_TEMP/pulse-production-universal-evidence" \
-            --output "$RUNNER_TEMP/pulse-npm-production-candidate" \
+            --output "$RUNNER_TEMP/pulse-npm-production-inputs" \
+            --security "$RUNNER_TEMP/pulse-production-security" \
             --tarball "${tarballs[0]}" \
             --universal-run-id "$UNIVERSAL_RUN_ID"
-          candidate_sha="$(node -p "JSON.parse(require('fs').readFileSync('$RUNNER_TEMP/pulse-npm-production-candidate/candidate.json')).sha256")"
-          node scripts/verify-npm-stage-candidate.mjs \
-            --candidate "$RUNNER_TEMP/pulse-npm-production-candidate/candidate.json" \
-            --commit "$GITHUB_SHA" \
-            --sha256 "$candidate_sha"
-          echo "Production candidate SHA-256: $candidate_sha"
-      - name: Upload exact npm candidate without publishing it
+          candidate_sha="$(node -p "JSON.parse(require('fs').readFileSync('$RUNNER_TEMP/pulse-npm-production-inputs/candidate-inputs.json')).package_sha256")"
+          echo "Unsealed candidate input SHA-256: $candidate_sha"
+      - name: Upload exact npm inputs without claiming candidate readiness
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pulse-npm-production-candidate
-          path: ${{ runner.temp }}/pulse-npm-production-candidate
+          name: pulse-npm-production-inputs
+          path: ${{ runner.temp }}/pulse-npm-production-inputs
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   production-candidate-required:
     name: Production candidate / required

@@ -34,6 +34,8 @@ import {
 } from './host-adapter.js';
 import {
 	activatedBoundPulseRequest,
+	boundPulseRequest,
+	ensureActivatedVaultRuntime,
   readCodexFinalizeMarker,
   readCodexTurnContext,
   resolveBoundCodexRuntime,
@@ -68,6 +70,33 @@ Pulse Personal automatic capture (local, private, and silent):
 function healthy(output) {
   Object.defineProperty(output, HEALTHY, { value: true });
   return output;
+}
+
+export function createActivatedHookRequest({
+	ensureActivation = ensureActivatedVaultRuntime,
+	request = boundPulseRequest,
+	platformServices,
+} = {}) {
+	let activation;
+	let authority;
+	return async (resolved, path, options = {}) => {
+		const currentAuthority = [
+			resolved?.binding?.binding_digest,
+			resolved?.binding?.resolver_epoch,
+			resolved?.runtime?.base_url,
+			resolved?.runtime?.data_dir,
+		].join('\x1f');
+		if (authority !== undefined && authority !== currentAuthority) {
+			throw new Error('hook_activation_lease_authority_changed');
+		}
+		authority = currentAuthority;
+		activation ??= Promise.resolve(ensureActivation(resolved, { platformServices }));
+		await activation;
+		return request(resolved, path, {
+			...options,
+			...(platformServices === undefined ? {} : { platformServices }),
+		});
+	};
 }
 
 function corroboratedWrite(output) {
@@ -289,7 +318,11 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     ? canonicalCodexTurnEvent(rawInput)
     : normalizeCodexHook(eventName, rawInput);
   const resolveRuntime = dependencies.resolveRuntime ?? resolveBoundCodexRuntime;
-	const request = dependencies.request ?? activatedBoundPulseRequest;
+	const request = dependencies.request ?? createActivatedHookRequest({
+		ensureActivation: dependencies.ensureActivation,
+		request: dependencies.boundRequest,
+		platformServices: dependencies.platformServices,
+	});
   const recordFailure = dependencies.recordFailure ?? recordHookFailure;
 
   if (eventName === 'PreToolUse') {
@@ -327,18 +360,23 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     resolved = resolveRuntime(rawInput);
     if (eventName === 'SessionStart') {
       let syncMessage;
-      try {
-        const sync = await (dependencies.syncSharedMemory ?? syncCommittedGitTeamMemory)(resolved, {
-          ensureProjectID: dependencies.portableProjectID ?? ensureBoundPortableProjectID,
-          requestIndex: (body) => request(resolved, '/project/shared-memory/index', {
-            body, timeoutMs: 45_000,
-          }),
-        });
-        if (sync?.state === 'indexed') {
-          syncMessage = `Pulse Git Team Memory indexed: ${sync.active_count} active project memories (${sync.receipt_id}).`;
+      // Personal Gold does not include Team memory. Avoid spawning Git and
+      // probing a repository on every Personal session start; Team bindings
+      // retain the explicit committed-pack sync path.
+      if (resolved.binding.mode === 'team') {
+        try {
+          const sync = await (dependencies.syncSharedMemory ?? syncCommittedGitTeamMemory)(resolved, {
+            ensureProjectID: dependencies.portableProjectID ?? ensureBoundPortableProjectID,
+            requestIndex: (body) => request(resolved, '/project/shared-memory/index', {
+              body, timeoutMs: 45_000,
+            }),
+          });
+          if (sync?.state === 'indexed') {
+            syncMessage = `Pulse Git Team Memory indexed: ${sync.active_count} active project memories (${sync.receipt_id}).`;
+          }
+        } catch {
+          syncMessage = 'Pulse Git Team Memory sync was blocked; no unverified shared project memory was admitted.';
         }
-      } catch {
-        syncMessage = 'Pulse Git Team Memory sync was blocked; no unverified shared project memory was admitted.';
       }
       const context = await resumeContext(resolved, event, request, dependencies);
       return annotateContinuityDelivery(healthy({
@@ -348,19 +386,32 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       }), resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {
-      let hadObservedSessionDelivery = false;
-      try {
-        hadObservedSessionDelivery =
-          await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
-            platformServices: dependencies.platformServices,
-          });
-      } catch { /* missing observation proof requires the prompt bootstrap */ }
       try {
         await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
           request: dependencies.deliveryRequest ?? request,
           platformServices: dependencies.platformServices,
         });
       } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
+      let memorySnapshotDigest;
+      if (dependencies.hasSessionDelivery === undefined) {
+        try {
+          const status = await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
+          if (/^[a-f0-9]{64}$/.test(status?.memory_snapshot_digest ?? '')) {
+            memorySnapshotDigest = status.memory_snapshot_digest;
+          }
+        } catch { /* a missing current snapshot requires the prompt bootstrap */ }
+      }
+      let hadObservedSessionDelivery = false;
+      try {
+        hadObservedSessionDelivery = memorySnapshotDigest === undefined && dependencies.hasSessionDelivery === undefined
+          ? false
+          : await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
+              platformServices: dependencies.platformServices,
+              ...(memorySnapshotDigest === undefined ? {} : {
+                expectedMemorySnapshotDigest: memorySnapshotDigest,
+              }),
+            });
+      } catch { /* stale or missing observation proof requires the prompt bootstrap */ }
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
       let approval;
@@ -393,7 +444,9 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
+          additionalContext: `${renderAdditionalContext([], contextLease(
+            resolved.binding, now, 30_000, memorySnapshotDigest,
+          ))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       });
     }

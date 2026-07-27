@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
-  generateKeyPairSync, sign,
+  createHash, generateKeyPairSync, sign,
 } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { once } from 'node:events';
@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { loadNativeUniversalMatrix } from '../scripts/native-universal-matrix.mjs';
 import { DESKTOP_TARGET_IDS } from './desktop-target.js';
 import {
   ReleaseManifestError,
@@ -18,6 +19,7 @@ import {
   pinnedReleaseKeyring,
   readMinimumReleaseEpoch,
   releaseKeyID,
+  verifyPersonalReleaseArtifactSet,
   verifyReleaseManifestEnvelope,
 } from './release-manifest.js';
 
@@ -257,6 +259,57 @@ function catalogEnvelope(rootKeys, channelKeys, manifest = catalogPayload(channe
   };
 }
 
+function artifactSetEnvelope(channelKeys, overrides = {}) {
+  const payload = catalogPayload(channelKeys);
+  delete payload.release.expires_at;
+  delete payload.release.issued_at;
+  payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
+  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.8.0/catalog/snapshot.json';
+  payload.host_policy = {
+    harnesses: loadNativeUniversalMatrix().harnesses.map((harness) => structuredClone(harness)),
+  };
+  Object.assign(payload, overrides);
+  return {
+    payload,
+    schema: 'pulse.personal_release_artifact_set.v1',
+    signature: {
+      algorithm: 'ed25519', key_id: channelKeys.keyID,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), channelKeys.privateKey).toString('base64'),
+    },
+  };
+}
+
+function snapshotEnvelope(rootKeys, channelKeys, artifactSet, overrides = {}) {
+  const payload = {
+    artifact_set: {
+      sha256: createHash('sha256').update(`${canonicalReleaseJSON(artifactSet)}\n`).digest('hex'),
+      url: 'https://releases.zbs.gg/pulse/0.8.0/epoch-7/catalog/artifact-set.json',
+    },
+    channel: {
+      key_id: channelKeys.keyID,
+      public_key_pem: channelKeys.publicKey,
+      valid_from_epoch: 7,
+      valid_through_epoch: 7,
+    },
+    expires_at: '2026-08-14T00:00:00.000Z',
+    issued_at: '2026-07-15T00:00:00.000Z',
+    package: '@zbs-gg/pulse',
+    release_epoch: 7,
+    revoked_key_ids: [],
+    schema: 'pulse.release_snapshot.v1',
+    version: '0.8.0',
+    ...overrides,
+  };
+  return {
+    payload,
+    schema: 'pulse.release_snapshot_envelope.v1',
+    signature: {
+      algorithm: 'ed25519', key_id: rootKeys.keyID,
+      value: sign(null, Buffer.from(canonicalReleaseJSON(payload)), rootKeys.privateKey).toString('base64'),
+    },
+  };
+}
+
 function expectCode(fn, code) {
   assert.throws(fn, (error) => error instanceof ReleaseManifestError && error.code === code);
 }
@@ -302,6 +355,76 @@ test('delegated catalog selects one exact target and preserves optional capabili
       ? ['daemon', 'embedder-runtime', 'model', 'plugin-runtime', 'presence-helper']
       : ['daemon', 'embedder-runtime', 'model', 'plugin-runtime']);
   }
+});
+
+test('v3 immutable artifact set is authorized by a fresh root snapshot for every target', () => {
+  const root = keyFixture();
+  const channel = keyFixture();
+  const artifactSet = artifactSetEnvelope(channel);
+  const snapshot = snapshotEnvelope(root, channel, artifactSet);
+  for (const targetID of DESKTOP_TARGET_IDS) {
+    const [platform, architecture, libc = null] = targetID.split('-');
+    const verified = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, verifyOptions(root, {
+      architecture, libc, platform,
+    }));
+    assert.equal(verified.schema, 'pulse.verified_release_manifest.v3');
+    assert.equal(verified.catalog_schema, 'pulse.personal_release_artifact_set.v1');
+    assert.equal(verified.target_id, targetID);
+    assert.equal(verified.epoch, 7);
+    assert.equal(verified.snapshot_refresh_required, false);
+    assert.match(verified.authority.snapshot_digest, /^[a-f0-9]{64}$/);
+  }
+});
+
+test('v3 host policy rejects malformed vendor download identity with a stable failure', () => {
+  const root = keyFixture();
+  const channel = keyFixture();
+  const artifactSet = artifactSetEnvelope(channel);
+  artifactSet.payload.host_policy.harnesses[0].vendor_source = 'not-a-vendor-url';
+  const snapshot = snapshotEnvelope(root, channel, artifactSet);
+  expectCode(
+    () => verifyPersonalReleaseArtifactSet(artifactSet, snapshot, verifyOptions(root)),
+    'release_host_policy_invalid',
+  );
+});
+
+test('v3 snapshot rejects tamper, revocation, expiry, downgrade, and cross-origin artifact set', () => {
+  const root = keyFixture();
+  const channel = keyFixture();
+  const artifactSet = artifactSetEnvelope(channel);
+  const options = verifyOptions(root);
+  const tampered = snapshotEnvelope(root, channel, artifactSet);
+  tampered.payload.artifact_set.sha256 = '0'.repeat(64);
+  expectCode(() => verifyPersonalReleaseArtifactSet(artifactSet, tampered, options), 'release_snapshot_signature_invalid');
+  expectCode(() => verifyPersonalReleaseArtifactSet(
+    artifactSet,
+    snapshotEnvelope(root, channel, artifactSet, { revoked_key_ids: [channel.keyID] }),
+    options,
+  ), 'release_key_revoked');
+  expectCode(() => verifyPersonalReleaseArtifactSet(
+    artifactSet,
+    snapshotEnvelope(root, channel, artifactSet, { expires_at: '2026-07-16T00:00:00.000Z' }),
+    options,
+  ), 'release_snapshot_expired');
+  const expired = verifyPersonalReleaseArtifactSet(
+    artifactSet,
+    snapshotEnvelope(root, channel, artifactSet, { expires_at: '2026-07-16T00:00:00.000Z' }),
+    { ...options, allowExpiredSnapshot: true },
+  );
+  assert.equal(expired.snapshot_refresh_required, true);
+  expectCode(() => verifyPersonalReleaseArtifactSet(
+    artifactSet, snapshotEnvelope(root, channel, artifactSet), { ...options, minimumAcceptedEpoch: 8 },
+  ), 'manifest_epoch_downgrade');
+  expectCode(() => verifyPersonalReleaseArtifactSet(
+    artifactSet,
+    snapshotEnvelope(root, channel, artifactSet, {
+      artifact_set: {
+        sha256: createHash('sha256').update(`${canonicalReleaseJSON(artifactSet)}\n`).digest('hex'),
+        url: 'https://evil.example/pulse/0.8.0/epoch-7/catalog/artifact-set.json',
+      },
+    }),
+    options,
+  ), 'release_snapshot_origin_invalid');
 });
 
 test('v2 catalog binds canonical trees and rejects mismatched platform verification profiles', () => {

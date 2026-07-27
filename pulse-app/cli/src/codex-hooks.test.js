@@ -24,6 +24,7 @@ import {
 } from './host-adapter.js';
 import {
 	codexWorkspaceDigest,
+	createActivatedHookRequest,
 	handleCodexHook,
 	inspectCodexNativeHookList,
 	inspectCodexNativeHookTrust,
@@ -63,6 +64,31 @@ const resolved = {
 };
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+test('one hook event proves activation once while retaining exact bound requests', async () => {
+	const calls = [];
+	const request = createActivatedHookRequest({
+		ensureActivation: async (value) => calls.push(['activation', value]),
+		request: async (value, path, options) => {
+			calls.push(['request', value, path, options]);
+			return { path };
+		},
+	});
+	assert.deepEqual(await request(resolved, '/continuity/delivery/observations', { timeoutMs: 1200 }), {
+		path: '/continuity/delivery/observations',
+	});
+	assert.deepEqual(await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 }), {
+		path: '/memory/status',
+	});
+	assert.equal(calls.filter(([kind]) => kind === 'activation').length, 1);
+	assert.deepEqual(calls.filter(([kind]) => kind === 'request').map(([, , path]) => path), [
+		'/continuity/delivery/observations', '/memory/status',
+	]);
+	await assert.rejects(() => request({
+		...resolved,
+		binding: { ...resolved.binding, resolver_epoch: resolved.binding.resolver_epoch + 1 },
+	}, '/memory/status'), /hook_activation_lease_authority_changed/);
+});
 
 function opaque(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
@@ -357,14 +383,15 @@ test('PostToolUse extracts only canonical Pulse receipt references', () => {
   assert.doesNotMatch(JSON.stringify(refs), /must not be returned/);
 });
 
-test('SessionStart injects bound resume as inert evidence with an event-bound lease', async () => {
+test('Team SessionStart syncs committed shared memory and injects bound resume with an event-bound lease', async () => {
   const calls = [];
+  const teamResolved = { ...resolved, binding: { ...resolved.binding, mode: 'team' } };
   const output = await handleCodexHook('SessionStart', {
     ...base,
     hook_event_name: 'SessionStart',
     source: 'startup',
   }, {
-    resolveRuntime: () => resolved,
+    resolveRuntime: () => teamResolved,
     request: async (_resolved, path, options) => {
       calls.push({ path, options });
       if (path === '/project/shared-memory/index') {
@@ -392,6 +419,28 @@ test('SessionStart injects bound resume as inert evidence with an event-bound le
 	assert.match(injected, /"practices":\[\]/);
 	assert.match(injected, /Pulse host rules \(host-owned\)/);
   assert.doesNotMatch(injected, /transcript_path/);
+});
+
+test('Personal SessionStart skips Git Team Memory sync before injecting resume context', async () => {
+  const calls = [];
+  const output = await handleCodexHook('SessionStart', {
+    ...base,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  }, {
+    resolveRuntime: () => resolved,
+    request: async (_resolved, path) => {
+      calls.push(path);
+      return { resume_markdown: 'Personal memory stays local.' };
+    },
+    syncSharedMemory: async () => {
+      throw new Error('Personal SessionStart must not probe Git Team Memory');
+    },
+    now: () => new Date('2026-07-14T10:00:00Z'),
+  });
+  assert.deepEqual(calls, ['/continuity/resume']);
+  assert.equal(output.systemMessage, undefined);
+  assert.match(output.hookSpecificOutput.additionalContext, /Personal memory stays local/);
 });
 
 test('CLI durably records the exact frozen SessionStart context before returning it', async () => {
@@ -786,6 +835,23 @@ test('Codex UserPromptSubmit attempts only a correlated pending-offer observatio
   assert.equal(observations, 1);
 });
 
+test('UserPromptSubmit rechecks the just-observed SessionStart lease before any bootstrap retrieval', async () => {
+  let observed = false;
+  let checks = 0;
+  const output = await handleCodexHook('UserPromptSubmit', {
+    ...base, hook_event_name: 'UserPromptSubmit', prompt: 'continue',
+  }, {
+    resolveRuntime: () => resolved,
+    writeTurnContext: () => {},
+    observeDelivery: async () => { observed = true; },
+    hasSessionDelivery: async () => { checks += 1; return observed; },
+    composeResume: async () => assert.fail('unchanged same-session memory must not run a second retrieval'),
+  });
+  assert.equal(checks, 1);
+  assert.equal(observed, true);
+  assert.match(output.hookSpecificOutput.additionalContext, /pulse\.context_lease/);
+});
+
 test('PostToolUse trusts only the plugin-owned product receipt namespace', async () => {
   const calls = [];
   const stopEvent = normalizeCodexHook('Stop', {
@@ -967,6 +1033,9 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
   const workerClient = readFileSync(resolve(pluginRoot, 'hook-worker-client.mjs'), 'utf8');
   assert.match(launcher, /runHookWorkerClient\(/);
   assert.match(launcher, /host: 'codex'/);
+  assert.match(launcher, /resolveProductEnvironment has already verified/);
+  assert.doesNotMatch(launcher, /readFileSync/);
+  assert.match(launcher, /pulse\.hook_worker_prewarm_error\.v1/);
   assert.doesNotMatch(launcher, /spawn\(/);
   assert.match(workerClient, /workspace_digest: receipt\.workspace_digest/);
   assert.match(workerClient, /cwd: dirname\(process\.execPath\)/);
