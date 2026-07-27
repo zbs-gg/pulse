@@ -34,6 +34,8 @@ import {
 } from './host-adapter.js';
 import {
 	activatedBoundPulseRequest,
+	boundPulseRequest,
+	ensureActivatedVaultRuntime,
   readCodexFinalizeMarker,
   readCodexTurnContext,
   resolveBoundCodexRuntime,
@@ -68,6 +70,33 @@ Pulse Personal automatic capture (local, private, and silent):
 function healthy(output) {
   Object.defineProperty(output, HEALTHY, { value: true });
   return output;
+}
+
+export function createActivatedHookRequest({
+	ensureActivation = ensureActivatedVaultRuntime,
+	request = boundPulseRequest,
+	platformServices,
+} = {}) {
+	let activation;
+	let authority;
+	return async (resolved, path, options = {}) => {
+		const currentAuthority = [
+			resolved?.binding?.binding_digest,
+			resolved?.binding?.resolver_epoch,
+			resolved?.runtime?.base_url,
+			resolved?.runtime?.data_dir,
+		].join('\x1f');
+		if (authority !== undefined && authority !== currentAuthority) {
+			throw new Error('hook_activation_lease_authority_changed');
+		}
+		authority = currentAuthority;
+		activation ??= Promise.resolve(ensureActivation(resolved, { platformServices }));
+		await activation;
+		return request(resolved, path, {
+			...options,
+			...(platformServices === undefined ? {} : { platformServices }),
+		});
+	};
 }
 
 function corroboratedWrite(output) {
@@ -289,7 +318,11 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     ? canonicalCodexTurnEvent(rawInput)
     : normalizeCodexHook(eventName, rawInput);
   const resolveRuntime = dependencies.resolveRuntime ?? resolveBoundCodexRuntime;
-	const request = dependencies.request ?? activatedBoundPulseRequest;
+	const request = dependencies.request ?? createActivatedHookRequest({
+		ensureActivation: dependencies.ensureActivation,
+		request: dependencies.boundRequest,
+		platformServices: dependencies.platformServices,
+	});
   const recordFailure = dependencies.recordFailure ?? recordHookFailure;
 
   if (eventName === 'PreToolUse') {

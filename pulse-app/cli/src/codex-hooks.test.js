@@ -24,6 +24,7 @@ import {
 } from './host-adapter.js';
 import {
 	codexWorkspaceDigest,
+	createActivatedHookRequest,
 	handleCodexHook,
 	inspectCodexNativeHookList,
 	inspectCodexNativeHookTrust,
@@ -63,6 +64,31 @@ const resolved = {
 };
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+test('one hook event proves activation once while retaining exact bound requests', async () => {
+	const calls = [];
+	const request = createActivatedHookRequest({
+		ensureActivation: async (value) => calls.push(['activation', value]),
+		request: async (value, path, options) => {
+			calls.push(['request', value, path, options]);
+			return { path };
+		},
+	});
+	assert.deepEqual(await request(resolved, '/continuity/delivery/observations', { timeoutMs: 1200 }), {
+		path: '/continuity/delivery/observations',
+	});
+	assert.deepEqual(await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 }), {
+		path: '/memory/status',
+	});
+	assert.equal(calls.filter(([kind]) => kind === 'activation').length, 1);
+	assert.deepEqual(calls.filter(([kind]) => kind === 'request').map(([, , path]) => path), [
+		'/continuity/delivery/observations', '/memory/status',
+	]);
+	await assert.rejects(() => request({
+		...resolved,
+		binding: { ...resolved.binding, resolver_epoch: resolved.binding.resolver_epoch + 1 },
+	}, '/memory/status'), /hook_activation_lease_authority_changed/);
+});
 
 function opaque(kind, value) {
   return `${kind}:${createHash('sha256').update(`${kind}\x1f${value}`).digest('hex')}`;
