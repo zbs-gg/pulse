@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { prewarmHookWorker, runHookWorkerClient } from '../../../plugins/pulse/hook-worker-client.mjs';
+import {
+  __hookWorkerClientTest, prewarmHookWorker, runHookWorkerClient,
+} from '../../../plugins/pulse/hook-worker-client.mjs';
 
 const digest = 'a'.repeat(64);
 const input = { cwd: '/workspace/pulse', session_id: 'session-one' };
 const workspace = { digest, workspacePath: input.cwd };
 const receipt = { generation: 'existing' };
+
+test('clean Windows worker startup has an install-only native-check budget', () => {
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('win32'), 120_000);
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('darwin'), 20_000);
+  assert.equal(__hookWorkerClientTest.hookWorkerStartTimeout('linux'), 20_000);
+});
 
 function clientServices(overrides = {}) {
   return {

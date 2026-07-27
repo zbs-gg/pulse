@@ -565,7 +565,9 @@ try {
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
   const installed = await packedPulse(tarball, ['install', '--json'], {
-    cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
+    // Windows clean-room prewarm performs native ACL and executable checks.
+    // This install-only timeout does not relax the measured 60s first-value gate below.
+    cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 5 * 60_000 : 15 * 60_000,
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
   assert.equal(installResult.outcome, 'ready', `${JSON.stringify(installResult)}\n${installed.stderr}`);

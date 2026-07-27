@@ -207,17 +207,21 @@ test('release verification includes packed Personal clean-room, consolidation, i
 	const nativePacked = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'personal-native-packed-e2e.mjs'), 'utf8',
 	);
-	assert.match(nativePacked, /process\.platform === 'win32' \? 180_000 : 15 \* 60_000/);
+	assert.match(nativePacked, /process\.platform === 'win32' \? 5 \* 60_000 : 15 \* 60_000/);
 	assert.match(nativePacked, /taskkill\.exe/);
 	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
 	assert.match(nativePacked, /await packedPulse\(tarball, \['install', '--json'\]/);
 	const universalTarget = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'native-universal-target.mjs'), 'utf8',
 	);
+	assert.match(universalTarget, /process\.env\.PULSE_CURSOR_VERSION/);
+	assert.doesNotMatch(universalTarget, /cursorExecutable, \['--version'\]/);
 	assert.match(universalTarget, /pulse\.personal_consolidation_report_fixture\.v1/);
 	assert.match(universalTarget, /consolidationReceipt\?\.package_sha256, productReceipt\.packed_tarball_sha256/);
 	assert.match(universalTarget, /sources_byte_preserved/);
 	assert.match(universalTarget, /mutation_authority_exercised: false/);
+	const universalWorkflow = readFileSync(join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
+	assert.equal((universalWorkflow.match(/PULSE_CURSOR_VERSION=/g) ?? []).length, 3);
 	const runtimeInstaller = readFileSync(
 		join(root, 'pulse-app', 'cli', 'src', 'personal-runtime-installer.js'), 'utf8',
 	);

@@ -841,6 +841,33 @@ async function activatePersonalInstallCore(binding) {
   }
 }
 
+function personalHostWorkerPrewarmTimeout(platform = process.platform) {
+  // Windows performs native executable, ACL, and signed-tree checks during a
+  // clean install prewarm. Keep that install-time budget separate from the
+  // unchanged 60-second first-value lifecycle boundary.
+  return platform === 'win32' ? 180_000 : 60_000;
+}
+
+function contentFreePrewarmFailure(result, elapsedMs) {
+  const hookCode = String(result?.stderr ?? '').match(/\bhook_worker_[a-z0-9_]{1,96}\b/i)?.[0] ?? null;
+  const errorCode = typeof result?.error?.code === 'string' && /^[A-Z0-9_]{1,64}$/i.test(result.error.code)
+    ? result.error.code : null;
+  return {
+    schema: 'pulse.hook_worker_prewarm_failure.v1',
+    content_free: true,
+    elapsed_ms: elapsedMs,
+    failure_class: errorCode === 'ETIMEDOUT'
+      ? 'launcher_timeout'
+      : errorCode ? 'launcher_spawn_failed'
+        : result?.status === 0 ? 'receipt_invalid' : 'launcher_exit',
+    error_code: errorCode,
+    hook_code: hookCode,
+    status: Number.isSafeInteger(result?.status) ? result.status : null,
+    signal: typeof result?.signal === 'string' && /^[A-Z0-9_]{1,32}$/i.test(result.signal)
+      ? result.signal : null,
+  };
+}
+
 function prewarmPersonalHostWorker(host, pluginRoot, binding) {
   const launchers = {
     'claude-code': join(pluginRoot, 'hooks', 'claude-hook.mjs'),
@@ -853,12 +880,13 @@ function prewarmPersonalHostWorker(host, pluginRoot, binding) {
       typeof workspace !== 'string' || !isAbsolute(workspace) || !existsSync(launcher)) {
     throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
   }
+  const startedAt = Date.now();
   const result = spawnSync(process.execPath, [launcher, '--prewarm'], {
     cwd: workspace,
     env: process.env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 60_000,
+    timeout: personalHostWorkerPrewarmTimeout(),
     killSignal: 'SIGTERM',
     windowsHide: true,
   });
@@ -869,6 +897,13 @@ function prewarmPersonalHostWorker(host, pluginRoot, binding) {
       ![receipt.hook_digest, receipt.plugin_digest, receipt.runtime_digest]
         .every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
       typeof receipt.reused !== 'boolean') {
+    if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+      process.stderr.write(
+        `[pulse-native-fixture] ${host} prewarm detail: ${JSON.stringify(
+          contentFreePrewarmFailure(result, Date.now() - startedAt),
+        )}\n`,
+      );
+    }
     throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
   }
   return receipt;

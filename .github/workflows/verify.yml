@@ -122,6 +122,7 @@ jobs:
           version="$(defaults read "$RUNNER_TEMP/Cursor.app/Contents/Info" CFBundleShortVersionString)"
           [[ "$version" = 3.13 || "$version" = 3.13.* ]]
           test -x "$RUNNER_TEMP/Cursor.app/Contents/MacOS/Cursor"
+          echo "PULSE_CURSOR_VERSION=$version" >> "$GITHUB_ENV"
           echo "PULSE_CURSOR_EXECUTABLE=$RUNNER_TEMP/Cursor.app/Contents/MacOS/Cursor" >> "$GITHUB_ENV"
       - name: Verify and expose Cursor Desktop on GNU/Linux
         if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'linux'
@@ -139,6 +140,7 @@ jobs:
           sudo chown root:root "$sandbox"
           sudo chmod 4755 "$sandbox"
           test "$(stat -c '%U:%G %a' "$sandbox")" = 'root:root 4755'
+          echo "PULSE_CURSOR_VERSION=$version" >> "$GITHUB_ENV"
           echo "PULSE_CURSOR_EXECUTABLE=$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor" >> "$GITHUB_ENV"
       - name: Verify and expose signed Cursor Desktop on Windows
         if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'win32'
@@ -160,6 +162,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Cursor executable is missing' }
           $version = (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion
           if ($version -notmatch '^3\.13(?:\.|$)') { throw "Cursor version mismatch: $version" }
+          "PULSE_CURSOR_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PULSE_CURSOR_EXECUTABLE=$executable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build native Go product
         working-directory: pulse-app

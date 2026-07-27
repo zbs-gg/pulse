@@ -117,8 +117,13 @@ if (harness.host === 'codex') {
     const cursorExecutable = process.env.PULSE_CURSOR_EXECUTABLE;
     assert.equal(typeof cursorExecutable === 'string' && isAbsolute(cursorExecutable), true,
       'Cursor proof requires the exact vendor Desktop executable');
-    const version = command(cursorExecutable, ['--version']);
-    assert.match(version, /(?:^|\s)3\.13(?:\.\d+)?(?:$|\s)/);
+    // The workflow reads platform-native version metadata from the verified
+    // installer/application. Never launch the Desktop UI merely to ask its
+    // version: Electron requires a display and may remain resident.
+    const version = process.env.PULSE_CURSOR_VERSION;
+    assert.equal(typeof version === 'string', true,
+      'Cursor proof requires verified vendor version metadata');
+    assert.match(version, /^3\.13(?:\.\d+)*$/);
     harnessExecutable = { ...fileSHA256(cursorExecutable), kind: 'vendor_executable' };
   }
   stdoutRuns.push(command(process.execPath, [npmExecPath, 'run', '--silent', 'test:personal-multiharness']));

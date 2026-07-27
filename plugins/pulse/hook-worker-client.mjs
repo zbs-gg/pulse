@@ -15,6 +15,13 @@ const MAX_INPUT_BYTES = 1 << 20;
 const MAX_RESPONSE_BYTES = (1 << 20) + (64 << 10);
 const MAX_WORKER_LIFETIME_MS = 120_000;
 
+function hookWorkerStartTimeout(platform = process.platform) {
+  // Native Windows startup includes Authenticode/ACL checks and can be much
+  // slower on clean ARM64 runners. This is install-time prewarm only; the
+  // first-value lifecycle gate remains unchanged.
+  return platform === 'win32' ? 120_000 : 20_000;
+}
+
 function exactObject(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
@@ -169,18 +176,32 @@ function spawnWorker({ host, expected, receiptPath, workspace, token }) {
     stdio: 'ignore',
     windowsHide: true,
   });
-  child.unref();
+  return new Promise((accept, reject) => {
+    child.once('error', () => reject(workerError('hook_worker_spawn_failed')));
+    child.once('spawn', () => {
+      child.unref();
+      accept(child);
+    });
+  });
 }
 
 function delay(ms) {
   return new Promise((accept) => setTimeout(accept, ms));
 }
 
-async function waitForWorker(path, validation, timeoutMs = 20_000) {
+async function waitForWorker(
+  path,
+  validation,
+  timeoutMs = hookWorkerStartTimeout(),
+  child = undefined,
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const receipt = privateReceipt(path);
     if (validReceipt(receipt, validation)) return receipt;
+    if (child && (child.exitCode !== null || child.signalCode !== null)) {
+      throw workerError('hook_worker_start_failed');
+    }
     await delay(25);
   }
   throw workerError('hook_worker_start_timeout');
@@ -198,15 +219,16 @@ async function ensureWorker({ host, expected, receiptPath, workspace }) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
     }
+    let child;
     if (ownsLock) {
       rmSync(receiptPath, { force: true });
-      spawnWorker({
+      child = await spawnWorker({
         host, expected, receiptPath, workspace, token: randomBytes(32).toString('hex'),
       });
     }
     return await waitForWorker(receiptPath, {
       host, workspaceDigest: workspace.digest, expected,
-    });
+    }, hookWorkerStartTimeout(), child);
   } finally {
     if (ownsLock) rmSync(lockPath, { force: true });
   }
@@ -310,6 +332,7 @@ export async function prewarmHookWorker({
 
 export const __hookWorkerClientTest = Object.freeze({
   MAX_WORKER_LIFETIME_MS,
+  hookWorkerStartTimeout,
   privateReceipt,
   validReceipt,
   workerReceiptPath,
