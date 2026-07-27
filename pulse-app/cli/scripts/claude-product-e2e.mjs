@@ -507,13 +507,15 @@ try {
   );
   const claudeRemember = JSON.parse(claudeMessages.find((message) => message.id === 3).result.content[0].text);
   assert.equal(claudeRemember.receipts[0].safe_provenance.host, 'claude-code');
-  assert.equal(claudeRemember.receipts[0].status, 'pending');
+  assert.equal(claudeRemember.receipts[0].status, 'created');
+  assert.match(claudeRemember.receipts[0].object_id, /^pulse:/);
   const claudePost = runHook(settings, 'PostToolUse', {
     ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
     tool_response: claudeMessages.find((message) => message.id === 3).result,
   }, workspace, env);
   assert.match(claudePost.systemMessage, new RegExp(claudeRemember.receipts[0].receipt_id));
+  assert.match(claudePost.systemMessage, /:created/);
   const claudeStop = runHook(settings, 'Stop', {
     ...promptPayload, hook_event_name: 'Stop', stop_hook_active: false,
     last_assistant_message: 'raw assistant text must not be stored', background_tasks: [], session_crons: [],
@@ -523,9 +525,13 @@ try {
   const vaultDir = join(root, 'vaults', 'personal');
   const secret = readFileSync(join(vaultDir, 'secret.key'), 'utf8');
   const baseUrl = `http://127.0.0.1:${port}`;
-  const claudePending = await waitForCandidate(baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'pending');
-  assert.equal(claudePending.grace_expires_at, '');
-  assert.equal(claudePending.latest_receipt.object_id, undefined);
+  const claudeCommitted = await waitForCandidate(
+    baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'created',
+  );
+  assert.equal(claudeCommitted.state, 'committed');
+  assert.equal(claudeCommitted.current, true);
+  assert.equal(claudeCommitted.canonical_object_id, claudeRemember.receipts[0].object_id);
+  assert.equal(claudeCommitted.projection_status, 'complete');
 
   const codexConnected = run(process.execPath, [packedCLI, 'connect', 'codex'], {
     cwd: workspace, env, timeout: 120_000,
@@ -562,13 +568,13 @@ try {
       ...codexBase, hook_event_name: 'SessionStart', source: 'resume',
     }),
   });
-  assert.doesNotMatch(JSON.parse(codexResume.stdout).hookSpecificOutput.additionalContext, new RegExp(summary));
+  assert.match(JSON.parse(codexResume.stdout).hookSpecificOutput.additionalContext, new RegExp(summary));
   run(process.execPath, [runtimeCLI, 'codex-hook', 'UserPromptSubmit'], {
     cwd: workspace, env, input: JSON.stringify({
       ...codexBase, hook_event_name: 'UserPromptSubmit', prompt: 'also must not persist',
     }),
   });
-  const codexSummary = 'Codex requires the same visible receipt before durable team memory.';
+  const codexSummary = 'Codex writes to the same private vault without a review step.';
   const codexMemory = {
     ...claudeMemory,
     source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-14T11:00:00Z' },
@@ -586,16 +592,22 @@ try {
   const codexMessages = runProductMcp(codexMcpConfig, mcpRememberInput(codexMemory), nestedWorkspace, env);
   const codexRemember = JSON.parse(codexMessages.find((message) => message.id === 3).result.content[0].text);
   assert.notEqual(codexRemember.receipts[0].content_digest, claudeRemember.receipts[0].content_digest);
-  const codexPending = await waitForCandidate(baseUrl, secret, codexRemember.receipts[0].candidate_id, 'pending');
-  assert.equal(codexPending.grace_expires_at, '');
-  assert.equal(codexPending.latest_receipt.object_id, undefined);
-  assert.equal(codexPending.latest_receipt.safe_provenance.host, 'codex');
+  assert.equal(codexRemember.receipts[0].status, 'created');
+  assert.match(codexRemember.receipts[0].object_id, /^pulse:/);
+  const codexCommitted = await waitForCandidate(
+    baseUrl, secret, codexRemember.receipts[0].candidate_id, 'created',
+  );
+  assert.equal(codexCommitted.state, 'committed');
+  assert.equal(codexCommitted.current, true);
+  assert.equal(codexCommitted.canonical_object_id, codexRemember.receipts[0].object_id);
+  assert.equal(codexCommitted.projection_status, 'complete');
+  assert.equal(codexCommitted.latest_receipt.safe_provenance.host, 'codex');
 
   const resumed = runHook(settings, 'SessionStart', {
     session_id: 'session-claude-fresh', transcript_path: transcriptPath, cwd: workspace,
     hook_event_name: 'SessionStart', source: 'resume', permission_mode: 'default',
   }, workspace, env);
-  assert.doesNotMatch(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
+  assert.match(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
 
   const doctor = run(process.execPath, [packedCLI, 'doctor', 'claude-code', '--json'], {
     cwd: workspace, env,
@@ -677,7 +689,7 @@ try {
 			source: 'resume',
 		}),
 	});
-	assert.doesNotMatch(
+	assert.match(
 		JSON.parse(upgradedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
 		new RegExp(codexSummary),
 	);
@@ -757,7 +769,7 @@ try {
       hook_event_name: 'SessionStart', source: 'resume',
     }),
   });
-  assert.doesNotMatch(
+  assert.match(
     JSON.parse(codexAfterClaudeDisconnect.stdout).hookSpecificOutput.additionalContext,
     new RegExp(codexSummary),
   );

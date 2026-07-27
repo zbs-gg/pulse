@@ -44,9 +44,9 @@ pulse home
 ```
 
 The only ready verdict is `Pulse <host> automatic lifecycle ready.` Memory Home
-must show the pending card before save, the saved receipt afterwards, the
-context offered to a fresh task, its acknowledgement state, and an honest
-token state: `collecting`, `estimated`, or `measured`.
+must show the automatically saved memory and write receipt, the context offered
+to a fresh task, its acknowledgement state, and an honest token state:
+`collecting`, `estimated`, or `measured`.
 
 To map existing local memory without importing it, run:
 
@@ -91,7 +91,7 @@ Please audit and install Pulse Personal for this project.
 6. For every host returned in `host_status.hosts`, run its exact doctor command:
    `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`.
    Then run `pulse home`.
-7. Help me save one visible memory, start a fresh task, and show the
+7. Help me create one visible automatically saved memory, start a fresh task, and show the
    continuity and token-economy receipts in Memory Home.
 8. Run `pulse consolidate report`. Show me the destination, source classes,
    totals, blockers, and next action. Do not import, merge, delete, publish, or

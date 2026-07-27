@@ -65,9 +65,32 @@ jobs:
           npm ci --ignore-scripts
           npm test
 
+  package:
+    name: Packed npm input
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Pack one immutable matrix input
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pulse-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pulse-package"
+          test "$(find "$RUNNER_TEMP/pulse-package" -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')" = 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-packed-package
+          path: ${{ runner.temp }}/pulse-package/*.tgz
+          if-no-files-found: error
+          retention-days: 30
+
   native:
     name: Native / ${{ matrix.target_id }} / ${{ matrix.host }}
-    needs: contract
+    needs: [contract, package]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.contract.outputs.matrix) }}
@@ -86,11 +109,97 @@ jobs:
         with:
           go-version: ${{ matrix.go_version }}
           cache-dependency-path: pulse-app/go.sum
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-packed-package
+          path: pulse-app/cli/.pulse-ci/package
+      - name: Bind the exact packed matrix input
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node -e "const fs=require('node:fs'),p=require('node:path');
+          const d=p.resolve('.pulse-ci/package');
+          const names=fs.readdirSync(d).filter((name)=>name.endsWith('.tgz'));
+          if(names.length!==1)throw new Error('expected one packed matrix input');
+          fs.appendFileSync(process.env.GITHUB_ENV,'PULSE_PERSONAL_PACKED_TARBALL='+fs.realpathSync(p.join(d,names[0]))+'\n');"
       - name: Install exact harness calibration
+        if: matrix.harness_distribution == 'npm'
         shell: bash
         run: |
-          npm install --global "${{ matrix.harness_package }}@${{ matrix.harness_version }}"
-          codex --version
+          test "$(npm view "${{ matrix.harness_identity }}@${{ matrix.harness_version }}" dist.tarball)" = "${{ matrix.harness_download_url }}"
+          npm install --global "${{ matrix.harness_identity }}@${{ matrix.harness_version }}"
+          "${{ matrix.harness_executable }}" --version
+      - name: Pin Cursor vendor identity for fixture authority
+        if: matrix.harness_distribution == 'vendor-desktop-installer'
+        shell: bash
+        run: |
+          test "${{ matrix.harness_vendor_source }}" = "https://cursor.com/download"
+          test "${{ matrix.harness_identity }}" = "Cursor Desktop"
+          test "${{ matrix.harness_download_url }}" = "$(node -e "const m=require('./pulse-app/cli/scripts/native-universal-matrix.json'); const h=m.harnesses.find(x=>x.host==='cursor'); process.stdout.write(h.downloads['${{ matrix.target_id }}'])")"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 1 \
+            --connect-timeout 15 --max-time 600 \
+            --write-out '%{url_effective}\n' --output "$RUNNER_TEMP/cursor-installer" \
+            "${{ matrix.harness_download_url }}" > "$RUNNER_TEMP/cursor-effective-url"
+          grep -Eq '^https://downloads\.cursor\.com/production/[a-f0-9]{40}/' "$RUNNER_TEMP/cursor-effective-url"
+          test -s "$RUNNER_TEMP/cursor-installer"
+          node -e "const c=require('crypto'),f=require('fs'); process.stdout.write(c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex')+'\n')" \
+            "$RUNNER_TEMP/cursor-installer" > "$RUNNER_TEMP/cursor-installer.sha256"
+      - name: Verify and expose signed Cursor Desktop on macOS
+        if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          mv "$RUNNER_TEMP/cursor-installer" "$RUNNER_TEMP/cursor.dmg"
+          mount="$(hdiutil attach -readonly -nobrowse "$RUNNER_TEMP/cursor.dmg" | awk '/\/Volumes\// {sub(/^.*\/Volumes\//,"/Volumes/"); print; exit}')"
+          test -d "$mount/Cursor.app"
+          ditto "$mount/Cursor.app" "$RUNNER_TEMP/Cursor.app"
+          hdiutil detach "$mount"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/Cursor.app"
+          spctl --assess --type execute --verbose=2 "$RUNNER_TEMP/Cursor.app"
+          version="$(defaults read "$RUNNER_TEMP/Cursor.app/Contents/Info" CFBundleShortVersionString)"
+          [[ "$version" = 3.13 || "$version" = 3.13.* ]]
+          test -x "$RUNNER_TEMP/Cursor.app/Contents/MacOS/Cursor"
+          echo "PULSE_CURSOR_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PULSE_CURSOR_EXECUTABLE=$RUNNER_TEMP/Cursor.app/Contents/MacOS/Cursor" >> "$GITHUB_ENV"
+      - name: Verify and expose Cursor Desktop on GNU/Linux
+        if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mv "$RUNNER_TEMP/cursor-installer" "$RUNNER_TEMP/cursor.deb"
+          version="$(dpkg-deb --field "$RUNNER_TEMP/cursor.deb" Version)"
+          [[ "$version" = 3.13 || "$version" = 3.13.* ]]
+          test "$(dpkg-deb --field "$RUNNER_TEMP/cursor.deb" Package)" = cursor
+          mkdir "$RUNNER_TEMP/cursor-root"
+          dpkg-deb --extract "$RUNNER_TEMP/cursor.deb" "$RUNNER_TEMP/cursor-root"
+          test -x "$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor"
+          sandbox="$RUNNER_TEMP/cursor-root/usr/share/cursor/chrome-sandbox"
+          test -f "$sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          test "$(stat -c '%U:%G %a' "$sandbox")" = 'root:root 4755'
+          echo "PULSE_CURSOR_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PULSE_CURSOR_EXECUTABLE=$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor" >> "$GITHUB_ENV"
+      - name: Verify and expose signed Cursor Desktop on Windows
+        if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'cursor-installer'
+          $installer = Join-Path $env:RUNNER_TEMP 'cursor-installer.exe'
+          Move-Item -LiteralPath $download -Destination $installer
+          $signature = Get-AuthenticodeSignature -FilePath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Anysphere') {
+            throw 'Cursor Authenticode verification failed'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'Cursor'
+          $process = Start-Process -FilePath $installer -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$destination"
+          ) -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Cursor installer failed: $($process.ExitCode)" }
+          $executable = Join-Path $destination 'Cursor.exe'
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Cursor executable is missing' }
+          $version = (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion
+          if ($version -notmatch '^3\.13(?:\.|$)') { throw "Cursor version mismatch: $version" }
+          "PULSE_CURSOR_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PULSE_CURSOR_EXECUTABLE=$executable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build native Go product
         working-directory: pulse-app
         shell: bash
@@ -115,15 +224,17 @@ jobs:
         shell: bash
         run: >-
           npm run test:native-universal-target --
+          --host "${{ matrix.host }}"
           --target "${{ matrix.target_id }}"
-          --out ".pulse-ci/evidence/${{ matrix.target_id }}.json"
+          --repeat "${{ matrix.stability_runs }}"
+          --out ".pulse-ci/evidence/${{ matrix.host }}-${{ matrix.target_id }}.json"
       - name: Upload content-free target evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pulse-native-${{ matrix.target_id }}
-          path: pulse-app/cli/.pulse-ci/evidence/${{ matrix.target_id }}.json
+          name: pulse-native-${{ matrix.host }}-${{ matrix.target_id }}
+          path: pulse-app/cli/.pulse-ci/evidence/${{ matrix.host }}-${{ matrix.target_id }}.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   universal-required:
     name: Universal / required
@@ -132,6 +243,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        if: needs.native.result == 'success'
+        with:
+          pattern: pulse-native-*
+          path: native-evidence
       - name: Require every native target
         env:
           CONTRACT_RESULT: ${{ needs.contract.result }}
@@ -142,3 +259,5 @@ jobs:
           test "$CONTRACT_RESULT" = success
           test "$QUALITY_RESULT" = success
           test "$NATIVE_RESULT" = success
+          node pulse-app/cli/scripts/validate-native-evidence-set.mjs \
+            --directory native-evidence --authority fixture

@@ -75,23 +75,41 @@ function nativePackedCodexCandidates(env, pathAPI) {
     ? [pathAPI.resolve(value)] : [];
 }
 
+function protectedHarnessCandidates(env, pathAPI, name) {
+  const root = env.RUNNER_TEMP;
+  const value = env[`PULSE_PROTECTED_HARNESS_${name}`];
+  if (env.GITHUB_ACTIONS !== 'true' || env.CI !== 'true' ||
+      !['production_candidate', 'public_registry'].includes(env.PULSE_PROTECTED_HARNESS_AUTHORITY) ||
+      typeof root !== 'string' || !pathAPI.isAbsolute(root) ||
+      typeof value !== 'string' || !pathAPI.isAbsolute(value)) return [];
+  const canonicalRoot = pathAPI.resolve(root);
+  const canonicalValue = pathAPI.resolve(value);
+  const local = pathAPI.relative(canonicalRoot, canonicalValue);
+  return local !== '' && local !== '..' && !local.startsWith(`..${pathAPI.sep}`) && !pathAPI.isAbsolute(local)
+    ? [canonicalValue]
+    : [];
+}
+
 function windowsCandidates(home, env, pathAPI) {
   const localAppData = env.LOCALAPPDATA || pathAPI.join(home, 'AppData', 'Local');
   const appData = env.APPDATA || pathAPI.join(home, 'AppData', 'Roaming');
   const programFiles = env.ProgramFiles || 'C:\\Program Files';
   return {
     claude: [
+      ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'claude.exe'),
       pathAPI.join(home, '.local', 'bin', 'claude.cmd'),
       pathAPI.join(appData, 'npm', 'claude.cmd'),
     ],
     codex: [
+      ...protectedHarnessCandidates(env, pathAPI, 'CODEX_EXECUTABLE'),
       ...nativePackedCodexCandidates(env, pathAPI),
       pathAPI.join(home, '.local', 'bin', 'codex.exe'),
       pathAPI.join(home, '.local', 'bin', 'codex.cmd'),
       pathAPI.join(appData, 'npm', 'codex.cmd'),
     ],
     cursor: [
+      ...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'),
       pathAPI.join(localAppData, 'Programs', 'cursor', 'Cursor.exe'),
       pathAPI.join(programFiles, 'Cursor', 'Cursor.exe'),
     ],
@@ -105,10 +123,17 @@ function windowsCandidates(home, env, pathAPI) {
 
 function posixCandidates(platform, home, env, pathAPI) {
   const common = {
-    claude: [pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude'],
+    claude: [
+      ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
+      pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude',
+    ],
     codex: [
+      ...protectedHarnessCandidates(env, pathAPI, 'CODEX_EXECUTABLE'),
       ...nativePackedCodexCandidates(env, pathAPI),
-      pathAPI.join(home, '.local', 'bin', 'codex'), '/usr/local/bin/codex', '/usr/bin/codex',
+      pathAPI.join(home, '.local', 'bin', 'codex'),
+      ...(platform === 'darwin' ? ['/opt/homebrew/bin/codex'] : []),
+      '/usr/local/bin/codex',
+      '/usr/bin/codex',
     ],
     git: platform === 'darwin'
       ? ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git']
@@ -117,8 +142,8 @@ function posixCandidates(platform, home, env, pathAPI) {
   return {
     ...common,
     cursor: platform === 'darwin'
-      ? ['/Applications/Cursor.app', pathAPI.join(home, 'Applications', 'Cursor.app')]
-      : [pathAPI.join(home, '.local', 'bin', 'cursor'), '/usr/local/bin/cursor', '/usr/bin/cursor', '/opt/Cursor/cursor'],
+      ? [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), '/Applications/Cursor.app', pathAPI.join(home, 'Applications', 'Cursor.app')]
+      : [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), pathAPI.join(home, '.local', 'bin', 'cursor'), '/usr/local/bin/cursor', '/usr/bin/cursor', '/opt/Cursor/cursor'],
   };
 }
 

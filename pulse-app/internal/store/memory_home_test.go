@@ -12,6 +12,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestPersonalProjectLabelsStayHumanAndPathFree(t *testing.T) {
+	s, err := OpenVault(filepath.Join(t.TempDir(), "personal.db"), StoreKindPersonal, "store_personal_labels")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RegisterPersonalProjectLabel("repository_pulse", "Pulse"); err != nil {
+		t.Fatal(err)
+	}
+	if got := memoryHomeProjectLabel(s.DB(), "repository_pulse"); got != "Pulse" {
+		t.Fatalf("project label=%q, want Pulse", got)
+	}
+	for _, unsafe := range []string{"", ".", "..", "/Users/example/pulse", `C:\Users\example\pulse`, "pulse\nsecret"} {
+		if err := s.RegisterPersonalProjectLabel("repository_pulse", unsafe); err == nil {
+			t.Fatalf("unsafe project label %q was accepted", unsafe)
+		}
+	}
+	if got := memoryHomeProjectLabel(s.DB(), "repository_pulse"); got != "Pulse" {
+		t.Fatalf("unsafe update changed project label to %q", got)
+	}
+}
+
 func TestBuildMemoryHomeDataTracksPendingCommittedAndDeletedCanonicalMemory(t *testing.T) {
 	s, err := OpenVault(filepath.Join(t.TempDir(), "personal.db"), StoreKindPersonal, "store_personal_home")
 	if err != nil {
@@ -58,6 +80,7 @@ func TestBuildMemoryHomeDataTracksPendingCommittedAndDeletedCanonicalMemory(t *t
 	if committedHome.Memories.ActiveCount != 1 || len(committedHome.Memories.LatestActive) != 1 ||
 		committedHome.Memories.LatestActive[0].ObjectID != committed.ObjectID ||
 		committedHome.Memories.LatestActive[0].RedactedSummary != "The Home reads this canonical private decision." ||
+		committedHome.Memories.LatestActive[0].EditableSummary != "The Home reads this canonical private decision." ||
 		len(committedHome.Receipts.Attempts) != 0 {
 		t.Fatalf("committed Home=%#v", committedHome)
 	}
@@ -483,7 +506,14 @@ func TestQueryMemoryHomeCanonicalFactsReadsOnlyActiveBoundPresentedObjects(t *te
 	for _, statement := range []string{
 		`CREATE TABLE turn_ledgers (ledger_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL)`,
 		`CREATE TABLE memory_tray_candidates (candidate_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, version INTEGER NOT NULL, content_digest TEXT NOT NULL, payload_json TEXT NOT NULL)`,
-		`CREATE TABLE private_memory_objects (object_id TEXT PRIMARY KEY, candidate_kind TEXT NOT NULL, content_digest TEXT NOT NULL, created_from_candidate_id TEXT NOT NULL, created_at TEXT NOT NULL, lifecycle TEXT NOT NULL)`,
+		`CREATE TABLE private_memory_objects (
+			object_id TEXT PRIMARY KEY, candidate_kind TEXT NOT NULL, content_digest TEXT NOT NULL,
+			created_from_candidate_id TEXT NOT NULL, created_at TEXT NOT NULL, lifecycle TEXT NOT NULL,
+			memory_scope TEXT NOT NULL, project_namespace_id TEXT NOT NULL,
+			original_repository_id TEXT NOT NULL, logical_generation INTEGER NOT NULL,
+			modified_at TEXT NOT NULL, capture_host TEXT NOT NULL,
+			capture_session_ref TEXT NOT NULL, captured_at TEXT NOT NULL
+		)`,
 		`CREATE TABLE memory_write_receipts (receipt_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, candidate_version INTEGER NOT NULL, content_digest TEXT NOT NULL, object_id TEXT, status TEXT NOT NULL, provenance_host TEXT NOT NULL, provenance_session_id TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE memory_presentation_receipts (receipt_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, candidate_version INTEGER NOT NULL, content_digest TEXT NOT NULL, binding_digest TEXT NOT NULL, presented_at TEXT NOT NULL)`,
 	} {
@@ -492,6 +522,7 @@ func TestQueryMemoryHomeCanonicalFactsReadsOnlyActiveBoundPresentedObjects(t *te
 		}
 	}
 	binding := testMemoryHomeDigest("b")
+	projectNamespace := stableProjectNamespace("repository_pulse")
 	payload := `{"kind":"memory_capsule","capsule":{"source":{"host":"codex","conversation_scope":"current_turn","timestamp":"2026-07-16T08:00:00Z"},"items":[{"kind":"decision","redacted_summary":"Use only canonical private memory.","privacy_tier":"normal"}]}}`
 	if _, err := db.Exec(`INSERT INTO turn_ledgers VALUES ('ledger_01', ?), ('ledger_other', ?)`, binding, testMemoryHomeDigest("c")); err != nil {
 		t.Fatal(err)
@@ -504,10 +535,12 @@ func TestQueryMemoryHomeCanonicalFactsReadsOnlyActiveBoundPresentedObjects(t *te
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO private_memory_objects VALUES
-		('object_01','memory_capsule',?,'candidate_01','2026-07-16T08:00:00Z','active'),
-		('object_deleted','memory_capsule',?,'candidate_deleted','2026-07-16T08:00:00Z','deleted'),
-		('object_other','memory_capsule',?,'candidate_other','2026-07-16T08:00:00Z','active')`,
-		testMemoryHomeDigest("1"), testMemoryHomeDigest("2"), testMemoryHomeDigest("3")); err != nil {
+		('object_01','memory_capsule',?,'candidate_01','2026-07-16T08:00:00Z','active','project',?,'repository_pulse',1,'2026-07-16T08:01:00Z','codex','session:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-07-16T08:01:00Z'),
+		('object_deleted','memory_capsule',?,'candidate_deleted','2026-07-16T08:00:00Z','deleted','project',?,'repository_pulse',2,'2026-07-16T08:01:00Z','codex','session:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','2026-07-16T08:01:00Z'),
+		('object_other','memory_capsule',?,'candidate_other','2026-07-16T08:00:00Z','active','project',?,'repository_other',1,'2026-07-16T08:01:00Z','codex','session:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','2026-07-16T08:01:00Z')`,
+		testMemoryHomeDigest("1"), projectNamespace,
+		testMemoryHomeDigest("2"), projectNamespace,
+		testMemoryHomeDigest("3"), stableProjectNamespace("repository_other")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO memory_write_receipts VALUES
@@ -527,7 +560,7 @@ func TestQueryMemoryHomeCanonicalFactsReadsOnlyActiveBoundPresentedObjects(t *te
 		t.Fatal(err)
 	}
 
-	count, facts, err := queryMemoryHomeCanonicalFacts(db, binding, 20)
+	count, facts, err := queryMemoryHomeCanonicalFacts(db, binding, projectNamespace, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +573,7 @@ func TestQueryMemoryHomeCanonicalFactsReadsOnlyActiveBoundPresentedObjects(t *te
 		got.SessionRef != "session:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("canonical Home fact lost receipt/provenance: %#v", got)
 	}
-	proofFacts, err := queryMemoryHomeReadinessFacts(db, binding, []MemoryHomeDeliveryFact{{
+	proofFacts, err := queryMemoryHomeReadinessFacts(db, binding, projectNamespace, []MemoryHomeDeliveryFact{{
 		Acknowledgement: MemoryHomeDeliveryOfferedToHost, Purpose: MemoryHomeDeliveryPurposeSessionStart,
 		BindingDigest: binding, ObjectIDs: []string{"object_01"},
 	}})

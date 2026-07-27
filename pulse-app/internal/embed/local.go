@@ -178,6 +178,7 @@ func (c *LocalClient) Start(ctx context.Context) error {
 			"HOME=" + os.Getenv("HOME"),
 			"LANG=" + os.Getenv("LANG"),
 			"LC_ALL=" + os.Getenv("LC_ALL"),
+			"PULSE_PRODUCT_AUTHORITY_NODE=" + os.Getenv("PULSE_PRODUCT_AUTHORITY_NODE"),
 			"PYTHONDONTWRITEBYTECODE=1",
 			"PYTHONHASHSEED=0",
 			"PYTHONNOUSERSITE=1",

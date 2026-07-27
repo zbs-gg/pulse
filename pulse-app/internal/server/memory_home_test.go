@@ -105,7 +105,7 @@ func TestBuildMemoryHomeUsesServerSideProductBoundaryAndSafeNextTaskPreview(t *t
 	}
 }
 
-func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing.T) {
+func TestRenderMemoryHomePutsCanonicalMemoryBeforeRetryAndSecondaryEvidence(t *testing.T) {
 	t.Parallel()
 	estimated := 840
 	reduction := 72.4
@@ -122,7 +122,8 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 			},
 			Memories: store.MemoryHomeMemories{ActiveCount: 3, LatestActive: []store.MemoryHomeActiveMemory{{
 				ObjectID: "object_saved", Kind: "decision", RedactedSummary: "Use receipt-backed continuity.",
-				Host: "claude-code", SessionRef: "session_fresh", CreatedAt: "2026-07-16T10:00:00Z",
+				EditableSummary: "Use receipt-backed continuity.",
+				Host:            "claude-code", SessionRef: "session_fresh", CreatedAt: "2026-07-16T10:00:00Z",
 				TerminalReceiptID: "receipt_saved", PresentationReceiptID: "presentation_saved",
 			}}},
 			Receipts: store.MemoryHomeReceipts{Attempts: []store.MemoryHomeAttempt{{
@@ -157,18 +158,21 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 	for _, want := range []string{
 		"Pulse is remembering, but the harness has not confirmed receipt yet",
 		"3", "840", "72.4%", "Context offered", "codex", "Continue the fresh task",
+		`aria-current="page">Memories`, `href="#projects">Projects`, "Team · Soon",
 		"Current project", "repository_pulse",
 		"Show this before saving.", "Use receipt-backed continuity.",
 		"object_saved", "claude-code", "codex", "session_fresh", "receipt_saved", "presentation_saved",
 		"Recent save attempts", "Save canceled before canonical memory.", "receipt_attempt", "canceled",
 		"What the next task receives", "Continue from the verified delivery receipt.",
+		`action="memory/object_saved/edit"`, `name="summary"`, "Save edit",
+		`action="memory/object_saved/move"`, "Move to Personal Global", "Technical details",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("Home HTML missing %q", want)
 		}
 	}
-	if strings.Index(html, "Show this before saving.") > strings.Index(html, "Use receipt-backed continuity.") {
-		t.Fatal("pending write appeared below canonical history")
+	if strings.Index(html, "Use receipt-backed continuity.") > strings.Index(html, "Show this before saving.") {
+		t.Fatal("canonical memory did not appear before retry activity")
 	}
 	if strings.Contains(html, "<script>alert(1)</script>") {
 		t.Fatal("stored summary was not escaped")
@@ -178,6 +182,17 @@ func TestRenderMemoryHomePutsPendingWriteAndTruthfulProofAboveHistory(t *testing
 	}
 	if strings.Contains(html, "key=") || strings.Contains(html, "X-Pulse-Key") || strings.Contains(html, "Authorization") {
 		t.Fatal("Home HTML exposed daemon authority")
+	}
+	if strings.Contains(html, ">Save now<") || strings.Contains(html, ">Cancel<") {
+		t.Fatal("Home restored a per-memory approval control")
+	}
+	deleteStart := strings.Index(html, `action="memory/object_saved/delete"`)
+	if deleteStart < 0 {
+		t.Fatal("Home omitted ordinary memory delete")
+	}
+	deleteEnd := strings.Index(html[deleteStart:], "</form>")
+	if deleteEnd < 0 || strings.Contains(html[deleteStart:deleteStart+deleteEnd], "data-home-confirm") {
+		t.Fatal("ordinary memory delete restored a confirmation ceremony")
 	}
 }
 

@@ -1,10 +1,11 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import LocalAuthentication
 import Security
 
-private let applicationTag = Data("gg.zbs.pulse.userpresence.v1".utf8)
+private let presenceKeyRepresentationName = "presence-trust-key.secureenclave"
 private let dpopApplicationTagPrefix = Data("gg.zbs.pulse.dpop.v1.".utf8)
 private let dpopMetadataService = "gg.zbs.pulse.dpop.metadata.v1"
 private let helperContractVersion = 3
@@ -40,6 +41,18 @@ private enum HelperFailure: Error {
     case signingFailed
 }
 
+private final class HelperApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        .terminateCancel
+    }
+}
+
+private let helperApplicationDelegate = HelperApplicationDelegate()
+
 private let safeDPoPKeyRef = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$")
 private let safeDPoPIdentity = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._|:@/-]{0,255}$")
 private let safeBase64URL = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]+$")
@@ -67,6 +80,42 @@ private func readPayload() throws -> Data {
         throw HelperFailure.invalidRequest
     }
     return try Data(contentsOf: URL(fileURLWithPath: path), options: [.mappedIfSafe])
+}
+
+private func readBoundedStandardInput() throws -> Data {
+    var result = Data()
+    while true {
+        let chunk = FileHandle.standardInput.availableData
+        if chunk.isEmpty { break }
+        guard result.count + chunk.count <= 1_048_576 else { throw HelperFailure.invalidRequest }
+        result.append(chunk)
+    }
+    guard !result.isEmpty else { throw HelperFailure.invalidRequest }
+    return result
+}
+
+private func reviewInChild(command: String, data: Data) throws {
+    guard command == "review-action-internal" || command == "review-binding-registry-internal" else {
+        throw HelperFailure.invalidRequest
+    }
+    let executable = URL(
+        fileURLWithPath: CommandLine.arguments[0],
+        relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    ).standardizedFileURL.resolvingSymlinksInPath()
+    let input = Pipe()
+    let process = Process()
+    process.executableURL = executable
+    process.arguments = [command]
+    process.standardInput = input
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { throw HelperFailure.canceled }
+    input.fileHandleForWriting.write(data)
+    try? input.fileHandleForWriting.close()
+    process.waitUntilExit()
+    guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+        throw HelperFailure.canceled
+    }
 }
 
 private func exactDictionary(_ data: Data, keys: Set<String>) throws -> [String: Any] {
@@ -606,6 +655,9 @@ private func dpopProof(_ data: Data) throws -> [String: Any] {
 
 @MainActor
 private func reviewExactBytes(title: String, summary: String, data: Data) throws {
+    let application = NSApplication.shared
+    application.delegate = helperApplicationDelegate
+    application.setActivationPolicy(.regular)
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = summary
@@ -629,28 +681,109 @@ private func reviewExactBytes(title: String, summary: String, data: Data) throws
     }
     scroll.documentView = text
     alert.accessoryView = scroll
-    NSApplication.shared.activate(ignoringOtherApps: true)
+    alert.window.level = .modalPanel
+    alert.window.center()
+    application.activate(ignoringOtherApps: true)
+    NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    alert.window.makeKeyAndOrderFront(nil)
     guard alert.runModal() == .alertFirstButtonReturn else {
         throw HelperFailure.canceled
     }
 }
 
-private func privateKey(reason: String) throws -> SecKey {
+private func ensurePrivateDirectory(_ path: String) throws {
+    if mkdir(path, S_IRWXU) != 0 && errno != EEXIST { throw HelperFailure.keyUnavailable }
+    var info = stat()
+    guard lstat(path, &info) == 0,
+          info.st_uid == getuid(),
+          (info.st_mode & S_IFMT) == S_IFDIR,
+          (info.st_mode & 0o077) == 0 else { throw HelperFailure.keyUnavailable }
+}
+
+private func presenceKeyRepresentationPath() throws -> String {
+    let pulse = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".pulse").path
+    let supervisor = URL(fileURLWithPath: pulse).appendingPathComponent("supervisor").path
+    try ensurePrivateDirectory(pulse)
+    try ensurePrivateDirectory(supervisor)
+    return URL(fileURLWithPath: supervisor).appendingPathComponent(presenceKeyRepresentationName).path
+}
+
+private func readPrivateRepresentation(_ path: String) throws -> Data? {
+    var before = stat()
+    if lstat(path, &before) != 0 {
+        if errno == ENOENT { return nil }
+        throw HelperFailure.keyUnavailable
+    }
+    guard before.st_uid == getuid(),
+          (before.st_mode & S_IFMT) == S_IFREG,
+          (before.st_mode & 0o077) == 0,
+          before.st_nlink == 1,
+          before.st_size > 0, before.st_size <= 4096 else { throw HelperFailure.keyUnavailable }
+    let descriptor = open(path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw HelperFailure.keyUnavailable }
+    defer { close(descriptor) }
+    var after = stat()
+    guard fstat(descriptor, &after) == 0,
+          after.st_dev == before.st_dev, after.st_ino == before.st_ino,
+          after.st_uid == getuid(),
+          (after.st_mode & S_IFMT) == S_IFREG,
+          (after.st_mode & 0o077) == 0,
+          after.st_nlink == 1,
+          after.st_size == before.st_size else { throw HelperFailure.keyUnavailable }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    guard let data = try handle.readToEnd(), data.count == after.st_size else {
+        throw HelperFailure.keyUnavailable
+    }
+    return data
+}
+
+private func createPrivateRepresentation(_ data: Data, at path: String) throws -> Bool {
+    guard !data.isEmpty, data.count <= 4096 else { throw HelperFailure.keyUnavailable }
+    let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    if descriptor < 0 {
+        if errno == EEXIST { return false }
+        throw HelperFailure.keyUnavailable
+    }
+    var complete = false
+    defer {
+        close(descriptor)
+        if !complete { unlink(path) }
+    }
+    let wrote = data.withUnsafeBytes { bytes -> Bool in
+        guard let start = bytes.baseAddress else { return false }
+        var offset = 0
+        while offset < bytes.count {
+            let count = Darwin.write(descriptor, start.advanced(by: offset), bytes.count - offset)
+            if count <= 0 { return false }
+            offset += count
+        }
+        return true
+    }
+    guard wrote, fsync(descriptor) == 0 else { throw HelperFailure.keyUnavailable }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0,
+          info.st_uid == getuid(),
+          (info.st_mode & S_IFMT) == S_IFREG,
+          (info.st_mode & 0o077) == 0,
+          info.st_nlink == 1,
+          info.st_size == data.count else { throw HelperFailure.keyUnavailable }
+    complete = true
+    return true
+}
+
+private func privateKey(reason: String) throws -> SecureEnclave.P256.Signing.PrivateKey {
+    guard SecureEnclave.isAvailable else { throw HelperFailure.keyUnavailable }
     let context = LAContext()
     context.localizedReason = reason
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassKey,
-        kSecAttrApplicationTag as String: applicationTag,
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecReturnRef as String: true,
-        kSecUseAuthenticationContext as String: context,
-    ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    if status == errSecSuccess, let key = item as! SecKey? {
-        return key
+    let path = try presenceKeyRepresentationPath()
+    if let representation = try readPrivateRepresentation(path) {
+        do {
+            return try SecureEnclave.P256.Signing.PrivateKey(
+                dataRepresentation: representation,
+                authenticationContext: context
+            )
+        } catch { throw HelperFailure.keyUnavailable }
     }
-    guard status == errSecItemNotFound else { throw HelperFailure.keyUnavailable }
 
     var accessError: Unmanaged<CFError>?
     guard let control = SecAccessControlCreateWithFlags(
@@ -659,42 +792,37 @@ private func privateKey(reason: String) throws -> SecKey {
         [.privateKeyUsage, .userPresence],
         &accessError
     ) else { throw HelperFailure.keyUnavailable }
-    let attributes: [String: Any] = [
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeySizeInBits as String: 256,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: [
-            kSecAttrIsPermanent as String: true,
-            kSecAttrApplicationTag as String: applicationTag,
-            kSecAttrAccessControl as String: control,
-        ],
-    ]
-    var keyError: Unmanaged<CFError>?
-    guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError) else {
-        throw HelperFailure.keyUnavailable
+    let key: SecureEnclave.P256.Signing.PrivateKey
+    do {
+        key = try SecureEnclave.P256.Signing.PrivateKey(
+            accessControl: control,
+            authenticationContext: context
+        )
+    } catch { throw HelperFailure.keyUnavailable }
+    if try !createPrivateRepresentation(key.dataRepresentation, at: path) {
+        guard let representation = try readPrivateRepresentation(path) else {
+            throw HelperFailure.keyUnavailable
+        }
+        do {
+            return try SecureEnclave.P256.Signing.PrivateKey(
+                dataRepresentation: representation,
+                authenticationContext: context
+            )
+        } catch { throw HelperFailure.keyUnavailable }
     }
     return key
 }
 
-private func sign(_ data: Data, reason: String) throws -> (signature: Data, publicKey: SecKey) {
+private func sign(_ data: Data, reason: String) throws -> (signature: Data, publicKey: P256.Signing.PublicKey) {
     let key = try privateKey(reason: reason)
-    var error: Unmanaged<CFError>?
-    guard let signature = SecKeyCreateSignature(
-        key,
-        .ecdsaSignatureMessageX962SHA256,
-        data as CFData,
-        &error
-    ) as Data?, let publicKey = SecKeyCopyPublicKey(key) else {
-        throw HelperFailure.signingFailed
-    }
-    return (signature, publicKey)
+    do {
+        return (try key.signature(for: data).derRepresentation, key.publicKey)
+    } catch { throw HelperFailure.signingFailed }
 }
 
-private func subjectPublicKeyInfo(_ key: SecKey) throws -> Data {
-    var error: Unmanaged<CFError>?
-    guard let raw = SecKeyCopyExternalRepresentation(key, &error) as Data?, raw.count == 65 else {
-        throw HelperFailure.keyUnavailable
-    }
+private func subjectPublicKeyInfo(_ key: P256.Signing.PublicKey) throws -> Data {
+    let raw = key.x963Representation
+    guard raw.count == 65, raw.first == 0x04 else { throw HelperFailure.keyUnavailable }
     let prefix: [UInt8] = [
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
@@ -703,11 +831,13 @@ private func subjectPublicKeyInfo(_ key: SecKey) throws -> Data {
 }
 
 private func pem(_ der: Data) -> String {
-    let base64 = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
-    return "-----BEGIN PUBLIC KEY-----\n\(base64)-----END PUBLIC KEY-----\n"
+    let base64 = der.base64EncodedString(
+        options: [.lineLength64Characters, .endLineWithLineFeed]
+    ).trimmingCharacters(in: .newlines)
+    return "-----BEGIN PUBLIC KEY-----\n\(base64)\n-----END PUBLIC KEY-----\n"
 }
 
-private func emitResult(signature: Data, publicKey: SecKey) throws {
+private func emitResult(signature: Data, publicKey: P256.Signing.PublicKey) throws {
     let der = try subjectPublicKeyInfo(publicKey)
     let result: [String: Any] = [
         "algorithm": "es256",
@@ -749,8 +879,27 @@ private func run() async throws {
     }
     if command == "public-key" {
         let key = try privateKey(reason: "Install the Pulse user-presence trust key")
-        guard let publicKey = SecKeyCopyPublicKey(key) else { throw HelperFailure.keyUnavailable }
-        FileHandle.standardOutput.write(Data(pem(try subjectPublicKeyInfo(publicKey)).utf8))
+        FileHandle.standardOutput.write(Data(pem(try subjectPublicKeyInfo(key.publicKey)).utf8))
+        return
+    }
+
+    if command == "review-action-internal" || command == "review-binding-registry-internal" {
+        let reviewData = try readBoundedStandardInput()
+        if command == "review-action-internal" {
+            let action = try validatePresenceChallenge(reviewData)
+            try await reviewExactBytes(
+                title: "Pulse privileged action",
+                summary: "Action: \(action)\nExact SHA-256: \(digestHex(reviewData))",
+                data: reviewData
+            )
+        } else {
+            let count = try validateBindingRegistry(reviewData)
+            try await reviewExactBytes(
+                title: "Change Pulse workspace bindings",
+                summary: "Bindings: \(count)\nExact SHA-256: \(digestHex(reviewData))",
+                data: reviewData
+            )
+        }
         return
     }
 
@@ -792,20 +941,12 @@ private func run() async throws {
     switch command {
     case "prove":
         let action = try validatePresenceChallenge(data)
-        try await reviewExactBytes(
-            title: "Pulse privileged action",
-            summary: "Action: \(action)\nExact SHA-256: \(digest)",
-            data: data
-        )
+        try reviewInChild(command: "review-action-internal", data: data)
         let proof = try sign(data, reason: "Approve Pulse action \(action), digest \(digest.prefix(16))")
         try emitResult(signature: proof.signature, publicKey: proof.publicKey)
     case "sign-binding-registry":
         let count = try validateBindingRegistry(data)
-        try await reviewExactBytes(
-            title: "Change Pulse workspace bindings",
-            summary: "Bindings: \(count)\nExact SHA-256: \(digest)",
-            data: data
-        )
+        try reviewInChild(command: "review-binding-registry-internal", data: data)
         let proof = try sign(data, reason: "Approve \(count) Pulse bindings, digest \(digest.prefix(16))")
         try emitResult(signature: proof.signature, publicKey: proof.publicKey)
     default:

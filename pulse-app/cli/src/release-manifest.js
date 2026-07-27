@@ -19,7 +19,12 @@ const LEGACY_MANIFEST_SCHEMA = 'pulse.personal_preview.release_manifest.v1';
 const LEGACY_ENVELOPE_SCHEMA = 'pulse.release_envelope.v1';
 const CATALOG_SCHEMA = 'pulse.personal_preview.release_catalog.v2';
 const CATALOG_ENVELOPE_SCHEMA = 'pulse.release_catalog_envelope.v2';
+const ARTIFACT_SET_SCHEMA = 'pulse.personal_release_artifact_set.v1';
+const ARTIFACT_SET_PAYLOAD_SCHEMA = 'pulse.personal_release_artifact_set_payload.v1';
+const SNAPSHOT_ENVELOPE_SCHEMA = 'pulse.release_snapshot_envelope.v1';
+const SNAPSHOT_PAYLOAD_SCHEMA = 'pulse.release_snapshot.v1';
 const VERIFIED_CATALOG_SCHEMA = 'pulse.verified_release_manifest.v2';
+const VERIFIED_ARTIFACT_SET_SCHEMA = 'pulse.verified_release_manifest.v3';
 const VERIFIED_LEGACY_SCHEMA = 'pulse.verified_release_manifest.v1';
 const AUTHORITY_SCHEMA = 'pulse.release_authority.v1';
 const AUTHORITY_ENVELOPE_SCHEMA = 'pulse.release_authority_envelope.v1';
@@ -54,6 +59,7 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const TEAM_ID = /^[A-Z0-9]{10}$/;
+const GOLD_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
 
 export class ReleaseManifestError extends Error {
   constructor(code) {
@@ -384,8 +390,18 @@ function validateCatalogPayload(payload, options) {
   for (const name of COMMON_ARTIFACTS) validateCatalogArtifact(name, payload.common_artifacts[name], payload.release, allowedOrigins, {
     platform: 'all', architecture: 'all',
   });
-  if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object' ||
-      Object.keys(payload.targets).some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) fail('release_target_catalog_invalid');
+  if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object') {
+    fail('release_target_catalog_invalid');
+  }
+  const targetIDs = Object.keys(payload.targets).sort();
+  if (targetIDs.length < 1 || targetIDs.some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) {
+    fail('release_target_catalog_invalid');
+  }
+  const fixtureOnlyCatalog = options.allowFixtureVerification === true &&
+    targetIDs.every((targetID) => payload.targets[targetID]?.verification_profile?.kind === 'fixture');
+  if (!fixtureOnlyCatalog && targetIDs.join('\0') !== DESKTOP_TARGET_IDS.join('\0')) {
+    fail('release_target_catalog_incomplete');
+  }
   for (const [targetID, target] of Object.entries(payload.targets)) {
     validateCatalogTarget(targetID, target, payload.release, allowedOrigins, options);
   }
@@ -401,6 +417,206 @@ function validateCatalogPayload(payload, options) {
     throw error;
   }
   return { ...validated, selected, target };
+}
+
+function validateArtifactSetRelease(release, options) {
+  exactKeys(release, ['channel', 'epoch', 'key_id', 'package', 'version'], 'release_fields_invalid');
+  if (release.package !== '@zbs-gg/pulse' || release.channel !== 'preview' ||
+      typeof release.version !== 'string' || !SEMVER.test(release.version)) fail('release_identity_invalid');
+  if (release.version !== options.packageVersion) fail('release_package_version_incompatible');
+  if (!Number.isSafeInteger(release.epoch) || release.epoch < 1) fail('manifest_epoch_invalid');
+  if (typeof release.key_id !== 'string' || !SHA256.test(release.key_id)) fail('release_key_id_invalid');
+  return release;
+}
+
+function validateSnapshotURL(value, expectedPathSuffix) {
+  let parsed;
+  try { parsed = new URL(value); } catch { fail('release_snapshot_url_invalid'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
+      parsed.pathname.split('/').some((part) => part === '..' || part === '.') ||
+      !parsed.pathname.endsWith(expectedPathSuffix)) fail('release_snapshot_url_invalid');
+  return parsed;
+}
+
+function validateHostPolicy(policy) {
+  exactKeys(policy, ['harnesses'], 'release_host_policy_invalid');
+  if (!Array.isArray(policy.harnesses) || policy.harnesses.length !== GOLD_HOSTS.length) {
+    fail('release_host_policy_invalid');
+  }
+  const hosts = [];
+  for (const harness of policy.harnesses) {
+    exactKeys(harness, [
+      'distribution', 'downloads', 'executable', 'executable_digest_policy', 'host', 'identity', 'supported_targets',
+      'vendor', 'vendor_source', 'version',
+    ], 'release_host_policy_invalid');
+    if (!GOLD_HOSTS.includes(harness.host) || typeof harness.vendor !== 'string' || harness.vendor.length < 1 ||
+        typeof harness.distribution !== 'string' || !SAFE_ID.test(harness.distribution) ||
+        typeof harness.identity !== 'string' || harness.identity.length < 1 || harness.identity.length > 256 ||
+        typeof harness.version !== 'string' || !/^\d+\.\d+(?:\.\d+)?$/.test(harness.version) ||
+        typeof harness.executable !== 'string' || !SAFE_ID.test(harness.executable) ||
+        harness.executable_digest_policy !== 'native_evidence_sha256') fail('release_host_policy_invalid');
+    let vendorSource;
+    try { vendorSource = new URL(harness.vendor_source); } catch { fail('release_host_policy_invalid'); }
+    if (vendorSource.protocol !== 'https:' || vendorSource.username || vendorSource.password ||
+        vendorSource.search || vendorSource.hash || vendorSource.pathname.split('/').some((part) => part === '..' || part === '.')) {
+      fail('release_host_policy_invalid');
+    }
+    if (!Array.isArray(harness.supported_targets) ||
+        harness.supported_targets.join('\0') !== DESKTOP_TARGET_IDS.join('\0')) fail('release_host_policy_invalid');
+    if (!harness.downloads || Array.isArray(harness.downloads) || typeof harness.downloads !== 'object' ||
+        Object.keys(harness.downloads).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0')) {
+      fail('release_host_policy_invalid');
+    }
+    for (const targetID of DESKTOP_TARGET_IDS) {
+      let download;
+      try { download = new URL(harness.downloads[targetID]); } catch { fail('release_host_policy_invalid'); }
+      const expectedOrigin = harness.distribution === 'npm' ? 'https://registry.npmjs.org' : 'https://api2.cursor.sh';
+      if (download.protocol !== 'https:' || download.origin !== expectedOrigin || download.username ||
+          download.password || download.search || download.hash) fail('release_host_policy_invalid');
+    }
+    hosts.push(harness.host);
+  }
+  if (hosts.sort().join('\0') !== GOLD_HOSTS.join('\0')) fail('release_host_policy_invalid');
+}
+
+function validateArtifactSetPayload(payload, options) {
+  exactKeys(payload, [
+    'allowed_origins', 'common_artifacts', 'host_policy', 'release', 'schema', 'snapshot_url', 'targets',
+  ], 'manifest_fields_invalid');
+  if (payload.schema !== ARTIFACT_SET_PAYLOAD_SCHEMA) fail('manifest_schema_invalid');
+  const release = validateArtifactSetRelease(payload.release, options);
+  const allowedOrigins = validateAllowedOrigins(payload.allowed_origins);
+  const snapshotURL = validateSnapshotURL(payload.snapshot_url, `/pulse/${release.version}/catalog/snapshot.json`);
+  if (!allowedOrigins.has(snapshotURL.origin)) fail('release_snapshot_origin_invalid');
+  validateHostPolicy(payload.host_policy);
+  exactKeys(payload.common_artifacts, COMMON_ARTIFACTS, 'artifact_set_invalid');
+  for (const name of COMMON_ARTIFACTS) validateCatalogArtifact(name, payload.common_artifacts[name], release, allowedOrigins, {
+    platform: 'all', architecture: 'all',
+  });
+  exactKeys(payload.targets, DESKTOP_TARGET_IDS, 'release_target_catalog_incomplete');
+  for (const [targetID, target] of Object.entries(payload.targets)) {
+    validateCatalogTarget(targetID, target, release, allowedOrigins, options);
+  }
+  let selected;
+  let target;
+  try {
+    target = resolveDesktopTarget({
+      platform: options.platform, architecture: options.architecture, libc: options.libc,
+    });
+    selected = selectDesktopTarget(payload.targets, target);
+  } catch (error) {
+    if (error instanceof DesktopTargetError) fail(error.code);
+    throw error;
+  }
+  return { release, selected, snapshotURL, target };
+}
+
+function validateSnapshotEnvelope(snapshot, artifactSet, options) {
+  exactKeys(snapshot, ['payload', 'schema', 'signature'], 'release_snapshot_fields_invalid');
+  if (snapshot.schema !== SNAPSHOT_ENVELOPE_SCHEMA) fail('release_snapshot_schema_invalid');
+  const signature = validateSignature(snapshot.signature, 'release_snapshot_signature_invalid');
+  const payload = snapshot.payload;
+  exactKeys(payload, [
+    'artifact_set', 'channel', 'expires_at', 'issued_at', 'package', 'release_epoch', 'revoked_key_ids',
+    'schema', 'version',
+  ], 'release_snapshot_fields_invalid');
+  if (payload.schema !== SNAPSHOT_PAYLOAD_SCHEMA || payload.package !== '@zbs-gg/pulse' ||
+      payload.version !== artifactSet.release.version || payload.version !== options.packageVersion ||
+      payload.release_epoch !== artifactSet.release.epoch) fail('release_snapshot_identity_invalid');
+  exactKeys(payload.artifact_set, ['sha256', 'url'], 'release_snapshot_fields_invalid');
+  if (!SHA256.test(payload.artifact_set.sha256 ?? '')) fail('release_snapshot_artifact_set_invalid');
+  const artifactSetURL = validateSnapshotURL(
+    payload.artifact_set.url,
+    `/pulse/${payload.version}/epoch-${payload.release_epoch}/catalog/artifact-set.json`,
+  );
+  if (!artifactSet.allowedOrigins.has(artifactSetURL.origin)) fail('release_snapshot_origin_invalid');
+  exactKeys(payload.channel, [
+    'key_id', 'public_key_pem', 'valid_from_epoch', 'valid_through_epoch',
+  ], 'release_snapshot_fields_invalid');
+  if (releaseKeyID(payload.channel.public_key_pem) !== payload.channel.key_id ||
+      payload.channel.key_id !== artifactSet.release.key_id) fail('release_key_id_invalid');
+  if (!Number.isSafeInteger(payload.channel.valid_from_epoch) ||
+      !Number.isSafeInteger(payload.channel.valid_through_epoch) || payload.channel.valid_from_epoch < 1 ||
+      payload.channel.valid_through_epoch < payload.channel.valid_from_epoch ||
+      payload.release_epoch < payload.channel.valid_from_epoch ||
+      payload.release_epoch > payload.channel.valid_through_epoch) fail('release_key_epoch_invalid');
+  if (!Array.isArray(payload.revoked_key_ids) || payload.revoked_key_ids.length > 32 ||
+      payload.revoked_key_ids.some((keyID) => typeof keyID !== 'string' || !SHA256.test(keyID)) ||
+      [...new Set(payload.revoked_key_ids)].sort().join('\0') !== payload.revoked_key_ids.join('\0')) {
+    fail('release_snapshot_revocations_invalid');
+  }
+  if (payload.revoked_key_ids.includes(payload.channel.key_id)) fail('release_key_revoked');
+  const issued = strictTimestamp(payload.issued_at, 'release_snapshot_issued_at_invalid');
+  const expires = strictTimestamp(payload.expires_at, 'release_snapshot_expires_at_invalid');
+  if (expires <= issued || expires - issued > 31 * 24 * 60 * 60 * 1000) fail('release_snapshot_validity_invalid');
+  const now = options.now instanceof Date ? options.now.getTime() : Number.NaN;
+  if (!Number.isFinite(now)) fail('verification_time_invalid');
+  if (now < issued) fail('release_snapshot_not_yet_valid');
+  const expired = now >= expires;
+  if (expired && options.allowExpiredSnapshot !== true) fail('release_snapshot_expired');
+  const rootKey = trustedReleaseKey(options.trustedKeys, signature.key_id, payload.release_epoch);
+  const canonicalBytes = Buffer.from(canonicalReleaseJSON(payload));
+  if (!verify(null, canonicalBytes, rootKey, signatureBytes(signature.value))) {
+    fail('release_snapshot_signature_invalid');
+  }
+  return {
+    artifactSetURL: artifactSetURL.href,
+    channelKey: keyDER(payload.channel.public_key_pem).key,
+    expiresAt: payload.expires_at,
+    expired,
+    rootKeyID: signature.key_id,
+  };
+}
+
+export function verifyPersonalReleaseArtifactSet(artifactSetEnvelope, snapshotEnvelope, options = {}) {
+  exactKeys(artifactSetEnvelope, ['payload', 'schema', 'signature'], 'envelope_fields_invalid');
+  if (artifactSetEnvelope.schema !== ARTIFACT_SET_SCHEMA) fail('envelope_schema_invalid');
+  const signature = validateSignature(artifactSetEnvelope.signature);
+  const validated = validateArtifactSetPayload(artifactSetEnvelope.payload, options);
+  if (signature.key_id !== validated.release.key_id) fail('release_key_id_mismatch');
+  const artifactSetBytes = Buffer.from(`${canonicalReleaseJSON(artifactSetEnvelope)}\n`);
+  const artifactSetDigest = createHash('sha256').update(artifactSetBytes).digest('hex');
+  const snapshot = validateSnapshotEnvelope(snapshotEnvelope, {
+    allowedOrigins: validateAllowedOrigins(artifactSetEnvelope.payload.allowed_origins),
+    release: validated.release,
+  }, options);
+  if (snapshotEnvelope.payload.artifact_set.sha256 !== artifactSetDigest) {
+    fail('release_snapshot_artifact_set_mismatch');
+  }
+  const artifactPayload = Buffer.from(canonicalReleaseJSON(artifactSetEnvelope.payload));
+  if (!verify(null, artifactPayload, snapshot.channelKey, signatureBytes(signature.value))) {
+    fail('release_signature_invalid');
+  }
+  const minimum = options.minimumAcceptedEpoch ?? 0;
+  if (!Number.isSafeInteger(minimum) || minimum < 0) fail('minimum_epoch_invalid');
+  if (validated.release.epoch < minimum) fail('manifest_epoch_downgrade');
+  const snapshotDigest = createHash('sha256')
+    .update(`${canonicalReleaseJSON(snapshotEnvelope)}\n`)
+    .digest('hex');
+  return deepFreeze({
+    artifacts: JSON.parse(canonicalReleaseJSON({
+      ...artifactSetEnvelope.payload.common_artifacts,
+      ...validated.selected.artifacts,
+    })),
+    authority: {
+      artifact_set_url: snapshot.artifactSetURL,
+      channel_key_id: signature.key_id,
+      root_key_id: snapshot.rootKeyID,
+      snapshot_digest: snapshotDigest,
+      snapshot_expires_at: snapshot.expiresAt,
+    },
+    capabilities: [...validated.selected.capabilities],
+    catalog_schema: ARTIFACT_SET_SCHEMA,
+    downgrade_authorized: false,
+    epoch: validated.release.epoch,
+    historical_only: false,
+    manifest_digest: artifactSetDigest,
+    schema: VERIFIED_ARTIFACT_SET_SCHEMA,
+    snapshot_refresh_required: snapshot.expired,
+    target_id: validated.target.id,
+    verification_profile: JSON.parse(canonicalReleaseJSON(validated.selected.verification_profile)),
+    version: validated.release.version,
+  });
 }
 
 function trustedReleaseKey(keys, keyID, epoch) {

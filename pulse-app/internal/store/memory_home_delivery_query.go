@@ -23,6 +23,24 @@ func (s *Store) ReadMemoryHomeDeliveryFacts(repositoryID, bindingDigest string, 
 	if err := s.validateContinuityDeliveryAuthority(bindingDigest, repositoryID); err != nil {
 		return nil, err
 	}
+	return s.readMemoryHomeDeliveryFacts(repositoryID, bindingDigest, limit)
+}
+
+func (s *Store) ReadMemoryHomeDeliveryFactsForVerifiedBinding(
+	repositoryID, bindingDigest string,
+	limit int,
+) ([]MemoryHomeDeliveryFact, error) {
+	if s == nil || limit < 1 || limit > 100 ||
+		!validTrayIdentifier(repositoryID) || !trayBindingDigestPattern.MatchString(bindingDigest) {
+		return nil, ErrContinuityDeliveryInvalid
+	}
+	return s.readMemoryHomeDeliveryFacts(repositoryID, bindingDigest, limit)
+}
+
+func (s *Store) readMemoryHomeDeliveryFacts(
+	repositoryID, bindingDigest string,
+	limit int,
+) ([]MemoryHomeDeliveryFact, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err

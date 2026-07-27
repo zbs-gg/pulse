@@ -8,9 +8,18 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
-import { createWorkspaceBinding, recoverWorkspaceBindingTransaction } from './binding-admin.js';
 import {
-  BindingError, canonicalizeWorkspace, resolveWorkspaceBinding, verifyBindingRegistry,
+  createInitialPersonalWorkspaceBinding,
+  createWorkspaceBinding,
+  recoverWorkspaceBindingTransaction,
+} from './binding-admin.js';
+import {
+  bindingRegistryAnchor,
+  BindingError,
+  canonicalJSONStringify,
+  canonicalizeWorkspace,
+  resolveWorkspaceBinding,
+  verifyBindingRegistry,
 } from './workspace-binding.js';
 
 function git(cwd, ...args) {
@@ -70,6 +79,86 @@ function teamOptions(setup, repository, overrides = {}) {
     ...overrides,
   };
 }
+
+function replaceSignedRegistry(setup, payload) {
+  const payloadBytes = Buffer.from(canonicalJSONStringify(payload));
+  const proof = setup.signer(payloadBytes);
+  const registryBytes = Buffer.from(`${JSON.stringify({
+    algorithm: proof.algorithm,
+    payload,
+    signature: proof.signature,
+  })}\n`);
+  writeFileSync(setup.registryPath, registryBytes, { mode: 0o600 });
+  chmodSync(setup.registryPath, 0o600);
+  setup.anchorInstaller(Buffer.from(`${canonicalJSONStringify(
+    bindingRegistryAnchor(registryBytes, payload.epoch),
+  )}\n`));
+}
+
+test('initial Personal binding uses an ephemeral portable signer and persists only its public key', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-binding-bootstrap.'));
+  const repository = makeRepository(home, 'project');
+  const trust = join(home, 'trust');
+  const registryPath = join(home, '.pulse', 'supervisor', 'workspace-bindings.json');
+  const publicKeyPath = join(trust, 'workspace-bindings.pub.pem');
+  const anchorPath = join(trust, 'workspace-bindings.anchor.json');
+  mkdirSync(trust, { recursive: true, mode: 0o700 });
+  let publicKeyInstalls = 0;
+
+  const binding = await createInitialPersonalWorkspaceBinding({
+    cwd: repository,
+    home,
+    principalID: 'principal_nik',
+    port: 18801,
+    registryPath,
+    publicKeyPath,
+    anchorPath,
+    rootPublicKey: false,
+    rootAnchor: false,
+    publicKeyInstaller: (bytes) => {
+      publicKeyInstalls += 1;
+      writeFileSync(publicKeyPath, bytes, { mode: 0o600 });
+      chmodSync(publicKeyPath, 0o600);
+    },
+    publicKeyRemover: () => rmSync(publicKeyPath, { force: true }),
+    anchorInstaller: (bytes) => {
+      writeFileSync(anchorPath, bytes, { mode: 0o600 });
+      chmodSync(anchorPath, 0o600);
+    },
+    anchorRemover: () => rmSync(anchorPath, { force: true }),
+  });
+
+  assert.equal(binding.mode, 'personal');
+  assert.equal(publicKeyInstalls, 1);
+  assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).algorithm, 'ed25519');
+  assert.doesNotMatch(readFileSync(publicKeyPath, 'utf8'), /PRIVATE KEY/);
+  assert.equal(resolveWorkspaceBinding({
+    cwd: repository,
+    registryPath,
+    publicKeyPath,
+    anchorPath,
+    rootAnchor: false,
+  }).binding_id, binding.binding_id);
+
+  await assert.rejects(
+    createInitialPersonalWorkspaceBinding({
+      cwd: repository,
+      home,
+      principalID: 'principal_nik',
+      registryPath,
+      publicKeyPath,
+      anchorPath,
+      rootPublicKey: false,
+      rootAnchor: false,
+      publicKeyInstaller: () => { publicKeyInstalls += 1; },
+      publicKeyRemover: () => {},
+      anchorInstaller: () => {},
+      anchorRemover: () => {},
+    }),
+    /binding_admin_initial_binding_exists/,
+  );
+  assert.equal(publicKeyInstalls, 1);
+});
 
 test('Personal and Team onboarding creates physically separate exact topologies', async () => {
   const setup = fixture();
@@ -132,6 +221,119 @@ test('Personal and Team onboarding creates physically separate exact topologies'
   assert.equal(resolvedPersonal.resolver_epoch, 1);
   assert.equal(resolvedTeam.fallback, false);
   assert.equal(resolvedTeam.resolver_epoch, 2);
+});
+
+test('same-principal Personal projects reuse one exact vault while retaining separate bindings', async () => {
+  const setup = fixture();
+  const firstRepository = makeRepository(setup.home, 'first-personal-project');
+  const secondRepository = makeRepository(setup.home, 'second-personal-project');
+
+  const first = await createWorkspaceBinding({
+    ...setup.options,
+    cwd: firstRepository,
+    mode: 'personal',
+    principalID: 'principal_nik',
+    port: 18801,
+  });
+  const second = await createWorkspaceBinding({
+    ...setup.options,
+    cwd: secondRepository,
+    mode: 'personal',
+    principalID: 'principal_nik',
+  });
+
+  assert.notEqual(first.binding_id, second.binding_id);
+  assert.notEqual(first.workspace.workspace_id, second.workspace.workspace_id);
+  assert.deepEqual(second.personal, first.personal);
+  assert.equal(second.personal.base_url, 'http://127.0.0.1:18801');
+
+  const registry = verifyBindingRegistry({
+    registryPath: setup.registryPath,
+    publicKeyPath: setup.publicKeyPath,
+  });
+  assert.equal(registry.bindings.length, 2);
+  assert.equal(new Set(registry.bindings.map((binding) => binding.personal.store_id)).size, 1);
+  assert.equal(resolveWorkspaceBinding({
+    cwd: firstRepository,
+    registryPath: setup.registryPath,
+    publicKeyPath: setup.publicKeyPath,
+    anchorPath: setup.anchorPath,
+    rootAnchor: false,
+  }).personal.store_id, first.personal.store_id);
+  assert.equal(resolveWorkspaceBinding({
+    cwd: secondRepository,
+    registryPath: setup.registryPath,
+    publicKeyPath: setup.publicKeyPath,
+    anchorPath: setup.anchorPath,
+    rootAnchor: false,
+  }).personal.store_id, first.personal.store_id);
+});
+
+test('same-principal Personal reuse rejects a conflicting explicit daemon port', async () => {
+  const setup = fixture();
+  const firstRepository = makeRepository(setup.home, 'first-personal-project');
+  const secondRepository = makeRepository(setup.home, 'second-personal-project');
+  await createWorkspaceBinding({
+    ...setup.options,
+    cwd: firstRepository,
+    mode: 'personal',
+    principalID: 'principal_nik',
+    port: 18801,
+  });
+  const before = readFileSync(setup.registryPath);
+
+  await assert.rejects(
+    createWorkspaceBinding({
+      ...setup.options,
+      cwd: secondRepository,
+      mode: 'personal',
+      principalID: 'principal_nik',
+      port: 18802,
+    }),
+    /binding_admin_personal_store_port_mismatch/,
+  );
+  assert.deepEqual(readFileSync(setup.registryPath), before);
+});
+
+test('fragmented legacy Personal stores block canonical reuse instead of creating a third store', async () => {
+  const setup = fixture();
+  const firstRepository = makeRepository(setup.home, 'first-fragment');
+  const secondRepository = makeRepository(setup.home, 'second-fragment');
+  const thirdRepository = makeRepository(setup.home, 'third-project');
+  await createWorkspaceBinding({
+    ...setup.options,
+    cwd: firstRepository,
+    mode: 'personal',
+    principalID: 'principal_nik',
+    port: 18801,
+  });
+  await createWorkspaceBinding({
+    ...setup.options,
+    cwd: secondRepository,
+    mode: 'personal',
+    principalID: 'principal_dima',
+    port: 18802,
+  });
+  const fragmented = verifyBindingRegistry({
+    registryPath: setup.registryPath,
+    publicKeyPath: setup.publicKeyPath,
+  });
+  fragmented.bindings.find((binding) =>
+    binding.workspace.workspace_id === canonicalizeWorkspace(secondRepository).workspace_id
+  ).principal_ref = 'principal_nik';
+  replaceSignedRegistry(setup, fragmented);
+  const before = readFileSync(setup.registryPath);
+
+  await assert.rejects(
+    createWorkspaceBinding({
+      ...setup.options,
+      cwd: thirdRepository,
+      mode: 'personal',
+      principalID: 'principal_nik',
+    }),
+    /binding_admin_personal_store_fragmented/,
+  );
+  assert.deepEqual(readFileSync(setup.registryPath), before);
 });
 
 test('replacing the same workspace bumps the epoch and leaves exactly one unambiguous binding', async () => {

@@ -12,6 +12,7 @@ import {
   canonicalInstallPlanJSON,
   detectCodexCLI,
   detectInstallResources,
+  formatPersonalInstallIntroduction,
   formatPersonalInstallPlan,
 } from './install-plan.js';
 
@@ -174,7 +175,15 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     assert.equal(plan.rollback.preserve_vault, true);
     assert.equal(plan.rollback.runtime_uninstall, 'unavailable_in_u3');
     assert.equal(plan.rollback.remove_runtime, null);
-    assert.doesNotMatch(canonicalInstallPlanJSON(plan), /Go|Python|go_toolchain|python/i);
+    const requirementClaims = canonicalInstallPlanJSON({
+      local_write_purposes: plan.local_writes.map((entry) => entry.purpose),
+      network_effect_codes: plan.network_effects.map((entry) => entry.code),
+      next_action: plan.next_action,
+      reason_codes: plan.reason_codes,
+      required_human_approval_codes: plan.required_human_approvals.map((entry) => entry.code),
+      resources: plan.resources,
+    });
+    assert.doesNotMatch(requirementClaims, /\b(?:Go|Python|go_toolchain)\b/i);
     assert.deepEqual(readdirSync(home), before, 'plan detection must not create Pulse or Codex state');
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -418,7 +427,6 @@ test('unsafe prior state always becomes action_required before consent', () => {
     ['binding', 'legacy', 'binding_legacy'],
     ['binding', 'repair_required', 'binding_repair_required'],
     ['presence', 'synthetic_test_authority', 'synthetic_authority_forbidden'],
-    ['presence', 'invalid', 'presence_invalid'],
     ['runtime', 'corrupt', 'runtime_corrupt'],
     ['daemon', 'unsafe', 'daemon_unsafe'],
   ];
@@ -436,6 +444,28 @@ test('unsafe prior state always becomes action_required before consent', () => {
   }
 });
 
+test('broken optional enhanced presence stays visible without blocking ordinary Personal install', () => {
+  const state = { ...cleanState, presence: 'invalid' };
+  const plan = buildPersonalInstallPlan({
+    cwd: '/project', home: '/tmp/pulse-plan-home', codexHome: '/tmp/pulse-plan-codex',
+    platform: 'darwin', architecture: 'arm64', nodeVersion: '20.0.0', currentState: state,
+    detectWorkspace: () => ({
+      canonical_path: '/project',
+      checkout_kind: 'primary',
+      repository_id: 'repository_a',
+      workspace_id: 'workspace_a',
+    }),
+    detectCodex: codexReady,
+    release: verifiedRelease(),
+    detectResources: () => ampleResources,
+  });
+
+  assert.equal(plan.current_state.presence, 'invalid');
+  assert.equal(plan.outcome, 'ready_to_install');
+  assert.deepEqual(plan.reason_codes, []);
+  assert.equal(plan.authority_profile.ordinary_ready, true);
+});
+
 test('safe release failure codes remain visible while arbitrary codes are rejected', () => {
   const base = {
     cwd: '/project', home: '/tmp/pulse-plan-home', codexHome: '/tmp/pulse-plan-codex',
@@ -446,6 +476,9 @@ test('safe release failure codes remain visible while arbitrary codes are reject
   const expired = buildPersonalInstallPlan({ ...base, releaseReasonCode: 'manifest_expired' });
   assert.ok(expired.reason_codes.includes('manifest_expired'));
   assert.equal(expired.reason_codes.includes('release_manifest_unavailable'), false);
+  const incomplete = buildPersonalInstallPlan({ ...base, releaseReasonCode: 'release_target_catalog_incomplete' });
+  assert.ok(incomplete.reason_codes.includes('release_target_catalog_incomplete'));
+  assert.equal(incomplete.outcome, 'action_required');
   assert.throws(() => buildPersonalInstallPlan({ ...base, releaseReasonCode: 'secret_/tmp/leak' }),
     /install_plan_release_reason_invalid/);
 });
@@ -480,6 +513,33 @@ test('human disclosure names the exact project, downloads, local writes, privacy
     assert.doesNotMatch(output, /pulse uninstall/i);
     assert.doesNotMatch(canonicalInstallPlanJSON(plan), /pulse uninstall/i);
     assert.doesNotMatch(output, /--yes.*consent/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('normal install introduction explains the product without exposing internal configuration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-install-intro.'));
+  try {
+    const home = join(root, 'home');
+    const cwd = repository(root, 'memory-project');
+    mkdirSync(home);
+    const plan = buildPersonalInstallPlan({
+      cwd, home, platform: 'darwin', architecture: 'arm64', nodeVersion: '20.0.0',
+      detectClaude: claudeReady, detectCodex: codexReady, detectCursor: hostMissing('cursor'),
+      release: verifiedRelease(), detectResources: () => ampleResources,
+    });
+    const output = formatPersonalInstallIntroduction(plan);
+    assert.match(output, /I checked the project boundary for memory-project/i);
+    assert.match(output, /cards in Memory Home/i);
+    assert.match(output, /saved automatically/i);
+    assert.match(output, /edit or delete any memory in Memory Home/i);
+    assert.match(output, /Connects Claude Code and Codex automatically/i);
+    assert.match(output, /operating system may ask once for administrator approval.*signed project binding/i);
+    assert.match(output, /no old chats.*no raw transcripts.*no paid model API calls/is);
+    assert.match(output, /do not need to choose a model, storage path, port, or hooks/i);
+    assert.match(output, /Technical details: pulse install-plan --json/);
+    assert.doesNotMatch(output, /workspace_|repository_|Current state:|Local writes:|Authority:|binding\.change|vault\.wipe/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

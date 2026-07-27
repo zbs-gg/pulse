@@ -123,8 +123,23 @@ func (s *Store) ConfigureContinuityDeliveryAuthority(bindingDigest, repositoryID
 		return ErrContinuityDeliveryAuthority
 	}
 	s.continuityAuthorityMu.Lock()
+	defer s.continuityAuthorityMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := backfillPersonalScopeForBindingTx(tx, bindingDigest, personalMemoryScope{
+		ProjectNamespaceID: stableProjectNamespace(repositoryID),
+		OriginalRepository: repositoryID,
+		Scope:              MemoryScopeProject,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	s.continuityRepository = repositoryID
-	s.continuityAuthorityMu.Unlock()
 	return nil
 }
 
@@ -525,14 +540,33 @@ func sealContinuityDeliveryRefsTx(tx *sql.Tx, receiptID string) error {
 func (s *Store) RecordContinuityOffer(
 	ctx context.Context, req ContinuityDeliveryOfferRequest, now time.Time,
 ) (ContinuityDeliveryReceipt, error) {
+	return s.recordContinuityOffer(ctx, req, now, true)
+}
+
+// RecordContinuityOfferForVerifiedBinding records an offer after the server
+// has re-verified the exact signed request binding. This is the multi-project
+// principal-daemon path; the request still carries the verified digest and
+// repository in the immutable receipt.
+func (s *Store) RecordContinuityOfferForVerifiedBinding(
+	ctx context.Context, req ContinuityDeliveryOfferRequest, now time.Time,
+) (ContinuityDeliveryReceipt, error) {
+	return s.recordContinuityOffer(ctx, req, now, false)
+}
+
+func (s *Store) recordContinuityOffer(
+	ctx context.Context, req ContinuityDeliveryOfferRequest, now time.Time,
+	requireConfiguredAuthority bool,
+) (ContinuityDeliveryReceipt, error) {
 	if !s.productTrayRequired() {
 		return ContinuityDeliveryReceipt{}, ErrContinuityDeliveryUnavailable
 	}
 	if err := validateContinuityOffer(req); err != nil {
 		return ContinuityDeliveryReceipt{}, err
 	}
-	if err := s.validateContinuityDeliveryAuthority(req.BindingDigest, req.RepositoryID); err != nil {
-		return ContinuityDeliveryReceipt{}, err
+	if requireConfiguredAuthority {
+		if err := s.validateContinuityDeliveryAuthority(req.BindingDigest, req.RepositoryID); err != nil {
+			return ContinuityDeliveryReceipt{}, err
+		}
 	}
 	operationDigest, err := continuityDeliveryOperationDigest(ContinuityDeliveryOfferedToHost, req)
 	if err != nil {
@@ -620,14 +654,29 @@ func continuityObservationMatchesOffer(req ContinuityDeliveryObservationRequest,
 func (s *Store) RecordContinuityHostObserved(
 	ctx context.Context, req ContinuityDeliveryObservationRequest, now time.Time,
 ) (ContinuityDeliveryReceipt, error) {
+	return s.recordContinuityHostObserved(ctx, req, now, true)
+}
+
+func (s *Store) RecordContinuityHostObservedForVerifiedBinding(
+	ctx context.Context, req ContinuityDeliveryObservationRequest, now time.Time,
+) (ContinuityDeliveryReceipt, error) {
+	return s.recordContinuityHostObserved(ctx, req, now, false)
+}
+
+func (s *Store) recordContinuityHostObserved(
+	ctx context.Context, req ContinuityDeliveryObservationRequest, now time.Time,
+	requireConfiguredAuthority bool,
+) (ContinuityDeliveryReceipt, error) {
 	if !s.productTrayRequired() {
 		return ContinuityDeliveryReceipt{}, ErrContinuityDeliveryUnavailable
 	}
 	if err := validateContinuityObservation(req); err != nil {
 		return ContinuityDeliveryReceipt{}, err
 	}
-	if err := s.validateContinuityDeliveryAuthority(req.BindingDigest, req.RepositoryID); err != nil {
-		return ContinuityDeliveryReceipt{}, err
+	if requireConfiguredAuthority {
+		if err := s.validateContinuityDeliveryAuthority(req.BindingDigest, req.RepositoryID); err != nil {
+			return ContinuityDeliveryReceipt{}, err
+		}
 	}
 	operationDigest, err := continuityDeliveryOperationDigest(ContinuityDeliveryHostObserved, req)
 	if err != nil {

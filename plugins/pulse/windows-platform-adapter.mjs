@@ -57,7 +57,11 @@ function invokeBinary({ binaryPath, operation, payload }) {
       envelope.schema !== RESPONSE_SCHEMA || typeof envelope.ok !== 'boolean') {
     fail('pulse_windows_plugin_adapter_protocol_invalid');
   }
-  if (result.status !== 0 || !envelope.ok) fail('pulse_windows_plugin_adapter_failed');
+  if (result.status !== 0 || !envelope.ok) {
+    const reason = ['lock_occupied', 'not_found', 'operation_failed', 'operation_unsupported', 'unsafe']
+      .includes(envelope.error) ? envelope.error : 'failed';
+    fail(`pulse_windows_plugin_adapter_${reason}`);
+  }
   return envelope.result;
 }
 
@@ -96,15 +100,27 @@ function validatedBinary(catalogRoot, architecture) {
       createHash('sha256').update(readFileSync(canonicalBinary)).digest('hex') !== entry.sha256) {
     fail('pulse_windows_plugin_adapter_unsafe');
   }
-  return { binaryPath: canonicalBinary, target };
+  return { binaryPath: canonicalBinary, bytes: entry.bytes, sha256: entry.sha256, target };
 }
 
 export function loadPluginWindowsAdapter({
   architecture = process.arch,
   catalogRoot = defaultCatalogRoot,
+  executionCatalogRoot,
   invoke = invokeBinary,
 } = {}) {
-  const { binaryPath, target } = validatedBinary(catalogRoot, architecture);
+  const trusted = validatedBinary(catalogRoot, architecture);
+  let executable = trusted;
+  if (executionCatalogRoot !== undefined) {
+    const candidate = validatedBinary(executionCatalogRoot, architecture);
+    if (candidate.target !== trusted.target || candidate.bytes !== trusted.bytes ||
+        candidate.sha256 !== trusted.sha256) {
+      fail('pulse_windows_plugin_adapter_execution_mismatch');
+    }
+    executable = candidate;
+  }
+  const { binaryPath } = executable;
+  const { target } = trusted;
   const call = (operation, payload = {}) => invoke({ binaryPath, operation, payload, target });
   let contractVerified = false;
   const verifyContract = (contract) => {

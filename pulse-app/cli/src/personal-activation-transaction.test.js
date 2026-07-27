@@ -59,3 +59,48 @@ test('Codex adapter completes fallible file preflight before creating a plugin b
   assert.notEqual(pluginSnapshot, -1);
   assert.ok(filePreflight < pluginSnapshot, 'plugin backup was created before fallible file preflight');
 });
+
+test('Windows install prewarm budget stays separate from the first-value gate', () => {
+  const prewarm = between(
+    'function personalHostWorkerPrewarmTimeout',
+    'function personalInstallHostRegistry',
+  );
+  assert.match(prewarm, /platform === 'win32' \? 180_000 : 60_000/);
+  assert.match(prewarm, /content_free: true/);
+  assert.match(prewarm, /hook_worker_prewarm_failure\.v1/);
+});
+
+test('Claude adapter grants workspace access before enabling its MCP and rolls it back on failure', () => {
+  const registry = between(
+    'function personalInstallHostRegistry(targets)',
+    'function personalInstallCoreHealth',
+  );
+  const claudeAdapter = registry.slice(
+    registry.indexOf("'claude-code': {"),
+    registry.indexOf('codex: {'),
+  );
+  const accessGrant = claudeAdapter.indexOf('writeProductHostAccess({');
+  const captureGrant = claudeAdapter.indexOf('writeCaptureStateFiles({');
+  const pluginActivation = claudeAdapter.indexOf('activateClaudePlugin(');
+  assert.notEqual(accessGrant, -1);
+  assert.notEqual(captureGrant, -1);
+  assert.notEqual(pluginActivation, -1);
+  assert.ok(
+    accessGrant < pluginActivation,
+    'Claude MCP was enabled before its workspace access existed',
+  );
+  assert.ok(
+    captureGrant < pluginActivation,
+    'Claude MCP was enabled before capture was enabled for its host',
+  );
+  assert.match(claudeAdapter, /catch \(error\) \{[\s\S]*restoreLocalFiles\(localFiles\)/);
+});
+
+test('Claude local MCP removal does not reject a same-name server from another scope', () => {
+  const removal = between(
+    'function removeClaudeCodeExternalRegistration',
+    'function installClaudeCode',
+  );
+  assert.match(removal, /\['mcp', 'remove', 'pulse', '--scope', 'local'\]/);
+  assert.doesNotMatch(removal, /\['mcp', 'get', 'pulse'\]/);
+});

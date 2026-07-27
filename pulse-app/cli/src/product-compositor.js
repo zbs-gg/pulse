@@ -24,10 +24,14 @@ function canonicalIDs(value, code) {
   return Object.freeze([...new Set(value.map((item) => safeID(item, code)))].sort());
 }
 
-function manifest(objectIDs = [], evidenceIDs = []) {
+function manifest(objectIDs = [], evidenceIDs = [], memorySnapshotDigest) {
+  if (memorySnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(memorySnapshotDigest)) {
+    throw new Error('resume_manifest_invalid');
+  }
   return Object.freeze({
     object_ids: canonicalIDs(objectIDs, 'resume_manifest_invalid'),
     evidence_ids: canonicalIDs(evidenceIDs, 'resume_manifest_invalid'),
+    ...(memorySnapshotDigest === undefined ? {} : { memory_snapshot_digest: memorySnapshotDigest }),
   });
 }
 
@@ -71,6 +75,10 @@ export function createContinuityDeliveryOffer(resolved, event, payload, rendered
     .update(`session\x1f${event.session_id}`).digest('hex')}`;
   const objectIDs = canonicalIDs(renderedManifest?.object_ids, 'resume_manifest_invalid');
   const evidenceIDs = canonicalIDs(renderedManifest?.evidence_ids, 'resume_manifest_invalid');
+  const memorySnapshotDigest = renderedManifest?.memory_snapshot_digest;
+  if (memorySnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(memorySnapshotDigest)) {
+    throw new Error('resume_manifest_invalid');
+  }
   const baseline = localBaseline(renderedManifest);
   const contextID = `context_${createHash('sha256').update([
     'pulse-continuity-context-v1', resolved.binding.binding_digest,
@@ -106,6 +114,7 @@ export function createContinuityDeliveryOffer(resolved, event, payload, rendered
   ].join('\x1f');
   return Object.freeze({
     offer,
+    ...(memorySnapshotDigest === undefined ? {} : { memory_snapshot_digest: memorySnapshotDigest }),
     idempotencyKey: `continuity-offer:${createHash('sha256')
       .update(idempotencyMaterial).digest('hex')}`,
   });
@@ -123,10 +132,24 @@ export async function persistContinuityDelivery(output, payload, {
     return request(resolved, '/continuity/delivery/offers', {
       body: offer,
       idempotencyKey,
-      timeoutMs: 1200,
+      timeoutMs: 2500,
     });
   });
-  const receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  let receipt;
+  try {
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  } catch (error) {
+    const status = error?.status;
+    const code = error?.code ?? error?.cause?.code;
+    const transient = error?.name === 'TimeoutError' || error?.name === 'AbortError' ||
+      ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
+      status === 408 || status === 425 || status === 429 || status >= 500;
+    if (!transient) throw error;
+    // The native source event supplies an exact idempotency key. Retrying the
+    // same offer can recover a slow local daemon without creating a second
+    // delivery fact when the first request committed before its timeout.
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  }
   return Object.freeze({ resolved: source.resolved, receipt, ...measurement });
 }
 
@@ -145,12 +168,24 @@ function continuityObservationDirectory(resolved) {
   return join(dataDir, 'runtime', 'continuity-observations');
 }
 
+function continuityObservedDirectory(resolved) {
+  return join(resolve(resolved.runtime.data_dir), 'runtime', 'continuity-observed');
+}
+
 function continuityObservationTicketPath(resolved, host, sessionRef) {
   if (!['codex', 'claude-code', 'cursor'].includes(host) ||
       !/^session:[a-f0-9]{64}$/.test(sessionRef ?? '')) {
     throw new Error('continuity_observation_identity_invalid');
   }
   return join(continuityObservationDirectory(resolved), `${host}-${sessionRef.slice('session:'.length)}.json`);
+}
+
+function continuityObservedMarkerPath(resolved, host, sessionRef) {
+  if (!['codex', 'claude-code', 'cursor'].includes(host) ||
+      !/^session:[a-f0-9]{64}$/.test(sessionRef ?? '')) {
+    throw new Error('continuity_observation_identity_invalid');
+  }
+  return join(continuityObservedDirectory(resolved), `${host}-${sessionRef.slice('session:'.length)}.json`);
 }
 
 function observationTicket(delivery) {
@@ -166,8 +201,14 @@ function observationTicket(delivery) {
       receipt.repository_id !== resolved?.binding?.workspace?.repository_id) {
     throw new Error('continuity_observation_offer_receipt_invalid');
   }
+  const memorySnapshotDigest = delivery?.memory_snapshot_digest;
+  if (memorySnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(memorySnapshotDigest)) {
+    throw new Error('continuity_observation_offer_receipt_invalid');
+  }
   return Object.freeze({
-    schema: 'pulse.continuity_observation_ticket.v1',
+    schema: memorySnapshotDigest === undefined
+      ? 'pulse.continuity_observation_ticket.v1'
+      : 'pulse.continuity_observation_ticket.v2',
     offer_receipt_id: receipt.receipt_id,
     context_id: receipt.context_id,
     binding_digest: receipt.binding_digest,
@@ -175,6 +216,7 @@ function observationTicket(delivery) {
     host: receipt.host,
     session_ref: receipt.session_ref,
     offer_source_event_digest: receipt.source_event_digest,
+    ...(memorySnapshotDigest === undefined ? {} : { memory_snapshot_digest: memorySnapshotDigest }),
     expires_at: new Date(Date.parse(receipt.created_at) + 7 * 24 * 60 * 60 * 1000).toISOString(),
   });
 }
@@ -202,18 +244,24 @@ function readObservationTicket(resolved, event, platformServices) {
   if (bytes === null) return undefined;
   let ticket;
   try { ticket = JSON.parse(bytes); } catch { throw new Error('continuity_observation_ticket_invalid'); }
-  const ticketFields = [
+  const ticketFieldsV1 = [
     'binding_digest', 'context_id', 'expires_at', 'host', 'offer_receipt_id',
     'offer_source_event_digest', 'repository_id', 'schema', 'session_ref',
   ];
+  const ticketFieldsV2 = [...ticketFieldsV1, 'memory_snapshot_digest'].sort();
+  const expectedFields = ticket?.schema === 'pulse.continuity_observation_ticket.v2'
+    ? ticketFieldsV2
+    : ticketFieldsV1;
   if (!ticket || typeof ticket !== 'object' || Array.isArray(ticket) ||
-      Object.keys(ticket).sort().join('\0') !== ticketFields.join('\0') ||
-      ticket.schema !== 'pulse.continuity_observation_ticket.v1' ||
+      Object.keys(ticket).sort().join('\0') !== [...expectedFields].sort().join('\0') ||
+      !['pulse.continuity_observation_ticket.v1', 'pulse.continuity_observation_ticket.v2'].includes(ticket.schema) ||
       !isStableHostID(ticket.offer_receipt_id) || !isStableHostID(ticket.context_id) ||
       ticket.binding_digest !== resolved.binding.binding_digest ||
       ticket.repository_id !== resolved.binding.workspace.repository_id ||
       ticket.host !== event.host || ticket.session_ref !== sessionRef ||
       !/^[a-f0-9]{64}$/.test(ticket.offer_source_event_digest ?? '') ||
+      (ticket.schema === 'pulse.continuity_observation_ticket.v2' &&
+        !/^[a-f0-9]{64}$/.test(ticket.memory_snapshot_digest ?? '')) ||
       typeof ticket.expires_at !== 'string' || Number.isNaN(Date.parse(ticket.expires_at)) ||
       Date.parse(ticket.expires_at) <= Date.now()) {
     throw new Error('continuity_observation_ticket_invalid');
@@ -221,9 +269,85 @@ function readObservationTicket(resolved, event, platformServices) {
   return { path, ticket };
 }
 
+function observationMarker(ticket, receipt) {
+  if (receipt?.schema !== 'pulse.continuity_delivery_receipt.v1' ||
+      receipt.state !== 'host_observed' || !isStableHostID(receipt.receipt_id) ||
+      receipt.context_id !== ticket.context_id || receipt.parent_receipt_id !== ticket.offer_receipt_id ||
+      receipt.binding_digest !== ticket.binding_digest || receipt.repository_id !== ticket.repository_id ||
+      receipt.host !== ticket.host || receipt.session_ref !== ticket.session_ref ||
+      typeof receipt.created_at !== 'string' || Number.isNaN(Date.parse(receipt.created_at))) {
+    throw new Error('continuity_observation_receipt_invalid');
+  }
+  return Object.freeze({
+    schema: ticket.schema === 'pulse.continuity_observation_ticket.v2'
+      ? 'pulse.continuity_observed_marker.v2'
+      : 'pulse.continuity_observed_marker.v1',
+    offer_receipt_id: ticket.offer_receipt_id,
+    observation_receipt_id: receipt.receipt_id,
+    context_id: ticket.context_id,
+    binding_digest: ticket.binding_digest,
+    repository_id: ticket.repository_id,
+    host: ticket.host,
+    session_ref: ticket.session_ref,
+    ...(ticket.memory_snapshot_digest === undefined
+      ? {}
+      : { memory_snapshot_digest: ticket.memory_snapshot_digest }),
+    observed_at: receipt.created_at,
+  });
+}
+
+function readObservedMarker(resolved, event, platformServices) {
+  const sessionRef = continuitySessionRef(event?.session_id);
+  const path = continuityObservedMarkerPath(resolved, event?.host, sessionRef);
+  const bytes = platformServices.readPrivateFile(path, { missing: true, minBytes: 1, maxBytes: 4096 });
+  if (bytes === null) return undefined;
+  let marker;
+  try { marker = JSON.parse(bytes); } catch { throw new Error('continuity_observed_marker_invalid'); }
+  const fieldsV1 = [
+    'binding_digest', 'context_id', 'host', 'observation_receipt_id', 'observed_at',
+    'offer_receipt_id', 'repository_id', 'schema', 'session_ref',
+  ];
+  const fieldsV2 = [...fieldsV1, 'memory_snapshot_digest'].sort();
+  const expectedFields = marker?.schema === 'pulse.continuity_observed_marker.v2'
+    ? fieldsV2
+    : fieldsV1;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker) ||
+      Object.keys(marker).sort().join('\0') !== [...expectedFields].sort().join('\0') ||
+      !['pulse.continuity_observed_marker.v1', 'pulse.continuity_observed_marker.v2'].includes(marker.schema) ||
+      !isStableHostID(marker.offer_receipt_id) || !isStableHostID(marker.observation_receipt_id) ||
+      !isStableHostID(marker.context_id) ||
+      marker.binding_digest !== resolved.binding.binding_digest ||
+      marker.repository_id !== resolved.binding.workspace.repository_id ||
+      marker.host !== event.host || marker.session_ref !== sessionRef ||
+      (marker.schema === 'pulse.continuity_observed_marker.v2' &&
+        !/^[a-f0-9]{64}$/.test(marker.memory_snapshot_digest ?? '')) ||
+      typeof marker.observed_at !== 'string' || Number.isNaN(Date.parse(marker.observed_at))) {
+    throw new Error('continuity_observed_marker_invalid');
+  }
+  return marker;
+}
+
+export function hasContinuitySessionDelivery(resolved, event, {
+  platformServices = defaultPlatformServices,
+  expectedMemorySnapshotDigest,
+} = {}) {
+  if (expectedMemorySnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(expectedMemorySnapshotDigest)) {
+    throw new Error('continuity_observed_marker_invalid');
+  }
+  const marker = readObservedMarker(resolved, event, platformServices);
+  if (!marker) return false;
+  return expectedMemorySnapshotDigest === undefined ||
+    (marker.schema === 'pulse.continuity_observed_marker.v2' &&
+      marker.memory_snapshot_digest === expectedMemorySnapshotDigest);
+}
+
 export function createContinuityDeliveryObservation(ticket, event) {
-  if (event?.event !== 'turn_start' || event?.native_event !== 'UserPromptSubmit' ||
-      event?.source !== 'prompt_submitted' || !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '') ||
+  const promptObservation = event?.event === 'turn_start' &&
+    event?.native_event === 'UserPromptSubmit' && event?.source === 'prompt_submitted';
+  const stopObservation = event?.event === 'turn_finalize' &&
+    event?.native_event === 'Stop' && event?.source === 'stop';
+  if ((!promptObservation && !stopObservation) ||
+      !/^event_[a-f0-9]{64}$/.test(event?.source_event_key ?? '') ||
       event.host !== ticket?.host || continuitySessionRef(event.session_id) !== ticket?.session_ref) {
     throw new Error('continuity_observation_event_invalid');
   }
@@ -270,6 +394,14 @@ export async function observePendingContinuityDelivery(resolved, event, {
         receipt.host !== pending.ticket.host || receipt.session_ref !== pending.ticket.session_ref) {
       throw new Error('continuity_observation_receipt_invalid');
     }
+    const marker = observationMarker(pending.ticket, receipt);
+    const markerDirectory = continuityObservedDirectory(resolved);
+    platformServices.ensurePrivateDirectory(markerDirectory);
+    platformServices.atomicWritePrivateFile(
+      continuityObservedMarkerPath(resolved, marker.host, marker.session_ref),
+      `${JSON.stringify(marker)}\n`,
+      { ensureParent: false, maxBytes: 4096 },
+    );
     platformServices.removePrivateFile(pending.path, { missing: false });
     return receipt;
   } finally {
@@ -344,7 +476,11 @@ export async function composeBoundResumeEvidence(resolved, event, {
     idempotencyKey: event.idempotency_key,
   });
   const evidence = [localEvidence(resolved.binding, local)];
-  const localManifest = manifest(local.included_object_ids, local.included_evidence_ids);
+  const localManifest = manifest(
+    local.included_object_ids,
+    local.included_evidence_ids,
+    local.memory_snapshot_digest,
+  );
   if (resolved.binding.mode !== 'team') {
     return Object.freeze({
       evidence: Object.freeze(evidence),
@@ -371,6 +507,7 @@ export async function composeBoundResumeEvidence(resolved, event, {
       manifest: manifest(
         [...localManifest.object_ids, ...remoteManifest.object_ids],
         localManifest.evidence_ids,
+        localManifest.memory_snapshot_digest,
       ),
       commons: Object.freeze({ status: 'active', returned_count: remote.returned_count, fallback: false }),
     });

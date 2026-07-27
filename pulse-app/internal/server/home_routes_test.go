@@ -207,6 +207,65 @@ func TestMemoryHomeOrdinarySessionNeedsNoNativePresenceAndGrantsNoProtectedRoute
 	}
 }
 
+func TestMemoryHomeFiltersCompleteEligibleFeedServerSideWithStrictQueryAllowlist(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	alpha := newHomeRoutePending(t, vault, "filter_alpha", "Alpha launch uses the quiet memory path.")
+	beta := newHomeRoutePending(t, vault, "filter_beta", "Beta archive stays separate.")
+	for _, candidate := range []store.MemoryTrayCandidateView{alpha, beta} {
+		if _, err := vault.CommitMemoryTrayCandidate(
+			candidate.CandidateID, candidate.Version, time.Now().UTC(),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := homePageRequest(srv, session)
+	request.URL.RawQuery = url.Values{
+		"q": {"alpha launch"}, "project": {"repository_pulse"},
+		"harness": {"codex"}, "scope": {store.MemoryScopeProject},
+		"sharing": {"unknown"},
+	}.Encode()
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filtered Home status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, want := range []string{
+		"Alpha launch uses the quiet memory path.", `value="alpha launch"`,
+		`value="repository_pulse" selected`, `value="codex" selected`,
+		`value="project" selected`, `value="unknown" selected`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("filtered Home missing %q", want)
+		}
+	}
+	feedStart := strings.Index(body, `<section class="feed"`)
+	feedEnd := -1
+	if feedStart >= 0 {
+		if relative := strings.Index(body[feedStart:], "</section>"); relative >= 0 {
+			feedEnd = feedStart + relative
+		}
+	}
+	if feedStart < 0 || feedEnd < 0 {
+		t.Fatal("filtered Home feed boundary is missing")
+	}
+	if strings.Contains(body[feedStart:feedEnd], "Beta archive stays separate.") {
+		t.Fatal("server-side filter returned a non-matching memory")
+	}
+
+	hostile := homePageRequest(srv, session)
+	hostile.URL.RawQuery = "capability=leak"
+	rejected := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rejected, hostile)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("unknown Home query status=%d", rejected.Code)
+	}
+}
+
 func TestHomeProtectedWipeBindsTheExactSnapshotAndConsumesPresenceOnce(t *testing.T) {
 	srv, vault := newHomeRouteFixture(t)
 	seedHomeProtectedWipeCapsule(t, vault, "capsule_protected", "Private content must never enter the protected receipt.")
@@ -457,7 +516,9 @@ func TestHomeRouterIsolatedFromIPCAndCORSAndRendersRealReadModel(t *testing.T) {
 	}
 	assertHomeHeaders(t, response.Header())
 	csp := response.Header().Get("Content-Security-Policy")
-	for _, directive := range []string{"connect-src 'self'", "script-src 'self'", "style-src 'unsafe-inline'", "frame-ancestors 'none'"} {
+	for _, directive := range []string{
+		"script-src 'self'", "style-src 'unsafe-inline'", "connect-src 'self'", "frame-ancestors 'none'",
+	} {
 		if !strings.Contains(csp, directive) {
 			t.Fatalf("Home CSP missing %q: %q", directive, csp)
 		}
@@ -541,8 +602,8 @@ func TestHomeUnassignedCardHasZeroInfluenceUntilExactProjectAssignment(t *testin
 	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
 		t.Fatal(err)
 	}
-	if active != 0 || pending != 1 {
-		t.Fatalf("assignment bypassed ordinary Tray: active=%d pending=%d", active, pending)
+	if active != 1 || pending != 0 {
+		t.Fatalf("assignment was not saved immediately: active=%d pending=%d", active, pending)
 	}
 	var provenanceHost string
 	if err := vault.DB().QueryRow(`SELECT provenance_host FROM memory_write_receipts ORDER BY created_at DESC, receipt_id DESC LIMIT 1`).Scan(&provenanceHost); err != nil {
@@ -560,13 +621,16 @@ func TestHomeUnassignedCardHasZeroInfluenceUntilExactProjectAssignment(t *testin
 	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='pending'`).Scan(&pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending != 1 {
-		t.Fatalf("assign retry duplicated Tray candidates: %d", pending)
+	if err := vault.DB().QueryRow(`SELECT COUNT(*) FROM private_memory_objects WHERE lifecycle='active'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 || active != 1 {
+		t.Fatalf("assign retry duplicated memory: active=%d pending=%d", active, pending)
 	}
 	completedPage := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(completedPage, homePageRequest(srv, session))
 	if completedPage.Code != http.StatusOK ||
-		!strings.Contains(completedPage.Body.String(), "Moved to this project’s Tray") ||
+		!strings.Contains(completedPage.Body.String(), "Saved to this project") ||
 		!strings.Contains(completedPage.Body.String(), "No unassigned memories") {
 		t.Fatalf("assignment receipt not visible: status=%d body=%s", completedPage.Code, completedPage.Body.String())
 	}
@@ -842,7 +906,7 @@ func TestHomeNeverPromotesNonReadySnapshotAndDowngradesReadyWhenRetrievalDisappe
 		t.Fatalf("server failed to downgrade warming retrieval: %s", warmingPage.Body.String())
 	}
 }
-func TestHomePresentationCreatesExactReceiptAndGETCannotMutate(t *testing.T) {
+func TestHomePresentationCreatesAuditReceiptAndGETCannotMutate(t *testing.T) {
 	srv, vault := newHomeRouteFixture(t)
 	pending := newHomeRoutePending(t, vault, "presentation", "Show the exact memory before saving it.")
 	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
@@ -880,6 +944,20 @@ func TestHomePresentationCreatesExactReceiptAndGETCannotMutate(t *testing.T) {
 	if presentationCount != 1 {
 		t.Fatalf("presentation receipts=%d, want 1", presentationCount)
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		current := homeRouteCandidate(t, vault, pending.CandidateID)
+		srv.trayScheduleMu.Lock()
+		scheduled := len(srv.traySchedules)
+		srv.trayScheduleMu.Unlock()
+		if current.State == "committed" && current.CanonicalObjectID != "" && scheduled == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("presentation audit did not converge immediately: candidate=%#v schedules=%d", current, scheduled)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	get := httptest.NewRequest(http.MethodGet, testViewerSessionOrigin+viewerSessionRoutePath(session.RouteScope)+"present", nil)
 	get.Host = srv.homeSessions.expectedHost
@@ -899,13 +977,12 @@ func TestHomePresentationCreatesExactReceiptAndGETCannotMutate(t *testing.T) {
 	assertHomeHeaders(t, getResponse.Header())
 }
 
-func TestHomeRoutePresentationGraceAndCommitCreatesCanonicalReceipt(t *testing.T) {
+func TestHomeRoutePresentationDoesNotDelayCanonicalReceipt(t *testing.T) {
 	srv, vault := newHomeRouteFixture(t)
-	pending := newHomeRoutePending(t, vault, "route_commit", "Commit only after the exact visible delay.")
+	pending := newHomeRoutePending(t, vault, "route_commit", "Home visibility is optional audit, never a save delay.")
 	clock := &viewerSessionTestClock{now: time.Now().UTC()}
 	srv.homePresentation.clock = clock.Now
 	srv.homeSessions.clock = clock.Now
-	srv.homePresentation.schedule = func(store.MemoryPresentationReceipt, time.Duration) {}
 	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
 	if err != nil {
 		t.Fatal(err)
@@ -927,17 +1004,22 @@ func TestHomeRoutePresentationGraceAndCommitCreatesCanonicalReceipt(t *testing.T
 	}
 	immediate := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(immediate, homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/commit", commitForm))
-	if immediate.Code != http.StatusTooEarly {
+	if immediate.Code != http.StatusNoContent && immediate.Code != http.StatusConflict {
 		t.Fatalf("immediate commit status=%d body=%s", immediate.Code, immediate.Body.String())
 	}
 
-	clock.Advance(31 * time.Second)
-	committed := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(committed, homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/commit", commitForm))
-	if committed.Code != http.StatusNoContent {
-		t.Fatalf("post-grace commit status=%d body=%s", committed.Code, committed.Body.String())
+	deadline := time.Now().Add(time.Second)
+	var canonical store.MemoryTrayCandidateView
+	for {
+		canonical = homeRouteCandidate(t, vault, pending.CandidateID)
+		if canonical.State == "committed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("presentation did not converge without grace: %#v", canonical)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	canonical := homeRouteCandidate(t, vault, pending.CandidateID)
 	if canonical.State != "committed" || canonical.CanonicalObjectID == "" ||
 		canonical.LatestReceipt.ReceiptID == "" || canonical.LatestReceipt.ObjectID != canonical.CanonicalObjectID ||
 		canonical.LatestReceipt.Status != store.MemoryWriteCreated {
@@ -970,8 +1052,7 @@ func TestMemoryHomeBrowserScriptPresentsOnlyVisibleCardsAfterPaint(t *testing.T)
 
 func TestMemoryHomeBrowserScriptIsolatesPresentationAndMutationFailures(t *testing.T) {
 	for _, want := range []string{
-		"Review delay did not start. Refresh Home to retry.",
-		"Review delay could not be confirmed. Refresh Home to retry.",
+		"Activity audit is unavailable. Pulse keeps retrying the save automatically.",
 		"present(card).finally(() => {",
 		"activePresentations -= 1;",
 		"if (!response.ok) {",
@@ -1015,7 +1096,7 @@ func TestMemoryHomeBrowserScriptRequiresExplicitProtectedWipeCompletion(t *testi
 	}
 }
 
-func TestHomeTrayEditThenCancelKeepsMemoryOutOfRecall(t *testing.T) {
+func TestHomeTrayEditCommitsImmediatelyAndDeleteRemovesRecall(t *testing.T) {
 	srv, vault := newHomeRouteFixture(t)
 	pending := newHomeRoutePending(t, vault, "edit_cancel", "Keep the original private summary.")
 	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
@@ -1041,21 +1122,110 @@ func TestHomeTrayEditThenCancelKeepsMemoryOutOfRecall(t *testing.T) {
 	}
 
 	edited := homeRouteCandidate(t, vault, pending.CandidateID)
-	if edited.Version != pending.Version+1 || edited.Candidate.Capsule.Items[0].RedactedSummary != "Keep only the edited private summary." || edited.GraceExpiresAt != "" {
+	if edited.Version != pending.Version+1 || edited.State != "committed" ||
+		edited.CanonicalObjectID == "" ||
+		edited.Candidate.Capsule.Items[0].RedactedSummary != "Keep only the edited private summary." {
 		t.Fatalf("edited candidate=%#v", edited)
 	}
-	cancel := homeMutationRequest(srv, session, "tray/"+pending.CandidateID+"/cancel", url.Values{
+	canonicalEdit := homeMutationRequest(srv, session, "memory/"+edited.CanonicalObjectID+"/edit", url.Values{
 		viewerSessionCSRFFormField: {session.CSRFToken},
-		"expected_version":         {strconv.Itoa(edited.Version)},
+		"summary":                  {"Keep the simple Home edit, with no approval step."},
+		"expected_generation":      {"1"},
 	})
-	cancelResponse := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(cancelResponse, cancel)
-	if cancelResponse.Code != http.StatusNoContent {
-		t.Fatalf("cancel status=%d body=%s", cancelResponse.Code, cancelResponse.Body.String())
+	canonicalEditResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(canonicalEditResponse, canonicalEdit)
+	if canonicalEditResponse.Code != http.StatusNoContent {
+		t.Fatalf("canonical edit status=%d body=%s", canonicalEditResponse.Code, canonicalEditResponse.Body.String())
 	}
-	canceled := homeRouteCandidate(t, vault, pending.CandidateID)
-	if canceled.State != "canceled" || canceled.Candidate.Capsule != nil || canceled.Candidate.SemanticDelta != nil {
-		t.Fatalf("canceled candidate retained private content: %#v", canceled)
+	var correctedSummary string
+	if err := vault.DB().QueryRow(
+		`SELECT redacted_summary FROM memory_capsules WHERE id=?`, edited.CanonicalObjectID,
+	).Scan(&correctedSummary); err != nil {
+		t.Fatal(err)
+	}
+	if correctedSummary != "Keep the simple Home edit, with no approval step." {
+		t.Fatalf("canonical edit summary=%q", correctedSummary)
+	}
+	var correctedReceipts int
+	if err := vault.DB().QueryRow(`
+		SELECT COUNT(*) FROM memory_write_receipts
+		 WHERE object_id=? AND status='updated' AND reason_code='user_corrected'`,
+		edited.CanonicalObjectID,
+	).Scan(&correctedReceipts); err != nil {
+		t.Fatal(err)
+	}
+	if correctedReceipts != 1 {
+		t.Fatalf("canonical edit receipts=%d, want 1", correctedReceipts)
+	}
+	staleEdit := homeMutationRequest(srv, session, "memory/"+edited.CanonicalObjectID+"/edit", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"summary":                  {"A stale tab must not overwrite the newer generation."},
+		"expected_generation":      {"1"},
+	})
+	staleEditResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(staleEditResponse, staleEdit)
+	if staleEditResponse.Code != http.StatusConflict {
+		t.Fatalf(
+			"stale canonical edit status=%d body=%s",
+			staleEditResponse.Code, staleEditResponse.Body.String(),
+		)
+	}
+	var generation int
+	if err := vault.DB().QueryRow(`
+		SELECT logical_generation FROM private_memory_objects WHERE object_id=?`,
+		edited.CanonicalObjectID,
+	).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	moveGlobal := homeMutationRequest(srv, session, "memory/"+edited.CanonicalObjectID+"/move", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_generation":      {strconv.Itoa(generation)},
+		"target_scope":             {store.MemoryScopePersonalGlobal},
+	})
+	moveGlobalResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(moveGlobalResponse, moveGlobal)
+	if moveGlobalResponse.Code != http.StatusNoContent {
+		t.Fatalf("move global status=%d body=%s", moveGlobalResponse.Code, moveGlobalResponse.Body.String())
+	}
+	var scope string
+	if err := vault.DB().QueryRow(`
+		SELECT memory_scope, logical_generation
+		  FROM private_memory_objects WHERE object_id=?`,
+		edited.CanonicalObjectID,
+	).Scan(&scope, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if scope != store.MemoryScopePersonalGlobal {
+		t.Fatalf("scope after global move=%q", scope)
+	}
+	moveProject := homeMutationRequest(srv, session, "memory/"+edited.CanonicalObjectID+"/move", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_generation":      {strconv.Itoa(generation)},
+		"target_scope":             {store.MemoryScopeProject},
+	})
+	moveProjectResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(moveProjectResponse, moveProject)
+	if moveProjectResponse.Code != http.StatusNoContent {
+		t.Fatalf("move project status=%d body=%s", moveProjectResponse.Code, moveProjectResponse.Body.String())
+	}
+	if err := vault.DB().QueryRow(`
+		SELECT memory_scope, logical_generation
+		  FROM private_memory_objects WHERE object_id=?`,
+		edited.CanonicalObjectID,
+	).Scan(&scope, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if scope != store.MemoryScopeProject {
+		t.Fatalf("scope after project move=%q", scope)
+	}
+	deleteRequest := homeMutationRequest(srv, session, "memory/"+edited.CanonicalObjectID+"/delete", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken},
+		"expected_generation":      {strconv.Itoa(generation)},
+	})
+	deleteResponse := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
 	}
 	home, err := vault.BuildMemoryHomeData(store.MemoryHomeQuery{
 		RepositoryID: "repository_pulse", BindingDigest: strings.Repeat("a", 64), GeneratedAt: time.Now().UTC(),
@@ -1065,7 +1235,7 @@ func TestHomeTrayEditThenCancelKeepsMemoryOutOfRecall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if home.Memories.ActiveCount != 0 || len(home.Memories.LatestActive) != 0 {
-		t.Fatalf("canceled memory entered canonical recall: %#v", home.Memories)
+		t.Fatalf("deleted memory remained in canonical recall: %#v", home.Memories)
 	}
 }
 

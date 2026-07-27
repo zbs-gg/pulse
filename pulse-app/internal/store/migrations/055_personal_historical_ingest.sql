@@ -332,7 +332,7 @@ BEFORE UPDATE ON historical_ingest_item_receipts
 BEGIN SELECT RAISE(ABORT, 'historical ingest item receipts are immutable'); END;
 
 UPDATE store_identity
-   SET min_reader_version = 53,
-       min_writer_version = 53
+   SET min_reader_version = 55,
+       min_writer_version = 55
  WHERE singleton = 1
    AND store_kind IN ('personal', 'desk');

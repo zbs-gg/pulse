@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -66,19 +67,23 @@ func ProjectReadinessLifecycleInputs(
 	result.TerminalMemory = &terminal
 	result.State = "context_offer_pending"
 
-	offered, offeredTime, ok := firstMatchingContextFact(deliveries, terminal, terminalTime, "offered_to_host", nil)
-	if !ok {
+	offers := matchingContextFacts(deliveries, terminal, terminalTime, "offered_to_host", nil)
+	if len(offers) == 0 {
 		return result
 	}
-	result.OfferedToHost = &offered
+	result.OfferedToHost = &offers[0].fact
 	result.State = "host_observation_pending"
 
-	observed, _, ok := firstMatchingContextFact(deliveries, terminal, offeredTime, "host_observed", &offered)
-	if !ok {
+	for _, offer := range offers {
+		observations := matchingContextFacts(deliveries, terminal, offer.at, "host_observed", &offer.fact)
+		if len(observations) == 0 {
+			continue
+		}
+		result.OfferedToHost = &offer.fact
+		result.HostObserved = &observations[0].fact
+		result.State = "ready"
 		return result
 	}
-	result.HostObserved = &observed
-	result.State = "ready"
 	return result
 }
 
@@ -93,7 +98,8 @@ func firstTerminalMemoryReadinessFact(facts []TerminalMemoryReadinessFact) (Term
 		terminalStatus := fact.Status == string(store.MemoryWriteCreated) ||
 			fact.Status == string(store.MemoryWriteUpdated) || fact.Status == string(store.MemoryWriteDeduplicated)
 		if !validTime || !terminalStatus || !fact.Active || !validReadinessScalar(fact.ReceiptID) ||
-			!validReadinessScalar(fact.PresentationReceiptID) || !validReadinessScalar(fact.ObjectID) ||
+			(fact.PresentationReceiptID != "" && !validReadinessScalar(fact.PresentationReceiptID)) ||
+			!validReadinessScalar(fact.ObjectID) ||
 			!readinessDigest(fact.ContentDigest) || !validReadinessScalar(fact.MemoryKind) ||
 			fact.MemoryKind == "system_event" || !validReadinessScalar(fact.ConversationScope) ||
 			fact.ConversationScope == "install_event" || !readinessDigest(fact.BindingDigest) ||
@@ -118,18 +124,19 @@ func firstTerminalMemoryReadinessFact(facts []TerminalMemoryReadinessFact) (Term
 	return valid[0].fact, valid[0].at, true
 }
 
-func firstMatchingContextFact(
+type contextReadinessCandidate struct {
+	fact ContextDeliveryReadinessFact
+	at   time.Time
+}
+
+func matchingContextFacts(
 	facts []ContextDeliveryReadinessFact,
 	terminal TerminalMemoryReadinessFact,
 	after time.Time,
 	acknowledgement string,
 	offered *ContextDeliveryReadinessFact,
-) (ContextDeliveryReadinessFact, time.Time, bool) {
-	type candidate struct {
-		fact ContextDeliveryReadinessFact
-		at   time.Time
-	}
-	valid := make([]candidate, 0, len(facts))
+) []contextReadinessCandidate {
+	valid := make([]contextReadinessCandidate, 0, len(facts))
 	for _, fact := range facts {
 		at, validTime := canonicalReadinessTime(fact.CreatedAt)
 		if !validTime || !at.After(after) || fact.Acknowledgement != acknowledgement ||
@@ -149,10 +156,7 @@ func firstMatchingContextFact(
 		copyFact := fact
 		copyFact.ObjectIDs = append([]string(nil), fact.ObjectIDs...)
 		copyFact.EvidenceIDs = append([]string(nil), fact.EvidenceIDs...)
-		valid = append(valid, candidate{fact: copyFact, at: at})
-	}
-	if len(valid) == 0 {
-		return ContextDeliveryReadinessFact{}, time.Time{}, false
+		valid = append(valid, contextReadinessCandidate{fact: copyFact, at: at})
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].at.Equal(valid[j].at) {
@@ -160,7 +164,7 @@ func firstMatchingContextFact(
 		}
 		return valid[i].at.Before(valid[j].at)
 	})
-	return valid[0].fact, valid[0].at, true
+	return valid
 }
 
 func contextFactReferencesTerminal(fact ContextDeliveryReadinessFact, terminal TerminalMemoryReadinessFact) bool {
@@ -242,11 +246,32 @@ func (s *Server) handleTurnFinalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := s.cfg.Store.FinalizeTurn(req, time.Now().UTC(), s.cfg.TrayGracePeriod)
+	var authority *productBindingAuthority
+	var result store.TurnFinalizeResult
+	var err error
+	if s.cfg.ProductBindingVerifier != nil {
+		verified, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if req.BindingDigest != verified.BindingDigest || req.PolicyEpoch != 0 ||
+			req.ResolverEpoch != verified.ResolverEpoch {
+			http.Error(w, "product binding authority mismatch", http.StatusForbidden)
+			return
+		}
+		authority = &verified
+		result, err = s.cfg.Store.FinalizeTurnForVerifiedBinding(
+			req, time.Now().UTC(), s.cfg.TrayGracePeriod,
+			verified.BindingDigest, verified.RepositoryID, verified.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.FinalizeTurn(req, time.Now().UTC(), s.cfg.TrayGracePeriod)
+	}
 	if err != nil {
 		writeMemoryTrayError(w, err)
 		return
 	}
+	result = s.commitTurnResultNowForAuthority(result, authority)
 	writeJSON(w, result)
 }
 
@@ -256,7 +281,25 @@ func (s *Server) handleTurnNoChange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := s.cfg.Store.FinalizeTurnNoChange(req, time.Now().UTC())
+	var result store.TurnFinalizeResult
+	var err error
+	if s.cfg.ProductBindingVerifier != nil {
+		verified, ok := s.requireProductBindingAuthority(w, r)
+		if !ok {
+			return
+		}
+		if req.BindingDigest != verified.BindingDigest || req.PolicyEpoch != 0 ||
+			req.ResolverEpoch != verified.ResolverEpoch {
+			http.Error(w, "product binding authority mismatch", http.StatusForbidden)
+			return
+		}
+		result, err = s.cfg.Store.FinalizeTurnNoChangeForVerifiedBinding(
+			req, time.Now().UTC(), verified.BindingDigest,
+			verified.RepositoryID, verified.ResolverEpoch,
+		)
+	} else {
+		result, err = s.cfg.Store.FinalizeTurnNoChange(req, time.Now().UTC())
+	}
 	if err != nil {
 		writeMemoryTrayError(w, err)
 		return
@@ -302,6 +345,7 @@ func (s *Server) handleMemoryTrayEdit(w http.ResponseWriter, r *http.Request) {
 		writeMemoryTrayError(w, err)
 		return
 	}
+	receipt = s.commitReceiptNow(receipt)
 	writeJSON(w, receipt)
 }
 
@@ -358,6 +402,7 @@ func (s *Server) handleMemoryCorrect(w http.ResponseWriter, r *http.Request) {
 		writeMemoryTrayError(w, err)
 		return
 	}
+	result = s.commitTurnResultNow(result)
 	writeJSON(w, result)
 }
 
@@ -394,12 +439,92 @@ func writeMemoryTrayError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) scheduleTurnResult(result store.TurnFinalizeResult) {
-	for _, receipt := range result.Receipts {
-		if receipt.Status == store.MemoryWritePending {
-			s.scheduleReceipt(receipt, s.cfg.TrayGracePeriod)
-		}
+// commitTurnResultNow materializes ordinary Personal memory before returning
+// the tool response. A pending candidate remains a durable crash-recovery
+// record, but it is not a user review state.
+func (s *Server) commitTurnResultNow(result store.TurnFinalizeResult) store.TurnFinalizeResult {
+	return s.commitTurnResultNowForAuthority(result, nil)
+}
+
+func (s *Server) commitTurnResultNowForAuthority(
+	result store.TurnFinalizeResult,
+	authority *productBindingAuthority,
+) store.TurnFinalizeResult {
+	for index, receipt := range result.Receipts {
+		result.Receipts[index] = s.commitReceiptNowForAuthority(receipt, authority)
 	}
+	return result
+}
+
+func (s *Server) commitReceiptNow(receipt store.MemoryWriteReceipt) store.MemoryWriteReceipt {
+	return s.commitReceiptNowForAuthority(receipt, nil)
+}
+
+func (s *Server) commitReceiptNowForAuthority(
+	receipt store.MemoryWriteReceipt,
+	authority *productBindingAuthority,
+) store.MemoryWriteReceipt {
+	if receipt.Status != store.MemoryWritePending {
+		return receipt
+	}
+	var committed store.MemoryWriteReceipt
+	var err error
+	if authority != nil {
+		committed, err = s.cfg.Store.CommitMemoryTrayCandidateForVerifiedBinding(
+			receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
+			authority.BindingDigest, authority.RepositoryID, authority.ResolverEpoch,
+		)
+	} else {
+		committed, err = s.cfg.Store.CommitMemoryTrayCandidate(
+			receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
+		)
+	}
+	if err == nil {
+		s.refreshProductRetrieval(committed)
+		return committed
+	}
+	// The candidate itself is already durable. Retry transient materialization
+	// in the background and return the honest pending receipt on failure.
+	if authority == nil && !errors.Is(err, store.ErrMemoryTrayVersionConflict) &&
+		!errors.Is(err, store.ErrMemoryTrayTerminal) {
+		s.scheduleReceipt(receipt, 0)
+	}
+	return receipt
+}
+
+// recoverReceiptNow closes the startup race for rows left by a crash or an
+// older runtime. New must not return while a fresh task could still observe
+// an ambiguous pending write: recovery produces either canonical memory or a
+// content-free terminal failure before the daemon reports ready.
+func (s *Server) recoverReceiptNow(receipt store.MemoryWriteReceipt) error {
+	if receipt.Status != store.MemoryWritePending {
+		return nil
+	}
+	committed, err := s.cfg.Store.CommitMemoryTrayCandidate(
+		receipt.CandidateID, receipt.CandidateVersion, time.Now().UTC(),
+	)
+	if err == nil {
+		s.refreshProductRetrieval(committed)
+		return nil
+	}
+	if errors.Is(err, store.ErrMemoryTrayVersionConflict) || errors.Is(err, store.ErrMemoryTrayTerminal) {
+		return nil
+	}
+	if _, failErr := s.cfg.Store.FailMemoryTrayCandidate(
+		receipt.CandidateID, receipt.CandidateVersion, "commit_failed", time.Now().UTC(),
+	); failErr == nil ||
+		errors.Is(failErr, store.ErrMemoryTrayVersionConflict) ||
+		errors.Is(failErr, store.ErrMemoryTrayTerminal) {
+		return nil
+	} else {
+		return fmt.Errorf("recover memory tray candidate %s: commit: %v; persist failure: %w", receipt.CandidateID, err, failErr)
+	}
+}
+
+// scheduleTurnResult is kept for internal call sites that do not return the
+// receipt body. Normal writes are still attempted synchronously.
+func (s *Server) scheduleTurnResult(result store.TurnFinalizeResult) {
+	_ = s.commitTurnResultNow(result)
 }
 
 func (s *Server) scheduleReceipt(receipt store.MemoryWriteReceipt, delay time.Duration) {
@@ -670,19 +795,29 @@ func (s *Server) recoverMemoryTray() error {
 		}
 		for _, candidate := range candidates {
 			after = candidate.CandidateID
-			delay, presented, err := memoryTrayScheduleDelay(candidate.GraceExpiresAt, time.Now())
-			if err != nil {
-				if _, failErr := s.cfg.Store.FailMemoryTrayCandidate(
-					candidate.CandidateID, candidate.Version, "commit_failed", time.Now().UTC(),
-				); failErr != nil {
-					return failErr
+			graceExpiresAt := candidate.GraceExpiresAt
+			if strings.TrimSpace(graceExpiresAt) == "" {
+				graceExpiresAt, err = s.cfg.Store.EnsureMemoryTrayGraceDeadline(
+					candidate.CandidateID, candidate.Version, time.Now().UTC(), s.cfg.TrayGracePeriod,
+				)
+				if err != nil {
+					if errors.Is(err, store.ErrMemoryTrayVersionConflict) || errors.Is(err, store.ErrMemoryTrayTerminal) {
+						continue
+					}
+					if _, failErr := s.cfg.Store.FailMemoryTrayCandidate(
+						candidate.CandidateID, candidate.Version, "commit_failed", time.Now().UTC(),
+					); failErr != nil {
+						return failErr
+					}
+					continue
 				}
-				continue
 			}
-			if !presented {
-				continue
+			// All pending rows, including rows from the old presentation/grace
+			// runtime, are materialized before New returns. A fresh task cannot
+			// race daemon startup and miss valid recovered memory.
+			if err := s.recoverReceiptNow(candidate.LatestReceipt); err != nil {
+				return err
 			}
-			s.scheduleReceipt(candidate.LatestReceipt, delay)
 		}
 		if len(candidates) < 200 {
 			break

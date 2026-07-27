@@ -48,11 +48,20 @@ async function fixture() {
   const sha256 = createHash('sha256').update(tarball).digest('hex');
   writeFileSync(join(root, 'pulse-0.7.0.tgz'), tarball);
   const candidate = {
+    artifact_set_digest: 'b'.repeat(64),
     commit: COMMIT,
+    dependency_count: 100,
+    host_target_count: 18,
+    hosts: ['claude-code', 'codex', 'cursor'],
+    license_inventory_sha256: 'c'.repeat(64),
     package: '@zbs-gg/pulse',
     production: true,
+    production_ready: true,
+    release_epoch: 8,
+    sbom_sha256: 'd'.repeat(64),
     schema: 'pulse.npm_production_candidate.v1',
     sha256,
+    snapshot_digest: 'e'.repeat(64),
     support_claim: false,
     targets: TARGETS,
     tarball: 'pulse-0.7.0.tgz',

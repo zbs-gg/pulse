@@ -310,23 +310,30 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
   try {
     const target = 'win32-x64';
     const directory = join(root, target);
+    const executionRoot = join(root, 'activated-runtime');
+    const executionDirectory = join(executionRoot, target);
     mkdirSync(directory, { recursive: true });
+    mkdirSync(executionDirectory, { recursive: true });
     const binary = Buffer.from('fixture Windows adapter');
     const binaryPath = join(directory, 'pulse-platform-adapter.exe');
+    const executionBinaryPath = join(executionDirectory, 'pulse-platform-adapter.exe');
     writeFileSync(binaryPath, binary);
+    writeFileSync(executionBinaryPath, binary);
     const sha256 = createHash('sha256').update(binary).digest('hex');
-    writeFileSync(join(root, 'catalog.json'), `${JSON.stringify({
+    const catalog = `${JSON.stringify({
       adapters: { [target]: {
         bytes: binary.length, path: `${target}/pulse-platform-adapter.exe`, sha256, target,
       } },
       protocol: 1,
       schema: 'pulse.windows_bootstrap_adapter_catalog.v1',
-    })}\n`);
+    })}\n`;
+    writeFileSync(join(root, 'catalog.json'), catalog);
+    writeFileSync(join(executionRoot, 'catalog.json'), catalog);
     const calls = [];
     const adapter = loadPluginWindowsAdapter({
-      architecture: 'x64', catalogRoot: root,
-      invoke: ({ operation, payload }) => {
-        calls.push({ operation, payload });
+      architecture: 'x64', catalogRoot: root, executionCatalogRoot: executionRoot,
+      invoke: ({ binaryPath: invokedBinaryPath, operation, payload }) => {
+        calls.push({ binaryPath: invokedBinaryPath, operation, payload });
         if (operation === 'batch') return { results: payload.requests.map(({ operation: nested, request }) => {
           if (nested === 'contract') return {
             operations: WINDOWS_ADAPTER_OPERATIONS,
@@ -366,7 +373,23 @@ test('plugin Windows adapter verifies its signed catalog and exact native protoc
     assert.deepEqual(calls.map(({ operation }) => operation), [
       'batch', 'batch', 'batch', 'batch', 'atomic_write_private_file',
     ]);
+    assert.equal(calls.every(({ binaryPath: invoked }) => invoked === realpathSync(executionBinaryPath)), true);
     assert.equal(calls[0].payload.requests[1].request.path, 'C:\\private.json');
+
+    const other = Buffer.from('different fixture adapter');
+    writeFileSync(executionBinaryPath, other);
+    writeFileSync(join(executionRoot, 'catalog.json'), `${JSON.stringify({
+      adapters: { [target]: {
+        bytes: other.length, path: `${target}/pulse-platform-adapter.exe`,
+        sha256: createHash('sha256').update(other).digest('hex'), target,
+      } },
+      protocol: 1,
+      schema: 'pulse.windows_bootstrap_adapter_catalog.v1',
+    })}\n`);
+    assert.throws(() => loadPluginWindowsAdapter({
+      architecture: 'x64', catalogRoot: root, executionCatalogRoot: executionRoot,
+      invoke: () => { throw new Error('must not execute'); },
+    }), /execution_mismatch/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

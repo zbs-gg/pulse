@@ -1,0 +1,126 @@
+name: Production origin
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Production candidate run for this exact main commit
+        required: true
+        type: string
+      confirmation:
+        description: Type "publish pulse 0.7.0 origin"
+        required: true
+        type: string
+
+concurrency:
+  group: pulse-production-origin-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  publish:
+    name: Publish immutable assets, then snapshot
+    environment: production-origin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      R2_PARENT_ACCESS_KEY_ID: ${{ secrets.R2_PARENT_ACCESS_KEY_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Bind the exact protected candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$RELEASE_CONFIRMATION" = 'publish pulse 0.7.0 origin'
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_R2_API_TOKEN"
+          test -n "$R2_PARENT_ACCESS_KEY_ID"
+          test "$R2_BUCKET" = pulse-releases-prod
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          test "$(jq -r .name "$RUNNER_TEMP/candidate-run.json")" = 'Production candidate'
+          test "$(jq -r .path "$RUNNER_TEMP/candidate-run.json")" = '.github/workflows/production-candidate.yml'
+          test "$(jq -r .event "$RUNNER_TEMP/candidate-run.json")" = workflow_dispatch
+          test "$(jq -r .head_branch "$RUNNER_TEMP/candidate-run.json")" = main
+          test "$(jq -r .head_sha "$RUNNER_TEMP/candidate-run.json")" = "$GITHUB_SHA"
+          test "$(jq -r .conclusion "$RUNNER_TEMP/candidate-run.json")" = success
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-production-release-catalog --dir "$RUNNER_TEMP/pulse-production-release-catalog"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-inputs --dir "$RUNNER_TEMP/pulse-npm-production-inputs"
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = process.env.RUNNER_TEMP + '/pulse-npm-production-inputs/candidate-inputs.json';
+          const value = JSON.parse(fs.readFileSync(path));
+          if (value.schema !== 'pulse.npm_production_inputs.v1' || value.version !== '0.7.0' ||
+              value.release_epoch !== 8 || value.production_ready !== false || value.support_claim !== false) process.exit(1);
+          NODE
+      - name: Mint one-hour prefix-scoped R2 credentials
+        shell: bash
+        run: |
+          request="$RUNNER_TEMP/r2-temp-request.json"
+          response="$RUNNER_TEMP/r2-temp-response.json"
+          jq -n \
+            --arg bucket "$R2_BUCKET" \
+            --arg parent "$R2_PARENT_ACCESS_KEY_ID" \
+            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.0/"]}' \
+            > "$request"
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $CLOUDFLARE_R2_API_TOKEN" \
+            --data-binary "@$request" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/temp-access-credentials" \
+            > "$response"
+          test "$(jq -r .success "$response")" = true
+          access_key="$(jq -er .result.accessKeyId "$response")"
+          secret_key="$(jq -er .result.secretAccessKey "$response")"
+          session_token="$(jq -er .result.sessionToken "$response")"
+          echo "::add-mask::$access_key"
+          echo "::add-mask::$secret_key"
+          echo "::add-mask::$session_token"
+          {
+            echo "AWS_ACCESS_KEY_ID=$access_key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret_key"
+            echo "AWS_SESSION_TOKEN=$session_token"
+            echo "AWS_DEFAULT_REGION=auto"
+          } >> "$GITHUB_ENV"
+          rm -f "$request" "$response"
+      - name: Require the runner-provided S3 client
+        shell: bash
+        run: aws --version
+      - name: Publish and re-download every exact object
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node scripts/publish-r2-release.mjs
+          --bucket "$R2_BUCKET"
+          --catalog "$RUNNER_TEMP/pulse-production-release-catalog"
+          --endpoint "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
+          --out "$RUNNER_TEMP/pulse-r2-publication.json"
+      - name: Preserve the content-free origin receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-origin-receipt
+          path: ${{ runner.temp }}/pulse-r2-publication.json
+          if-no-files-found: error
+          retention-days: 30

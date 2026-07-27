@@ -107,6 +107,18 @@ func (s *Store) MaterialGraph(q MaterialGraphQuery) (MaterialGraph, error) {
 		builder.scope = "thread"
 		builder.addCheckpoint(cp)
 	}
+	_, personalScoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return MaterialGraph{}, err
+	}
+	if personalScoped {
+		// These legacy graph tables predate per-object project provenance.
+		// Retrieval has a projection-backed eligibility path; this viewer path
+		// does not. Omitting ambiguous stored rows is safer than allowing a
+		// foreign project's entity, relation, fact, or event to influence the
+		// current project view. The scoped checkpoint above remains available.
+		return graph, nil
+	}
 	builder.scope = "global"
 	if err := s.addStoredMaterialGraphRows(builder, limit); err != nil {
 		return MaterialGraph{}, err

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, lstatSync, openSync, readFileSync, readSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +20,7 @@ import {
   canonicalReleaseJSON,
   pinnedReleaseKeyring,
   readMinimumReleaseEpoch,
+  verifyPersonalReleaseArtifactSet,
   verifyReleaseManifestEnvelope,
 } from './release-manifest.js';
 import { createPlatformServices } from './platform-services.js';
@@ -28,6 +29,9 @@ import { detectDesktopLibc } from './desktop-target.js';
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(PACKAGE_ROOT, 'release', 'personal-preview-manifest.json');
 const PACKAGE_JSON_PATH = join(PACKAGE_ROOT, 'package.json');
+const ARTIFACT_SET_SCHEMA = 'pulse.personal_release_artifact_set.v1';
+const SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
+const SNAPSHOT_TIMEOUT_MS = 10_000;
 
 export class PersonalRuntimeInstallerError extends Error {
   constructor(code) {
@@ -59,6 +63,64 @@ function readCanonicalEnvelope(path) {
   }
   if (bytes !== `${canonicalReleaseJSON(value)}\n`) fail('release_manifest_noncanonical');
   return value;
+}
+
+function snapshotCachePath(dataDir) {
+  return join(resolve(dataDir), 'runtime', 'release-snapshot.json');
+}
+
+async function fetchCanonicalSnapshot(url, { fetchImpl, timeoutMs = SNAPSHOT_TIMEOUT_MS } = {}) {
+  let parsed;
+  try { parsed = new URL(url); } catch { fail('release_snapshot_url_invalid'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    fail('release_snapshot_url_invalid');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetchImpl(parsed.href, { redirect: 'manual', signal: controller.signal });
+  } catch {
+    clearTimeout(timeout);
+    fail('release_snapshot_unavailable');
+  }
+  try {
+    if (!response || response.status >= 300 && response.status < 400 || response.redirected === true) {
+      fail('release_snapshot_redirect_forbidden');
+    }
+    if (response.status !== 200) fail('release_snapshot_unavailable');
+    if (response.url) {
+      let finalURL;
+      try { finalURL = new URL(response.url); } catch { fail('release_snapshot_redirect_forbidden'); }
+      if (finalURL.href !== parsed.href || finalURL.origin !== parsed.origin) fail('release_snapshot_redirect_forbidden');
+    }
+    const declaredHeader = response.headers?.get?.('content-length');
+    const declaredLength = declaredHeader === null || declaredHeader === undefined ? null : Number(declaredHeader);
+    if (declaredLength !== null && (!Number.isFinite(declaredLength) ||
+        declaredLength < 1 || declaredLength > SNAPSHOT_MAX_BYTES)) {
+      fail('release_snapshot_unsafe');
+    }
+    const chunks = [];
+    let size = 0;
+    if (!response.body) fail('release_snapshot_unavailable');
+    for await (const chunk of response.body) {
+      const bytes = Buffer.from(chunk);
+      size += bytes.length;
+      if (size > SNAPSHOT_MAX_BYTES) fail('release_snapshot_unsafe');
+      chunks.push(bytes);
+    }
+    if (size < 2) fail('release_snapshot_unsafe');
+    const bytes = Buffer.concat(chunks).toString('utf8');
+    let value;
+    try { value = JSON.parse(bytes); } catch { fail('release_snapshot_invalid'); }
+    if (bytes !== `${canonicalReleaseJSON(value)}\n`) fail('release_snapshot_noncanonical');
+    return Object.freeze({ bytes, value });
+  } catch (error) {
+    if (error instanceof PersonalRuntimeInstallerError) throw error;
+    fail('release_snapshot_unavailable');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function packageVersion(path = PACKAGE_JSON_PATH) {
@@ -174,8 +236,10 @@ function readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, verif
     installRoot, platformServices: authorityPlatformServices,
   });
   const minimumAcceptedEpoch = authorityFloor > 0 ? authorityFloor : readMinimumReleaseEpoch(epochPath);
-  return verifyReleaseManifestEnvelope(readCanonicalEnvelope(manifestPath), {
+  const manifest = readCanonicalEnvelope(manifestPath);
+  const options = {
     allowFixtureVerification: verification.testMode === true,
+    allowExpiredSnapshot: verification.allowExpiredSnapshot === true,
     architecture: verification.architecture,
     libc: verification.libc,
     minimumAcceptedEpoch,
@@ -184,7 +248,61 @@ function readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, verif
     packageVersion: verification.packageVersion,
     platform: verification.platform,
     trustedKeys: verification.trustedKeys,
+  };
+  if (manifest.schema === ARTIFACT_SET_SCHEMA) {
+    if (typeof verification.snapshotPath !== 'string' || !isAbsolute(verification.snapshotPath)) {
+      fail('release_snapshot_unavailable');
+    }
+    return verifyPersonalReleaseArtifactSet(manifest, readCanonicalEnvelope(verification.snapshotPath), options);
+  }
+  return verifyReleaseManifestEnvelope(manifest, options);
+}
+
+export async function refreshPersonalReleaseSnapshot({
+  architecture = process.arch,
+  dataDir,
+  fetchImpl = globalThis.fetch,
+  libc,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  now = new Date(),
+  osVersion,
+  packageVersion: expectedPackageVersion = packageVersion(),
+  platform = process.platform,
+  platformServices = createPlatformServices({ platform, architecture }),
+  snapshotPath,
+  testMode = false,
+  trustedKeys = pinnedReleaseKeyring(),
+} = {}) {
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || typeof fetchImpl !== 'function') {
+    fail('personal_runtime_configuration_invalid');
+  }
+  snapshotPath ??= snapshotCachePath(dataDir);
+  if (typeof snapshotPath !== 'string' || !isAbsolute(snapshotPath)) fail('personal_runtime_configuration_invalid');
+  let detectedOSVersion = osVersion;
+  try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
+  const manifest = readCanonicalEnvelope(manifestPath);
+  if (manifest.schema !== ARTIFACT_SET_SCHEMA) {
+    return Object.freeze({ refreshed: false, release: verifyReleaseManifestEnvelope(manifest, {
+      allowFixtureVerification: testMode === true,
+      architecture, libc, minimumAcceptedEpoch: 0, now, osVersion: detectedOSVersion,
+      packageVersion: expectedPackageVersion, platform, trustedKeys,
+    }), snapshotPath: null });
+  }
+  const snapshotURL = manifest.payload?.snapshot_url;
+  const fetched = await fetchCanonicalSnapshot(snapshotURL, { fetchImpl });
+  const installRoot = join(resolve(dataDir), 'artifacts');
+  const authorityFloor = readArtifactGenerationFloor({ installRoot, platformServices });
+  const minimumAcceptedEpoch = authorityFloor > 0
+    ? authorityFloor
+    : readMinimumReleaseEpoch(join(resolve(dataDir), 'runtime', 'minimum-release-epoch.json'));
+  const release = verifyPersonalReleaseArtifactSet(manifest, fetched.value, {
+    allowFixtureVerification: testMode === true,
+    architecture, libc, minimumAcceptedEpoch, now, osVersion: detectedOSVersion,
+    packageVersion: expectedPackageVersion, platform, trustedKeys,
   });
+  platformServices.ensurePrivateDirectory(dirname(snapshotPath));
+  platformServices.atomicWritePrivateFile(snapshotPath, fetched.bytes);
+  return Object.freeze({ refreshed: true, release, snapshotPath });
 }
 
 export async function provisionPersonalRuntime({
@@ -199,6 +317,7 @@ export async function provisionPersonalRuntime({
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
   platformServices = createPlatformServices({ platform, architecture }),
+  snapshotPath,
   testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
@@ -206,6 +325,7 @@ export async function provisionPersonalRuntime({
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || typeof fetchImpl !== 'function') {
     fail('personal_runtime_configuration_invalid');
   }
+  snapshotPath ??= snapshotCachePath(dataDir);
   if (materializers !== undefined && !testMode) fail('release_test_materializer_forbidden');
   let detectedOSVersion = osVersion;
   try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
@@ -224,7 +344,7 @@ export async function provisionPersonalRuntime({
   nativeFixtureInstallerStage('preflight_release_started');
   const preflightRelease = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
         architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-        platform, platformServices, testMode, trustedKeys,
+        platform, platformServices, snapshotPath, testMode, trustedKeys,
   });
   nativeFixtureInstallerStage('preflight_release_complete');
   if (preflightRelease.historical_only) fail('release_manifest_legacy');
@@ -235,7 +355,7 @@ export async function provisionPersonalRuntime({
     nativeFixtureInstallerStage('release_verification_started');
     const release = readVerifiedPersonalRelease(manifestPath, epochPath, installRoot, {
       architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, testMode, trustedKeys,
+      platform, platformServices, snapshotPath, testMode, trustedKeys,
     });
     nativeFixtureInstallerStage('release_verification_complete');
     if (release.historical_only) fail('release_manifest_legacy');
@@ -307,12 +427,14 @@ export function inspectPersonalRuntime({
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
   platformServices = createPlatformServices({ platform, architecture }),
+  snapshotPath,
   testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
+  snapshotPath ??= snapshotCachePath(dataDir);
   let detectedOSVersion = osVersion;
   try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
   const root = resolve(dataDir);
@@ -321,7 +443,7 @@ export function inspectPersonalRuntime({
     join(root, 'runtime', 'minimum-release-epoch.json'),
     join(root, 'artifacts'),
     { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, testMode, trustedKeys },
+      allowExpiredSnapshot: true, platform, platformServices, snapshotPath, testMode, trustedKeys },
   );
   if (release.historical_only) {
     return Object.freeze({
@@ -338,7 +460,7 @@ export function inspectPersonalRuntime({
     return Object.freeze({
       activationSet,
       ready: true,
-      reason_code: 'runtime_staged',
+      reason_code: release.snapshot_refresh_required === true ? 'catalog_refresh_required' : 'runtime_staged',
       release,
     });
   } catch (activeError) {
@@ -349,7 +471,7 @@ export function inspectPersonalRuntime({
       return Object.freeze({
         activationSet,
         ready: true,
-        reason_code: 'runtime_candidate_staged',
+        reason_code: release.snapshot_refresh_required === true ? 'catalog_refresh_required' : 'runtime_candidate_staged',
         release,
       });
     } catch {
@@ -377,12 +499,14 @@ export function inspectPersonalRelease({
   packageVersion: expectedPackageVersion = packageVersion(),
   platform = process.platform,
   platformServices = createPlatformServices({ platform, architecture }),
+  snapshotPath,
   testMode = false,
   trustedKeys = pinnedReleaseKeyring(),
 } = {}) {
   if (typeof dataDir !== 'string' || !isAbsolute(dataDir)) {
     fail('personal_runtime_configuration_invalid');
   }
+  snapshotPath ??= snapshotCachePath(dataDir);
   let detectedOSVersion = osVersion;
   try { detectedOSVersion ??= platformServices.desktopOSVersion(); } catch { fail('release_os_version_invalid'); }
   const root = resolve(dataDir);
@@ -391,7 +515,7 @@ export function inspectPersonalRelease({
     join(root, 'runtime', 'minimum-release-epoch.json'),
     join(root, 'artifacts'),
     { architecture, libc, now, osVersion: detectedOSVersion, packageVersion: expectedPackageVersion,
-      platform, platformServices, testMode, trustedKeys },
+      platform, platformServices, snapshotPath, testMode, trustedKeys },
   );
   return Object.freeze({
     ready: !release.historical_only,
@@ -431,11 +555,13 @@ export function packagedPersonalRuntimeOptions(dataDir) {
   const testMode = process.env.PULSE_RELEASE_TEST_MODE === '1';
   const manifestOverride = process.env.PULSE_RELEASE_MANIFEST_PATH;
   const rootOverride = process.env.PULSE_RELEASE_TEST_ROOT_PATH;
-  if ((manifestOverride || rootOverride) && !testMode) fail('release_override_forbidden');
+  const snapshotOverride = process.env.PULSE_RELEASE_SNAPSHOT_PATH;
+  if ((manifestOverride || rootOverride || snapshotOverride) && !testMode) fail('release_override_forbidden');
   const options = {
     dataDir,
     libc: detectDesktopLibc(),
     manifestPath: manifestOverride ?? DEFAULT_MANIFEST_PATH,
+    snapshotPath: snapshotOverride ?? snapshotCachePath(dataDir),
     testMode,
     trustedKeys: pinnedReleaseKeyring(rootOverride),
   };
@@ -445,5 +571,11 @@ export function packagedPersonalRuntimeOptions(dataDir) {
   if (testMode && process.env.PULSE_RELEASE_TEST_MATERIALIZER_SPEC) {
     options.materializers = loadReleaseTestMaterializers(process.env.PULSE_RELEASE_TEST_MATERIALIZER_SPEC);
   }
+  return options;
+}
+
+export async function refreshPackagedPersonalRelease(dataDir) {
+  const options = packagedPersonalRuntimeOptions(dataDir);
+  await refreshPersonalReleaseSnapshot(options);
   return options;
 }

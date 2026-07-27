@@ -102,8 +102,8 @@ func presentProductCandidate(t *testing.T, vault *store.Store, receipt store.Mem
 	}
 }
 
-func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
-	_, ts := newProductMemoryServer(t)
+func TestTurnFinalizeReturnsDurableReceiptImmediately(t *testing.T) {
+	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
 	req := store.TurnFinalizeRequest{
 		Schema: store.TurnFinalizeRequestSchema,
@@ -116,7 +116,7 @@ func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
 				Schema: store.MemoryCapsuleSchema,
 				Source: store.CapsuleSource{Host: "codex", ConversationScope: "current_turn", Timestamp: "2026-07-14T09:00:00Z"},
 				Items: []store.MemoryCapsuleItem{{
-					Kind: "decision", RedactedSummary: "Show every private write before canonical commit.",
+					Kind: "decision", RedactedSummary: "Save useful private memory immediately.",
 					Confidence: 0.97, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project",
 				}},
 			},
@@ -130,7 +130,7 @@ func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&finalized); err != nil {
 		t.Fatal(err)
 	}
-	if len(finalized.Receipts) != 1 || finalized.Receipts[0].Status != store.MemoryWritePending || finalized.Receipts[0].ObjectID != "" {
+	if len(finalized.Receipts) != 1 || finalized.Receipts[0].Status != store.MemoryWriteCreated || finalized.Receipts[0].ObjectID == "" {
 		t.Fatalf("finalize response: %#v", finalized)
 	}
 
@@ -145,7 +145,8 @@ func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(tray.Candidates) != 1 || tray.Candidates[0].Candidate.Capsule == nil ||
-		tray.Candidates[0].Candidate.Capsule.Items[0].RedactedSummary != "Show every private write before canonical commit." {
+		tray.Candidates[0].State != "committed" ||
+		tray.Candidates[0].Candidate.Capsule.Items[0].RedactedSummary != "Save useful private memory immediately." {
 		t.Fatalf("tray must show exact candidate: %#v", tray)
 	}
 
@@ -153,15 +154,12 @@ func TestTurnFinalizeTrayListAndCancelRoutes(t *testing.T) {
 	resp = pulseJSON(t, ts, http.MethodPost, "/memory/tray/"+receipt.CandidateID+"/cancel", map[string]any{
 		"expected_version": receipt.CandidateVersion,
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("cancel status=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("terminal memory was cancelable: status=%d", resp.StatusCode)
 	}
-	var canceled store.MemoryWriteReceipt
-	if err := json.NewDecoder(resp.Body).Decode(&canceled); err != nil {
-		t.Fatal(err)
-	}
-	if canceled.Status != store.MemoryWriteCanceled || canceled.ObjectID != "" {
-		t.Fatalf("cancel receipt: %#v", canceled)
+	var memories int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&memories); err != nil || memories != 1 {
+		t.Fatalf("durable response did not match canonical memory: count=%d err=%v", memories, err)
 	}
 }
 
@@ -194,14 +192,14 @@ func TestProductFinalizeRejectsUnknownAuthorityFieldsBeforeLedgerPersistence(t *
 	}
 }
 
-func TestLegacyManualRoutesEnterTrayOnProductStore(t *testing.T) {
+func TestLegacyManualRoutesCommitImmediatelyOnProductStore(t *testing.T) {
 	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
 	capsule := map[string]any{
 		"schema": store.MemoryCapsuleSchema,
 		"source": map[string]any{"host": "codex", "conversation_scope": "current_turn", "timestamp": "2026-07-14T09:00:00Z"},
 		"items": []map[string]any{{
-			"kind": "decision", "redacted_summary": "Manual memory tools also enter the private Tray.",
+			"kind": "decision", "redacted_summary": "Manual memory tools also save immediately.",
 			"confidence": 0.95, "evidence_hint": "current_turn", "privacy_tier": "normal", "retention": "project",
 		}},
 		"raw_input_included": false,
@@ -214,12 +212,12 @@ func TestLegacyManualRoutesEnterTrayOnProductStore(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWritePending || result.Receipts[0].ObjectID != "" {
-		t.Fatalf("manual write bypassed Tray: %#v", result)
+	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWriteCreated || result.Receipts[0].ObjectID == "" {
+		t.Fatalf("manual write was not durable: %#v", result)
 	}
 	var capsules int
-	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&capsules); err != nil || capsules != 0 {
-		t.Fatalf("manual pending write became canonical: count=%d err=%v", capsules, err)
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&capsules); err != nil || capsules != 1 {
+		t.Fatalf("manual durable write missing from canonical store: count=%d err=%v", capsules, err)
 	}
 
 	resp = pulseJSON(t, ts, http.MethodPost, "/graph/delta", semanticDeltaBody())
@@ -230,23 +228,23 @@ func TestLegacyManualRoutesEnterTrayOnProductStore(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWritePending {
-		t.Fatalf("semantic write bypassed Tray: %#v", result)
+	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWriteCreated || result.Receipts[0].ObjectID == "" {
+		t.Fatalf("semantic write was not durable: %#v", result)
 	}
 	var graphEvents int
-	if err := vault.DB().QueryRow(`SELECT count(*) FROM events WHERE scorer_version='host-extracted'`).Scan(&graphEvents); err != nil || graphEvents != 0 {
-		t.Fatalf("pending semantic delta reached graph: count=%d err=%v", graphEvents, err)
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM events WHERE scorer_version='host-extracted'`).Scan(&graphEvents); err != nil || graphEvents == 0 {
+		t.Fatalf("durable semantic delta missing from graph: count=%d err=%v", graphEvents, err)
 	}
 }
 
-func TestManualHTTPIdempotencySurvivesLostResponseWithoutMakingCancelPermanent(t *testing.T) {
-	_, ts := newProductMemoryServer(t)
+func TestManualHTTPIdempotencySurvivesLostResponseWithoutDuplicateMemory(t *testing.T) {
+	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
 	capsule := map[string]any{
 		"schema": store.MemoryCapsuleSchema,
 		"source": map[string]any{"host": "codex", "conversation_scope": "current_turn", "timestamp": "2026-07-14T09:00:00Z"},
 		"items": []map[string]any{{
-			"kind": "decision", "redacted_summary": "A lost HTTP response must converge on the same visible candidate.",
+			"kind": "decision", "redacted_summary": "A lost HTTP response must converge on the same durable memory.",
 			"confidence": 1.0, "evidence_hint": "current_turn", "privacy_tier": "private", "retention": "project",
 		}},
 		"raw_input_included": false,
@@ -267,13 +265,18 @@ func TestManualHTTPIdempotencySurvivesLostResponseWithoutMakingCancelPermanent(t
 	if first.LedgerID != retry.LedgerID || first.Receipts[0].CandidateID != retry.Receipts[0].CandidateID {
 		t.Fatalf("lost-response retry diverged: first=%#v retry=%#v", first, retry)
 	}
-	canceled := pulseJSON(t, ts, http.MethodPost, "/memory/tray/"+first.Receipts[0].CandidateID+"/cancel", map[string]any{"expected_version": 1})
-	if canceled.StatusCode != http.StatusOK {
-		t.Fatalf("cancel status=%d", canceled.StatusCode)
+	if first.Receipts[0].Status != store.MemoryWriteCreated || first.Receipts[0].ObjectID == "" ||
+		retry.Receipts[0].ObjectID != first.Receipts[0].ObjectID {
+		t.Fatalf("lost-response retry lacked the same terminal proof: first=%#v retry=%#v", first, retry)
 	}
 	second := decode(pulseJSONWithIdempotency(t, ts, http.MethodPost, "/memory/remember", capsule, "host_invocation_02"))
-	if second.Receipts[0].CandidateID == first.Receipts[0].CandidateID {
-		t.Fatal("new invocation after cancel reused the terminal candidate")
+	if second.Receipts[0].Status != store.MemoryWriteDeduplicated ||
+		second.Receipts[0].ObjectID != first.Receipts[0].ObjectID {
+		t.Fatalf("new invocation did not deduplicate to the canonical memory: %#v", second)
+	}
+	var memories int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&memories); err != nil || memories != 1 {
+		t.Fatalf("idempotent writes created duplicate canonical memories: count=%d err=%v", memories, err)
 	}
 }
 
@@ -374,11 +377,11 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 		wantState string
 	}{
 		{name: "no terminal memory", wantState: "first_memory_pending"},
-		{name: "unpresented terminal receipt is not a proof", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
+		{name: "presentation is optional for terminal memory proof", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
 			unpresented := terminal
 			unpresented.PresentationReceiptID = ""
 			return unpresented
-		}()}, wantState: "first_memory_pending"},
+		}()}, wantState: "context_offer_pending"},
 		{name: "empty terminal identity is rejected", memories: []TerminalMemoryReadinessFact{func() TerminalMemoryReadinessFact {
 			malformed := terminal
 			malformed.ReceiptID = ""
@@ -467,6 +470,24 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 			}
 		})
 	}
+
+	laterOffered := offered
+	laterOffered.ContextID = "context_later"
+	laterOffered.PayloadDigest = strings.Repeat("e", 64)
+	laterOffered.SessionRef = "session:" + strings.Repeat("9", 64)
+	laterOffered.CreatedAt = "2026-07-16T01:03:00Z"
+	laterObserved := laterOffered
+	laterObserved.Acknowledgement = "host_observed"
+	laterObserved.CreatedAt = "2026-07-16T01:04:00Z"
+	recovered := ProjectReadinessLifecycleInputs(
+		[]TerminalMemoryReadinessFact{terminal},
+		[]ContextDeliveryReadinessFact{offered, laterOffered, laterObserved},
+	)
+	if recovered.State != "ready" || recovered.OfferedToHost == nil || recovered.HostObserved == nil ||
+		recovered.OfferedToHost.ContextID != laterOffered.ContextID ||
+		recovered.HostObserved.ContextID != laterOffered.ContextID {
+		t.Fatalf("later observed delivery did not recover readiness: %#v", recovered)
+	}
 }
 
 func TestMemoryTrayRecoveryScheduleSkipsUnpresentedCandidate(t *testing.T) {
@@ -508,7 +529,7 @@ func TestProductDeleteRouteFailsClosedWithoutOSPresence(t *testing.T) {
 	}
 }
 
-func TestProductCorrectionRouteReturnsVisiblePendingCandidate(t *testing.T) {
+func TestProductCorrectionRouteReturnsDurableUpdatedReceipt(t *testing.T) {
 	vault, ts := newProductMemoryServer(t)
 	defer ts.Close()
 	now := time.Now().UTC()
@@ -535,7 +556,7 @@ func TestProductCorrectionRouteReturnsVisiblePendingCandidate(t *testing.T) {
 				"schema": store.MemoryCapsuleSchema,
 				"source": map[string]any{"host": "claude-code", "conversation_scope": "current_turn", "timestamp": now.Format(time.RFC3339)},
 				"items": []map[string]any{{
-					"kind": "decision", "redacted_summary": "Corrected route value after the visible grace.",
+					"kind": "decision", "redacted_summary": "Corrected route value saved immediately.",
 					"confidence": 1, "evidence_hint": "user_confirmed", "privacy_tier": "normal", "retention": "project",
 				}},
 				"raw_input_included": false,
@@ -549,8 +570,9 @@ func TestProductCorrectionRouteReturnsVisiblePendingCandidate(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWritePending || result.Receipts[0].ObjectID != "" {
-		t.Fatalf("correction route did not return pending: %#v", result)
+	if len(result.Receipts) != 1 || result.Receipts[0].Status != store.MemoryWriteUpdated ||
+		result.Receipts[0].ObjectID != created.ObjectID {
+		t.Fatalf("correction route did not return durable update: %#v", result)
 	}
 	tray, err := vault.ListMemoryTray(10)
 	if err != nil {
@@ -559,11 +581,12 @@ func TestProductCorrectionRouteReturnsVisiblePendingCandidate(t *testing.T) {
 	found := false
 	for _, item := range tray {
 		if item.CandidateID == result.Receipts[0].CandidateID {
-			found = item.Operation == "correct" && item.TargetObjectID == created.ObjectID
+			found = item.State == "committed" && item.Operation == "correct" &&
+				item.TargetObjectID == created.ObjectID && item.CanonicalObjectID == created.ObjectID
 		}
 	}
 	if !found {
-		t.Fatalf("correction not visible in Tray: %#v", tray)
+		t.Fatalf("durable correction not represented in audit history: %#v", tray)
 	}
 }
 
@@ -896,7 +919,7 @@ func TestProjectionRetriesTransientEmbedderFailureWithoutRestart(t *testing.T) {
 	t.Fatal("transient projection failure did not retry to complete")
 }
 
-func TestProductServerAutomaticallyCommitsAfterVisibleGrace(t *testing.T) {
+func TestProductServerCommitsImmediatelyWithoutPresentation(t *testing.T) {
 	vault, err := store.OpenVault(
 		filepath.Join(t.TempDir(), "desk-auto.db"), store.StoreKindDesk, "store_desk_auto_test",
 	)
@@ -914,7 +937,7 @@ func TestProductServerAutomaticallyCommitsAfterVisibleGrace(t *testing.T) {
 		"schema": store.MemoryCapsuleSchema,
 		"source": map[string]any{"host": "codex", "conversation_scope": "current_turn", "timestamp": time.Now().UTC().Format(time.RFC3339)},
 		"items": []map[string]any{{
-			"kind": "decision", "redacted_summary": "The daemon commits a safe candidate after the visible grace period.",
+			"kind": "decision", "redacted_summary": "Useful memory becomes durable without opening Home.",
 			"confidence": 1, "evidence_hint": "current_turn", "privacy_tier": "normal", "retention": "project",
 		}},
 		"raw_input_included": false,
@@ -926,22 +949,27 @@ func TestProductServerAutomaticallyCommitsAfterVisibleGrace(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&prepared); err != nil {
 		t.Fatal(err)
 	}
-	presentProductCandidate(t, vault, prepared.Receipts[0], time.Now().UTC(), time.Second)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		if count == 1 {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	if len(prepared.Receipts) != 1 || prepared.Receipts[0].Status != store.MemoryWriteCreated ||
+		prepared.Receipts[0].ObjectID == "" {
+		t.Fatalf("response did not include terminal memory proof: %#v", prepared)
 	}
-	t.Fatal("candidate did not commit after the one-second grace period")
+	var state string
+	if err := vault.DB().QueryRow(
+		`SELECT state FROM memory_tray_candidates WHERE candidate_id=?`,
+		prepared.Receipts[0].CandidateID,
+	).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if state != "committed" || count != 1 {
+		t.Fatalf("automatic memory was not durable: state=%q memories=%d", state, count)
+	}
 }
 
-func TestProductServerTurnsAutomaticCommitErrorsIntoDurableFailedReceipts(t *testing.T) {
+func TestProductServerRecoveryTurnsInvalidCandidateIntoDurableFailure(t *testing.T) {
 	vault, err := store.OpenVault(
 		filepath.Join(t.TempDir(), "desk-auto-fail.db"), store.StoreKindDesk, "store_desk_auto_fail_test",
 	)
@@ -949,61 +977,56 @@ func TestProductServerTurnsAutomaticCommitErrorsIntoDurableFailedReceipts(t *tes
 		t.Fatal(err)
 	}
 	defer vault.Close()
-	srv, err := New(Config{IPCSecret: "secret", Store: vault, TrayGracePeriod: time.Second})
+	if err := vault.ConfigureProductRuntimeAuthority(strings.Repeat("a", 64), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	prepared, err := vault.FinalizeTurn(store.TurnFinalizeRequest{
+		Schema: store.TurnFinalizeRequestSchema, Host: "codex",
+		SessionID: "session_invalid_recovery", TurnID: "turn_invalid_recovery",
+		SourceEventKey: "event_invalid_recovery", IdempotencyKey: "idempotency_invalid_recovery",
+		BindingDigest: strings.Repeat("a", 64),
+		Candidates: []store.PrivateMemoryCandidate{{
+			Kind: store.PrivateMemoryCandidateCapsule,
+			Capsule: &store.MemoryCapsule{
+				Schema: store.MemoryCapsuleSchema,
+				Source: store.CapsuleSource{Host: "codex", ConversationScope: "current_turn", Timestamp: now.Format(time.RFC3339)},
+				Items: []store.MemoryCapsuleItem{{
+					Kind: "decision", RedactedSummary: "Invalid pending recovery becomes an explicit failed receipt.",
+					Confidence: 1, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project",
+				}},
+			},
+		}},
+	}, now, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	resp := pulseJSON(t, ts, http.MethodPost, "/memory/remember", map[string]any{
-		"schema": store.MemoryCapsuleSchema,
-		"source": map[string]any{"host": "codex", "conversation_scope": "current_turn", "timestamp": time.Now().UTC().Format(time.RFC3339)},
-		"items": []map[string]any{{
-			"kind": "decision", "redacted_summary": "The worker records a failed receipt instead of silently stalling.",
-			"confidence": 1, "evidence_hint": "current_turn", "privacy_tier": "normal", "retention": "project",
-		}},
-		"raw_input_included": false,
-	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("prepare status=%d", resp.StatusCode)
-	}
-	var prepared store.TurnFinalizeResult
-	if err := json.NewDecoder(resp.Body).Decode(&prepared); err != nil {
-		t.Fatal(err)
-	}
 	candidateID := prepared.Receipts[0].CandidateID
-	presentProductCandidate(t, vault, prepared.Receipts[0], time.Now().UTC(), time.Second)
 	if _, err := vault.DB().Exec(`UPDATE memory_tray_candidates SET payload_json='{}' WHERE candidate_id=?`, candidateID); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) {
-		var state string
-		if err := vault.DB().QueryRow(`SELECT state FROM memory_tray_candidates WHERE candidate_id=?`, candidateID).Scan(&state); err != nil {
-			t.Fatal(err)
-		}
-		if state == "failed" {
-			var status, reason string
-			if err := vault.DB().QueryRow(`
-				SELECT status, reason_code FROM memory_write_receipts
-				 WHERE candidate_id=? ORDER BY rowid DESC LIMIT 1`, candidateID).Scan(&status, &reason); err != nil {
-				t.Fatal(err)
-			}
-			if status != "failed" || reason != "commit_failed" {
-				t.Fatalf("automatic failure receipt status=%q reason=%q", status, reason)
-			}
-			var memories int
-			if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&memories); err != nil || memories != 0 {
-				t.Fatalf("failed worker committed memory: count=%d err=%v", memories, err)
-			}
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	if _, err := New(Config{IPCSecret: "secret", Store: vault}); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("automatic commit failure remained pending without a durable failed receipt")
+	var state, payload, status, reason string
+	if err := vault.DB().QueryRow(`
+		SELECT candidate.state, candidate.payload_json, receipt.status, receipt.reason_code
+		  FROM memory_tray_candidates candidate
+		  JOIN memory_write_receipts receipt ON receipt.candidate_id=candidate.candidate_id
+		 WHERE candidate.candidate_id=?
+		 ORDER BY receipt.rowid DESC LIMIT 1`, candidateID).Scan(&state, &payload, &status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	var memories int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&memories); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || payload != "{}" || status != "failed" || reason != "commit_failed" || memories != 0 {
+		t.Fatalf("invalid recovery lacked safe terminal failure: state=%q payload=%q receipt=%q reason=%q memories=%d", state, payload, status, reason, memories)
+	}
 }
 
-func TestProductServerRestartLeavesUnpresentedPendingCandidateAlone(t *testing.T) {
+func TestProductServerRestartCommitsPendingCandidateWithoutPresentation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk-restart.db")
 	vault, err := store.OpenVault(path, store.StoreKindDesk, "store_desk_restart_test")
 	if err != nil {
@@ -1053,12 +1076,12 @@ func TestProductServerRestartLeavesUnpresentedPendingCandidateAlone(t *testing.T
 	if err := reopened.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if state != "pending" || graceExpiresAt != "" || count != 0 {
-		t.Fatalf("unpresented recovery mutated candidate: state=%q grace=%q memories=%d", state, graceExpiresAt, count)
+	if state != "committed" || graceExpiresAt == "" || count != 1 {
+		t.Fatalf("restart did not finish automatic memory: state=%q grace=%q memories=%d", state, graceExpiresAt, count)
 	}
 }
 
-func TestRestartDoesNotCommitCandidateFromStaleRuntimeAuthority(t *testing.T) {
+func TestRestartFailsCandidateFromStaleRuntimeAuthority(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desk-restart-stale-authority.db")
 	vault, err := store.OpenVault(path, store.StoreKindDesk, "store_desk_restart_stale_test")
 	if err != nil {
@@ -1094,28 +1117,28 @@ func TestRestartDoesNotCommitCandidateFromStaleRuntimeAuthority(t *testing.T) {
 	if _, err := New(Config{IPCSecret: "secret", Store: reopened}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var state, payload string
-		if err := reopened.DB().QueryRow(`SELECT state, payload_json FROM memory_tray_candidates WHERE candidate_id=?`, prepared.Receipts[0].CandidateID).Scan(&state, &payload); err != nil {
-			t.Fatal(err)
-		}
-		var objects int
-		if err := reopened.DB().QueryRow(`SELECT count(*) FROM private_memory_objects`).Scan(&objects); err != nil {
-			t.Fatal(err)
-		}
-		if objects != 0 {
-			t.Fatalf("stale authority recovery created %d objects", objects)
-		}
-		if state == "failed" {
-			if payload != "{}" {
-				t.Fatalf("stale authority failure retained payload=%q", payload)
-			}
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	var state, payload string
+	if err := reopened.DB().QueryRow(
+		`SELECT state, payload_json FROM memory_tray_candidates WHERE candidate_id=?`,
+		prepared.Receipts[0].CandidateID,
+	).Scan(&state, &payload); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("stale authority candidate did not reach a content-free terminal failure")
+	var objects int
+	if err := reopened.DB().QueryRow(`SELECT count(*) FROM private_memory_objects`).Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	var status, reason string
+	if err := reopened.DB().QueryRow(`
+		SELECT status, reason_code FROM memory_write_receipts
+		 WHERE candidate_id=? ORDER BY rowid DESC LIMIT 1`,
+		prepared.Receipts[0].CandidateID,
+	).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || payload != "{}" || objects != 0 || status != "failed" || reason != "commit_failed" {
+		t.Fatalf("stale authority recovery lacked safe terminal failure: state=%q payload=%q objects=%d receipt=%q reason=%q", state, payload, objects, status, reason)
+	}
 }
 
 func TestProductServerRestartRecoversMoreThanOnePendingPage(t *testing.T) {
@@ -1162,9 +1185,6 @@ func TestProductServerRestartRecoversMoreThanOnePendingPage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, receipt := range result.Receipts {
-			presentProductCandidate(t, vault, receipt, now, time.Second)
-		}
 		createdCandidates += len(result.Receipts)
 	}
 	if createdCandidates != 205 {
@@ -1186,25 +1206,17 @@ func TestProductServerRestartRecoversMoreThanOnePendingPage(t *testing.T) {
 	if _, err := New(Config{IPCSecret: "secret", Store: reopened}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		var pending, committed, failed int
-		if err := reopened.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state IN ('pending','committing')`).Scan(&pending); err != nil {
-			t.Fatal(err)
-		}
-		if err := reopened.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='committed'`).Scan(&committed); err != nil {
-			t.Fatal(err)
-		}
-		if err := reopened.DB().QueryRow(`SELECT COUNT(*) FROM memory_tray_candidates WHERE state='failed'`).Scan(&failed); err != nil {
-			t.Fatal(err)
-		}
-		if pending == 0 {
-			if committed != 205 || failed != 0 {
-				t.Fatalf("multi-page recovery committed=%d failed=%d", committed, failed)
-			}
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	var pending, committed, failed int
+	if err := reopened.DB().QueryRow(`
+		SELECT
+			SUM(CASE WHEN state IN ('pending','committing') THEN 1 ELSE 0 END),
+			SUM(CASE WHEN state='committed' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END)
+		FROM memory_tray_candidates`,
+	).Scan(&pending, &committed, &failed); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("multi-page restart recovery left candidates pending")
+	if pending != 0 || committed != 205 || failed != 0 {
+		t.Fatalf("multi-page restart recovery pending=%d committed=%d failed=%d", pending, committed, failed)
+	}
 }

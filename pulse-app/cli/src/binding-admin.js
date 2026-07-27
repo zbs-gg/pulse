@@ -1,5 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  sign as cryptoSign,
+} from 'node:crypto';
 import {
   existsSync, mkdirSync, rmSync, readFileSync, writeFileSync,
 } from 'node:fs';
@@ -17,6 +23,7 @@ import {
 import { createPlatformServices, PlatformServicesError } from './platform-services.js';
 
 const HELPER_PATH = '/Library/PrivilegedHelperTools/gg.zbs.pulse.presence-helper';
+const ROOT_PUBLIC_KEY_PATH = '/Library/Application Support/Pulse/trust/workspace-bindings.pub.pem';
 const ROOT_ANCHOR_PATH = '/Library/Application Support/Pulse/trust/workspace-bindings.anchor.json';
 const SAFE_VAULT_ID = /^[a-z][a-z0-9_]{2,127}$/;
 const SAFE_PROJECT_ID = /^project_[a-z0-9][a-z0-9_]{0,119}$/;
@@ -24,7 +31,9 @@ const TRANSACTION_SCHEMA = 'pulse.workspace-binding-transaction.v1';
 const defaultPlatformServices = createPlatformServices();
 
 function fail(code) {
-  throw new Error(`binding_admin_${code}`);
+  const error = new Error(`binding_admin_${code}`);
+  error.code = `binding_admin_${code}`;
+  throw error;
 }
 
 function exactID(value, code) {
@@ -66,6 +75,51 @@ function selectLocalPort(requested, bindings, workspaceID) {
     if (!occupied.has(candidate)) return candidate;
   }
   fail('port_exhausted');
+}
+
+function exactPersonalTopology(personal, home) {
+  if (!personal || typeof personal !== 'object' || Array.isArray(personal)) {
+    fail('personal_store_invalid');
+  }
+  const storeID = exactID(personal.store_id, 'personal_store_invalid');
+  const expected = {
+    store_id: storeID,
+    data_dir: join(home, '.pulse', 'vaults', 'personal', storeID),
+    base_url: personal.base_url,
+    credential_ref: `keychain:pulse/local/${storeID}`,
+    cache_dir: join(home, '.pulse', 'caches', 'personal', storeID),
+  };
+  let port;
+  try {
+    const endpoint = new URL(personal.base_url);
+    port = Number.parseInt(endpoint.port, 10);
+    if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' ||
+        endpoint.pathname !== '/' || endpoint.search || endpoint.hash ||
+        !Number.isInteger(port) || port < 1024 || port > 65535) {
+      fail('personal_store_invalid');
+    }
+  } catch (error) {
+    if (error?.code === 'binding_admin_personal_store_invalid') throw error;
+    fail('personal_store_invalid');
+  }
+  if (personal.data_dir !== expected.data_dir ||
+      personal.credential_ref !== expected.credential_ref ||
+      personal.cache_dir !== expected.cache_dir) {
+    fail('personal_store_invalid');
+  }
+  return { personal: Object.freeze({ ...expected }), port };
+}
+
+function reusablePersonalTopology(bindings, principalID, home) {
+  const candidates = bindings.filter((binding) =>
+    binding?.mode === 'personal' && binding?.principal_ref === principalID);
+  if (candidates.length === 0) return undefined;
+  const topologies = candidates.map((binding) => exactPersonalTopology(binding.personal, home));
+  const canonical = canonicalJSONStringify(topologies[0].personal);
+  if (topologies.some((topology) => canonicalJSONStringify(topology.personal) !== canonical)) {
+    fail('personal_store_fragmented');
+  }
+  return topologies[0];
 }
 
 function exactCommonsResource(value) {
@@ -306,6 +360,46 @@ export function installRootBindingAnchor(anchorBytes, {
   }
 }
 
+export function installRootBindingPublicKey(publicKeyBytes, {
+  publicKeyPath = ROOT_PUBLIC_KEY_PATH,
+} = {}) {
+  if (!Buffer.isBuffer(publicKeyBytes) || publicKeyBytes.length < 100 || publicKeyBytes.length > 16_384 ||
+      publicKeyPath !== ROOT_PUBLIC_KEY_PATH) fail('public_key_install_invalid');
+  let publicKey;
+  try {
+    publicKey = createPublicKey(publicKeyBytes);
+  } catch {
+    fail('public_key_install_invalid');
+  }
+  if (publicKey.asymmetricKeyType !== 'ed25519') fail('public_key_install_invalid');
+
+  const directory = join(homedir(), '.pulse', 'supervisor', 'presence');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const nonce = `${process.pid}-${Date.now()}-${randomBytes(8).toString('hex')}`;
+  const source = join(directory, `binding-public-key-${nonce}.pem`);
+  const privilegedTemporary = `${ROOT_PUBLIC_KEY_PATH}.${nonce}.new`;
+  try {
+    writeFileSync(source, publicKeyBytes, { mode: 0o600, flag: 'wx' });
+    runRootInstall(['/bin/mkdir', '-p', dirname(ROOT_PUBLIC_KEY_PATH)], 'public_key_install_failed');
+    runRootInstall([
+      '/usr/bin/install', '-o', 'root', '-g', 'wheel', '-m', '0644',
+      source, privilegedTemporary,
+    ], 'public_key_install_failed');
+    runRootInstall(['/bin/mv', '-f', privilegedTemporary, ROOT_PUBLIC_KEY_PATH], 'public_key_install_failed');
+    runRootInstall(['/bin/sync'], 'public_key_install_failed');
+  } catch (error) {
+    spawnSync('/usr/bin/sudo', ['/bin/rm', '-f', privilegedTemporary], { stdio: 'ignore', timeout: 30_000 });
+    throw error;
+  } finally {
+    rmSync(source, { force: true });
+  }
+}
+
+export function removeRootBindingPublicKey({ publicKeyPath = ROOT_PUBLIC_KEY_PATH } = {}) {
+  if (publicKeyPath !== ROOT_PUBLIC_KEY_PATH) fail('public_key_install_invalid');
+  runRootInstall(['/bin/rm', '-f', ROOT_PUBLIC_KEY_PATH], 'public_key_remove_failed');
+}
+
 export function removeRootBindingAnchor({ anchorPath = ROOT_ANCHOR_PATH } = {}) {
   if (anchorPath !== ROOT_ANCHOR_PATH) fail('anchor_install_invalid');
   runRootInstall(['/bin/rm', '-f', ROOT_ANCHOR_PATH], 'anchor_remove_failed');
@@ -341,7 +435,7 @@ async function withRegistryLock(registryPath, action, {
 
 function nextBinding({
   mode, workspace, epoch, home, port, principalID, teamID, commonsStoreID,
-  commonsProjectID, commonsResource,
+  commonsProjectID, commonsResource, personalTopology,
 }) {
   const suffix = randomBytes(10).toString('hex');
   const base = {
@@ -353,6 +447,9 @@ function nextBinding({
     principal_ref: principalID,
   };
   if (mode === 'personal') {
+    if (personalTopology) {
+      return { ...base, personal: { ...personalTopology } };
+    }
     const storeID = `store_personal_${suffix}`;
     return {
       ...base,
@@ -470,10 +567,18 @@ export async function createWorkspaceBinding({
       fail('desk_binding_conflict');
     }
     const epoch = previous.epoch + 1;
-    const selectedPort = selectLocalPort(port, previous.bindings, workspace.workspace_id);
+    const reusablePersonal = mode === 'personal'
+      ? reusablePersonalTopology(previous.bindings, principalID, resolve(home))
+      : undefined;
+    if (reusablePersonal && port !== undefined && port !== reusablePersonal.port) {
+      fail('personal_store_port_mismatch');
+    }
+    const selectedPort = reusablePersonal?.port ??
+      selectLocalPort(port, previous.bindings, workspace.workspace_id);
     const replacement = nextBinding({
       mode, workspace, epoch, home: resolve(home), port: selectedPort, principalID,
       teamID, commonsStoreID, commonsProjectID, commonsResource,
+      personalTopology: reusablePersonal?.personal,
     });
     const bindings = previous.bindings
       .filter((binding) => binding?.workspace?.workspace_id !== workspace.workspace_id);
@@ -486,7 +591,8 @@ export async function createWorkspaceBinding({
     };
     const bytes = Buffer.from(canonicalJSONStringify(payload));
     const proof = signer(bytes, { payload });
-    if (!proof || proof.algorithm !== 'es256' || typeof proof.signature !== 'string') fail('presence_invalid');
+    if (!proof || !['ed25519', 'es256'].includes(proof.algorithm) ||
+        typeof proof.signature !== 'string') fail('presence_invalid');
     const envelope = { algorithm: proof.algorithm, payload, signature: proof.signature };
     const temporary = `${registryPath}.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}.new`;
     const previousRegistryBytes = hadRegistry ? readFileSync(registryPath) : undefined;
@@ -552,5 +658,70 @@ export async function createWorkspaceBinding({
     const result = verified.bindings.find((binding) => binding.binding_id === replacement.binding_id);
     if (!result) fail('write_verification_failed');
     return result;
+  }, { platformServices, timeoutSeconds: lockTimeoutSeconds });
+}
+
+export async function createInitialPersonalWorkspaceBinding({
+  cwd = process.cwd(),
+  port,
+  principalID,
+  home = homedir(),
+  registryPath = defaultBindingPaths(home).registryPath,
+  publicKeyPath = defaultBindingPaths(home).publicKeyPath,
+  anchorPath = defaultBindingPaths(home).anchorPath,
+  publicKeyInstaller = installRootBindingPublicKey,
+  publicKeyRemover = removeRootBindingPublicKey,
+  anchorInstaller = installRootBindingAnchor,
+  anchorRemover = removeRootBindingAnchor,
+  rootPublicKey = true,
+  rootAnchor = true,
+  platformServices = defaultPlatformServices,
+  lockTimeoutSeconds = 30,
+  onTransitionPhase = () => {},
+} = {}) {
+  if (typeof publicKeyInstaller !== 'function' || typeof publicKeyRemover !== 'function' ||
+      typeof anchorInstaller !== 'function' || typeof anchorRemover !== 'function' ||
+      typeof onTransitionPhase !== 'function' || !isAbsolute(home) ||
+      typeof rootPublicKey !== 'boolean' || typeof rootAnchor !== 'boolean') {
+    fail('request_invalid');
+  }
+  exactID(principalID, 'principal_invalid');
+  exactPort(port);
+  platformServices.ensurePrivateDirectory(dirname(registryPath));
+
+  return withRegistryLock(`${registryPath}.initial-bootstrap`, async () => {
+    if (existsSync(registryPath) || existsSync(anchorPath)) fail('initial_binding_exists');
+
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const publicKeyBytes = Buffer.from(publicKey.export({ type: 'spki', format: 'pem' }));
+    await publicKeyInstaller(publicKeyBytes, { publicKeyPath });
+    try {
+      return await createWorkspaceBinding({
+        cwd,
+        mode: 'personal',
+        port,
+        principalID,
+        home,
+        registryPath,
+        publicKeyPath,
+        anchorPath,
+        signer: (bytes) => ({
+          algorithm: 'ed25519',
+          signature: cryptoSign(null, bytes, privateKey).toString('base64'),
+        }),
+        anchorInstaller,
+        anchorRemover,
+        rootPublicKey,
+        rootAnchor,
+        platformServices,
+        lockTimeoutSeconds,
+        onTransitionPhase,
+      });
+    } catch (error) {
+      if (!existsSync(registryPath) && !existsSync(anchorPath)) {
+        await publicKeyRemover({ publicKeyPath });
+      }
+      throw error;
+    }
   }, { platformServices, timeoutSeconds: lockTimeoutSeconds });
 }

@@ -227,7 +227,7 @@ function requireProductEdgeFile(root, relative, label) {
 export function resolveSignedCodexProductEdge({
 	release, activation, platformServices = defaultPlatformServices,
 } = {}) {
-	if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2'].includes(release?.schema) ||
+	if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2', 'pulse.verified_release_manifest.v3'].includes(release?.schema) ||
 		!SHA256.test(release.manifest_digest ?? '') ||
 		typeof release.version !== 'string' || release.version.length < 1 ||
 		!Number.isSafeInteger(release.epoch) || release.epoch < 1) {
@@ -895,7 +895,13 @@ export function installCodexRuntime(packageRoot, dataDir, options = {}) {
     cpSync(packageRoot, next, {
       recursive: true,
       dereference: true,
-      filter: (sourcePath) => includeRuntimePath(packageRoot, sourcePath),
+      // A signed product edge already names one release-owned, fully verified
+      // runtime snapshot. Copy that tree byte-for-byte so the installed digest
+      // remains the digest we verified above. The allowlist remains necessary
+      // for the historical unsigned package-root install path.
+      ...(options.signedEdge
+        ? {}
+        : { filter: (sourcePath) => includeRuntimePath(packageRoot, sourcePath) }),
     });
     if (!existsSync(join(next, 'node_modules'))) {
       const hoisted = resolve(packageRoot, '..', '..');

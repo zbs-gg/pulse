@@ -43,6 +43,7 @@ type statusResponse struct {
 	Embedder                      string `json:"embedder,omitempty"`
 	ConsolidationReportsAvailable bool   `json:"consolidation_reports_available"`
 	ConsolidationReportsState     string `json:"consolidation_reports_state"`
+	MemorySnapshotDigest          string `json:"memory_snapshot_digest,omitempty"`
 }
 
 func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +66,7 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 			writeMemoryTrayError(w, err)
 			return
 		}
-		s.scheduleTurnResult(result)
+		result = s.commitTurnResultNow(result)
 		writeJSON(w, result)
 		return
 	}
@@ -135,6 +136,13 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	} else if s.consolidationReports != nil {
 		consolidationState = "ready"
 	}
+	memorySnapshotDigest := ""
+	if scope, scoped, scopeErr := s.cfg.Store.CurrentPersonalMemoryScopeSnapshot(); scopeErr != nil {
+		http.Error(w, "memory status error: "+scopeErr.Error(), http.StatusInternalServerError)
+		return
+	} else if scoped {
+		memorySnapshotDigest = scope.Digest()
+	}
 	writeJSON(w, statusResponse{
 		BillingMode:                   billing.Mode,
 		Host:                          billing.Host,
@@ -150,6 +158,7 @@ func (s *Server) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		Embedder:                      embedder,
 		ConsolidationReportsAvailable: s.consolidationReports != nil && s.consolidationUnavailable == "",
 		ConsolidationReportsState:     consolidationState,
+		MemorySnapshotDigest:          memorySnapshotDigest,
 	})
 }
 

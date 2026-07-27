@@ -37,10 +37,16 @@ function packedPackage(root) {
       throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be one regular, non-linked file');
     }
   } else {
-    const npmArgs = ['npm', 'pack', '--json', '--pack-destination', root];
+    const npmExecPath = process.env.npm_execpath;
+    if (!npmExecPath || !isAbsolute(npmExecPath) || resolve(npmExecPath) !== npmExecPath) {
+      throw new Error('multiharness npm executable must be an absolute canonical path');
+    }
+    const npmArgs = [npmExecPath, 'pack', '--json', '--pack-destination', root];
     const [command, args] = process.platform === 'darwin'
-      ? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]]
-      : ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', ...npmArgs]];
+      ? ['/usr/bin/lockf', ['-k', '-t', '300', '/tmp/pulse-product-pack.lock', process.execPath, ...npmArgs]]
+      : process.platform === 'linux'
+        ? ['/usr/bin/flock', ['-w', '300', '/tmp/pulse-product-pack.lock', process.execPath, ...npmArgs]]
+        : [process.execPath, npmArgs];
     run(command, args, {
       cwd: cliRoot,
       env: { ...process.env, PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW: '1' },
@@ -51,7 +57,11 @@ function packedPackage(root) {
   }
   const bytes = readFileSync(tarball);
   const installRoot = join(root, 'packed');
-  run('npm', [
+  const npmExecPath = process.env.npm_execpath;
+  if (!npmExecPath || !isAbsolute(npmExecPath) || resolve(npmExecPath) !== npmExecPath) {
+    throw new Error('multiharness npm executable must be an absolute canonical path');
+  }
+  run(process.execPath, [npmExecPath,
     'install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installRoot, tarball,
   ], { cwd: root });
   return {
@@ -64,10 +74,11 @@ function packedPackage(root) {
 function gitRepository(root) {
   const path = join(root, 'project');
   mkdirSync(path, { recursive: true, mode: 0o700 });
-  run('/usr/bin/git', ['init', '-q'], { cwd: path });
-  run('/usr/bin/git', ['config', 'user.email', 'pulse-matrix@example.test'], { cwd: path });
-  run('/usr/bin/git', ['config', 'user.name', 'Pulse Matrix'], { cwd: path });
-  run('/usr/bin/git', ['commit', '--allow-empty', '-q', '-m', 'fixture'], { cwd: path });
+  const git = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
+  run(git, ['init', '-q'], { cwd: path });
+  run(git, ['config', 'user.email', 'pulse-matrix@example.test'], { cwd: path });
+  run(git, ['config', 'user.name', 'Pulse Matrix'], { cwd: path });
+  run(git, ['commit', '--allow-empty', '-q', '-m', 'fixture'], { cwd: path });
   return path;
 }
 
@@ -141,6 +152,9 @@ function productFixture({ failHosts = [] } = {}) {
   };
   const context = {
     binding_id: 'binding_shared_product',
+    edge: {
+      release_manifest_digest: 'a'.repeat(64),
+    },
     edge_digest: 'c'.repeat(64),
     store_id: 'store_personal_shared',
   };
@@ -196,6 +210,14 @@ try {
     detectClaude: detector('claude-code', selected, incompatible),
     detectCodex: detector('codex', selected, incompatible),
     detectCursor: detector('cursor', selected, incompatible),
+    detectWorkspace: (path) => ({
+      schema: 'pulse.workspace-identity.v1',
+      workspace_id: 'workspace_multiharness_fixture',
+      repository_id: 'repository_multiharness_fixture',
+      canonical_path: resolve(path),
+      git_common_dir: join(resolve(path), '.git'),
+      checkout_kind: 'primary',
+    }),
     release: verifiedRelease(),
     detectResources: () => ({
       disk_free_bytes: 20 * 1024 ** 3,

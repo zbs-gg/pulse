@@ -23,6 +23,7 @@ node_modules/
 /pulse-app/.venv-mlx/
 /pulse-app/bin/
 /pulse-app/native/pulse-embedder-runtime/
+/pulse-app/native/pulse-presence-helper/dist/*.dmg
 /pulse-app/cli/release/dist/
 /pulse-app/cli/release/personal-preview-manifest.payload.json
 /pulse-app/cli/release/personal-preview-manifest.json

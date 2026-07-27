@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url';
 
 import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
 import { projectPersonalLiveReadiness } from '../src/personal-live-readiness.js';
+import { productBindingRequestHeaders } from '../src/codex-runtime.js';
 import { exactTarballPulseInvocation } from '../src/release-attestation.js';
+import { resolveWorkspaceBinding } from '../src/workspace-binding.js';
 import { loadBundledWindowsAdapter } from '../src/windows-bootstrap-adapter.js';
 import { releaseTargetDefinition } from './release-builder-core.mjs';
 import { writeProductEdgeFixture } from './product-release-fixture.mjs';
@@ -151,6 +153,22 @@ function npmCLI() {
 }
 
 function pack(root) {
+  const supplied = process.env.PULSE_PERSONAL_PACKED_TARBALL;
+  if (supplied !== undefined) {
+    if (resolve(supplied) !== supplied) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be an absolute canonical path');
+    }
+    const canonical = realpathSync(supplied);
+    const info = lstatSync(canonical);
+    if (canonical !== supplied || !info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be one regular, non-linked file');
+    }
+    return {
+      path: canonical,
+      bytes: info.size,
+      sha256: createHash('sha256').update(readFileSync(canonical)).digest('hex'),
+    };
+  }
   const output = join(root, 'package');
   mkdirSync(output, { mode: 0o700 });
   const result = run(process.execPath, [npmCLI(), 'pack', '--ignore-scripts', '--pack-destination', output, '--json'], {
@@ -286,13 +304,16 @@ async function productJSON(runtime, secret, path, { method = 'GET', body } = {})
   return response.json();
 }
 
-function installedRuntime(registryPath, workspace) {
+function installedRuntime(registryPath, workspace, { publicKeyPath, anchorPath }) {
   const envelope = json(readFileSync(registryPath, 'utf8'), 'native packed binding registry is invalid');
   const bindings = envelope?.payload?.bindings;
   assert.equal(Array.isArray(bindings), true);
   assert.equal(bindings.length, 1, `isolated native packed fixture must have one binding for ${workspace}`);
-  const [binding] = bindings;
-  assert.equal(binding.mode, 'personal');
+  const [storedBinding] = bindings;
+  assert.equal(storedBinding.mode, 'personal');
+  const binding = resolveWorkspaceBinding({
+    cwd: workspace, registryPath, publicKeyPath, anchorPath, rootAnchor: false,
+  });
   assert.equal(binding.personal?.base_url.startsWith('http://127.0.0.1:'), true);
   assert.equal(realpathSync(binding.personal.data_dir), binding.personal.data_dir);
   return { binding, runtime: binding.personal };
@@ -318,35 +339,113 @@ function codexHookInput({ eventName, root, sessionID, turnID, workspace, extra =
   };
 }
 
-function callInstalledMCP(pluginRoot, toolName, toolArguments, { cwd, env }) {
-  const input = [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+function startInstalledMCP(pluginRoot, { cwd, env }) {
+  const child = spawn(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
+    cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  let stdout = '';
+  let stderr = '';
+  let nextID = 1;
+  let closed = false;
+  const pending = new Map();
+  const failPending = (error) => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  };
+  const exited = new Promise((accept) => {
+    child.once('error', (error) => {
+      failPending(error);
+      accept({ error });
+    });
+    child.once('close', (status, signal) => {
+      const error = status === 0 || closed
+        ? undefined
+        : new Error(`installed MCP exited ${status ?? signal}: ${stderr.slice(-2000)}`);
+      if (error) failPending(error);
+      accept({ status, signal, error });
+    });
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-8192);
+  });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    for (let newline = stdout.indexOf('\n'); newline >= 0; newline = stdout.indexOf('\n')) {
+      const line = stdout.slice(0, newline).trim();
+      stdout = stdout.slice(newline + 1);
+      if (!line) continue;
+      let message;
+      try { message = JSON.parse(line); } catch {
+        failPending(new Error('native packed MCP output is invalid'));
+        continue;
+      }
+      const waiter = pending.get(message.id);
+      if (!waiter) continue;
+      pending.delete(message.id);
+      clearTimeout(waiter.timer);
+      if (message.error) waiter.reject(new Error(`native packed MCP error ${message.error.code}`));
+      else waiter.resolve(message.result);
+    }
+  });
+  const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+  const request = (method, params, timeoutMs = 30_000) => new Promise((resolveRequest, reject) => {
+    const id = nextID++;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`native packed MCP ${method} timed out`));
+    }, timeoutMs);
+    pending.set(id, { reject, resolve: resolveRequest, timer });
+    send({ jsonrpc: '2.0', id, method, params });
+  });
+  const ready = (async () => {
+    // The parent intentionally runs synchronous native hook launchers while
+    // the host-owned MCP boots. Allow their combined Windows ARM64 wall time
+    // before the event loop can consume the already-buffered response.
+    const initialized = await request('initialize', {
       protocolVersion: '2024-11-05', capabilities: {},
       clientInfo: { name: 'pulse-native-packed-e2e', version: '1' },
-    } },
-    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
-    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: toolName, arguments: toolArguments,
-    } },
-  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
-  const result = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
-    cwd, env, input, timeout: 30_000,
+    }, 60_000);
+    assert.equal(initialized?.serverInfo?.name, 'pulse-mcp');
+    send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+    return request('tools/list', {});
+  })();
+  return Object.freeze({
+    ready,
+    async call(toolName, toolArguments) {
+      const listed = await ready;
+      assert.equal(listed?.tools?.some((tool) => tool.name === toolName), true,
+        `installed MCP does not expose ${toolName}`);
+      const callResult = await request('tools/call', { name: toolName, arguments: toolArguments });
+      assert.equal(Array.isArray(callResult?.content), true);
+      assert.notEqual(callResult.isError, true, callResult.content?.[0]?.text);
+      return {
+        callResult,
+        output: json(callResult.content[0].text, `native packed ${toolName} output is invalid`),
+      };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      child.stdin.end();
+      let killTimer;
+      const outcome = await Promise.race([
+        exited,
+        new Promise((accept) => {
+          killTimer = setTimeout(() => {
+            terminateCommandTree(child);
+            accept({ error: new Error('installed MCP did not stop') });
+          }, 5000);
+        }),
+      ]);
+      clearTimeout(killTimer);
+      if (outcome.error) throw outcome.error;
+    },
   });
-  const messages = result.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) =>
-    json(line, 'native packed MCP output is invalid'));
-  assert.equal(messages.find((message) => message.id === 1)?.result?.serverInfo?.name, 'pulse-mcp');
-  assert.equal(messages.find((message) => message.id === 2)?.result?.tools?.some((tool) =>
-    tool.name === toolName), true, `installed MCP does not expose ${toolName}`);
-  const callResult = messages.find((message) => message.id === 3)?.result;
-  assert.equal(Array.isArray(callResult?.content), true);
-  assert.notEqual(callResult.isError, true, callResult.content?.[0]?.text);
-  return { callResult, output: json(callResult.content[0].text, `native packed ${toolName} output is invalid`) };
-}
-
-function rememberThroughInstalledMCP(pluginRoot, memoryArguments, options) {
-  const result = callInstalledMCP(pluginRoot, 'pulse_remember', memoryArguments, options);
-  return { callResult: result.callResult, remembered: result.output };
 }
 
 function seedSyntheticConsolidationArtifacts(home) {
@@ -404,7 +503,7 @@ async function waitForPackedConsolidationReport(tarball, report, options) {
   return current;
 }
 
-async function readMemoryHomePage(runtime, secret) {
+async function readMemoryHomePage(runtime, secret, binding) {
   const checks = Object.fromEntries([
     'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
     'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
@@ -413,7 +512,11 @@ async function readMemoryHomePage(runtime, secret) {
   const liveReadiness = projectPersonalLiveReadiness(checks, new Date());
   const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': secret,
+      ...productBindingRequestHeaders({ binding }),
+    },
     body: JSON.stringify({ live_readiness: liveReadiness }),
     signal: AbortSignal.timeout(5000),
   });
@@ -427,7 +530,7 @@ async function readMemoryHomePage(runtime, secret) {
   return pageResponse.text();
 }
 
-async function openVisibleHomeCard({ candidate, runtime, secret }) {
+async function assertVisibleHomeMemory({ binding, candidate, runtime, secret }) {
   const checks = Object.fromEntries([
     'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
     'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
@@ -438,7 +541,11 @@ async function openVisibleHomeCard({ candidate, runtime, secret }) {
   assert.equal(liveReadiness.reason_code, 'codex_hook_lifecycle_required');
   const sessionResponse = await fetch(`${runtime.base_url}/home/session`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Key': secret,
+      ...productBindingRequestHeaders({ binding }),
+    },
     body: JSON.stringify({ live_readiness: liveReadiness }),
     signal: AbortSignal.timeout(5000),
   });
@@ -451,29 +558,8 @@ async function openVisibleHomeCard({ candidate, runtime, secret }) {
   });
   assert.equal(pageResponse.status, 200);
   const page = await pageResponse.text();
-  assert.equal(page.includes(`data-candidate-id="${candidate.candidate_id}"`), true);
   assert.equal(page.includes(candidate.candidate.capsule.items[0].redacted_summary), true);
-  const csrf = page.match(/name="csrf_token" value="([^"]+)"/)?.[1];
-  assert.equal(typeof csrf, 'string');
-  const form = new URLSearchParams({
-    csrf_token: csrf,
-    candidate_id: candidate.candidate_id,
-    expected_version: String(candidate.version),
-  });
-  const presentResponse = await fetch(new URL('present', session.target_url), {
-    method: 'POST',
-    headers: {
-      Cookie: cookie,
-      Origin: runtime.base_url,
-      'Sec-Fetch-Site': 'same-origin',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Dest': 'empty',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: form,
-    signal: AbortSignal.timeout(5000),
-  });
-  assert.equal(presentResponse.status, 204, await presentResponse.text());
+  assert.equal(page.includes(candidate.canonical_object_id), true);
 }
 
 async function waitForTerminalCandidate(runtime, secret, candidateID, timeoutMs = 30_000) {
@@ -507,6 +593,7 @@ const host = process.env.PULSE_NATIVE_PACKED_HOST ?? 'codex';
 if (host !== 'codex') throw new Error('the first native packed proof currently calibrates Codex');
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'pulse-native-packed.')));
 let keep = process.env.PULSE_KEEP_NATIVE_PACKED_ROOT === '1';
+let installedMCP;
 try {
   const home = join(root, 'home');
   const codexHome = join(home, '.codex');
@@ -573,21 +660,28 @@ try {
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
   const installed = await packedPulse(tarball, ['install', '--json'], {
-    cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 180_000 : 15 * 60_000,
+    // Windows clean-room prewarm performs native ACL and executable checks.
+    // This install-only timeout does not relax the measured 60s first-value gate below.
+    cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 5 * 60_000 : 15 * 60_000,
   });
   const installResult = json(installed.stdout, 'native packed install result is invalid');
-  assert.equal(installResult.outcome, 'action_required', `${JSON.stringify(installResult)}\n${installed.stderr}`);
+  assert.equal(installResult.outcome, 'ready', `${JSON.stringify(installResult)}\n${installed.stderr}`);
   assert.equal(
     installResult.reason_code,
-    'codex_lifecycle_required',
+    'installed',
     `${JSON.stringify(installResult)}\n${installed.stderr}`,
   );
   assert.equal(installResult.host_status.hosts[0].installed, true);
+  assert.equal(installResult.host_status.hosts[0].lifecycle_ready, false);
+  assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
   assert.equal(basename(pluginRoot), '0.7.0');
 
-  const { runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace);
+  const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
+    publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,
+    anchorPath: baseEnv.PULSE_BINDING_ANCHOR_PATH,
+  });
   const secret = readFileSync(join(runtime.data_dir, 'secret.key'), 'utf8').trim();
   assert.match(secret, /^[a-f0-9]{64}$/);
   const initialStatus = await productJSON(runtime, secret, '/memory/status');
@@ -610,6 +704,10 @@ try {
       ['PULSE_TRUST_MODE', 'PULSE_TEST_CODEX_LIFECYCLE_ATTESTOR'].includes(name)),
   );
   const hookEnv = { ...freshHostEnv, PLUGIN_DATA: join(root, 'plugin-data') };
+  // A real host starts one stdio MCP server for the session and keeps it alive.
+  // Start it alongside SessionStart so MCP boot overlaps host startup instead
+  // of charging a synthetic one-shot Node launch to the first tool call.
+  installedMCP = startInstalledMCP(pluginRoot, { cwd: workspace, env: hookEnv });
   const firstSessionID = 'session-native-packed-first';
   const firstTurnID = 'turn-native-packed-first';
   const firstSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
@@ -629,14 +727,9 @@ try {
     extra: { prompt: 'Do not store this raw prompt.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstPrompt.continue, true);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /before the single final user-facing response/);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /ASCII safe slug/);
   markFirstValueStage('prompt_submit');
-  const preFinalize = codexHook(pluginRoot, 'Stop', codexHookInput({
-    eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
-    extra: { stop_hook_active: false, last_assistant_message: 'Do not store this raw message.' },
-  }), { cwd: workspace, env: hookEnv });
-  assert.equal(preFinalize.decision, 'block');
-  assert.match(preFinalize.reason, /bounded Pulse finalization pass/);
-  markFirstValueStage('stop_block');
 
   const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';
   const memoryArguments = {
@@ -657,13 +750,11 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.deepEqual(preTool, {});
   markFirstValueStage('pre_tool');
-  const { callResult, remembered } = rememberThroughInstalledMCP(pluginRoot, memoryArguments, {
-    cwd: workspace, env: hookEnv,
-  });
+  const { callResult, output: remembered } = await installedMCP.call('pulse_remember', memoryArguments);
   assert.equal(remembered.status, 'candidates');
   assert.equal(remembered.receipts.length, 1);
-  assert.equal(remembered.receipts[0].status, 'pending');
-  assert.equal(remembered.receipts[0].object_id ?? '', '');
+  assert.equal(remembered.receipts[0].status, 'created');
+  assert.match(remembered.receipts[0].object_id, /^pulse:/);
   markFirstValueStage('remember_mcp');
 
   const postTool = codexHook(pluginRoot, 'PostToolUse', codexHookInput({
@@ -673,8 +764,7 @@ try {
       tool_use_id: 'tool-native-packed-remember', tool_response: callResult,
     },
   }), { cwd: workspace, env: hookEnv });
-  assert.match(postTool.systemMessage, new RegExp(remembered.receipts[0].receipt_id));
-  assert.match(postTool.systemMessage, /:pending/);
+  assert.deepEqual(postTool, {});
   markFirstValueStage('post_tool');
   const firstStop = codexHook(pluginRoot, 'Stop', codexHookInput({
     eventName: 'Stop', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
@@ -683,23 +773,26 @@ try {
   assert.deepEqual(firstStop, {});
   markFirstValueStage('stop_finalize');
 
-  const pendingTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
-  const pendingCard = pendingTray.candidates.find((candidate) =>
+  const committedTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+  const committedCard = committedTray.candidates.find((candidate) =>
     candidate.candidate_id === remembered.receipts[0].candidate_id);
-  assert.equal(pendingCard.state, 'pending');
-  assert.equal(pendingCard.grace_expires_at, '');
-  assert.equal(pendingCard.candidate.capsule.items[0].redacted_summary, summary);
-  markFirstValueStage('pending_card');
-  await openVisibleHomeCard({ candidate: pendingCard, runtime, secret });
+  assert.equal(committedCard.state, 'committed');
+  assert.equal(committedCard.current, true);
+  assert.equal(committedCard.canonical_object_id, remembered.receipts[0].object_id);
+  assert.equal(committedCard.latest_receipt.status, 'created');
+  assert.equal(committedCard.projection_status, 'complete');
+  assert.equal(committedCard.candidate.capsule.items[0].redacted_summary, summary);
+  markFirstValueStage('committed_card');
+  await assertVisibleHomeMemory({ binding, candidate: committedCard, runtime, secret });
   markFirstValueStage('visible_card');
-  const terminalCard = await waitForTerminalCandidate(runtime, secret, pendingCard.candidate_id);
+  const terminalCard = await waitForTerminalCandidate(runtime, secret, committedCard.candidate_id);
   assert.equal(['created', 'updated', 'deduplicated'].includes(terminalCard.latest_receipt.status), true);
   assert.equal(terminalCard.latest_receipt.object_id, terminalCard.canonical_object_id);
   assert.equal(terminalCard.latest_receipt.safe_provenance.host, 'codex');
   assert.match(terminalCard.latest_receipt.receipt_id, /^receipt_/);
   const objectID = terminalCard.canonical_object_id;
   markFirstValueStage('terminal_receipt');
-  await waitForProjectedCandidate(runtime, secret, pendingCard.candidate_id);
+  await waitForProjectedCandidate(runtime, secret, committedCard.candidate_id);
   markFirstValueStage('retrieval_projection');
   const freshSessionID = 'session-native-packed-fresh';
   const freshTurnID = 'turn-native-packed-fresh';
@@ -725,8 +818,23 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.equal(freshPrompt.continue, true);
 
-  const lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
-  const codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  let lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
+  let codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  // Delivery observation is intentionally bounded and non-blocking. A slow
+  // local platform may leave the prompt offer pending, so exercise the same
+  // trusted Stop retry that closes the proof during ordinary host use.
+  for (let attempt = 0;
+    codexLifecycle?.state === 'host_observation_pending' && attempt < 3;
+    attempt += 1) {
+    const observationRetry = codexHook(pluginRoot, 'Stop', codexHookInput({
+      eventName: 'Stop', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
+      extra: { stop_hook_active: false, last_assistant_message: 'Continue from the saved decision.' },
+    }), { cwd: workspace, env: hookEnv });
+    assert.deepEqual(observationRetry, {});
+    await new Promise((accept) => setTimeout(accept, 250));
+    lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
+    codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  }
   assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify(codexLifecycle));
   assert.equal(codexLifecycle.state, 'ready');
   assert.equal(codexLifecycle.object_id, objectID);
@@ -785,22 +893,22 @@ try {
   assert.equal(consolidationStatus.report_digest, consolidation.report_digest);
   assert.deepEqual(consolidationStatus.totals, consolidation.totals);
 
-  const mcpConsolidation = callInstalledMCP(
-    pluginRoot,
+  const mcpConsolidation = (await installedMCP.call(
     'pulse_consolidation_report',
     { action: 'status', report_id: consolidation.invocation_id },
-    { cwd: workspace, env: hookEnv },
-  ).output;
+  )).output;
   assert.equal(mcpConsolidation.report_digest, consolidation.report_digest);
   assert.deepEqual(mcpConsolidation.totals, consolidation.totals);
 
-  const consolidationHome = await readMemoryHomePage(runtime, secret);
+  const consolidationHome = await readMemoryHomePage(runtime, secret, binding);
   for (const text of [
     'Memory ocean', 'What Pulse found on this computer', 'Where memory for this project is written',
     'Which sources were inspected', 'canonical_vault_01', 'release_artifact_01', 'backup_01',
   ]) assert.equal(consolidationHome.includes(text), true, `Memory Home missing ${text}`);
   assert.equal(consolidationHome.includes(sourceFixtures[0].path), false);
   assert.equal(consolidationHome.includes(sourceFixtures[1].path), false);
+  await installedMCP.close();
+  installedMCP = undefined;
 
   const consolidationReceipt = {
     schema: 'pulse.personal_consolidation_report_fixture.v1',
@@ -857,6 +965,8 @@ try {
     static_host_attached: true,
     visible_memory_card: true,
     first_memory_saved: true,
+    automatic_durable_write: true,
+    tray_save_proof: false,
     canonical_object_id: objectID,
     fresh_session_context: true,
     host_observation: true,
@@ -865,6 +975,7 @@ try {
     same_object_recalled: true,
     first_value_boundary: 'fresh_session_context',
     first_value_ms: firstValueMs,
+    first_value_stages_ms: Object.fromEntries(firstValueStages),
     token_economy: {
       state: economy.state,
       method_id: economy.method_id,
@@ -882,6 +993,7 @@ try {
   process.stderr.write(`Native packed fixture root preserved at ${root}\n`);
   throw error;
 } finally {
+  try { await installedMCP?.close(); } catch { /* cleanup must preserve the primary assertion */ }
   stopFixtureProcesses(root);
   if (!keep) rmSync(root, { recursive: true, force: true });
 }

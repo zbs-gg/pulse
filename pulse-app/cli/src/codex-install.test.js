@@ -193,7 +193,17 @@ function writeSignedProductEdgeFixture(root, { releaseVersion = '0.7.0', pluginV
 		name: 'pulse', version: pluginVersion, mcpServers: './.mcp.json',
 	}));
 	writeFileSync(join(pluginRoot, '.mcp.json'), JSON.stringify({
-		mcpServers: { 'pulse-product': { command: 'node', args: ['${PLUGIN_ROOT}/mcp/server.mjs'] } },
+		mcpServers: {
+			'pulse-product': {
+				command: 'node',
+				args: [
+					'--input-type=module',
+					'--eval',
+					"const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+				],
+				env_vars: ['CODEX_HOME'],
+			},
+		},
 	}));
 	writeFileSync(join(pluginRoot, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
 	writeFileSync(join(pluginRoot, 'hooks', 'pulse-hook.mjs'), 'export {}\n');
@@ -344,6 +354,13 @@ test('signed Codex runtime records the complete release edge and preserves last-
 	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-signed-runtime-'));
 	try {
 		const fixture = writeSignedProductEdgeFixture(root);
+		writeFileSync(join(fixture.runtimeRoot, 'src', 'runtime.test.js'), 'export const signedTestSupport = true;\n');
+		writeFileSync(join(fixture.runtimeRoot, 'src', 'cli.js.map'), '{"version":3}\n');
+		mkdirSync(join(fixture.runtimeRoot, 'node_modules', 'signed-types'), { recursive: true, mode: 0o700 });
+		writeFileSync(
+			join(fixture.runtimeRoot, 'node_modules', 'signed-types', 'index.d.ts'),
+			'export declare const signedType: true;\n',
+		);
 		const edge = resolveSignedCodexProductEdge({ release: fixture.release, activation: fixture.activation });
 		const dataDir = join(root, 'data');
 		const installed = installCodexRuntime(fixture.runtimeRoot, dataDir, {
@@ -356,6 +373,13 @@ test('signed Codex runtime records the complete release edge and preserves last-
 		assert.equal(installed.manifest.plugin_runtime_activation_digest, fixture.activation.activation_digest);
 		assert.equal(installed.manifest.plugin_runtime_tree_digest, fixture.activation.tree_digest);
 		assert.equal(installed.manifest.plugin_tree_digest, edge.plugin_tree_digest);
+		assert.equal(readFileSync(join(dataDir, 'runtime', 'codex', 'current', 'src', 'runtime.test.js'), 'utf8'),
+			'export const signedTestSupport = true;\n');
+		assert.equal(readFileSync(join(dataDir, 'runtime', 'codex', 'current', 'src', 'cli.js.map'), 'utf8'),
+			'{"version":3}\n');
+		assert.equal(readFileSync(join(
+			dataDir, 'runtime', 'codex', 'current', 'node_modules', 'signed-types', 'index.d.ts',
+		), 'utf8'), 'export declare const signedType: true;\n');
 
 		const before = installed.digest;
 		writeFileSync(join(fixture.runtimeRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n// drifted after signing\n');

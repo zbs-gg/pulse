@@ -115,12 +115,20 @@ export async function verifyNpmStageCandidate({ candidatePath, expectedCommit, e
   let candidate;
   try { candidate = JSON.parse(raw); } catch { fail('npm_candidate_receipt_invalid'); }
   if (raw !== `${canonical(candidate)}\n` || !exactObject(candidate, [
-    'commit', 'package', 'production', 'schema', 'sha256', 'support_claim',
-    'targets', 'tarball', 'universal_run_id', 'version',
+    'artifact_set_digest', 'commit', 'dependency_count', 'hosts', 'host_target_count', 'license_inventory_sha256',
+    'package', 'production', 'production_ready', 'release_epoch', 'sbom_sha256', 'schema', 'sha256', 'snapshot_digest',
+    'support_claim', 'targets', 'tarball', 'universal_run_id', 'version',
   ]) || candidate.schema !== 'pulse.npm_production_candidate.v1' ||
       candidate.package !== '@zbs-gg/pulse' || candidate.commit !== expectedCommit ||
       candidate.sha256 !== expectedSHA256 || candidate.production !== true ||
+      candidate.production_ready !== true ||
       candidate.support_claim !== false || !SAFE_TARBALL.test(candidate.tarball ?? '') ||
+      !SHA256.test(candidate.artifact_set_digest ?? '') || !SHA256.test(candidate.snapshot_digest ?? '') ||
+      !SHA256.test(candidate.sbom_sha256 ?? '') || !SHA256.test(candidate.license_inventory_sha256 ?? '') ||
+      !Number.isSafeInteger(candidate.dependency_count) || candidate.dependency_count < 1 ||
+      candidate.release_epoch !== 8 ||
+      candidate.host_target_count !== 18 ||
+      JSON.stringify(candidate.hosts) !== JSON.stringify(['claude-code', 'codex', 'cursor']) ||
       !Number.isSafeInteger(candidate.universal_run_id) || candidate.universal_run_id < 1 ||
       typeof candidate.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(candidate.version) ||
       !Array.isArray(candidate.targets) || JSON.stringify(candidate.targets) !== JSON.stringify(TARGETS)) {
@@ -140,10 +148,18 @@ export async function verifyNpmStageCandidate({ candidatePath, expectedCommit, e
   }
   return Object.freeze({
     schema: 'pulse.npm_stage_verification.v1',
+    artifact_set_digest: candidate.artifact_set_digest,
     commit: candidate.commit,
+    dependency_count: candidate.dependency_count,
+    hosts: candidate.hosts,
+    host_target_count: candidate.host_target_count,
     package: candidate.package,
+    license_inventory_sha256: candidate.license_inventory_sha256,
+    release_epoch: candidate.release_epoch,
+    sbom_sha256: candidate.sbom_sha256,
     sha256: candidate.sha256,
     stage_tag: 'preview',
+    snapshot_digest: candidate.snapshot_digest,
     targets: candidate.targets,
     tarball: candidate.tarball,
     universal_run_id: candidate.universal_run_id,

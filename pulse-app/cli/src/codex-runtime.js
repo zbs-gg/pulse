@@ -520,10 +520,33 @@ export function readRuntimeSecret(runtime, { platformServices = defaultPlatformS
   return secret;
 }
 
+export function productBindingRequestHeaders(resolved) {
+	const binding = resolved?.binding;
+	const workspace = binding?.workspace?.canonical_path;
+	const repositoryID = binding?.workspace?.repository_id;
+	if (typeof workspace !== 'string' || !isAbsolute(workspace) ||
+		!/^[a-f0-9]{64}$/.test(binding?.binding_digest ?? '') ||
+		typeof repositoryID !== 'string' || !repositoryID.startsWith('repository_') ||
+		!Number.isSafeInteger(binding?.resolver_epoch) || binding.resolver_epoch < 1) {
+		throw new Error('product_binding_request_invalid');
+	}
+	const encodedWorkspace = Buffer.from(workspace, 'utf8').toString('base64url');
+	if (Buffer.byteLength(workspace, 'utf8') > 4096 || encodedWorkspace.length === 0) {
+		throw new Error('product_binding_request_invalid');
+	}
+	return {
+		'X-Pulse-Product-Workspace': encodedWorkspace,
+		'X-Pulse-Product-Binding': binding.binding_digest,
+		'X-Pulse-Product-Repository': repositoryID,
+		'X-Pulse-Product-Resolver-Epoch': String(binding.resolver_epoch),
+	};
+}
+
 export async function boundPulseRequest(resolved, path, options = {}) {
   const method = options.method ?? 'POST';
   const headers = {
     Accept: 'application/json',
+		...productBindingRequestHeaders(resolved),
     'X-Pulse-Key': readRuntimeSecret(resolved.runtime, {
 		platformServices: options.platformServices ?? defaultPlatformServices,
 	}),

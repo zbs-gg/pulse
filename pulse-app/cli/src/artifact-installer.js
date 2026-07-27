@@ -1102,7 +1102,7 @@ function activationPointerRecord(activation) {
 }
 
 function validateVerifiedRelease(release) {
-  if (!release || release.schema !== 'pulse.verified_release_manifest.v2' ||
+  if (!release || !['pulse.verified_release_manifest.v2', 'pulse.verified_release_manifest.v3'].includes(release.schema) ||
       typeof release.manifest_digest !== 'string' || !SHA256.test(release.manifest_digest) ||
       typeof release.version !== 'string' || !Number.isSafeInteger(release.epoch) || release.epoch < 1 ||
       !release.artifacts || Array.isArray(release.artifacts) || typeof release.artifacts !== 'object') {

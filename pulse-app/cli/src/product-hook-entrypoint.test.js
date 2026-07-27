@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { __productHookEntrypointTest, runProductHookEntrypoint } from './product-hook-entrypoint.js';
@@ -41,6 +44,37 @@ test('synthetic worker diagnostics expose only stable content-free error codes',
   assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic({ code: 'capture_state_unsafe' }), 'capture_state_unsafe');
   assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic(new Error('pulse_response_invalid')), 'pulse_response_invalid');
   assert.equal(__productHookEntrypointTest.syntheticHookDiagnostic(new Error('/private/path leaked')), 'hook_failure_unclassified');
+});
+
+test('hook worker lease watches resolver inputs but not mutable runtime outputs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-hook-entrypoint-witnesses.'));
+  try {
+    const dataDir = join(root, 'data');
+    const runtimeDir = join(dataDir, 'runtime');
+    mkdirSync(runtimeDir, { recursive: true });
+    const authority = ['bindings.json', 'bindings.pub', 'bindings.anchor']
+      .map((name) => join(root, name));
+    const capture = join(dataDir, 'capture-state.json');
+    const daemon = join(runtimeDir, 'product-daemon.json');
+    const secret = join(dataDir, 'secret.key');
+    const pid = join(runtimeDir, 'pulse.pid');
+    for (const path of [...authority, capture, daemon, secret, pid]) writeFileSync(path, '{}\n');
+
+    const witnesses = __productHookEntrypointTest.productHookWitnessPaths({
+      runtime: { data_dir: dataDir, pid_file: pid },
+    }, {
+      PULSE_TRUST_MODE: 'test',
+      PULSE_BINDING_REGISTRY_PATH: authority[0],
+      PULSE_BINDING_PUBLIC_KEY_PATH: authority[1],
+      PULSE_BINDING_ANCHOR_PATH: authority[2],
+    });
+    assert.deepEqual(witnesses, [...authority, capture]);
+    assert.equal(witnesses.includes(daemon), false);
+    assert.equal(witnesses.includes(secret), false);
+    assert.equal(witnesses.includes(pid), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('worker entrypoint accepts filesystem aliases only after canonical identity matches', () => {

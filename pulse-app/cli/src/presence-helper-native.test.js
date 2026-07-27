@@ -65,6 +65,25 @@ test('native helper source builds and exposes the exact non-mutating capability 
 test('native helper permits the exact home.open user-presence action', () => {
   const source = readFileSync(join(helperRoot, 'main.swift'), 'utf8');
   assert.match(source, /"home\.open"/);
+  assert.match(source, /setActivationPolicy\(\.regular\)/);
+  assert.match(source, /makeKeyAndOrderFront\(nil\)/);
+  assert.match(source, /applicationShouldTerminateAfterLastWindowClosed/);
+  assert.match(source, /applicationShouldTerminate[\s\S]*?\.terminateCancel/);
+  assert.match(source, /reviewInChild\(command: "review-action-internal"/);
+  assert.match(source, /reviewInChild\(command: "review-binding-registry-internal"/);
+});
+
+test('native helper persists only an opaque Secure Enclave representation in private user state', () => {
+  const source = readFileSync(join(helperRoot, 'main.swift'), 'utf8');
+  const functionBody = source.match(
+    /private func privateKey\(reason: String\) throws -> SecKey \{([\s\S]*?)\n\}/,
+  )?.[1];
+  assert.equal(functionBody, undefined, 'presence trust must not persist a SecKey in Keychain');
+  assert.match(source, /SecureEnclave\.P256\.Signing\.PrivateKey/);
+  assert.match(source, /key\.dataRepresentation/);
+  assert.match(source, /O_WRONLY \| O_CREAT \| O_EXCL \| O_NOFOLLOW/);
+  assert.match(source, /info\.st_nlink == 1/);
+  assert.match(source, /\\n-----END PUBLIC KEY-----\\n/);
 });
 
 test('native helper source passes DER-to-P1363 known-answer and malformed vectors without Keychain access', {

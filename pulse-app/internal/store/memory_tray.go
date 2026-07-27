@@ -43,6 +43,7 @@ var (
 	ErrMemoryTrayGraceActive      = errors.New("Memory Tray grace period is active")
 	ErrMemoryTrayNotPresented     = errors.New("Memory Tray candidate has not been presented")
 	ErrMemoryTrayVersionConflict  = errors.New("Memory Tray candidate version conflict")
+	ErrMemoryScopeConflict        = errors.New("memory scope changed concurrently")
 	ErrMemoryPresentationConflict = errors.New("memory presentation does not match the current candidate")
 	ErrMemoryCorrectionConflict   = errors.New("memory correction target changed after preview")
 	ErrMemoryTrayTerminal         = errors.New("Memory Tray candidate is terminal")
@@ -74,18 +75,20 @@ type PrivateMemoryCandidate struct {
 }
 
 type TurnFinalizeRequest struct {
-	Schema         string                   `json:"schema"`
-	Host           string                   `json:"host"`
-	SessionID      string                   `json:"session_id"`
-	TurnID         string                   `json:"turn_id"`
-	SourceEventKey string                   `json:"source_event_key"`
-	IdempotencyKey string                   `json:"idempotency_key"`
-	BindingDigest  string                   `json:"binding_digest"`
-	PolicyEpoch    int64                    `json:"policy_epoch"`
-	ResolverEpoch  int64                    `json:"resolver_epoch"`
-	Candidates     []PrivateMemoryCandidate `json:"candidates"`
-	operation      string
-	targetObjectID string
+	Schema                      string                   `json:"schema"`
+	Host                        string                   `json:"host"`
+	SessionID                   string                   `json:"session_id"`
+	TurnID                      string                   `json:"turn_id"`
+	SourceEventKey              string                   `json:"source_event_key"`
+	IdempotencyKey              string                   `json:"idempotency_key"`
+	BindingDigest               string                   `json:"binding_digest"`
+	PolicyEpoch                 int64                    `json:"policy_epoch"`
+	ResolverEpoch               int64                    `json:"resolver_epoch"`
+	Candidates                  []PrivateMemoryCandidate `json:"candidates"`
+	operation                   string
+	targetObjectID              string
+	expectedTargetContentDigest string
+	expectedTargetGeneration    int
 }
 
 type TurnNoChangeRequest struct {
@@ -168,12 +171,13 @@ type MemoryPresentationReceipt struct {
 	GraceExpiresAt         string `json:"grace_expires_at"`
 }
 
-// TerminalMemoryReadinessFact is derived only from a terminal write receipt,
-// its exact presentation receipt, the current active object, and the bound
-// turn ledger. It contains no memory body and is safe for readiness projection.
+// TerminalMemoryReadinessFact is derived from a terminal write receipt, the
+// current active object, and the bound turn ledger. A presentation receipt is
+// optional audit evidence that Memory Home displayed the exact card; ordinary
+// Personal continuity does not require the user to open Home before saving.
 type TerminalMemoryReadinessFact struct {
 	ReceiptID             string   `json:"receipt_id"`
-	PresentationReceiptID string   `json:"presentation_receipt_id"`
+	PresentationReceiptID string   `json:"presentation_receipt_id,omitempty"`
 	ObjectID              string   `json:"object_id"`
 	EvidenceIDs           []string `json:"evidence_ids,omitempty"`
 	Status                string   `json:"status"`
@@ -232,7 +236,7 @@ type trayCandidateRow struct {
 	id, ledgerID, kind, operation, targetObjectID, targetContentDigest string
 	digest, payload, state, graceExpires                               string
 	host, sessionID, bindingDigest                                     string
-	version                                                            int
+	version, targetLogicalGeneration                                   int
 	policyEpoch, resolverEpoch                                         int64
 	destination                                                        string
 }
@@ -278,8 +282,8 @@ func validateTrayEnvelope(host, sessionID, turnID, sourceEventKey, idempotencyKe
 }
 
 func validateTrayGrace(grace time.Duration) error {
-	if grace < time.Second || grace > 30*time.Second {
-		return errors.New("Memory Tray grace must be between 1s and 30s")
+	if grace < 0 || grace > 30*time.Second {
+		return errors.New("private memory write delay must be between 0s and 30s")
 	}
 	return nil
 }
@@ -383,6 +387,35 @@ func requestDigest(value any) (string, error) {
 // rejection receipts. Candidate payload validation happens before a DB
 // transaction is opened, so rejected bytes never reach SQLite or its WAL.
 func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.Duration) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.finalizeTurnForAuthority(
+		req, now, grace, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+// FinalizeTurnForVerifiedBinding admits a Personal write only after the server
+// has re-verified the signed workspace binding carried by this request. The
+// product policy epoch is currently fixed at zero by every host adapter.
+func (s *Store) FinalizeTurnForVerifiedBinding(
+	req TurnFinalizeRequest,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.finalizeTurnForAuthority(req, now, grace, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) finalizeTurnForAuthority(
+	req TurnFinalizeRequest,
+	now time.Time,
+	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (TurnFinalizeResult, error) {
 	destination, err := s.trayDestination()
 	if err != nil {
 		return TurnFinalizeResult{}, err
@@ -393,7 +426,6 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 	if req.Schema != TurnFinalizeRequestSchema {
 		return TurnFinalizeResult{}, errors.New("invalid turn finalize schema")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if req.BindingDigest != expectedBinding || req.PolicyEpoch != expectedPolicy || req.ResolverEpoch != expectedResolver {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
@@ -421,7 +453,14 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 	if err != nil {
 		return TurnFinalizeResult{}, err
 	}
-	operationDigest := sha256.Sum256([]byte(digest + "\x1f" + operation + "\x1f" + req.targetObjectID))
+	operationIdentity := digest + "\x1f" + operation + "\x1f" + req.targetObjectID
+	if req.expectedTargetContentDigest != "" {
+		operationIdentity += "\x1f" + req.expectedTargetContentDigest
+	}
+	if req.expectedTargetGeneration > 0 {
+		operationIdentity += fmt.Sprintf("\x1f%d", req.expectedTargetGeneration)
+	}
+	operationDigest := sha256.Sum256([]byte(operationIdentity))
 	digest = hex.EncodeToString(operationDigest[:])
 	prepared := make([]preparedPrivateCandidate, len(req.Candidates))
 	unsafeBatch := false
@@ -444,15 +483,38 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 	defer tx.Rollback()
 	targetContentDigest := ""
 	if operation == "correct" && !unsafeBatch {
-		var targetKind, lifecycle string
+		var targetKind, lifecycle, targetBinding string
+		var targetGeneration int
+		var targetPolicy, targetResolver int64
 		if err := tx.QueryRow(`
-			SELECT candidate_kind, lifecycle, content_digest FROM private_memory_objects WHERE object_id=?`,
+			SELECT object.candidate_kind, object.lifecycle, object.content_digest,
+			       object.logical_generation, ledger.binding_digest,
+			       ledger.policy_epoch, ledger.resolver_epoch
+			  FROM private_memory_objects object
+			  JOIN memory_tray_candidates candidate
+			    ON candidate.candidate_id=object.created_from_candidate_id
+			  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+			 WHERE object.object_id=?`,
 			req.targetObjectID,
-		).Scan(&targetKind, &lifecycle, &targetContentDigest); err != nil {
+		).Scan(
+			&targetKind, &lifecycle, &targetContentDigest, &targetGeneration,
+			&targetBinding, &targetPolicy, &targetResolver,
+		); err != nil {
 			return TurnFinalizeResult{}, err
+		}
+		if targetBinding != expectedBinding || targetPolicy != expectedPolicy || targetResolver != expectedResolver {
+			return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 		}
 		if lifecycle != "active" || targetKind != prepared[0].kind {
 			return TurnFinalizeResult{}, errors.New("correction target is inactive or has a different kind")
+		}
+		if req.expectedTargetContentDigest != "" &&
+			targetContentDigest != req.expectedTargetContentDigest {
+			return TurnFinalizeResult{}, ErrMemoryCorrectionConflict
+		}
+		if req.expectedTargetGeneration > 0 &&
+			targetGeneration != req.expectedTargetGeneration {
+			return TurnFinalizeResult{}, ErrMemoryScopeConflict
 		}
 	}
 	ledgerID, err := newOpaqueID("turn")
@@ -464,6 +526,10 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 		return TurnFinalizeResult{}, err
 	}
 	createdAt := now.UTC().Format(time.RFC3339Nano)
+	// Ordinary Personal memory is eligible for canonical persistence
+	// immediately. Keep the legacy column populated for schema compatibility,
+	// but never turn it into a user-facing review gate.
+	graceExpiresAt := now.UTC().Format(time.RFC3339Nano)
 	state := TurnFinalizedCandidates
 	if unsafeBatch {
 		state = TurnFinalizedRejected
@@ -533,11 +599,13 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 		if _, err := tx.Exec(`
 			INSERT INTO memory_tray_candidates(
 				candidate_id, ledger_id, candidate_kind, operation, target_object_id, target_content_digest,
+				target_logical_generation,
 				version, content_digest, payload_json,
 				state, grace_expires_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), 1, ?, ?, 'pending', ?, ?, ?)`,
-			candidateID, ledgerID, prepared[index].kind, operation, req.targetObjectID, targetContentDigest, prepared[index].digest,
-			string(prepared[index].payload), "", createdAt, createdAt,
+			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, 0), 1, ?, ?, 'pending', ?, ?, ?)`,
+			candidateID, ledgerID, prepared[index].kind, operation, req.targetObjectID,
+			targetContentDigest, req.expectedTargetGeneration, prepared[index].digest,
+			string(prepared[index].payload), graceExpiresAt, createdAt, createdAt,
 		); err != nil {
 			return TurnFinalizeResult{}, err
 		}
@@ -570,6 +638,30 @@ func (s *Store) FinalizeTurn(req TurnFinalizeRequest, now time.Time, grace time.
 }
 
 func (s *Store) FinalizeTurnNoChange(req TurnNoChangeRequest, now time.Time) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.finalizeTurnNoChangeForAuthority(
+		req, now, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) FinalizeTurnNoChangeForVerifiedBinding(
+	req TurnNoChangeRequest,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.finalizeTurnNoChangeForAuthority(req, now, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) finalizeTurnNoChangeForAuthority(
+	req TurnNoChangeRequest,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (TurnFinalizeResult, error) {
 	destination, err := s.trayDestination()
 	if err != nil {
 		return TurnFinalizeResult{}, err
@@ -580,7 +672,6 @@ func (s *Store) FinalizeTurnNoChange(req TurnNoChangeRequest, now time.Time) (Tu
 	if req.Schema != TurnNoChangeRequestSchema {
 		return TurnFinalizeResult{}, errors.New("invalid turn no-change schema")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if req.BindingDigest != expectedBinding || req.PolicyEpoch != expectedPolicy || req.ResolverEpoch != expectedResolver {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
@@ -871,13 +962,15 @@ func loadTrayCandidateTx(tx *sql.Tx, candidateID string) (trayCandidateRow, erro
 		SELECT candidate.candidate_id, candidate.ledger_id, candidate.candidate_kind,
 		       candidate.operation, COALESCE(candidate.target_object_id, ''),
 		       COALESCE(candidate.target_content_digest, ''),
+		       COALESCE(candidate.target_logical_generation, 0),
 		       candidate.version, candidate.content_digest, candidate.payload_json,
 		       candidate.state, candidate.grace_expires_at, ledger.binding_digest, ledger.policy_epoch,
 		       ledger.resolver_epoch, ledger.destination_class, ledger.host, ledger.session_id
 		  FROM memory_tray_candidates candidate
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
 		 WHERE candidate.candidate_id=?`, candidateID,
-	).Scan(&row.id, &row.ledgerID, &row.kind, &row.operation, &row.targetObjectID, &row.targetContentDigest,
+	).Scan(&row.id, &row.ledgerID, &row.kind, &row.operation,
+		&row.targetObjectID, &row.targetContentDigest, &row.targetLogicalGeneration,
 		&row.version, &row.digest, &row.payload,
 		&row.state, &row.graceExpires, &row.bindingDigest, &row.policyEpoch, &row.resolverEpoch, &row.destination,
 		&row.host, &row.sessionID)
@@ -909,9 +1002,9 @@ func loadExactMemoryPresentationReceiptTx(tx *sql.Tx, req MemoryPresentationRequ
 }
 
 // PresentMemoryTrayCandidate records content-free proof that an authenticated,
-// trusted human surface rendered the exact current candidate. The first exact
-// presentation starts grace atomically; retries return the immutable receipt
-// and never extend the deadline.
+// trusted human surface rendered the exact current candidate. Presentation is
+// optional audit evidence only; it never delays or authorizes persistence. The
+// empty-deadline branch only upgrades candidates created by an older runtime.
 func (s *Store) PresentMemoryTrayCandidate(
 	req MemoryPresentationRequest,
 	now time.Time,
@@ -964,7 +1057,7 @@ func (s *Store) PresentMemoryTrayCandidate(
 	presentedAt := now.UTC().Format(time.RFC3339Nano)
 	graceExpiresAt := row.graceExpires
 	if graceExpiresAt == "" {
-		graceExpiresAt = now.Add(grace).UTC().Format(time.RFC3339Nano)
+		graceExpiresAt = presentedAt
 	}
 	receiptID, err := newOpaqueID("presentation")
 	if err != nil {
@@ -1033,7 +1126,7 @@ func (s *Store) TerminalMemoryReadinessFacts(
 		return nil, errors.New("readiness fact limit must be between 1 and 100")
 	}
 	rows, err := s.db.Query(`
-		SELECT receipt.receipt_id, presentation.receipt_id, receipt.object_id,
+		SELECT receipt.receipt_id, COALESCE(presentation.receipt_id, ''), receipt.object_id,
 		       receipt.status, candidate.content_digest, candidate.payload_json,
 		       ledger.binding_digest, receipt.provenance_host,
 		       receipt.provenance_session_id, receipt.created_at
@@ -1047,7 +1140,7 @@ func (s *Store) TerminalMemoryReadinessFacts(
 		    ON object.object_id=receipt.object_id
 		   AND object.content_digest=receipt.content_digest
 		   AND object.lifecycle='active'
-		  JOIN memory_presentation_receipts presentation
+		  LEFT JOIN memory_presentation_receipts presentation
 		    ON presentation.candidate_id=candidate.candidate_id
 		   AND presentation.candidate_version=candidate.version
 		   AND presentation.content_digest=candidate.content_digest
@@ -1121,6 +1214,41 @@ func terminalReadinessCandidateMetadata(payload string) (string, string, error) 
 }
 
 func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion int, now time.Time) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.commitMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+// CommitMemoryTrayCandidateForVerifiedBinding materializes a candidate inside
+// the namespace derived from the request's signed repository identity.
+func (s *Store) CommitMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || !validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.commitMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		bindingDigest, 0, resolverEpoch,
+		personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) commitMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	scope personalMemoryScope,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1142,29 +1270,6 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 	if row.state != "pending" {
 		return MemoryWriteReceipt{}, ErrMemoryTrayTerminal
 	}
-	if row.graceExpires == "" {
-		return MemoryWriteReceipt{}, ErrMemoryTrayNotPresented
-	}
-	var presented int
-	if err := tx.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM memory_presentation_receipts
-			 WHERE candidate_id=? AND candidate_version=? AND content_digest=?
-			   AND binding_digest=? AND grace_expires_at=?
-		)`, candidateID, expectedVersion, row.digest, row.bindingDigest, row.graceExpires,
-	).Scan(&presented); err != nil {
-		return MemoryWriteReceipt{}, err
-	}
-	if presented != 1 {
-		return MemoryWriteReceipt{}, ErrMemoryTrayNotPresented
-	}
-	graceExpires, err := time.Parse(time.RFC3339Nano, row.graceExpires)
-	if err != nil {
-		return MemoryWriteReceipt{}, err
-	}
-	if now.Before(graceExpires) {
-		return MemoryWriteReceipt{}, ErrMemoryTrayGraceActive
-	}
 	var candidate PrivateMemoryCandidate
 	if err := json.Unmarshal([]byte(row.payload), &candidate); err != nil {
 		return MemoryWriteReceipt{}, fmt.Errorf("stored candidate JSON is invalid: %w", err)
@@ -1176,9 +1281,11 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 	if revalidated.kind != row.kind || revalidated.digest != row.digest || string(revalidated.payload) != row.payload {
 		return MemoryWriteReceipt{}, errors.New("stored candidate does not match previewed canonical payload")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	if err := backfillPersonalScopeForBindingTx(tx, row.bindingDigest, scope); err != nil {
+		return MemoryWriteReceipt{}, err
 	}
 	changed, err := tx.Exec(`
 		UPDATE memory_tray_candidates SET state='committing', updated_at=?
@@ -1193,15 +1300,23 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 
 	status := MemoryWriteCreated
 	objectID := ""
+	mutationAt := now.UTC().Format(time.RFC3339Nano)
 	if row.operation == "correct" {
 		status = MemoryWriteUpdated
 		objectID = row.targetObjectID
 		var targetKind, lifecycle string
 		var existingDigest string
+		var targetNamespace, targetScope string
+		var targetGeneration int
 		if err := tx.QueryRow(`
-			SELECT candidate_kind, lifecycle, content_digest FROM private_memory_objects WHERE object_id=?`,
+			SELECT candidate_kind, lifecycle, content_digest, project_namespace_id,
+			       memory_scope, logical_generation
+			  FROM private_memory_objects WHERE object_id=?`,
 			objectID,
-		).Scan(&targetKind, &lifecycle, &existingDigest); err != nil {
+		).Scan(
+			&targetKind, &lifecycle, &existingDigest, &targetNamespace,
+			&targetScope, &targetGeneration,
+		); err != nil {
 			return MemoryWriteReceipt{}, err
 		}
 		if lifecycle != "active" || targetKind != row.kind {
@@ -1210,11 +1325,17 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 		if existingDigest != row.targetContentDigest {
 			return MemoryWriteReceipt{}, ErrMemoryCorrectionConflict
 		}
+		if row.targetLogicalGeneration > 0 &&
+			targetGeneration != row.targetLogicalGeneration {
+			return MemoryWriteReceipt{}, ErrMemoryScopeConflict
+		}
 		var duplicateID string
 		err := tx.QueryRow(`
 			SELECT object_id FROM private_memory_objects
-			 WHERE candidate_kind=? AND content_digest=? AND lifecycle='active' AND object_id!=?`,
-			row.kind, row.digest, objectID,
+			 WHERE project_namespace_id=? AND memory_scope=?
+			   AND candidate_kind=? AND content_digest=?
+			   AND lifecycle='active' AND object_id!=?`,
+			targetNamespace, targetScope, row.kind, row.digest, objectID,
 		).Scan(&duplicateID)
 		if err == nil {
 			return MemoryWriteReceipt{}, errors.New("correction duplicates another active memory object")
@@ -1234,11 +1355,20 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 		default:
 			return MemoryWriteReceipt{}, errors.New("stored correction kind is invalid")
 		}
-		if _, err := tx.Exec(`
+		updateResult, err := tx.Exec(`
 			UPDATE private_memory_objects
-			   SET content_digest=?, created_from_candidate_id=?
-			 WHERE object_id=? AND lifecycle='active'`, row.digest, candidateID, objectID); err != nil {
+			 SET content_digest=?, created_from_candidate_id=?,
+			       logical_generation=logical_generation+1, modified_at=?
+			 WHERE object_id=? AND lifecycle='active'
+			   AND (?=0 OR logical_generation=?)`,
+			row.digest, candidateID, mutationAt, objectID,
+			row.targetLogicalGeneration, row.targetLogicalGeneration,
+		)
+		if err != nil {
 			return MemoryWriteReceipt{}, err
+		}
+		if affected, _ := updateResult.RowsAffected(); affected != 1 {
+			return MemoryWriteReceipt{}, ErrMemoryScopeConflict
 		}
 		if row.kind == PrivateMemoryCandidateSemanticDelta {
 			if err := rebuildPrivateSemanticProjectionTx(tx); err != nil {
@@ -1248,7 +1378,10 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 	} else {
 		err = tx.QueryRow(`
 			SELECT object_id FROM private_memory_objects
-			 WHERE candidate_kind=? AND content_digest=? AND lifecycle='active'`, row.kind, row.digest).Scan(&objectID)
+			 WHERE project_namespace_id=? AND memory_scope=?
+			   AND candidate_kind=? AND content_digest=? AND lifecycle='active'`,
+			scope.ProjectNamespaceID, scope.Scope, row.kind, row.digest,
+		).Scan(&objectID)
 		if err == nil {
 			status = MemoryWriteDeduplicated
 		} else if err != sql.ErrNoRows {
@@ -1272,11 +1405,18 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 			default:
 				return MemoryWriteReceipt{}, errors.New("stored candidate kind is invalid")
 			}
-			createdAt := now.UTC().Format(time.RFC3339Nano)
+			createdAt := mutationAt
 			if _, err := tx.Exec(`
 				INSERT INTO private_memory_objects(
-					object_id, candidate_kind, content_digest, created_from_candidate_id, created_at
-				) VALUES (?, ?, ?, ?, ?)`, objectID, row.kind, row.digest, candidateID, createdAt); err != nil {
+					object_id, candidate_kind, content_digest, created_from_candidate_id, created_at,
+					logical_memory_id, logical_generation, project_namespace_id,
+					original_repository_id, memory_scope, modified_at,
+					capture_host, capture_session_ref, captured_at
+				) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+				objectID, row.kind, row.digest, candidateID, createdAt,
+				objectID, scope.ProjectNamespaceID, scope.OriginalRepository, scope.Scope, createdAt,
+				row.host, row.sessionID, createdAt,
+			); err != nil {
 				return MemoryWriteReceipt{}, err
 			}
 			if row.kind == PrivateMemoryCandidateSemanticDelta {
@@ -1287,7 +1427,7 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 		}
 	}
 
-	createdAt := now.UTC().Format(time.RFC3339Nano)
+	createdAt := mutationAt
 	measurementMethod := "host_structured_v1"
 	reasonCode := ""
 	if row.operation == "correct" {
@@ -1335,6 +1475,9 @@ func (s *Store) CommitMemoryTrayCandidate(candidateID string, expectedVersion in
 		objectID, createdAt, createdAt, candidateID, row.version); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
+	if err := advancePersonalEligibilityTx(tx, now); err != nil {
+		return MemoryWriteReceipt{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1374,10 +1517,20 @@ func projectPrivateSemanticObjectTx(tx *sql.Tx, objectID string, delta SemanticD
 	if err := validateSemanticDelta(delta); err != nil {
 		return err
 	}
+	var objectScope, projectNamespace string
+	if err := tx.QueryRow(`
+		SELECT memory_scope, project_namespace_id
+		  FROM private_memory_objects
+		 WHERE object_id=? AND lifecycle='active'`, objectID,
+	).Scan(&objectScope, &projectNamespace); err != nil {
+		return err
+	}
 	now := delta.Source.Timestamp
 	entityIDs := make(map[string]int64, len(delta.Nodes))
 	for _, node := range delta.Nodes {
-		rowID, err := upsertPrivateSemanticNodeTx(tx, node, now)
+		rowID, err := upsertPrivateSemanticNodeTx(
+			tx, objectScope, projectNamespace, node, now,
+		)
 		if err != nil {
 			return fmt.Errorf("project private node %q: %w", node.ClientID, err)
 		}
@@ -1477,15 +1630,28 @@ func projectPrivateSemanticObjectTx(tx *sql.Tx, objectID string, delta SemanticD
 	return nil
 }
 
-func upsertPrivateSemanticNodeTx(tx *sql.Tx, node SemanticNode, now string) (int64, error) {
+func upsertPrivateSemanticNodeTx(
+	tx *sql.Tx,
+	objectScope, projectNamespace string,
+	node SemanticNode,
+	now string,
+) (int64, error) {
 	nodeKeys := semanticEntityKeys(node.Kind, node.CanonicalName, node.Aliases)
 	rows, err := tx.Query(`
 		SELECT DISTINCT entity.id, entity.canonical_name, COALESCE(entity.aliases, '[]')
 		  FROM entities entity
 		  JOIN private_semantic_projection_rows projection
 		    ON projection.row_kind='entity' AND projection.row_ref=CAST(entity.id AS TEXT)
+		  JOIN private_memory_objects object ON object.object_id=projection.object_id
 		 WHERE entity.kind=?
-		 ORDER BY entity.salience_score DESC, entity.last_seen DESC, entity.id ASC`, node.Kind)
+		   AND object.lifecycle='active'
+		   AND object.memory_scope=?
+		   AND (
+		       ?='personal_global' OR
+		       object.project_namespace_id=?
+		   )
+		 ORDER BY entity.salience_score DESC, entity.last_seen DESC, entity.id ASC`,
+		node.Kind, objectScope, objectScope, projectNamespace)
 	if err != nil {
 		return 0, err
 	}
@@ -1630,6 +1796,41 @@ func deletePrivateSemanticProjectionTx(tx *sql.Tx, _ string) error {
 }
 
 func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int, replacement PrivateMemoryCandidate, now time.Time, grace time.Duration) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.editMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, replacement, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) EditMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	replacement PrivateMemoryCandidate,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.editMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, replacement, now, grace,
+		bindingDigest, 0, resolverEpoch,
+	)
+}
+
+func (s *Store) editMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	replacement PrivateMemoryCandidate,
+	now time.Time,
+	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1645,7 +1846,6 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
@@ -1674,7 +1874,7 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 		       grace_expires_at=?, updated_at=?
 		 WHERE candidate_id=? AND version=? AND state='pending'`,
 		prepared.kind, newVersion, prepared.digest, string(prepared.payload),
-		"", createdAt,
+		createdAt, createdAt,
 		candidateID, expectedVersion)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
@@ -1701,6 +1901,37 @@ func (s *Store) EditMemoryTrayCandidate(candidateID string, expectedVersion int,
 }
 
 func (s *Store) CancelMemoryTrayCandidate(candidateID string, expectedVersion int, now time.Time) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.cancelMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) CancelMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.cancelMemoryTrayCandidateForAuthority(
+		candidateID, expectedVersion, now,
+		bindingDigest, 0, resolverEpoch,
+	)
+}
+
+func (s *Store) cancelMemoryTrayCandidateForAuthority(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -1713,7 +1944,6 @@ func (s *Store) CancelMemoryTrayCandidate(candidateID string, expectedVersion in
 	if err != nil {
 		return MemoryWriteReceipt{}, err
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
 		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
@@ -1892,10 +2122,9 @@ func (s *Store) PrepareManualMemoryCapsuleWithInvocation(capsule MemoryCapsule, 
 }
 
 // PrepareUnassignedMemoryCapsuleWithInvocation moves one host-extracted,
-// digest-bound Inbox capsule into the current bound Vault's ordinary Memory
-// Tray. It does not commit canonical memory; the visible Tray review and grace
-// period remain mandatory. The caller is the trusted local Home surface, while
-// the original supported harness remains the truthful provenance host.
+// digest-bound Inbox capsule into the current bound Vault's ordinary durable
+// write path. The caller is the trusted local Home surface, while the original
+// supported harness remains the truthful provenance host.
 func (s *Store) PrepareUnassignedMemoryCapsuleWithInvocation(
 	capsule MemoryCapsule,
 	invocationKey string,
@@ -1957,9 +2186,9 @@ func (s *Store) PrepareManualSemanticDeltaWithInvocation(delta SemanticDelta, in
 	}, now, grace)
 }
 
-// PrepareMemoryCorrection creates a new visible Tray candidate for an active
-// object. The correction cannot mutate canonical memory until the same grace,
-// edit/cancel, receipt, and CAS path as an ordinary private write completes.
+// PrepareMemoryCorrection creates a durable correction candidate for an active
+// object. Ordinary Personal corrections are eligible for immediate commit and
+// retain the same receipt and compare-and-swap guarantees as automatic writes.
 func (s *Store) PrepareMemoryCorrection(
 	targetObjectID string,
 	replacement PrivateMemoryCandidate,
@@ -1976,8 +2205,29 @@ func (s *Store) PrepareMemoryCorrectionWithInvocation(
 	now time.Time,
 	grace time.Duration,
 ) (TurnFinalizeResult, error) {
+	bindingDigest, policyEpoch, resolverEpoch := s.productRuntimeAuthority()
+	return s.prepareMemoryCorrectionWithInvocation(
+		targetObjectID, replacement, invocationKey, "", 0, now, grace,
+		bindingDigest, policyEpoch, resolverEpoch,
+	)
+}
+
+func (s *Store) prepareMemoryCorrectionWithInvocation(
+	targetObjectID string,
+	replacement PrivateMemoryCandidate,
+	invocationKey string,
+	expectedTargetContentDigest string,
+	expectedTargetGeneration int,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest string,
+	policyEpoch, resolverEpoch int64,
+) (TurnFinalizeResult, error) {
 	if !validTrayIdentifier(targetObjectID) {
 		return TurnFinalizeResult{}, errors.New("correction target is invalid")
+	}
+	if expectedTargetContentDigest != "" && !trayBindingDigestPattern.MatchString(expectedTargetContentDigest) {
+		return TurnFinalizeResult{}, errors.New("correction target digest is invalid")
 	}
 	switch replacement.Kind {
 	case PrivateMemoryCandidateCapsule:
@@ -2012,8 +2262,7 @@ func (s *Store) PrepareMemoryCorrectionWithInvocation(
 		delta.Source.SessionID = sessionID
 		replacement.SemanticDelta = &delta
 	}
-	bindingDigest, policyEpoch, resolverEpoch := s.productRuntimeAuthority()
-	return s.FinalizeTurn(TurnFinalizeRequest{
+	return s.finalizeTurnForAuthority(TurnFinalizeRequest{
 		Schema: TurnFinalizeRequestSchema,
 		Host:   "pulse-cli", SessionID: sessionID,
 		TurnID: "correct_turn_" + invocationID, SourceEventKey: "control:correct:" + invocationID,
@@ -2021,7 +2270,177 @@ func (s *Store) PrepareMemoryCorrectionWithInvocation(
 		PolicyEpoch: policyEpoch, ResolverEpoch: resolverEpoch,
 		Candidates: []PrivateMemoryCandidate{replacement},
 		operation:  "correct", targetObjectID: targetObjectID,
-	}, now, grace)
+		expectedTargetContentDigest: expectedTargetContentDigest,
+		expectedTargetGeneration:    expectedTargetGeneration,
+	}, now, grace, bindingDigest, policyEpoch, resolverEpoch)
+}
+
+// PrepareMemorySummaryCorrectionWithInvocation is the simple Memory Home edit
+// path. It preserves the structured candidate and changes only the human-
+// visible summary selected by Home. The target digest is captured before the
+// correction is prepared so a concurrent edit cannot be overwritten.
+func (s *Store) PrepareMemorySummaryCorrectionWithInvocation(
+	targetObjectID string,
+	summary string,
+	invocationKey string,
+	now time.Time,
+	grace time.Duration,
+) (TurnFinalizeResult, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.prepareMemorySummaryCorrectionWithInvocation(
+		targetObjectID, summary, invocationKey, 0, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+// PrepareMemorySummaryCorrectionAtGenerationWithInvocation gives Memory Home
+// a generation-fenced edit path. Scope moves, deletes, and earlier edits all
+// advance the generation, so a stale browser tab cannot overwrite any of them.
+func (s *Store) PrepareMemorySummaryCorrectionAtGenerationWithInvocation(
+	targetObjectID string,
+	summary string,
+	invocationKey string,
+	expectedGeneration int,
+	now time.Time,
+	grace time.Duration,
+) (TurnFinalizeResult, error) {
+	if expectedGeneration < 1 {
+		return TurnFinalizeResult{}, errors.New("correction target generation is invalid")
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.prepareMemorySummaryCorrectionWithInvocation(
+		targetObjectID, summary, invocationKey, expectedGeneration, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) PrepareMemorySummaryCorrectionAtGenerationWithInvocationForVerifiedBinding(
+	targetObjectID string,
+	summary string,
+	invocationKey string,
+	expectedGeneration int,
+	now time.Time,
+	grace time.Duration,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (TurnFinalizeResult, error) {
+	if expectedGeneration < 1 || !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	return s.prepareMemorySummaryCorrectionWithInvocation(
+		targetObjectID, summary, invocationKey, expectedGeneration, now, grace,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) prepareMemorySummaryCorrectionWithInvocation(
+	targetObjectID string,
+	summary string,
+	invocationKey string,
+	expectedGeneration int,
+	now time.Time,
+	grace time.Duration,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
+) (TurnFinalizeResult, error) {
+	if !validTrayIdentifier(targetObjectID) {
+		return TurnFinalizeResult{}, errors.New("correction target is invalid")
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return TurnFinalizeResult{}, errors.New("memory summary is required")
+	}
+	var payload, targetContentDigest, lifecycle, bindingDigest string
+	var memoryScope, projectNamespace, originalRepository string
+	var targetGeneration int
+	var policyEpoch, resolverEpoch int64
+	err := s.db.QueryRow(`
+		SELECT candidate.payload_json, object.content_digest, object.lifecycle,
+		       object.logical_generation, object.memory_scope,
+		       object.project_namespace_id, object.original_repository_id,
+		       ledger.binding_digest,
+		       ledger.policy_epoch, ledger.resolver_epoch
+		  FROM private_memory_objects object
+		  JOIN memory_tray_candidates candidate
+		    ON candidate.candidate_id=object.created_from_candidate_id
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE object.object_id=?`, targetObjectID,
+	).Scan(
+		&payload, &targetContentDigest, &lifecycle, &targetGeneration,
+		&memoryScope, &projectNamespace, &originalRepository,
+		&bindingDigest, &policyEpoch, &resolverEpoch,
+	)
+	if err != nil {
+		return TurnFinalizeResult{}, err
+	}
+	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	if originalRepository != authority.OriginalRepository ||
+		projectNamespace != authority.ProjectNamespaceID ||
+		(memoryScope != MemoryScopeProject && memoryScope != MemoryScopePersonalGlobal) {
+		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
+	}
+	if lifecycle != "active" {
+		return TurnFinalizeResult{}, errors.New("correction target is inactive")
+	}
+	if expectedGeneration > 0 && targetGeneration != expectedGeneration {
+		return TurnFinalizeResult{}, ErrMemoryScopeConflict
+	}
+	var replacement PrivateMemoryCandidate
+	if err := json.Unmarshal([]byte(payload), &replacement); err != nil {
+		return TurnFinalizeResult{}, errors.New("stored correction target is invalid")
+	}
+	if err := replacePrivateMemorySummary(&replacement, summary); err != nil {
+		return TurnFinalizeResult{}, err
+	}
+	return s.prepareMemoryCorrectionWithInvocation(
+		targetObjectID, replacement, invocationKey, targetContentDigest,
+		expectedGeneration, now, grace,
+		expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func replacePrivateMemorySummary(candidate *PrivateMemoryCandidate, summary string) error {
+	if candidate == nil {
+		return errors.New("stored correction target is invalid")
+	}
+	switch candidate.Kind {
+	case PrivateMemoryCandidateCapsule:
+		if candidate.Capsule == nil || len(candidate.Capsule.Items) != 1 {
+			return errors.New("stored correction capsule is invalid")
+		}
+		candidate.Capsule.Items[0].RedactedSummary = summary
+		return nil
+	case PrivateMemoryCandidateSemanticDelta:
+		if candidate.SemanticDelta == nil {
+			return errors.New("stored semantic correction is invalid")
+		}
+		delta := candidate.SemanticDelta
+		if delta.Continuity != nil {
+			delta.Continuity.Summary = summary
+			return nil
+		}
+		if len(delta.Events) > 0 {
+			delta.Events[0].Summary = summary
+			return nil
+		}
+		if len(delta.Facts) > 0 {
+			delta.Facts[0].Text = summary
+			return nil
+		}
+		if len(delta.Nodes) > 0 {
+			delta.Nodes[0].Summary = summary
+			return nil
+		}
+		return errors.New("stored semantic correction has no editable summary")
+	default:
+		return errors.New("stored correction kind is invalid")
+	}
 }
 
 func (s *Store) ListMemoryTray(limit int) ([]MemoryTrayCandidateView, error) {
@@ -2066,10 +2485,31 @@ func (s *Store) ListPendingMemoryTrayCandidates(limit int) ([]MemoryTrayPendingC
 	if _, err := s.trayDestination(); err != nil {
 		return nil, err
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.listPendingMemoryTrayCandidatesForAuthority(
+		limit, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) ListPendingMemoryTrayCandidatesForVerifiedBinding(
+	limit int,
+	bindingDigest string,
+	resolverEpoch int64,
+) ([]MemoryTrayPendingCandidate, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || resolverEpoch < 1 {
+		return nil, ErrProductRuntimeMismatch
+	}
+	return s.listPendingMemoryTrayCandidatesForAuthority(limit, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) listPendingMemoryTrayCandidatesForAuthority(
+	limit int,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) ([]MemoryTrayPendingCandidate, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	rows, err := s.db.Query(`
 		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
 		  FROM memory_tray_candidates candidate
@@ -2097,10 +2537,33 @@ func (s *Store) GetPendingMemoryTrayCandidate(candidateID string, version int) (
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryTrayPendingCandidate{}, err
 	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.getPendingMemoryTrayCandidateForAuthority(
+		candidateID, version, expectedBinding, expectedPolicy, expectedResolver,
+	)
+}
+
+func (s *Store) GetPendingMemoryTrayCandidateForVerifiedBinding(
+	candidateID string,
+	version int,
+	bindingDigest string,
+	resolverEpoch int64,
+) (MemoryTrayPendingCandidate, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) || resolverEpoch < 1 {
+		return MemoryTrayPendingCandidate{}, ErrProductRuntimeMismatch
+	}
+	return s.getPendingMemoryTrayCandidateForAuthority(candidateID, version, bindingDigest, 0, resolverEpoch)
+}
+
+func (s *Store) getPendingMemoryTrayCandidateForAuthority(
+	candidateID string,
+	version int,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+) (MemoryTrayPendingCandidate, error) {
 	if !validTrayIdentifier(candidateID) || version < 1 {
 		return MemoryTrayPendingCandidate{}, errors.New("pending Memory Tray candidate identity is invalid")
 	}
-	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
 	return scanPendingMemoryTrayCandidate(s.db.QueryRow(`
 		SELECT candidate.candidate_id, candidate.version, candidate.content_digest, candidate.payload_json
 		  FROM memory_tray_candidates candidate
@@ -2287,6 +2750,66 @@ func (s *Store) ListPendingPrivateProjectionReceipts(afterObjectID string, limit
 	return receipts, rows.Err()
 }
 
+// EnsureMemoryTrayGraceDeadline upgrades pending candidates created by a
+// pre-zero-touch runtime. The legacy column is set to "now"; it is not a
+// review timer and never requires the user to open Memory Home.
+func (s *Store) EnsureMemoryTrayGraceDeadline(
+	candidateID string,
+	expectedVersion int,
+	now time.Time,
+	grace time.Duration,
+) (string, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return "", err
+	}
+	if !validTrayIdentifier(candidateID) || expectedVersion < 1 {
+		return "", errors.New("Memory Tray candidate identity is invalid")
+	}
+	if err := validateTrayGrace(grace); err != nil {
+		return "", err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	row, err := loadTrayCandidateTx(tx, candidateID)
+	if err != nil {
+		return "", err
+	}
+	if row.version != expectedVersion {
+		return "", ErrMemoryTrayVersionConflict
+	}
+	if row.state != "pending" {
+		return "", ErrMemoryTrayTerminal
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	if row.bindingDigest != expectedBinding || row.policyEpoch != expectedPolicy || row.resolverEpoch != expectedResolver {
+		return "", ErrProductRuntimeMismatch
+	}
+	if row.graceExpires != "" {
+		return row.graceExpires, nil
+	}
+	armedAt := now.UTC().Format(time.RFC3339Nano)
+	deadline := armedAt
+	result, err := tx.Exec(`
+		UPDATE memory_tray_candidates
+		   SET grace_expires_at=?, updated_at=?
+		 WHERE candidate_id=? AND version=? AND state='pending' AND grace_expires_at=''`,
+		deadline, armedAt, candidateID, expectedVersion,
+	)
+	if err != nil {
+		return "", err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return "", ErrMemoryTrayVersionConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return deadline, nil
+}
+
 func (s *Store) CommitDueMemoryTrayCandidates(now time.Time, limit int) ([]MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return nil, err
@@ -2369,11 +2892,278 @@ func (s *Store) insertHumanControlLedgerTx(
 	return ledgerID, nil
 }
 
+// MoveCommittedMemoryScope moves one active logical memory between its
+// immutable origin project and Personal Global. The body and capture
+// provenance do not change; scope, generation, receipt, and eligibility
+// revision commit atomically.
+func (s *Store) MoveCommittedMemoryScope(
+	objectID string,
+	expectedGeneration int,
+	targetScope string,
+	idempotencyKey string,
+	now time.Time,
+) (MemoryScopeMoveReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.moveCommittedMemoryScopeForAuthority(
+		objectID, expectedGeneration, targetScope, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) MoveCommittedMemoryScopeForVerifiedBinding(
+	objectID string,
+	expectedGeneration int,
+	targetScope string,
+	idempotencyKey string,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryScopeMoveReceipt, error) {
+	if !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.moveCommittedMemoryScopeForAuthority(
+		objectID, expectedGeneration, targetScope, idempotencyKey, now,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) moveCommittedMemoryScopeForAuthority(
+	objectID string,
+	expectedGeneration int,
+	targetScope string,
+	idempotencyKey string,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
+) (MemoryScopeMoveReceipt, error) {
+	if _, err := s.trayDestination(); err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if !validTrayIdentifier(objectID) || !validTrayIdentifier(idempotencyKey) ||
+		expectedGeneration < 1 ||
+		(targetScope != MemoryScopeProject && targetScope != MemoryScopePersonalGlobal) {
+		return MemoryScopeMoveReceipt{}, errors.New("memory scope move is invalid")
+	}
+	requestHash := sha256.Sum256([]byte(strings.Join([]string{
+		"pulse-memory-scope-move-v1", objectID, strconv.Itoa(expectedGeneration), targetScope,
+	}, "\x1f")))
+	requestDigest := hex.EncodeToString(requestHash[:])
+	tx, err := s.db.Begin()
+	if err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	defer tx.Rollback()
+
+	var replayDigest, replayReceiptID string
+	err = tx.QueryRow(`
+		SELECT request_digest, receipt_id
+		  FROM memory_write_idempotency
+		 WHERE operation='move_scope' AND idempotency_key=?`, idempotencyKey,
+	).Scan(&replayDigest, &replayReceiptID)
+	if err == nil {
+		if replayDigest != requestDigest {
+			return MemoryScopeMoveReceipt{}, ErrMemoryScopeConflict
+		}
+		receipt, err := scanWriteReceipt(tx.QueryRow(`
+			SELECT `+receiptColumns+` FROM memory_write_receipts WHERE receipt_id=?`,
+			replayReceiptID,
+		))
+		if err != nil {
+			return MemoryScopeMoveReceipt{}, err
+		}
+		return MemoryScopeMoveReceipt{
+			WriteReceipt: receipt, ObjectID: objectID, Scope: targetScope,
+			LogicalGeneration: expectedGeneration + 1,
+		}, nil
+	}
+	if err != sql.ErrNoRows {
+		return MemoryScopeMoveReceipt{}, err
+	}
+
+	var (
+		kind, lifecycle, currentScope, projectNamespace, originalRepository string
+		contentDigest, candidateID, destination, bindingDigest              string
+		version, generation                                                 int
+		policyEpoch, resolverEpoch                                          int64
+	)
+	err = tx.QueryRow(`
+		SELECT object.candidate_kind, object.lifecycle, object.memory_scope,
+		       object.project_namespace_id, object.original_repository_id,
+		       object.content_digest, object.logical_generation,
+		       candidate.candidate_id, candidate.version,
+		       ledger.destination_class, ledger.binding_digest,
+		       ledger.policy_epoch, ledger.resolver_epoch
+		  FROM private_memory_objects object
+		  JOIN memory_tray_candidates candidate
+		    ON candidate.candidate_id=object.created_from_candidate_id
+		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
+		 WHERE object.object_id=?`, objectID,
+	).Scan(
+		&kind, &lifecycle, &currentScope, &projectNamespace, &originalRepository,
+		&contentDigest, &generation, &candidateID, &version, &destination,
+		&bindingDigest, &policyEpoch, &resolverEpoch,
+	)
+	if err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
+		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
+	}
+	if lifecycle != "active" || originalRepository != authority.OriginalRepository ||
+		projectNamespace != authority.ProjectNamespaceID {
+		return MemoryScopeMoveReceipt{}, ErrProductRuntimeMismatch
+	}
+	if generation != expectedGeneration || currentScope == targetScope {
+		return MemoryScopeMoveReceipt{}, ErrMemoryScopeConflict
+	}
+	var duplicateID string
+	if targetScope == MemoryScopePersonalGlobal {
+		err = tx.QueryRow(`
+			SELECT object_id FROM private_memory_objects
+			 WHERE memory_scope='personal_global' AND candidate_kind=?
+			   AND content_digest=? AND lifecycle='active' AND object_id!=?`,
+			kind, contentDigest, objectID,
+		).Scan(&duplicateID)
+	} else {
+		err = tx.QueryRow(`
+			SELECT object_id FROM private_memory_objects
+			 WHERE memory_scope='project' AND project_namespace_id=?
+			   AND candidate_kind=? AND content_digest=?
+			   AND lifecycle='active' AND object_id!=?`,
+			projectNamespace, kind, contentDigest, objectID,
+		).Scan(&duplicateID)
+	}
+	if err == nil {
+		return MemoryScopeMoveReceipt{}, ErrMemoryScopeConflict
+	}
+	if err != sql.ErrNoRows {
+		return MemoryScopeMoveReceipt{}, err
+	}
+
+	ledgerID, err := s.insertHumanControlLedgerTx(
+		tx, "move_scope", objectID, idempotencyKey, destination,
+		policyEpoch, resolverEpoch, now,
+	)
+	if err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	createdAt := now.UTC().Format(time.RFC3339Nano)
+	result, err := tx.Exec(`
+		UPDATE private_memory_objects
+		   SET memory_scope=?, logical_generation=logical_generation+1, modified_at=?
+		 WHERE object_id=? AND lifecycle='active'
+		   AND logical_generation=? AND memory_scope=?`,
+		targetScope, createdAt, objectID, expectedGeneration, currentScope,
+	)
+	if err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return MemoryScopeMoveReceipt{}, ErrMemoryScopeConflict
+	}
+	if kind == PrivateMemoryCandidateSemanticDelta {
+		if err := rebuildPrivateSemanticProjectionTx(tx); err != nil {
+			return MemoryScopeMoveReceipt{}, fmt.Errorf("rebuild moved semantic projection: %w", err)
+		}
+	}
+	reasonCode := "user_moved_to_project"
+	if targetScope == MemoryScopePersonalGlobal {
+		reasonCode = "user_moved_to_personal_global"
+	}
+	receipt, err := insertWriteReceiptTx(tx, MemoryWriteReceipt{
+		LedgerID: ledgerID, CandidateID: candidateID, CandidateVersion: version,
+		Status: MemoryWriteUpdated, Destination: capture.Destination(destination),
+		ContentDigest: contentDigest, ObjectID: objectID, ReasonCode: reasonCode,
+		PolicyEpoch: policyEpoch, ResolverEpoch: resolverEpoch,
+		MeasurementMethod: "human_control_v1", CreatedAt: createdAt,
+	})
+	if err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if err := insertWriteAuditTx(tx, receipt, "move_scope", MemoryWriteUpdated); err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO memory_write_idempotency(
+			operation, idempotency_key, request_digest, receipt_id, object_id, created_at
+		) VALUES ('move_scope', ?, ?, ?, ?, ?)`,
+		idempotencyKey, requestDigest, receipt.ReceiptID, objectID, createdAt,
+	); err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if err := advancePersonalEligibilityTx(tx, now); err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryScopeMoveReceipt{}, err
+	}
+	return MemoryScopeMoveReceipt{
+		WriteReceipt: receipt, ObjectID: objectID, Scope: targetScope,
+		LogicalGeneration: expectedGeneration + 1,
+	}, nil
+}
+
 // DeleteCommittedMemory is the product correction/delete path for a committed
 // capsule. Canonical deletion, lifecycle state, receipt, idempotency, and audit
 // commit together. Semantic-delta lineage deletion remains fail-closed until
 // its contribution map is available.
 func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.Time) (MemoryWriteReceipt, error) {
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, nil, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) DeleteCommittedMemoryGeneration(
+	objectID string,
+	expectedGeneration int,
+	idempotencyKey string,
+	now time.Time,
+) (MemoryWriteReceipt, error) {
+	if expectedGeneration < 1 {
+		return MemoryWriteReceipt{}, errors.New("delete generation is invalid")
+	}
+	expectedBinding, expectedPolicy, expectedResolver := s.productRuntimeAuthority()
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, &expectedGeneration, idempotencyKey, now,
+		expectedBinding, expectedPolicy, expectedResolver,
+		s.currentPersonalMemoryScope(expectedBinding),
+	)
+}
+
+func (s *Store) DeleteCommittedMemoryGenerationForVerifiedBinding(
+	objectID string,
+	expectedGeneration int,
+	idempotencyKey string,
+	now time.Time,
+	bindingDigest, repositoryID string,
+	resolverEpoch int64,
+) (MemoryWriteReceipt, error) {
+	if expectedGeneration < 1 || !trayBindingDigestPattern.MatchString(bindingDigest) ||
+		!validTrayIdentifier(repositoryID) || resolverEpoch < 1 {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	return s.deleteCommittedMemoryForAuthority(
+		objectID, &expectedGeneration, idempotencyKey, now,
+		bindingDigest, 0, resolverEpoch, personalMemoryScopeForRepository(repositoryID),
+	)
+}
+
+func (s *Store) deleteCommittedMemoryForAuthority(
+	objectID string,
+	expectedGeneration *int,
+	idempotencyKey string,
+	now time.Time,
+	expectedBinding string,
+	expectedPolicy, expectedResolver int64,
+	authority personalMemoryScope,
+) (MemoryWriteReceipt, error) {
 	if _, err := s.trayDestination(); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
@@ -2385,27 +3175,46 @@ func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.
 		return MemoryWriteReceipt{}, err
 	}
 	defer tx.Rollback()
-	var kind, lifecycle, candidateID, originalLedgerID, destination string
-	var version int
+	var kind, lifecycle, memoryScope, projectNamespace, originalRepository string
+	var candidateID, originalLedgerID, destination, bindingDigest string
+	var version, generation int
 	var policyEpoch, resolverEpoch int64
 	err = tx.QueryRow(`
-		SELECT object.candidate_kind, object.lifecycle, candidate.candidate_id,
-		       candidate.version, ledger.ledger_id, ledger.destination_class,
+		SELECT object.candidate_kind, object.lifecycle, object.memory_scope,
+		       object.project_namespace_id, object.original_repository_id,
+		       object.logical_generation,
+		       candidate.candidate_id,
+		       candidate.version, ledger.ledger_id, ledger.destination_class, ledger.binding_digest,
 		       ledger.policy_epoch, ledger.resolver_epoch
 		  FROM private_memory_objects object
 		  JOIN memory_tray_candidates candidate
 		    ON candidate.candidate_id=object.created_from_candidate_id
 		  JOIN turn_ledgers ledger ON ledger.ledger_id=candidate.ledger_id
 		 WHERE object.object_id=?`, objectID,
-	).Scan(&kind, &lifecycle, &candidateID, &version, &originalLedgerID, &destination, &policyEpoch, &resolverEpoch)
+	).Scan(
+		&kind, &lifecycle, &memoryScope, &projectNamespace, &originalRepository,
+		&generation, &candidateID, &version, &originalLedgerID,
+		&destination, &bindingDigest, &policyEpoch, &resolverEpoch,
+	)
 	if err != nil {
 		return MemoryWriteReceipt{}, err
+	}
+	if bindingDigest != expectedBinding || policyEpoch != expectedPolicy || resolverEpoch != expectedResolver {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
+	}
+	if originalRepository != authority.OriginalRepository ||
+		projectNamespace != authority.ProjectNamespaceID ||
+		(memoryScope != MemoryScopeProject && memoryScope != MemoryScopePersonalGlobal) {
+		return MemoryWriteReceipt{}, ErrProductRuntimeMismatch
 	}
 	if lifecycle == "deleted" {
 		return scanWriteReceipt(tx.QueryRow(`
 			SELECT `+receiptColumns+` FROM memory_write_receipts
 			 WHERE candidate_id=? AND status='updated' AND reason_code='user_deleted'
 			 ORDER BY rowid DESC LIMIT 1`, candidateID))
+	}
+	if expectedGeneration != nil && generation != *expectedGeneration {
+		return MemoryWriteReceipt{}, ErrMemoryScopeConflict
 	}
 	if err := s.purgeDeskPublicationIntentsTx(tx, objectID, now, false); err != nil {
 		return MemoryWriteReceipt{}, err
@@ -2436,8 +3245,10 @@ func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.
 		return MemoryWriteReceipt{}, errors.New("canonical memory object kind is invalid")
 	}
 	if _, err := tx.Exec(`
-		UPDATE private_memory_objects SET lifecycle='deleted', deleted_at=?
-		 WHERE object_id=? AND lifecycle='active'`, createdAt, objectID); err != nil {
+		UPDATE private_memory_objects
+		   SET lifecycle='deleted', deleted_at=?, modified_at=?,
+		       logical_generation=logical_generation+1
+		 WHERE object_id=? AND lifecycle='active'`, createdAt, createdAt, objectID); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
 	if _, err := tx.Exec(`
@@ -2471,6 +3282,9 @@ func (s *Store) DeleteCommittedMemory(objectID, idempotencyKey string, now time.
 		INSERT INTO memory_write_idempotency(
 			operation, idempotency_key, request_digest, receipt_id, created_at
 		) VALUES ('delete', ?, ?, ?, ?)`, idempotencyKey, objectID, receipt.ReceiptID, createdAt); err != nil {
+		return MemoryWriteReceipt{}, err
+	}
+	if err := advancePersonalEligibilityTx(tx, now); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
 	if err := tx.Commit(); err != nil {

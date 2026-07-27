@@ -41,7 +41,11 @@ import {
 	TeamOwnerError,
 } from './team-owner-client.js';
 import { readTeamOwnerAuthProfile, runTeamOwnerLogin, runTeamOwnerStepUp } from './team-owner-login.js';
-import { createWorkspaceBinding, recoverWorkspaceBindingTransaction } from './binding-admin.js';
+import {
+  createInitialPersonalWorkspaceBinding,
+  createWorkspaceBinding,
+  recoverWorkspaceBindingTransaction,
+} from './binding-admin.js';
 import {
   inspectPresenceTrust,
   installPresenceTrust,
@@ -133,6 +137,7 @@ import {
 	boundPulseRequest,
 	ensureActivatedVaultRuntime,
 	inspectProductWorkspaceBinding,
+	productBindingRequestHeaders,
 	readProductActivation,
 	readProductActivationBundle,
 } from './codex-runtime.js';
@@ -152,6 +157,7 @@ import {
 	inspectPersonalRuntime,
 	packagedPersonalRuntimeOptions,
 	provisionPersonalRuntime,
+  refreshPackagedPersonalRelease,
 } from './personal-runtime-installer.js';
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
@@ -174,6 +180,11 @@ const FIRST_PROOF_MEMORY =
 	'Pulse keeps the thread: structured memories, never raw transcripts, deletion stays human-controlled.';
 const FIRST_PROOF_REMEMBER_PROMPT = `Remember this in Pulse: ${FIRST_PROOF_MEMORY}`;
 const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores memory?';
+const CODEX_PRODUCT_MCP_ARGS = Object.freeze([
+  '--input-type=module',
+  '--eval',
+  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+]);
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '--help';
@@ -343,6 +354,7 @@ const PERSONAL_INSTALL_TEST_OVERRIDE_NAMES = Object.freeze([
   'PULSE_BINDING_ANCHOR_PATH',
   'PULSE_CODEX_MARKETPLACE_SOURCE',
   'PULSE_RELEASE_MANIFEST_PATH',
+  'PULSE_RELEASE_SNAPSHOT_PATH',
   'PULSE_RELEASE_TEST_ROOT_PATH',
   'PULSE_RELEASE_TEST_ASSET_ROOT',
   'PULSE_RELEASE_TEST_MATERIALIZER_SPEC',
@@ -385,11 +397,12 @@ function currentNativePackedFixtureAttestation(workspace, release) {
   return attestation;
 }
 
-function currentPersonalInstallPlan() {
+async function currentPersonalInstallPlan() {
   let releaseInspection;
   let releaseReasonCode;
   try {
-    releaseInspection = inspectPersonalRelease(packagedPersonalRuntimeOptions(DATA_DIR));
+    const releaseOptions = await refreshPackagedPersonalRelease(DATA_DIR);
+    releaseInspection = inspectPersonalRelease(releaseOptions);
   } catch (error) {
     releaseReasonCode = typeof error?.code === 'string' ? error.code : 'release_manifest_unavailable';
   }
@@ -477,7 +490,9 @@ function personalInstallReceiptStatus(workspace) {
       return 'invalid';
     }
     if (receipt.outcome === 'ready') return 'ready';
-    if (['warming', 'action_required', 'partial'].includes(receipt.outcome)) return 'resumable';
+    if (resumableJournal || ['warming', 'action_required', 'partial'].includes(receipt.outcome)) {
+      return 'resumable';
+    }
     return 'blocked';
   } catch {
     return 'invalid';
@@ -612,31 +627,48 @@ async function createPersonalBindingForInstall(principal, plan) {
         throw new PersonalInstallError('synthetic_authority_forbidden');
       }
     }
-    return await createWorkspaceBinding({
+    const bindingRequest = {
       cwd: plan.detected.workspace.canonical_path,
-      mode: 'personal',
       ...(fixture ? { port: fixture.port } : {}),
       principalID: principal.principal_id,
-      ...(process.env.PULSE_TRUST_MODE === 'test' ? {
-        ...paths,
-        ...(fixture ? {
-          signer: (bytes) => ({
-            algorithm: 'es256', signature: cryptoSign('sha256', bytes, fixturePrivateKey).toString('base64'),
-          }),
-          anchorInstaller: async (bytes, { anchorPath }) => {
-            defaultPlatformServices.atomicWritePrivateFile(anchorPath, bytes, {
-              ensureParent: true, maxBytes: 4096,
-            });
-          },
-          anchorRemover: async ({ anchorPath }) => {
-            defaultPlatformServices.removePrivateFile(anchorPath, { missing: true });
-          },
-        } : {}),
+    };
+    if (process.env.PULSE_TRUST_MODE !== 'test') {
+      return await createInitialPersonalWorkspaceBinding(bindingRequest);
+    }
+    return await createWorkspaceBinding({
+      ...bindingRequest,
+      mode: 'personal',
+      ...paths,
+      ...(fixture ? {
+        signer: (bytes) => ({
+          algorithm: 'es256', signature: cryptoSign('sha256', bytes, fixturePrivateKey).toString('base64'),
+        }),
+        anchorInstaller: async (bytes, { anchorPath }) => {
+          defaultPlatformServices.atomicWritePrivateFile(anchorPath, bytes, {
+            ensureParent: true, maxBytes: 4096,
+          });
+        },
+        anchorRemover: async ({ anchorPath }) => {
+          defaultPlatformServices.removePrivateFile(anchorPath, { missing: true });
+        },
       } : {}),
     });
   } catch (error) {
-    if (/presence_denied|presence_invalid/i.test(error?.message ?? '')) {
+    if (error?.code === 'binding_admin_presence_denied') {
       throw new PersonalInstallError('presence_denied');
+    }
+    if (error?.code === 'binding_admin_presence_invalid') {
+      throw new PersonalInstallError('binding_bootstrap_signature_invalid');
+    }
+    if ([
+      'binding_admin_anchor_install_failed',
+      'binding_admin_public_key_install_failed',
+      'binding_admin_public_key_remove_failed',
+    ].includes(error?.code)) {
+      throw new PersonalInstallError('binding_trust_install_failed');
+    }
+    if (error?.code === 'binding_admin_initial_binding_exists') {
+      throw new PersonalInstallError('binding_repair_required');
     }
     throw error;
   }
@@ -812,6 +844,86 @@ async function activatePersonalInstallCore(binding) {
   }
 }
 
+function personalHostWorkerPrewarmTimeout(platform = process.platform) {
+  // Windows performs native executable, ACL, and signed-tree checks during a
+  // clean install prewarm. Keep that install-time budget separate from the
+  // unchanged 60-second first-value lifecycle boundary.
+  return platform === 'win32' ? 180_000 : 60_000;
+}
+
+function contentFreePrewarmFailure(result, elapsedMs) {
+  const stderr = String(result?.stderr ?? '');
+  let childCode = stderr.match(/\b(?:hook_worker|codex_prewarm)_[a-z0-9_]{1,96}\b/i)?.[0] ?? null;
+  for (const line of stderr.split(/\r?\n/)) {
+    try {
+      const diagnostic = JSON.parse(line);
+      if (diagnostic?.schema === 'pulse.hook_worker_prewarm_error.v1' &&
+          diagnostic.content_free === true &&
+          /^(?:hook_worker|codex_prewarm)_[a-z0-9_]{1,96}$/i.test(diagnostic.code ?? '')) {
+        childCode = diagnostic.code;
+        break;
+      }
+    } catch { /* ignore non-JSON runtime diagnostics */ }
+  }
+  const errorCode = typeof result?.error?.code === 'string' && /^[A-Z0-9_]{1,64}$/i.test(result.error.code)
+    ? result.error.code : null;
+  return {
+    schema: 'pulse.hook_worker_prewarm_failure.v1',
+    content_free: true,
+    elapsed_ms: elapsedMs,
+    failure_class: errorCode === 'ETIMEDOUT'
+      ? 'launcher_timeout'
+      : errorCode ? 'launcher_spawn_failed'
+        : result?.status === 0 ? 'receipt_invalid' : 'launcher_exit',
+    error_code: errorCode,
+    hook_code: childCode,
+    status: Number.isSafeInteger(result?.status) ? result.status : null,
+    signal: typeof result?.signal === 'string' && /^[A-Z0-9_]{1,32}$/i.test(result.signal)
+      ? result.signal : null,
+  };
+}
+
+function prewarmPersonalHostWorker(host, pluginRoot, binding) {
+  const launchers = {
+    'claude-code': join(pluginRoot, 'hooks', 'claude-hook.mjs'),
+    codex: join(pluginRoot, 'hooks', 'pulse-hook.mjs'),
+    cursor: join(pluginRoot, 'hooks', 'cursor-hook.mjs'),
+  };
+  const launcher = launchers[host];
+  const workspace = binding?.workspace?.canonical_path;
+  if (!launcher || typeof pluginRoot !== 'string' || !isAbsolute(pluginRoot) ||
+      typeof workspace !== 'string' || !isAbsolute(workspace) || !existsSync(launcher)) {
+    throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
+  }
+  const startedAt = Date.now();
+  const result = spawnSync(process.execPath, [launcher, '--prewarm'], {
+    cwd: workspace,
+    env: process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: personalHostWorkerPrewarmTimeout(),
+    killSignal: 'SIGTERM',
+    windowsHide: true,
+  });
+  let receipt;
+  try { receipt = JSON.parse(result.stdout); } catch { receipt = undefined; }
+  if (result.status !== 0 || receipt?.schema !== 'pulse.hook_worker_prewarm.v1' ||
+      receipt.host !== host || receipt.workspace_digest?.length !== 64 ||
+      ![receipt.hook_digest, receipt.plugin_digest, receipt.runtime_digest]
+        .every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
+      typeof receipt.reused !== 'boolean') {
+    if (process.env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1') {
+      process.stderr.write(
+        `[pulse-native-fixture] ${host} prewarm detail: ${JSON.stringify(
+          contentFreePrewarmFailure(result, Date.now() - startedAt),
+        )}\n`,
+      );
+    }
+    throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
+  }
+  return receipt;
+}
+
 function personalInstallHostRegistry(targets) {
   const codexExecutable = targets.get('codex')?.executable_path;
   const claudeExecutable = targets.get('claude-code')?.executable_path;
@@ -874,15 +986,35 @@ function personalInstallHostRegistry(targets) {
         };
       },
       activate: async (context) => {
-        activateClaudePlugin(context.edge, { executable: claudeExecutable });
-        removeLegacyClaudeProductRegistration(claudeExecutable);
-        writeCaptureStateFiles({
-          globalDataDir: DATA_DIR, binding: context.binding, host: 'claude-code', enabled: true,
-          reason: 'claude_code_native_plugin_connected',
-        });
-        writeProductHostAccess({
-          productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'claude-code',
-        });
+        const localFiles = snapshotLocalFiles([
+          ...captureStatePaths(DATA_DIR, context.binding),
+          resolve(process.cwd(), '.mcp.json'),
+          resolve(process.cwd(), '.claude', 'settings.local.json'),
+          productHostAccessPath({
+            productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'claude-code',
+          }),
+        ]);
+        try {
+          // Claude starts plugin MCP servers while enabling them, so the signed
+          // server must already have its exact workspace access at that point.
+          writeProductHostAccess({
+            productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'claude-code',
+          });
+          writeCaptureStateFiles({
+            globalDataDir: DATA_DIR, binding: context.binding, host: 'claude-code', enabled: true,
+            reason: 'claude_code_native_plugin_connected',
+          });
+          const activation = activateClaudePlugin(context.edge, { executable: claudeExecutable });
+          removeLegacyClaudeProductRegistration(claudeExecutable);
+          prewarmPersonalHostWorker('claude-code', activation.plugin.path, context.binding);
+        } catch (error) {
+          const failures = [];
+          try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
+          if (failures.length > 0) {
+            throw new PersonalInstallError('claude_code_activation_rollback_failed');
+          }
+          throw error;
+        }
       },
     },
     codex: {
@@ -913,7 +1045,7 @@ function personalInstallHostRegistry(targets) {
         ]);
         const transaction = snapshotCodexHostActivation(codexExecutable);
         try {
-          const { source } = activateExactCodexProductEdge(context.edge, transaction, codexExecutable);
+          const { plugin, source } = activateExactCodexProductEdge(context.edge, transaction, codexExecutable);
           const migration = migrateLegacyPulseHookFiles({ cwd: process.cwd() });
           const defaults = defaultBindingPaths();
           writeCodexProductLocator({
@@ -930,6 +1062,7 @@ function personalInstallHostRegistry(targets) {
           writeProductHostAccess({
             productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'codex',
           });
+          prewarmPersonalHostWorker('codex', plugin.path, context.binding);
           discardPluginTreeSnapshot(transaction.pluginTree);
           return { migration, source };
         } catch (error) {
@@ -966,7 +1099,7 @@ function personalInstallHostRegistry(targets) {
         };
       },
       activate: async (context) => {
-        installCursorPlugin(context.edge.plugin_root, {
+        const installed = installCursorPlugin(context.edge.plugin_root, {
           cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
         });
         writeCaptureStateFiles({
@@ -976,6 +1109,7 @@ function personalInstallHostRegistry(targets) {
         writeProductHostAccess({
           productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'cursor',
         });
+        prewarmPersonalHostWorker('cursor', installed.path, context.binding);
       },
     },
   };
@@ -1120,11 +1254,18 @@ function personalInstallDependencies(plan) {
       try {
         await installPresenceTrust({ confirmation: TRUST_INSTALL_CONFIRMATION });
       } catch (error) {
-        if (/denied|cancel|helper_public_key_failed/i.test(error?.message ?? '')) {
+        if (/denied|cancel/i.test(error?.message ?? '')) {
           throw new PersonalInstallError('presence_denied');
         }
         throw error;
       }
+    },
+    inspectAuthorityProfile: async () => {
+      const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
+      const presence = syntheticAuthority
+        ? { ready: false, status: 'synthetic_test_authority' }
+        : inspectPresenceTrust({ probePublicKey: true });
+      return personalAuthorityProfileForDoctor(presence, { syntheticAuthority });
     },
     inspectPrincipal: async () => {
       try { return readPersonalPrincipal(); } catch (error) {
@@ -1317,6 +1458,7 @@ async function runProductMcpServer(host) {
   process.env.PULSE_MCP_MODE = 'daemon';
   process.env.PULSE_HOST_ADAPTER = host;
   process.env.PULSE_BINDING_DIGEST = resolved.binding.binding_digest;
+  process.env.PULSE_REPOSITORY_ID = resolved.binding.workspace.repository_id;
   process.env.PULSE_RESOLVER_EPOCH = String(resolved.binding.resolver_epoch);
   process.env.PULSE_HOST_WORKSPACE = resolved.binding.workspace.canonical_path;
   process.env.PULSE_PRODUCT_BINDING_MODE = resolved.binding.mode;
@@ -1773,11 +1915,16 @@ function checkCodexPluginMcp(plugin) {
   }
   const server = servers['pulse-product'];
   if (server.url !== undefined || server.cwd !== undefined || server.command !== 'node' ||
-      !Array.isArray(server.args) || server.args.length !== 1 ||
-      server.args[0] !== '${PLUGIN_ROOT}/mcp/server.mjs') {
+      !Array.isArray(server.args) || server.args.length !== CODEX_PRODUCT_MCP_ARGS.length ||
+      server.args.some((value, index) => value !== CODEX_PRODUCT_MCP_ARGS[index]) ||
+      !Array.isArray(server.env_vars) || server.env_vars.length !== 1 ||
+      server.env_vars[0] !== 'CODEX_HOME') {
     return { ok: false, detail: 'pulse-product MCP must be stdio without url' };
   }
-  return { ok: true, detail: 'one plugin-owned stdio server; no url fallback' };
+  return {
+    ok: true,
+    detail: 'one workspace-cwd stdio server with an exact CODEX_HOME plugin launcher; no url fallback',
+  };
 }
 
 function codexProductConnectedForWorkspace(captureState, binding) {
@@ -2936,9 +3083,9 @@ function removeClaudeCodeExternalRegistration(executable = 'claude') {
 	if (removed.error || (removed.status !== 0 && !/not found|not registered|does not exist/i.test(removeDetail))) {
 		throw claudeMutationFailure(removed, 'remove');
 	}
-	const verified = claudeMcpMutation(['mcp', 'get', 'pulse'], executable);
-	if (verified.error) throw claudeMutationFailure(verified, 'get after remove');
-	if (verified.status === 0) throw new Error('claude mcp remove verification failed: Pulse is still registered');
+	// Claude has no scoped `mcp get`: an unscoped read can legitimately find a
+	// same-name user or project server after the local entry was removed.
+	// The scoped mutation's exit status is the authoritative result.
 }
 
 function installClaudeCode(runtimePath, { requireExternal = false } = {}) {
@@ -7355,7 +7502,7 @@ async function readBoundedHomeResponse(response) {
 	return Buffer.concat(chunks, total).toString('utf8');
 }
 
-async function requestHomeSession(baseURL, secret, liveReadiness) {
+async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 	requireLoopbackPulseIPC(baseURL);
 	const timeoutMs = boundedHomeTimeout(
 		'PULSE_HOME_REQUEST_TIMEOUT_MS', HOME_REQUEST_TIMEOUT_MS, HOME_REQUEST_TIMEOUT_MAX_MS,
@@ -7373,6 +7520,7 @@ async function requestHomeSession(baseURL, secret, liveReadiness) {
 			method: 'POST',
 			headers: {
 				...buildPulseRequestHeaders(baseURL, { ipcSecret: secret }),
+				...(product ? productBindingRequestHeaders(product) : {}),
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify({ live_readiness: liveReadiness }),
@@ -7568,7 +7716,7 @@ async function runHome(rest) {
 	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
 	const doctor = await homeDoctorReport(product, explicitHost);
-	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness);
+	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness, product);
 	const relay = await startHomeBrowserRelay(session);
 	const interrupt = () => relay.close();
 	process.once('SIGINT', interrupt);
@@ -9353,7 +9501,7 @@ async function commitMigrationPreview(previewPath, rest) {
     throw new Error(`Pulse graph delta was not committed (${failedReceipt.status}: ${failedReceipt.reason_code || 'write_not_materialized'}; receipt ${failedReceipt.receipt_id || 'unknown'})`);
   }
   if (pendingReceipts.length > 0) {
-    console.log(`[pulse] Pulse graph delta is visible in Memory Tray and not committed yet (${pendingReceipts.length} receipt${pendingReceipts.length === 1 ? '' : 's'})`);
+    console.log(`[pulse] Pulse is retrying durable memory materialization automatically (${pendingReceipts.length} receipt${pendingReceipts.length === 1 ? '' : 's'})`);
   } else if (materializedReceipts.length > 0 || (receipts.length === 0 && out?.ok === true)) {
     console.log('[pulse] committed Pulse graph delta');
   } else {
@@ -10032,7 +10180,7 @@ async function main() {
     if (target !== undefined && target !== '--json' && target !== 'codex') {
       throw new Error('pulse install-plan supports host-neutral Personal or the legacy claude-code preview plan');
     }
-    printPersonalInstallPlan(currentPersonalInstallPlan(), { json: args.includes('--json') });
+    printPersonalInstallPlan(await currentPersonalInstallPlan(), { json: args.includes('--json') });
     return;
   }
 
@@ -10043,7 +10191,6 @@ async function main() {
       buildPlan: currentPersonalInstallPlan,
       dataDir: DATA_DIR,
       mode: command,
-      openHome: () => runHome([]),
     });
     if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
     return;

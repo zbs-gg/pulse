@@ -15,6 +15,13 @@ const MAX_INPUT_BYTES = 1 << 20;
 const MAX_RESPONSE_BYTES = (1 << 20) + (64 << 10);
 const MAX_WORKER_LIFETIME_MS = 120_000;
 
+function hookWorkerStartTimeout(platform = process.platform) {
+  // Native Windows startup includes Authenticode/ACL checks and can be much
+  // slower on clean ARM64 runners. This is install-time prewarm only; the
+  // first-value lifecycle gate remains unchanged.
+  return platform === 'win32' ? 120_000 : 20_000;
+}
+
 function exactObject(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
@@ -169,18 +176,32 @@ function spawnWorker({ host, expected, receiptPath, workspace, token }) {
     stdio: 'ignore',
     windowsHide: true,
   });
-  child.unref();
+  return new Promise((accept, reject) => {
+    child.once('error', () => reject(workerError('hook_worker_spawn_failed')));
+    child.once('spawn', () => {
+      child.unref();
+      accept(child);
+    });
+  });
 }
 
 function delay(ms) {
   return new Promise((accept) => setTimeout(accept, ms));
 }
 
-async function waitForWorker(path, validation, timeoutMs = 20_000) {
+async function waitForWorker(
+  path,
+  validation,
+  timeoutMs = hookWorkerStartTimeout(),
+  child = undefined,
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const receipt = privateReceipt(path);
     if (validReceipt(receipt, validation)) return receipt;
+    if (child && (child.exitCode !== null || child.signalCode !== null)) {
+      throw workerError('hook_worker_start_failed');
+    }
     await delay(25);
   }
   throw workerError('hook_worker_start_timeout');
@@ -198,15 +219,16 @@ async function ensureWorker({ host, expected, receiptPath, workspace }) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
     }
+    let child;
     if (ownsLock) {
       rmSync(receiptPath, { force: true });
-      spawnWorker({
+      child = await spawnWorker({
         host, expected, receiptPath, workspace, token: randomBytes(32).toString('hex'),
       });
     }
     return await waitForWorker(receiptPath, {
       host, workspaceDigest: workspace.digest, expected,
-    });
+    }, hookWorkerStartTimeout(), child);
   } finally {
     if (ownsLock) rmSync(lockPath, { force: true });
   }
@@ -218,10 +240,6 @@ function writeOutput(output, stream = process.stdout) {
   });
 }
 
-function isSessionStart(eventName) {
-  return eventName === 'SessionStart' || eventName === 'sessionStart';
-}
-
 export async function runHookWorkerClient({
   host,
   eventName,
@@ -230,37 +248,91 @@ export async function runHookWorkerClient({
   resolveEnvironment,
   inputStream = process.stdin,
   outputStream = process.stdout,
+  services = {},
 } = {}) {
   if (!['claude-code', 'codex', 'cursor'].includes(host) || typeof eventName !== 'string' ||
       typeof pluginRoot !== 'string' || typeof resolveEnvironment !== 'function') {
     throw new Error('hook_worker_client_invalid');
   }
-  const input = await readHookInput(inputStream);
-  const workspace = workerWorkspace(pluginRoot, input);
+  const readInput = services.readHookInput ?? readHookInput;
+  const resolveWorkspace = services.workerWorkspace ?? workerWorkspace;
+  const receiptForWorkspace = services.workerReceiptPath ?? workerReceiptPath;
+  const readReceipt = services.privateReceipt ?? privateReceipt;
+  const receiptIsValid = services.validReceipt ?? validReceipt;
+  const dispatch = services.dispatchWorker ?? dispatchWorker;
+  const ensure = services.ensureWorker ?? ensureWorker;
+  const emit = services.writeOutput ?? writeOutput;
+  const input = await readInput(inputStream);
+  const workspace = resolveWorkspace(pluginRoot, input);
   const boundedInput = typeof input.cwd === 'string'
     ? input
     : { ...input, cwd: workspace.workspacePath };
-  const receiptPath = workerReceiptPath(host, workspace.digest);
-  let expected = isSessionStart(eventName) ? await resolveEnvironment() : undefined;
-  let receipt = privateReceipt(receiptPath);
-  if (validReceipt(receipt, { host, workspaceDigest: workspace.digest, expected })) {
+  const receiptPath = receiptForWorkspace(host, workspace.digest);
+  let receipt = readReceipt(receiptPath);
+  // A live receipt represents an exact, owner-private worker generation whose
+  // runtime and plugin bytes were fully verified before it started. Reuse that
+  // bounded generation at a new session boundary: the worker still refreshes
+  // binding recovery and authority witnesses for SessionStart. If the worker
+  // is gone or its 120-second lease expired, fall back to the full product
+  // environment proof before starting the next generation.
+  if (receiptIsValid(receipt, { host, workspaceDigest: workspace.digest })) {
     try {
-      const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
-      await writeOutput(output, outputStream);
+      const output = await dispatch(receipt, { host, eventName, input: boundedInput });
+      await emit(output, outputStream);
       return;
     } catch (error) {
       if (error?.code === 'hook_worker_execution_failed') throw error;
     }
   }
 
-  expected ??= await resolveEnvironment();
-  receipt = await ensureWorker({ host, expected, receiptPath, workspace });
-  const output = await dispatchWorker(receipt, { host, eventName, input: boundedInput });
-  await writeOutput(output, outputStream);
+  const expected = await resolveEnvironment();
+  receipt = await ensure({ host, expected, receiptPath, workspace });
+  const output = await dispatch(receipt, { host, eventName, input: boundedInput });
+  await emit(output, outputStream);
+}
+
+export async function prewarmHookWorker({
+  host,
+  pluginRoot,
+  workspacePath,
+  resolveEnvironment,
+  services = {},
+} = {}) {
+  if (!['claude-code', 'codex', 'cursor'].includes(host) || typeof pluginRoot !== 'string' ||
+      typeof workspacePath !== 'string' || !isAbsolute(workspacePath) ||
+      typeof resolveEnvironment !== 'function') {
+    throw new Error('hook_worker_prewarm_invalid');
+  }
+  const resolveWorkspace = services.workerWorkspace ?? workerWorkspace;
+  const receiptForWorkspace = services.workerReceiptPath ?? workerReceiptPath;
+  const readReceipt = services.privateReceipt ?? privateReceipt;
+  const receiptIsValid = services.validReceipt ?? validReceipt;
+  const ensure = services.ensureWorker ?? ensureWorker;
+  const workspace = resolveWorkspace(pluginRoot, { cwd: workspacePath });
+  const receiptPath = receiptForWorkspace(host, workspace.digest);
+  const expected = await resolveEnvironment();
+  let receipt = readReceipt(receiptPath);
+  let reused = receiptIsValid(receipt, { host, workspaceDigest: workspace.digest, expected });
+  if (!reused) {
+    receipt = await ensure({ host, expected, receiptPath, workspace });
+    if (!receiptIsValid(receipt, { host, workspaceDigest: workspace.digest, expected })) {
+      throw new Error('hook_worker_prewarm_unverified');
+    }
+  }
+  return Object.freeze({
+    schema: 'pulse.hook_worker_prewarm.v1',
+    host,
+    workspace_digest: workspace.digest,
+    hook_digest: expected.hookDigest,
+    plugin_digest: expected.productEnvironment.PULSE_PLUGIN_TREE_DIGEST,
+    runtime_digest: expected.productEnvironment.PULSE_RUNTIME_DIGEST,
+    reused,
+  });
 }
 
 export const __hookWorkerClientTest = Object.freeze({
   MAX_WORKER_LIFETIME_MS,
+  hookWorkerStartTimeout,
   privateReceipt,
   validReceipt,
   workerReceiptPath,

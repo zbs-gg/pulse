@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
@@ -193,6 +193,36 @@ test('managed product runtime resolves three verified activations and atomically
   }).config.runner_path, disk.runner_path);
 });
 
+test('managed product runtime does not load the already tree-verified model into a bounded integrity buffer', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-managed-large-model.'));
+  try {
+    const runtime = vaultRuntimeFromBinding(binding('personal', root));
+    const { installRoot, verifiedActivations } = await activateManagedRuntimeFixtures(root);
+    const modelPath = join(verifiedActivations.model.version_path, 'model_int8.onnx');
+    const basePlatformServices = createPlatformServices();
+    let modelContentRead = false;
+    const platformServices = {
+      ...basePlatformServices,
+      readIntegrityFile(path, options) {
+        if (path === modelPath) {
+          modelContentRead = true;
+          throw new Error('large model must not be loaded into an integrity buffer');
+        }
+        return basePlatformServices.readIntegrityFile(path, options);
+      },
+    };
+
+    const managed = resolveManagedRuntime(runtime, {
+      installRoot, verifiedActivations, platformServices,
+    });
+
+    assert.equal(managed.model.version_path, verifiedActivations.model.version_path);
+    assert.equal(modelContentRead, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('managed product runtime selects pulse.exe for a Windows target', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-managed-runtime-windows.'));
   try {
@@ -324,7 +354,8 @@ const value = (name) => process.argv[process.argv.indexOf(name) + 1];
 const dataDir = value('-data-dir');
 const [host, port] = value('-addr').split(':');
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-writeFileSync(dataDir + '/secret.key', 'a'.repeat(64), { mode: 0o600 });
+writeFileSync(dataDir + '/secret.key.staged', 'a'.repeat(64), { mode: 0o600 });
+renameSync(dataDir + '/secret.key.staged', dataDir + '/secret.key');
 const server = createServer((_request, response) => {
   response.statusCode = 503; response.end('not ready');
 });
@@ -555,7 +586,7 @@ test('supervisor recovers an exact crashed receipt and atomically restarts on da
   assert.equal(inspectVaultRuntime(runtime).executable.endsWith('/pulse-daemon-b.mjs'), true);
 });
 
-test('supervisor safely restarts a verified legacy receipt into repository authority and rejects wrong present authority', async (t) => {
+test('supervisor adopts legacy authority and reuses one Personal daemon across signed project bindings', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-supervisor-legacy-authority.'));
   const port = await freePort();
   const selected = binding('personal', root);
@@ -582,8 +613,13 @@ test('supervisor safely restarts a verified legacy receipt into repository autho
   assert.equal(inspectVaultRuntime(runtime).legacy_authority, false);
 
   writeFileSync(runtime.pid_file, JSON.stringify({
-    ...adoptedReceipt, repository_id: 'repository_wrong',
+		...adoptedReceipt, binding_digest: 'b'.repeat(64), repository_id: 'repository_other',
   }), { mode: 0o600 });
+	assert.equal(inspectVaultRuntime(runtime).status, 'running');
+
+	writeFileSync(runtime.pid_file, JSON.stringify({
+		...adoptedReceipt, store_id: 'store_personal_wrong',
+	}), { mode: 0o600 });
   assert.equal(inspectVaultRuntime(runtime).status, 'stale_or_mismatched');
   await assert.rejects(
     startVaultRuntime(runtime, { daemonPath: daemon, timeoutMs: 5000 }),
