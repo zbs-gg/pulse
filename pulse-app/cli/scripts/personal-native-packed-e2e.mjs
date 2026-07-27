@@ -153,6 +153,22 @@ function npmCLI() {
 }
 
 function pack(root) {
+  const supplied = process.env.PULSE_PERSONAL_PACKED_TARBALL;
+  if (supplied !== undefined) {
+    if (!isAbsolute(supplied) || resolve(supplied) !== supplied) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be an absolute canonical path');
+    }
+    const canonical = realpathSync(supplied);
+    const info = lstatSync(canonical);
+    if (canonical !== supplied || !info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+      throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be one regular, non-linked file');
+    }
+    return {
+      path: canonical,
+      bytes: info.size,
+      sha256: createHash('sha256').update(readFileSync(canonical)).digest('hex'),
+    };
+  }
   const output = join(root, 'package');
   mkdirSync(output, { mode: 0o700 });
   const result = run(process.execPath, [npmCLI(), 'pack', '--ignore-scripts', '--pack-destination', output, '--json'], {

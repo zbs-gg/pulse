@@ -211,6 +211,7 @@ test('release verification includes packed Personal clean-room, consolidation, i
 	assert.match(nativePacked, /taskkill\.exe/);
 	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
 	assert.match(nativePacked, /await packedPulse\(tarball, \['install', '--json'\]/);
+	assert.match(nativePacked, /PULSE_PERSONAL_PACKED_TARBALL/);
 	const universalTarget = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'native-universal-target.mjs'), 'utf8',
 	);
@@ -222,6 +223,9 @@ test('release verification includes packed Personal clean-room, consolidation, i
 	assert.match(universalTarget, /mutation_authority_exercised: false/);
 	const universalWorkflow = readFileSync(join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
 	assert.equal((universalWorkflow.match(/PULSE_CURSOR_VERSION=/g) ?? []).length, 3);
+	assert.match(universalWorkflow, /name: Packed npm input/);
+	assert.match(universalWorkflow, /needs: \[contract, package\]/);
+	assert.match(universalWorkflow, /PULSE_PERSONAL_PACKED_TARBALL/);
 	const runtimeInstaller = readFileSync(
 		join(root, 'pulse-app', 'cli', 'src', 'personal-runtime-installer.js'), 'utf8',
 	);

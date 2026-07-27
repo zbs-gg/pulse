@@ -65,9 +65,32 @@ jobs:
           npm ci --ignore-scripts
           npm test
 
+  package:
+    name: Packed npm input
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Pack one immutable matrix input
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pulse-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pulse-package"
+          test "$(find "$RUNNER_TEMP/pulse-package" -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')" = 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-packed-package
+          path: ${{ runner.temp }}/pulse-package/*.tgz
+          if-no-files-found: error
+          retention-days: 30
+
   native:
     name: Native / ${{ matrix.target_id }} / ${{ matrix.host }}
-    needs: contract
+    needs: [contract, package]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.contract.outputs.matrix) }}
@@ -86,6 +109,19 @@ jobs:
         with:
           go-version: ${{ matrix.go_version }}
           cache-dependency-path: pulse-app/go.sum
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-packed-package
+          path: pulse-app/cli/.pulse-ci/package
+      - name: Bind the exact packed matrix input
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node -e "const fs=require('node:fs'),p=require('node:path');
+          const d=p.resolve('.pulse-ci/package');
+          const names=fs.readdirSync(d).filter((name)=>name.endsWith('.tgz'));
+          if(names.length!==1)throw new Error('expected one packed matrix input');
+          fs.appendFileSync(process.env.GITHUB_ENV,'PULSE_PERSONAL_PACKED_TARBALL='+fs.realpathSync(p.join(d,names[0]))+'\n');"
       - name: Install exact harness calibration
         if: matrix.harness_distribution == 'npm'
         shell: bash
