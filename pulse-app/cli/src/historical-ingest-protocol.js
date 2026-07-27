@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 const SCHEMA_VERSION = 'https://zbs.gg/schemas/pulse/historical-ingest/v1';
 const HEX_DIGEST = /^[a-f0-9]{64}$/;
 const JOB_ID = /^job_[a-f0-9]{16,64}$/;
@@ -186,15 +188,69 @@ export function normalizeCodexHistoricalIngestManifest(value) {
   if (!normalized || !Array.isArray(normalized.items)) return normalized;
   for (const item of normalized.items) {
     if (item?.scope?.project_id === null) delete item.scope.project_id;
-    if (item?.valid_time?.to === null) delete item.valid_time.to;
+    if (item?.valid_time && Object.hasOwn(item.valid_time, 'to')) {
+      const from = item.valid_time.from;
+      const to = item.valid_time.to;
+      // The model-facing schema must require nullable optionals and cannot
+      // express the canonical cross-field ordering rule. Preserve the
+      // required start time, but discard an unusable optional end time before
+      // the strict canonical validator runs.
+      if (to === null || typeof to !== 'string' || !RFC3339.test(to) ||
+          Number.isNaN(Date.parse(to)) || Date.parse(to) <= Date.parse(from)) {
+        delete item.valid_time.to;
+      }
+    }
     if (item?.payload && typeof item.payload === 'object') {
       for (const [key, entry] of Object.entries(item.payload)) {
         if (entry === null) delete item.payload[key];
       }
     }
   }
-  normalized.items = normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind));
+  normalized.items = normalizeDuplicateCandidateIDs(
+    normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind)),
+  );
   return normalized;
+}
+
+function canonicalJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function itemContentDigest(item) {
+  const { candidate_id: _candidateID, ...content } = item;
+  return createHash('sha256').update(canonicalJSON(content)).digest('hex');
+}
+
+function normalizeDuplicateCandidateIDs(items) {
+  const seenIDs = new Set();
+  const contentByOriginalID = new Map();
+  const result = [];
+  for (const item of items) {
+    const originalID = item?.candidate_id;
+    const contentDigest = itemContentDigest(item);
+    if (!seenIDs.has(originalID)) {
+      seenIDs.add(originalID);
+      contentByOriginalID.set(originalID, new Set([contentDigest]));
+      result.push(item);
+      continue;
+    }
+    const originalContents = contentByOriginalID.get(originalID);
+    if (originalContents?.has(contentDigest)) continue;
+    originalContents?.add(contentDigest);
+    let replacementID = `candidate_${contentDigest}`;
+    let collision = 0;
+    while (seenIDs.has(replacementID)) {
+      collision += 1;
+      replacementID = `candidate_${createHash('sha256').update(`${contentDigest}:${collision}`).digest('hex')}`;
+    }
+    seenIDs.add(replacementID);
+    result.push({ ...item, candidate_id: replacementID });
+  }
+  return result;
 }
 
 function payloadIsCanonical(payloadValue, kind) {
