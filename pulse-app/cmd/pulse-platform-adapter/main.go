@@ -297,14 +297,7 @@ func digestPrivateTree(value request) (any, error) {
 			strings.Contains(value.ExcludeRootFile, "/"))) {
 		return nil, platform.ErrUnsafe
 	}
-	// Signed runtime and plugin trees are integrity-sensitive, not secret.
-	// Vendor-managed caches (notably Codex on Windows) may grant read access to
-	// additional principals while still denying every untrusted write. Keep the
-	// current-user ownership and no-untrusted-write boundary without requiring
-	// owner-only read ACLs.
-	if err := platform.ValidatePrivatePath(value.Path, platform.FilePolicy{
-		Directory: true, RequireCurrentOwner: true, NoUntrustedWrite: true,
-	}); err != nil {
+	if _, err := platform.InspectPrivateDirectory(value.Path, false); err != nil {
 		return nil, err
 	}
 	hash := sha256.New()
@@ -329,9 +322,8 @@ func digestPrivateTree(value request) (any, error) {
 			return platform.ErrUnsafe
 		}
 		if info.IsDir() {
-			return platform.ValidatePrivatePath(path, platform.FilePolicy{
-				Directory: true, RequireCurrentOwner: true, NoUntrustedWrite: true,
-			})
+			_, err := platform.InspectPrivateDirectory(path, false)
+			return err
 		}
 		if !info.Mode().IsRegular() {
 			return platform.ErrUnsafe
@@ -345,7 +337,7 @@ func digestPrivateTree(value request) (any, error) {
 			maximumBytes = 512 * 1024 * 1024
 		}
 		data, details, err := platform.ReadPrivateFileWithInfo(path, platform.FilePolicy{
-			MaximumBytes: maximumBytes, RequireCurrentOwner: true, NoUntrustedWrite: true, SingleLink: true,
+			MaximumBytes: maximumBytes, RequireCurrentOwner: true, OwnerOnly: true, SingleLink: true,
 		})
 		if err != nil || details.Size != int64(len(data)) {
 			return platform.ErrUnsafe
@@ -381,9 +373,7 @@ func inspectPrivateTree(value request) (any, error) {
 		value.MaximumTotalBytes < 1 || value.MaximumTotalBytes > 64*1024*1024*1024 {
 		return nil, platform.ErrUnsafe
 	}
-	if err := platform.ValidatePrivatePath(value.Path, platform.FilePolicy{
-		Directory: true, RequireCurrentOwner: true, NoUntrustedWrite: true,
-	}); err != nil {
+	if _, err := platform.InspectPrivateDirectory(value.Path, false); err != nil {
 		return nil, err
 	}
 	expected := make(map[string]privateTreeEntry, len(value.Entries))
@@ -434,9 +424,8 @@ func inspectPrivateTree(value request) (any, error) {
 			if !allowedDirectories[relative] {
 				return platform.ErrUnsafe
 			}
-			return platform.ValidatePrivatePath(path, platform.FilePolicy{
-				Directory: true, RequireCurrentOwner: true, NoUntrustedWrite: true,
-			})
+			_, err := platform.InspectPrivateDirectory(path, false)
+			return err
 		}
 		entry, exists := expected[relative]
 		if !exists || seen[relative] || !info.Mode().IsRegular() {
@@ -447,7 +436,7 @@ func inspectPrivateTree(value request) (any, error) {
 			maximumBytes = 1
 		}
 		data, details, err := platform.ReadPrivateFileWithInfo(path, platform.FilePolicy{
-			MaximumBytes: maximumBytes, RequireCurrentOwner: true, NoUntrustedWrite: true,
+			MaximumBytes: maximumBytes, RequireCurrentOwner: true, OwnerOnly: true,
 			SingleLink: true, Executable: entry.Executable,
 		})
 		if err != nil || details.Size != entry.Bytes || int64(len(data)) != entry.Bytes ||
