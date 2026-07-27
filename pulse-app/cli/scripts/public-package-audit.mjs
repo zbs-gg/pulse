@@ -242,6 +242,8 @@ vendor/pulse-preview-source/pulse-app/internal/historicalingest/apply.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/checkpoint.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/chunker.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/codex_job.go
+vendor/pulse-preview-source/pulse-app/internal/historicalingest/codex_fileinfo_unix.go
+vendor/pulse-preview-source/pulse-app/internal/historicalingest/codex_fileinfo_windows.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/codex_records.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/codex_source.go
 vendor/pulse-preview-source/pulse-app/internal/historicalingest/manager.go

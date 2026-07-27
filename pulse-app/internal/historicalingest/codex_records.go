@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -141,7 +140,7 @@ func ParseCodexFile(path string, options CodexParseOptions) (CodexParseResult, e
 		Exclusions:            map[string]int64{},
 		BlockingKinds:         map[string]int64{},
 		AttachmentOccurrences: map[string]int64{},
-		sourceVersion:         codexVersionFromInfo(initial),
+		sourceVersion:         codexVersionFromFile(file, initial),
 	}
 	seen := map[string]struct{}{}
 	boundaryFound := options.ExpectedSessionID == ""
@@ -463,7 +462,7 @@ func openCodexFile(path string, allowMultipleLinks bool) (*os.File, os.FileInfo,
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: lstat source: %v", ErrUnsafeCodexSource, err)
 	}
-	if !initial.Mode().IsRegular() || initial.Mode()&os.ModeSymlink != 0 || (!allowMultipleLinks && hasMultipleLinks(initial)) {
+	if !initial.Mode().IsRegular() || initial.Mode()&os.ModeSymlink != 0 || (!allowMultipleLinks && hasMultipleLinksInfo(initial)) {
 		return nil, nil, ErrUnsafeCodexSource
 	}
 	file, err := os.Open(path)
@@ -471,24 +470,16 @@ func openCodexFile(path string, allowMultipleLinks bool) (*os.File, os.FileInfo,
 		return nil, nil, fmt.Errorf("%w: open source: %v", ErrUnsafeCodexSource, err)
 	}
 	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(initial, opened) || (!allowMultipleLinks && hasMultipleLinks(opened)) {
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(initial, opened) || (!allowMultipleLinks && hasMultipleLinksFile(file, opened)) {
 		file.Close()
 		return nil, nil, ErrUnsafeCodexSource
 	}
 	return file, opened, nil
 }
 
-func hasMultipleLinks(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Nlink > 1
-}
-
-func codexVersionFromInfo(info os.FileInfo) codexSourceVersion {
+func codexVersionFromFile(file *os.File, info os.FileInfo) codexSourceVersion {
 	version := codexSourceVersion{Size: info.Size(), ModTimeUnixNano: info.ModTime().UnixNano()}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		version.Device = uint64(stat.Dev)
-		version.Inode = uint64(stat.Ino)
-	}
+	version.Device, version.Inode = codexFileIdentity(file, info)
 	return version
 }
 
@@ -497,10 +488,11 @@ func currentCodexSourceVersion(path string) (codexSourceVersion, error) {
 	if err != nil {
 		return codexSourceVersion{}, err
 	}
+	version := codexVersionFromFile(file, info)
 	if err := file.Close(); err != nil {
 		return codexSourceVersion{}, err
 	}
-	return codexVersionFromInfo(info), nil
+	return version, nil
 }
 
 func validCodexSourceVersion(version codexSourceVersion) bool {
