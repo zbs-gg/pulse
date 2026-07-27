@@ -155,7 +155,7 @@ function npmCLI() {
 function pack(root) {
   const supplied = process.env.PULSE_PERSONAL_PACKED_TARBALL;
   if (supplied !== undefined) {
-    if (!isAbsolute(supplied) || resolve(supplied) !== supplied) {
+    if (resolve(supplied) !== supplied) {
       throw new Error('PULSE_PERSONAL_PACKED_TARBALL must be an absolute canonical path');
     }
     const canonical = realpathSync(supplied);
