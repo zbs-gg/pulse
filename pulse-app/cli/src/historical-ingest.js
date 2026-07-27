@@ -9,6 +9,7 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const SESSION_ID = /^[a-f0-9-]{16,64}$/;
 const TERMINAL = new Set(['manifest_ready', 'nothing_to_import', 'approval_ready', 'canceled', 'stale']);
 const RUNNABLE = new Set(['extracting']);
+const COMMITTED = new Set(['committed_indexing', 'indexing_failed', 'retrieval_ready']);
 const SAFE_STATUS_KEYS = new Set([
   'schema', 'job_id', 'state', 'generation', 'total_units', 'accepted_units', 'pending_units',
   'leased_units', 'manifest_revision', 'manifest_digest', 'usage', 'reason_code', 'snapshot_digest',
@@ -57,13 +58,16 @@ function assertedJobID(value) {
 
 function formatStatus(status) {
   const usage = status.usage ?? {};
+  const memoryState = COMMITTED.has(status.state)
+    ? '[pulse] Memory writes: committed through the reviewed Home receipt'
+    : '[pulse] Memory writes: 0 (dry run)';
   return [
     `[pulse] History job ${status.job_id}: ${status.state}`,
     `[pulse] Snapshot: ${status.source_root_count} root trees · ${status.source_file_count} source prefixes · ${formatBytes(status.source_bytes)} captured`,
     `[pulse] Model egress: ${status.total_units} isolated Luna turns · ${formatBytes(status.evidence_bytes)} normalized evidence`,
     `[pulse] Progress: ${status.accepted_units}/${status.total_units} accepted · ${status.pending_units} pending · ${status.leased_units} active`,
     `[pulse] Subscription usage: ${usage.input_tokens ?? 0} input · ${usage.cached_input_tokens ?? 0} cached · ${usage.output_tokens ?? 0} output · ${usage.reasoning_tokens ?? 0} reasoning`,
-    `[pulse] Memory writes: 0 (dry run)`,
+    memoryState,
   ].join('\n');
 }
 
@@ -192,7 +196,7 @@ export async function runHistoricalIngestCommand({
   }
   if (action === 'explain') {
     stdout(formatStatus(status));
-    stdout('[pulse] Source files are frozen by prefix digest. Only normalized, path-free records may reach Luna. The manifest remains a dry run until a separate reviewed apply phase exists.');
+    stdout('[pulse] Source files are frozen by prefix digest. Only normalized, path-free records may reach Luna. The manifest remains a dry run until you finish review and approve the exact Backup & Import action in Memory Home; the CLI cannot apply it.');
     return status;
   }
   if (action === 'usage') {

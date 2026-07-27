@@ -77,6 +77,17 @@ test('status, explain, and usage expose one content-free daemon lifecycle', asyn
   }
 });
 
+test('status reports a committed Home apply without claiming the dry run wrote nothing', async () => {
+  const output = [];
+  await runHistoricalIngestCommand({
+    argv: ['status'], dataDir: mkdtempSync(path.join(tmpdir(), 'pulse-history-cli-')),
+    request: async () => status('retrieval_ready'), openHome: async () => {},
+    stdout: (line) => output.push(line),
+  });
+  assert.match(output.join('\n'), /Memory writes: committed through the reviewed Home receipt/);
+  assert.doesNotMatch(output.join('\n'), /Memory writes: 0/);
+});
+
 test('cancel uses the same job and stops its registered foreground worker', async () => {
   const calls = [];
   const stopped = [];
