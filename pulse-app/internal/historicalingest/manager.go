@@ -99,25 +99,29 @@ type UnitReceipt struct {
 }
 
 type JobStatus struct {
-	Schema           string     `json:"schema"`
-	JobID            string     `json:"job_id"`
-	State            JobState   `json:"state"`
-	Generation       uint64     `json:"generation"`
-	TotalUnits       int        `json:"total_units"`
-	AcceptedUnits    int        `json:"accepted_units"`
-	PendingUnits     int        `json:"pending_units"`
-	LeasedUnits      int        `json:"leased_units"`
-	ManifestRevision int64      `json:"manifest_revision,omitempty"`
-	ManifestDigest   string     `json:"manifest_digest,omitempty"`
-	Usage            TokenUsage `json:"usage"`
-	ReasonCode       string     `json:"reason_code,omitempty"`
-	SnapshotDigest   string     `json:"snapshot_digest"`
-	RunnerContract   string     `json:"runner_contract_digest"`
-	SourceRootCount  int        `json:"source_root_count"`
-	SourceFileCount  int        `json:"source_file_count"`
-	SourceBytes      int64      `json:"source_bytes"`
-	EvidenceBytes    int64      `json:"evidence_bytes"`
-	EgressAuthorized bool       `json:"egress_authorized"`
+	Schema                string     `json:"schema"`
+	JobID                 string     `json:"job_id"`
+	State                 JobState   `json:"state"`
+	Generation            uint64     `json:"generation"`
+	TotalUnits            int        `json:"total_units"`
+	AcceptedUnits         int        `json:"accepted_units"`
+	PendingUnits          int        `json:"pending_units"`
+	LeasedUnits           int        `json:"leased_units"`
+	ManifestRevision      int64      `json:"manifest_revision,omitempty"`
+	ManifestDigest        string     `json:"manifest_digest,omitempty"`
+	Usage                 TokenUsage `json:"usage"`
+	ReasonCode            string     `json:"reason_code,omitempty"`
+	SnapshotDigest        string     `json:"snapshot_digest"`
+	RunnerContract        string     `json:"runner_contract_digest"`
+	SourceRootCount       int        `json:"source_root_count"`
+	SourceFileCount       int        `json:"source_file_count"`
+	SourceBytes           int64      `json:"source_bytes"`
+	EvidenceBytes         int64      `json:"evidence_bytes"`
+	EgressAuthorized      bool       `json:"egress_authorized"`
+	WriteSetDigest        string     `json:"write_set_digest,omitempty"`
+	DestinationStoreID    string     `json:"destination_store_id,omitempty"`
+	DestinationGeneration int64      `json:"destination_generation,omitempty"`
+	BatchReceiptID        string     `json:"batch_receipt_id,omitempty"`
 }
 
 func NewIngestManager(cfg IngestManagerConfig) (*IngestManager, error) {
@@ -428,6 +432,7 @@ func (m *IngestManager) CancelJob(jobID string) (JobStatus, error) {
 		}
 	}
 	checkpoint.State, checkpoint.ReasonCode, checkpoint.ReviewComplete = JobCanceled, "user_canceled", false
+	checkpoint.WriteSetDigest, checkpoint.DestinationStoreID, checkpoint.DestinationGeneration, checkpoint.BatchReceiptID = "", "", 0, ""
 	if err := m.commitLocked(&checkpoint); err != nil {
 		return JobStatus{}, err
 	}
@@ -475,6 +480,7 @@ func (m *IngestManager) MarkStale(jobID, snapshotDigest, reason string) (JobStat
 		return JobStatus{}, ErrReviewVersionConflict
 	}
 	checkpoint.State, checkpoint.ReasonCode, checkpoint.ReviewComplete = JobStale, reason, false
+	checkpoint.WriteSetDigest, checkpoint.DestinationStoreID, checkpoint.DestinationGeneration, checkpoint.BatchReceiptID = "", "", 0, ""
 	if err := m.commitLocked(&checkpoint); err != nil {
 		return JobStatus{}, err
 	}
@@ -633,7 +639,7 @@ func validateResultProvenance(result WorkUnitResult, unit WorkUnit, snapshot Sou
 }
 
 func statusFor(checkpoint ingestCheckpoint) JobStatus {
-	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest, SourceRootCount: checkpoint.Snapshot.RootCount, SourceFileCount: len(checkpoint.Snapshot.Files), EgressAuthorized: checkpoint.EgressAuthorizedAt != nil}
+	status := JobStatus{Schema: "pulse.historical_ingest.status.v1", JobID: checkpoint.JobID, State: checkpoint.State, Generation: checkpoint.Generation, TotalUnits: len(checkpoint.Units), ManifestRevision: checkpoint.ManifestRevision, ManifestDigest: checkpoint.ManifestDigest, ReasonCode: checkpoint.ReasonCode, SnapshotDigest: checkpoint.Snapshot.Digest, RunnerContract: checkpoint.Contract.Digest, SourceRootCount: checkpoint.Snapshot.RootCount, SourceFileCount: len(checkpoint.Snapshot.Files), EgressAuthorized: checkpoint.EgressAuthorizedAt != nil, WriteSetDigest: checkpoint.WriteSetDigest, DestinationStoreID: checkpoint.DestinationStoreID, DestinationGeneration: checkpoint.DestinationGeneration, BatchReceiptID: checkpoint.BatchReceiptID}
 	for _, source := range checkpoint.Snapshot.Files {
 		status.SourceBytes += source.CapturedBytes
 	}
@@ -683,7 +689,7 @@ func randomLeaseID() string {
 }
 func validManagerState(state JobState) bool {
 	switch state {
-	case JobAwaitingEgress, JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobApprovalReady, JobStale, JobCanceled:
+	case JobAwaitingEgress, JobExtracting, JobPausedQuota, JobExtractionFailed, JobManifestReady, JobNothingToImport, JobApprovalReady, JobApproved, JobApplying, JobCommittedIndexing, JobIndexingFailed, JobRetrievalReady, JobStale, JobCanceled:
 		return true
 	default:
 		return false

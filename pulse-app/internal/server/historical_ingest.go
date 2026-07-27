@@ -315,3 +315,40 @@ func digestHistoricalEvidence(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }
+
+func (s *Server) recoverHistoricalIngest() error {
+	if s == nil || s.cfg.Store == nil || s.historicalIngest == nil || s.historicalUnavailable != "" {
+		return nil
+	}
+	status, err := s.historicalIngest.LatestStatus()
+	if errors.Is(err, historicalingest.ErrIngestJobNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status.State == historicalingest.JobApplying {
+		receipt, found, err := s.cfg.Store.HistoricalBatchReceipt(status.JobID, status.ManifestDigest, status.WriteSetDigest)
+		if err != nil {
+			return err
+		}
+		if found {
+			status, err = s.historicalIngest.MarkCommitted(status.JobID, status.ManifestDigest, status.WriteSetDigest, receipt.ReceiptID)
+		} else {
+			status, err = s.historicalIngest.MarkApplyReady(status.JobID, status.ManifestDigest, status.WriteSetDigest, "apply_interrupted")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if status.BatchReceiptID != "" && (status.State == historicalingest.JobCommittedIndexing || status.State == historicalingest.JobIndexingFailed || status.State == historicalingest.JobRetrievalReady) {
+		state, err := s.cfg.Store.HistoricalProjectionState(status.BatchReceiptID)
+		if err != nil {
+			return err
+		}
+		if _, err := s.historicalIngest.MarkProjectionState(status.JobID, status.BatchReceiptID, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}

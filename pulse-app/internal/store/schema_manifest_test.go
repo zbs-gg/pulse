@@ -27,7 +27,7 @@ const frozenMigration049SHA256 = "bcfee1bd56ffb726f399356eeb12abe4ee4f267b11a9fb
 const frozenMigration050SHA256 = "38a6a75a4b7c4be67ad3bef86e01671009ecbaa55a79c2fb42dc727b815b4dd5"
 const frozenMigration051SHA256 = "6d0307856112bfd8716a3203d4750de7fa97d263468e8167d20b2c1fab07a3b1"
 const frozenMigration052SHA256 = "f886a63bb1e79f1b7bbb640c12e7f83c238914ffdb421d1b92e328125aeea184"
-const frozenMigration055SHA256 = "8781d766a5a45f283e6cf0a95fdd758e5fbc0c6517c23fa880173dc359cc1797"
+const frozenMigration055SHA256 = "39a00348fbb9a60f6e3dfcabdb8cbb55932bb1581ea609f5bd5c80125e9ae175"
 
 func TestEmbeddedMigrationManifestIsContiguousAndFingerprinted(t *testing.T) {
 	migrations, err := loadMigrationSet(migrationsFS)

@@ -98,6 +98,8 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/history/{job}/entities/preview", s.handleHomeHistoricalEntityPreview)
 		r.Post("/history/{job}/entities/apply", s.handleHomeHistoricalEntityApply)
 		r.Post("/history/{job}/complete", s.handleHomeHistoricalReviewComplete)
+		r.Post("/history/{job}/prepare-apply", s.handleHomeHistoricalPrepareApply)
+		r.Post("/history/{job}/apply", s.handleHomeHistoricalApply)
 		r.Post("/protected/wipe/begin", s.handleHomeProtectedWipeBegin)
 		r.Post("/protected/wipe/complete", s.handleHomeProtectedWipeComplete)
 	})

@@ -414,16 +414,21 @@ const (
 type ItemOutcome struct {
 	CandidateID  string          `json:"candidate_id"`
 	Outcome      ItemOutcomeKind `json:"outcome"`
+	ObjectKind   string          `json:"object_kind"`
 	ObjectID     string          `json:"object_id"`
 	ObjectDigest string          `json:"object_digest"`
 }
 
 type BatchReceipt struct {
-	ReceiptID      string        `json:"receipt_id"`
-	ManifestDigest string        `json:"manifest_digest"`
-	WriteSetDigest string        `json:"write_set_digest"`
-	Outcomes       []ItemOutcome `json:"outcomes"`
-	CommittedAt    time.Time     `json:"committed_at"`
+	ReceiptID             string        `json:"receipt_id"`
+	ManifestDigest        string        `json:"manifest_digest"`
+	WriteSetDigest        string        `json:"write_set_digest"`
+	DestinationStoreID    string        `json:"destination_store_id"`
+	DestinationGeneration int64         `json:"destination_generation"`
+	CreatedCount          int           `json:"created_count"`
+	DeduplicatedCount     int           `json:"deduplicated_count"`
+	Outcomes              []ItemOutcome `json:"outcomes"`
+	CommittedAt           time.Time     `json:"committed_at"`
 }
 
 // SupportedSQLiteVersion implements the fixed-version floor from the SQLite

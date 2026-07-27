@@ -84,6 +84,7 @@ func (m *IngestManager) CleanupJob(jobID string, reason RetentionReason) error {
 		}
 	}
 	checkpoint.State, checkpoint.ReviewComplete = JobCanceled, false
+	checkpoint.WriteSetDigest, checkpoint.DestinationStoreID, checkpoint.DestinationGeneration, checkpoint.BatchReceiptID = "", "", 0, ""
 	checkpoint.ReasonCode = "retention_" + string(reason)
 	return m.commitLocked(&checkpoint)
 }

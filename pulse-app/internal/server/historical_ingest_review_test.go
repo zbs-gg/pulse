@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -216,6 +217,131 @@ func TestHomeHistoricalReviewMutationRequiresSessionCSRFExactRevisionAndDigest(t
 	final, err := srv.historicalIngest.ReviewSnapshot(review.JobID, nil)
 	if err != nil || final.State != historicalingest.JobApprovalReady || !final.ReviewComplete {
 		t.Fatalf("final=%+v err=%v", final, err)
+	}
+}
+
+func TestHomeHistoricalPrepareAndApplyUsesExactWriteSetWithoutCLIAuthority(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	evidence := "bounded normalized evidence"
+	srv.historicalEvidence = historicalEvidenceStub{payload: HistoricalIngestWorkPayload{TrustedPrompt: "prompt", Evidence: evidence}}
+	review := seedHistoricalReview(t, srv, evidence, historicalDecisionItem("Keep the reviewed import exact and replayable."))
+	session, err := srv.homeSessions.Create(testViewerSessionReadiness())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingDigest, repositoryID, _ := vault.ProductRuntimeBoundary()
+	destinationStoreID := vault.StoreID()
+	completed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(completed, homeMutationRequest(srv, session, "history/"+review.JobID+"/complete", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "expected_revision": {"1"},
+		"manifest_digest": {review.ManifestDigest}, "destination_store_id": {destinationStoreID},
+		"repository_id":       {repositoryID},
+		"confirmation_digest": {historicalReviewDestinationConfirmationDigest(review.JobID, review.Revision, review.ManifestDigest, destinationStoreID, repositoryID, bindingDigest)},
+	}))
+	if completed.Code != http.StatusNoContent {
+		t.Fatalf("complete status=%d body=%s", completed.Code, completed.Body.String())
+	}
+	frozen, err := srv.historicalIngest.ReviewSnapshot(review.JobID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(prepared, homeMutationRequest(srv, session, "history/"+review.JobID+"/prepare-apply", url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "expected_revision": {strconv.FormatInt(frozen.Revision, 10)},
+		"manifest_digest": {frozen.ManifestDigest}, "destination_store_id": {destinationStoreID}, "repository_id": {repositoryID},
+	}))
+	if prepared.Code != http.StatusNoContent {
+		t.Fatalf("prepare status=%d body=%s", prepared.Code, prepared.Body.String())
+	}
+	home := srv.memoryHomeHistoricalReview()
+	if !home.WriteSetReady || !home.CanApply || home.WriteSetDigest == "" || home.ApplyConfirmationDigest == "" || home.PlannedCreatedCount != 1 {
+		t.Fatalf("prepared home=%+v", home)
+	}
+	form := url.Values{
+		viewerSessionCSRFFormField: {session.CSRFToken}, "expected_revision": {strconv.FormatInt(home.Revision, 10)},
+		"manifest_digest": {home.ManifestDigest}, "write_set_digest": {home.WriteSetDigest},
+		"destination_store_id": {home.DestinationStoreID}, "destination_generation": {strconv.FormatInt(home.DestinationGeneration, 10)},
+		"confirmation_digest": {strings.Repeat("0", 64)},
+	}
+	wrong := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wrong, homeMutationRequest(srv, session, "history/"+review.JobID+"/apply", form))
+	if wrong.Code != http.StatusConflict {
+		t.Fatalf("wrong apply status=%d body=%s", wrong.Code, wrong.Body.String())
+	}
+	form.Set("confirmation_digest", home.ApplyConfirmationDigest)
+	applied := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(applied, homeMutationRequest(srv, session, "history/"+review.JobID+"/apply", form))
+	if applied.Code != http.StatusNoContent {
+		t.Fatalf("apply status=%d body=%s", applied.Code, applied.Body.String())
+	}
+	status, err := srv.historicalIngest.Status(review.JobID)
+	if err != nil || status.State != historicalingest.JobCommittedIndexing || status.BatchReceiptID == "" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	var capsules, receipts int
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&capsules); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.DB().QueryRow(`SELECT count(*) FROM historical_ingest_batch_receipts WHERE job_id=?`, review.JobID).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if capsules != 1 || receipts != 1 {
+		t.Fatalf("capsules=%d receipts=%d", capsules, receipts)
+	}
+}
+
+func TestHistoricalApplyRecoveryJoinsCommittedStoreReceiptAfterCheckpointGap(t *testing.T) {
+	srv, vault := newHomeRouteFixture(t)
+	evidence := "bounded recovery evidence"
+	srv.historicalEvidence = historicalEvidenceStub{payload: HistoricalIngestWorkPayload{TrustedPrompt: "prompt", Evidence: evidence}}
+	review := seedHistoricalReview(t, srv, evidence, historicalDecisionItem("Recover the exact committed import after a checkpoint interruption."))
+	if _, err := srv.historicalIngest.CompleteReview(
+		review.JobID, review.Revision, review.ManifestDigest,
+		historicalingest.ReviewConfirmationDigest(review.JobID, review.Revision, review.ManifestDigest), nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := srv.historicalIngest.ReviewSnapshot(review.JobID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := srv.historicalIngest.ApplySource(review.JobID, frozen.Revision, frozen.ManifestDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingDigest, repositoryID, _ := vault.ProductRuntimeBoundary()
+	set, digest, err := vault.CompileHistoricalWriteSet(source, bindingDigest, repositoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.historicalIngest.RecordWriteSet(review.JobID, frozen.ManifestDigest, digest, set.DestinationStoreID, set.DestinationGeneration); err != nil {
+		t.Fatal(err)
+	}
+	now := srv.homeNow()
+	capability, err := vault.AuthorizeHistoricalApply(review.JobID, digest, set.DestinationGeneration, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.CreateHistoricalBackup(review.JobID, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.historicalIngest.MarkApplying(review.JobID, frozen.ManifestDigest, digest); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := vault.ApplyHistoricalWriteSet(capability, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := srv.historicalIngest.Status(review.JobID)
+	if err != nil || before.State != historicalingest.JobApplying || before.BatchReceiptID != "" {
+		t.Fatalf("pre-recovery status=%+v err=%v", before, err)
+	}
+	if err := srv.recoverHistoricalIngest(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := srv.historicalIngest.Status(review.JobID)
+	if err != nil || after.State != historicalingest.JobCommittedIndexing || after.BatchReceiptID != receipt.ReceiptID {
+		t.Fatalf("recovered status=%+v receipt=%+v err=%v", after, receipt, err)
 	}
 }
 

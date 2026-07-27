@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nkkmnk/pulse/internal/historicalingest"
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 const historicalEvidenceViewLimit = 8 << 10
@@ -47,6 +48,15 @@ type memoryHomeHistoricalReview struct {
 	ConfirmationDigest       string
 	DestinationStoreID       string
 	RepositoryID             string
+	WriteSetReady            bool
+	CanPrepareApply          bool
+	CanApply                 bool
+	WriteSetDigest           string
+	DestinationGeneration    int64
+	PlannedCreatedCount      int
+	PlannedDeduplicatedCount int
+	ApplyConfirmationDigest  string
+	BatchReceiptID           string
 	Cards                    []memoryHomeHistoricalCard
 	RootOptions              []memoryHomeHistoricalRoot
 }
@@ -122,14 +132,36 @@ func (s *Server) memoryHomeHistoricalReview() memoryHomeHistoricalReview {
 		CandidateCount: snapshot.CandidateCount, WriteCount: snapshot.WriteCount, ExcludedCount: snapshot.ExcludedCount,
 		ReviewedCount: snapshot.ReviewedCount, RemainingRequired: snapshot.RemainingRequired,
 		Revision: snapshot.Revision, ManifestDigest: snapshot.ManifestDigest, ReviewComplete: snapshot.ReviewComplete,
-		CanComplete: snapshot.RemainingRequired == 0 && !snapshot.ReviewComplete && snapshot.State == historicalingest.JobManifestReady,
-		CanMutate:   snapshot.State == historicalingest.JobManifestReady || snapshot.State == historicalingest.JobApprovalReady,
+		CanComplete:    snapshot.RemainingRequired == 0 && !snapshot.ReviewComplete && snapshot.State == historicalingest.JobManifestReady,
+		CanMutate:      snapshot.State == historicalingest.JobManifestReady || snapshot.State == historicalingest.JobApprovalReady,
+		BatchReceiptID: status.BatchReceiptID,
 	}
 	view.StateLabel, view.StateDetail = historicalReviewStateCopy(snapshot.State, snapshot.RemainingRequired)
 	bindingDigest, repositoryID, boundaryOK := s.cfg.Store.ProductRuntimeBoundary()
 	if boundaryOK {
 		view.DestinationStoreID, view.RepositoryID = s.cfg.Store.StoreID(), repositoryID
 		view.ConfirmationDigest = historicalReviewDestinationConfirmationDigest(snapshot.JobID, snapshot.Revision, snapshot.ManifestDigest, view.DestinationStoreID, repositoryID, bindingDigest)
+		view.CanPrepareApply = snapshot.ReviewComplete && snapshot.State == historicalingest.JobApprovalReady && status.WriteSetDigest == ""
+		if status.WriteSetDigest != "" {
+			set, digest, loadErr := s.cfg.Store.LoadHistoricalWriteSet(snapshot.JobID, snapshot.Revision, snapshot.ManifestDigest, status.WriteSetDigest)
+			if loadErr == nil && digest == status.WriteSetDigest && set.DestinationStoreID == view.DestinationStoreID && set.DestinationBindingDigest == bindingDigest && set.RepositoryID == repositoryID {
+				currentGeneration, generationErr := s.cfg.Store.HistoricalDestinationGeneration()
+				if generationErr == nil && currentGeneration == set.DestinationGeneration {
+					view.WriteSetReady, view.WriteSetDigest, view.DestinationGeneration = true, digest, set.DestinationGeneration
+					for _, item := range set.Items {
+						if item.Target.Outcome == historicalingest.ItemCreated {
+							view.PlannedCreatedCount++
+						} else {
+							view.PlannedDeduplicatedCount++
+						}
+					}
+					view.CanApply = snapshot.State == historicalingest.JobApprovalReady
+					view.ApplyConfirmationDigest = historicalApplyConfirmationDigest(set, digest)
+				} else if generationErr == nil && currentGeneration > set.DestinationGeneration {
+					view.CanPrepareApply = snapshot.State == historicalingest.JobApprovalReady
+				}
+			}
+		}
 	}
 	rootSet := map[string]struct{}{}
 	for _, item := range snapshot.Items {
@@ -155,7 +187,15 @@ func historicalReviewStateCopy(state historicalingest.JobState, remaining int) (
 		}
 		return "Ready to finish review", "Every blocking candidate has a disposition. Finishing review freezes a new revision; it does not write memory."
 	case historicalingest.JobApprovalReady:
-		return "Review complete", "This revision is frozen for the later apply compiler. No memory has been written yet."
+		return "Review complete", "This revision is frozen. Prepare its exact write set, verify the destination, then apply it once. No memory has been written yet."
+	case historicalingest.JobApplying:
+		return "Applying exact history", "Pulse is committing only the precompiled write set. No model or new dedup search runs here."
+	case historicalingest.JobCommittedIndexing:
+		return "History committed", "Canonical memory and receipts are durable. Retrieval projections are catching up."
+	case historicalingest.JobIndexingFailed:
+		return "History committed; indexing needs retry", "Canonical memory is safe. Projection retry never reapplies the write set."
+	case historicalingest.JobRetrievalReady:
+		return "Historical memory is ready", "The approved write set is committed and available to scoped retrieval."
 	case historicalingest.JobNothingToImport:
 		return "Nothing to import", "All selected roots were processed and produced no structured memory."
 	case historicalingest.JobPausedQuota:
@@ -370,6 +410,141 @@ func historicalReviewDestinationConfirmationDigest(jobID string, revision int64,
 	return hex.EncodeToString(digest[:])
 }
 
+func historicalApplyConfirmationDigest(set historicalingest.WriteSet, writeSetDigest string) string {
+	value := fmt.Sprintf("pulse:historical-apply:v1:%s:%d:%s:%s:%s:%d:%s:%s:%d",
+		set.JobID, set.Revision, set.ManifestDigest, writeSetDigest, set.DestinationStoreID,
+		set.DestinationGeneration, set.DestinationBindingDigest, set.RepositoryID, len(set.Items))
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Server) handleHomeHistoricalPrepareApply(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireHomeMutation(w, r)
+	if !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "expected_revision", "manifest_digest", "destination_store_id", "repository_id") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	revision, err := strconv.ParseInt(r.PostFormValue("expected_revision"), 10, 64)
+	if err != nil || revision < 1 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	bindingDigest, repositoryID, boundaryOK := s.cfg.Store.ProductRuntimeBoundary()
+	if session.HasProductAuthority {
+		bindingDigest, repositoryID = session.ProductAuthority.BindingDigest, session.ProductAuthority.RepositoryID
+	}
+	if !boundaryOK || r.PostFormValue("destination_store_id") != s.cfg.Store.StoreID() || r.PostFormValue("repository_id") != repositoryID {
+		http.Error(w, "The historical apply destination changed. Refresh Home.", http.StatusConflict)
+		return
+	}
+	source, err := s.historicalIngest.ApplySource(chi.URLParam(r, "job"), revision, r.PostFormValue("manifest_digest"))
+	if err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	if s.historicalCodexSource != nil {
+		if err := s.historicalCodexSource.VerifyDigest(source.Snapshot.Digest); err != nil {
+			_, _ = s.historicalIngest.MarkStale(source.Manifest.JobID, source.Snapshot.Digest, "source_prefix_changed")
+			http.Error(w, "The frozen history source changed. Start a new snapshot.", http.StatusConflict)
+			return
+		}
+	}
+	set, writeSetDigest, err := s.cfg.Store.CompileHistoricalWriteSet(source, bindingDigest, repositoryID)
+	if err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	if _, err := s.historicalIngest.RecordWriteSet(source.Manifest.JobID, source.ManifestDigest, writeSetDigest, set.DestinationStoreID, set.DestinationGeneration); err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeHistoricalApply(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "expected_revision", "manifest_digest", "write_set_digest", "destination_store_id", "destination_generation", "confirmation_digest") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	revision, err := strconv.ParseInt(r.PostFormValue("expected_revision"), 10, 64)
+	generation, generationErr := strconv.ParseInt(r.PostFormValue("destination_generation"), 10, 64)
+	if err != nil || generationErr != nil || revision < 1 || generation < 1 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	jobID, manifestDigest, writeSetDigest := chi.URLParam(r, "job"), r.PostFormValue("manifest_digest"), r.PostFormValue("write_set_digest")
+	set, storedDigest, err := s.cfg.Store.LoadHistoricalWriteSet(jobID, revision, manifestDigest, writeSetDigest)
+	if err != nil || storedDigest != writeSetDigest || set.DestinationGeneration != generation ||
+		set.DestinationStoreID != r.PostFormValue("destination_store_id") || r.PostFormValue("confirmation_digest") != historicalApplyConfirmationDigest(set, storedDigest) {
+		http.Error(w, "The exact historical write set changed. Refresh Home.", http.StatusConflict)
+		return
+	}
+	status, err := s.historicalIngest.Status(jobID)
+	if err != nil || status.State != historicalingest.JobApprovalReady || status.WriteSetDigest != writeSetDigest {
+		http.Error(w, "The historical apply state changed. Refresh Home.", http.StatusConflict)
+		return
+	}
+	if s.historicalCodexSource != nil {
+		if err := s.historicalCodexSource.VerifyDigest(status.SnapshotDigest); err != nil {
+			_, _ = s.historicalIngest.MarkStale(jobID, status.SnapshotDigest, "source_prefix_changed")
+			http.Error(w, "The frozen history source changed. Start a new snapshot.", http.StatusConflict)
+			return
+		}
+	}
+	authorizedAt := s.homeNow()
+	capability, err := s.cfg.Store.AuthorizeHistoricalApply(jobID, writeSetDigest, generation, authorizedAt)
+	if err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	if _, err := s.cfg.Store.CreateHistoricalBackup(jobID, writeSetDigest); err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	if _, err := s.historicalIngest.MarkApplying(jobID, manifestDigest, writeSetDigest); err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	receipt, err := s.cfg.Store.ApplyHistoricalWriteSet(capability, s.homeNow())
+	if err != nil {
+		_, _ = s.historicalIngest.MarkApplyReady(jobID, manifestDigest, writeSetDigest, "apply_failed")
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	if _, err := s.historicalIngest.MarkCommitted(jobID, manifestDigest, writeSetDigest, receipt.ReceiptID); err != nil {
+		writeHistoricalReviewError(w, err)
+		return
+	}
+	for _, outcome := range receipt.Outcomes {
+		s.refreshProductRetrieval(store.MemoryWriteReceipt{ObjectID: outcome.ObjectID})
+	}
+	s.scheduleHistoricalProjectionState(jobID, receipt.ReceiptID, 0)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) scheduleHistoricalProjectionState(jobID, receiptID string, attempt int) {
+	if attempt > 8 {
+		return
+	}
+	delay := time.Duration(1<<min(attempt, 4)) * 250 * time.Millisecond
+	time.AfterFunc(delay, func() {
+		state, err := s.cfg.Store.HistoricalProjectionState(receiptID)
+		if err != nil {
+			return
+		}
+		_, _ = s.historicalIngest.MarkProjectionState(jobID, receiptID, state)
+		if state == historicalingest.ProjectionPending {
+			s.scheduleHistoricalProjectionState(jobID, receiptID, attempt+1)
+		}
+	})
+}
+
 func (s *Server) handleHomeHistoricalEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet || r.URL.RawQuery != "" || r.URL.Fragment != "" {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -479,7 +654,7 @@ func historicalReviewItemByID(snapshot historicalingest.ReviewSnapshot, candidat
 
 func historicalReplacementFromForm(item historicalingest.MaterialItem, r *http.Request) (historicalingest.MaterialItem, error) {
 	text := strings.TrimSpace(r.PostFormValue("primary_text"))
-	if text == "" || len(text) > 4000 {
+	if text == "" || len(text) > 1200 {
 		return historicalingest.MaterialItem{}, historicalingest.ErrReviewInvalid
 	}
 	switch item.Kind {
@@ -573,6 +748,11 @@ func writeHistoricalReviewError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, historicalingest.ErrReviewVersionConflict):
 		http.Error(w, "The historical review changed. Refresh Home.", http.StatusConflict)
+	case errors.Is(err, historicalingest.ErrApplyNotReady), errors.Is(err, historicalingest.ErrApplyVersionConflict),
+		errors.Is(err, historicalingest.ErrApplyAuthorization), errors.Is(err, historicalingest.ErrApplyDestination):
+		http.Error(w, "The exact historical apply boundary changed. Refresh Home.", http.StatusConflict)
+	case errors.Is(err, historicalingest.ErrApplyWriteSetInvalid):
+		http.Error(w, "The reviewed history cannot be compiled into a safe write set. Correct the flagged item in Home.", http.StatusConflict)
 	case errors.Is(err, historicalingest.ErrReviewIncomplete):
 		http.Error(w, "Blocking candidates still need a decision. Refresh Home.", http.StatusConflict)
 	case errors.Is(err, historicalingest.ErrReviewInvalid):

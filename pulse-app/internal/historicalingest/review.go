@@ -422,6 +422,10 @@ func (m *IngestManager) persistReviewRevisionLocked(checkpoint *ingestCheckpoint
 	}
 	checkpoint.ManifestRevision = manifest.Revision
 	checkpoint.ManifestDigest = digest
+	checkpoint.WriteSetDigest = ""
+	checkpoint.DestinationStoreID = ""
+	checkpoint.DestinationGeneration = 0
+	checkpoint.BatchReceiptID = ""
 	return m.commitLocked(checkpoint)
 }
 

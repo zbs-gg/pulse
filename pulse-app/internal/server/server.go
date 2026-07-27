@@ -330,6 +330,9 @@ func New(cfg Config) (*Server, error) {
 	if err := server.recoverMemoryTray(); err != nil {
 		return nil, err
 	}
+	if err := server.recoverHistoricalIngest(); err != nil {
+		return nil, err
+	}
 	return server, nil
 }
 

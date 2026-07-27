@@ -1,6 +1,6 @@
 -- Personal/Desk-only historical ingest authority. These tables stage reviewed
--- structured material and receipts; canonical memory remains in the existing
--- event/entity/assertion/continuity stores.
+-- structured material and receipts; canonical recall uses the existing private
+-- capsule store while typed provenance remains in the historical metadata.
 
 CREATE TABLE historical_ingest_jobs (
     job_id                   TEXT PRIMARY KEY CHECK(
@@ -190,7 +190,7 @@ CREATE TABLE historical_ingest_write_sets (
                               ),
     write_set_json            BLOB NOT NULL CHECK(length(write_set_json) BETWEEN 2 AND 67108864),
     created_at                TEXT NOT NULL CHECK(length(created_at) BETWEEN 20 AND 40),
-    PRIMARY KEY(job_id, revision),
+    PRIMARY KEY(job_id, revision, write_set_digest),
     FOREIGN KEY(job_id, revision) REFERENCES historical_ingest_manifests(job_id, revision) ON DELETE RESTRICT
 ) WITHOUT ROWID;
 
