@@ -273,6 +273,11 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     const observed = await observePendingContinuityDelivery(runtime, promptEvent, {
       request: async (_resolved, path, options) => {
         calls.push({ path, options });
+        if (calls.length === 1) {
+          const error = new Error('slow local observation');
+          error.name = 'TimeoutError';
+          throw error;
+        }
         return {
           ...offerReceipt, receipt_id: 'delivery_observed_1', parent_receipt_id: offerReceipt.receipt_id,
           state: 'host_observed', source_event_digest: options.body.source_event_digest,
@@ -280,9 +285,12 @@ test('a later same-session host event promotes only a receipt-backed content-fre
       },
     });
     assert.equal(observed.state, 'host_observed');
+    assert.equal(calls.length, 2);
     assert.equal(calls[0].path, '/continuity/delivery/observations');
     assert.deepEqual(calls[0].options.body, expected.body);
     assert.equal(calls[0].options.idempotencyKey, expected.idempotencyKey);
+    assert.equal(calls[0].options.timeoutMs, 5000);
+    assert.deepEqual(calls[1], calls[0]);
     assert.deepEqual(readdirSync(ticketDirectory), []);
     const observedDirectory = join(root, 'runtime', 'continuity-observed');
     const observedFiles = readdirSync(observedDirectory);
