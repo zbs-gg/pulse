@@ -18,6 +18,14 @@ function safeID(value, code) {
   return value;
 }
 
+function isTransientLocalDeliveryError(error) {
+  const status = error?.status;
+  const code = error?.code ?? error?.cause?.code;
+  return error?.name === 'TimeoutError' || error?.name === 'AbortError' ||
+    ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
+    status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 function canonicalIDs(value, code) {
   if (value === undefined) return Object.freeze([]);
   if (!Array.isArray(value)) throw new Error(code);
@@ -139,12 +147,7 @@ export async function persistContinuityDelivery(output, payload, {
   try {
     receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
   } catch (error) {
-    const status = error?.status;
-    const code = error?.code ?? error?.cause?.code;
-    const transient = error?.name === 'TimeoutError' || error?.name === 'AbortError' ||
-      ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
-      status === 408 || status === 425 || status === 429 || status >= 500;
-    if (!transient) throw error;
+    if (!isTransientLocalDeliveryError(error)) throw error;
     // The native source event supplies an exact idempotency key. Retrying the
     // same offer can recover a slow local daemon without creating a second
     // delivery fact when the first request committed before its timeout.
@@ -385,9 +388,19 @@ export async function observePendingContinuityDelivery(resolved, event, {
     const pending = readObservationTicket(resolved, event, platformServices);
     if (!pending) return undefined;
     const observation = createContinuityDeliveryObservation(pending.ticket, event);
-    const receipt = await request(resolved, '/continuity/delivery/observations', {
-      body: observation.body, idempotencyKey: observation.idempotencyKey, timeoutMs: 1200,
+    const observe = () => request(resolved, '/continuity/delivery/observations', {
+      body: observation.body, idempotencyKey: observation.idempotencyKey, timeoutMs: 5000,
     });
+    let receipt;
+    try {
+      receipt = await observe();
+    } catch (error) {
+      if (!isTransientLocalDeliveryError(error)) throw error;
+      // The observation endpoint is idempotent. If a slow local daemon commits
+      // just after the client deadline, one exact replay returns that receipt;
+      // otherwise it gets one bounded second chance without duplicating state.
+      receipt = await observe();
+    }
     if (receipt?.schema !== 'pulse.continuity_delivery_receipt.v1' || receipt.state !== 'host_observed' ||
         receipt.context_id !== pending.ticket.context_id || receipt.parent_receipt_id !== pending.ticket.offer_receipt_id ||
         receipt.binding_digest !== pending.ticket.binding_digest || receipt.repository_id !== pending.ticket.repository_id ||

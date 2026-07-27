@@ -820,22 +820,37 @@ try {
 
   let lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
   let codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  const observationStartedAt = Date.now();
+  const observationTrace = [];
   // Delivery observation is intentionally bounded and non-blocking. A slow
   // local platform may leave the prompt offer pending, so exercise the same
-  // trusted Stop retry that closes the proof during ordinary host use.
+  // trusted Stop retry that closes the proof during ordinary host use. Space
+  // retries out: firing three new hook processes 250ms apart is less realistic
+  // than an ordinary prompt/turn boundary and can repeatedly hit the same
+  // transient Windows ARM64 daemon backlog.
   for (let attempt = 0;
-    codexLifecycle?.state === 'host_observation_pending' && attempt < 3;
+    codexLifecycle?.state === 'host_observation_pending' && attempt < 5;
     attempt += 1) {
+    await new Promise((accept) => setTimeout(accept, [250, 500, 1_000, 1_500, 2_000][attempt]));
     const observationRetry = codexHook(pluginRoot, 'Stop', codexHookInput({
       eventName: 'Stop', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
       extra: { stop_hook_active: false, last_assistant_message: 'Continue from the saved decision.' },
     }), { cwd: workspace, env: hookEnv });
     assert.deepEqual(observationRetry, {});
-    await new Promise((accept) => setTimeout(accept, 250));
     lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
     codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+    observationTrace.push({
+      attempt: attempt + 1,
+      elapsed_ms: Date.now() - observationStartedAt,
+      state: codexLifecycle?.state ?? 'missing',
+      lifecycle_ready: codexLifecycle?.lifecycle_ready === true,
+      milestone_count: Array.isArray(codexLifecycle?.milestones) ? codexLifecycle.milestones.length : 0,
+    });
   }
-  assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify(codexLifecycle));
+  assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify({
+    lifecycle: codexLifecycle,
+    observation_trace: observationTrace,
+  }));
   assert.equal(codexLifecycle.state, 'ready');
   assert.equal(codexLifecycle.object_id, objectID);
   assert.deepEqual(codexLifecycle.milestones, ['write_receipt', 'session_context', 'prompt_context']);
