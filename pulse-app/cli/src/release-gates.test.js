@@ -420,6 +420,13 @@ test('production release is split into immutable inputs, origin publication, and
   assert.match(multiharness, /\[process\.execPath, npmArgs\]/);
   assert.match(multiharness, /process\.platform === 'win32' \? 'git\.exe'/);
 
+  const packager = readFileSync(
+    join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
+  );
+  assert.match(packager, /process\.platform === 'win32'/);
+  assert.match(packager, /flag: 'wx'/);
+  assert.match(packager, /PULSE_PREVIEW_VENDOR_LOCKED: '1'/);
+
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
   assert.equal(
     packageJSON.scripts?.['build:npm-production-inputs'],

@@ -1,8 +1,9 @@
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
+  copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,16 +40,49 @@ const productionPackaging = process.env.npm_lifecycle_event === 'prepublishOnly'
 // whole preparation under a kernel-held lock before touching either tree.
 if (process.env.PULSE_PREVIEW_VENDOR_LOCKED !== '1') {
   const digest = createHash('sha256').update(pulseRoot).digest('hex').slice(0, 20);
-  const lockPath = `/tmp/pulse-preview-vendor-${digest}.lock`;
-  const lockTool = process.platform === 'darwin' ? '/usr/bin/lockf' : '/usr/bin/flock';
-  const lockArgs = process.platform === 'darwin'
-    ? ['-k', '-t', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)]
-    : ['-w', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)];
-  const result = spawnSync(lockTool, lockArgs, {
-    env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
-    stdio: 'inherit',
-    timeout: 330_000,
-  });
+  const lockPath = join(tmpdir(), `pulse-preview-vendor-${digest}.lock`);
+  let windowsLockAcquired = false;
+  if (process.platform === 'win32') {
+    const deadline = Date.now() + 300_000;
+    const waiter = new Int32Array(new SharedArrayBuffer(4));
+    while (!windowsLockAcquired && Date.now() < deadline) {
+      try {
+        writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+        windowsLockAcquired = true;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 10 * 60_000) rmSync(lockPath);
+        } catch (inspectionError) {
+          if (inspectionError?.code !== 'ENOENT') throw inspectionError;
+        }
+        if (!windowsLockAcquired) Atomics.wait(waiter, 0, 0, 100);
+      }
+    }
+    if (!windowsLockAcquired) throw new Error('could not acquire the Pulse preview vendor lock (timeout)');
+  }
+  let result;
+  try {
+    if (process.platform === 'win32') {
+      result = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
+        stdio: 'inherit',
+        timeout: 330_000,
+      });
+    } else {
+      const lockTool = process.platform === 'darwin' ? '/usr/bin/lockf' : '/usr/bin/flock';
+      const lockArgs = process.platform === 'darwin'
+        ? ['-k', '-t', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)]
+        : ['-w', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)];
+      result = spawnSync(lockTool, lockArgs, {
+        env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
+        stdio: 'inherit',
+        timeout: 330_000,
+      });
+    }
+  } finally {
+    if (windowsLockAcquired) rmSync(lockPath, { force: true });
+  }
   if (result.status !== 0) {
     throw new Error(`could not acquire the Pulse preview vendor lock (status ${result.status})`);
   }
