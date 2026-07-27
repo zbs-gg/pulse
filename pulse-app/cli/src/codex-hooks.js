@@ -327,18 +327,23 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     resolved = resolveRuntime(rawInput);
     if (eventName === 'SessionStart') {
       let syncMessage;
-      try {
-        const sync = await (dependencies.syncSharedMemory ?? syncCommittedGitTeamMemory)(resolved, {
-          ensureProjectID: dependencies.portableProjectID ?? ensureBoundPortableProjectID,
-          requestIndex: (body) => request(resolved, '/project/shared-memory/index', {
-            body, timeoutMs: 45_000,
-          }),
-        });
-        if (sync?.state === 'indexed') {
-          syncMessage = `Pulse Git Team Memory indexed: ${sync.active_count} active project memories (${sync.receipt_id}).`;
+      // Personal Gold does not include Team memory. Avoid spawning Git and
+      // probing a repository on every Personal session start; Team bindings
+      // retain the explicit committed-pack sync path.
+      if (resolved.binding.mode === 'team') {
+        try {
+          const sync = await (dependencies.syncSharedMemory ?? syncCommittedGitTeamMemory)(resolved, {
+            ensureProjectID: dependencies.portableProjectID ?? ensureBoundPortableProjectID,
+            requestIndex: (body) => request(resolved, '/project/shared-memory/index', {
+              body, timeoutMs: 45_000,
+            }),
+          });
+          if (sync?.state === 'indexed') {
+            syncMessage = `Pulse Git Team Memory indexed: ${sync.active_count} active project memories (${sync.receipt_id}).`;
+          }
+        } catch {
+          syncMessage = 'Pulse Git Team Memory sync was blocked; no unverified shared project memory was admitted.';
         }
-      } catch {
-        syncMessage = 'Pulse Git Team Memory sync was blocked; no unverified shared project memory was admitted.';
       }
       const context = await resumeContext(resolved, event, request, dependencies);
       return annotateContinuityDelivery(healthy({

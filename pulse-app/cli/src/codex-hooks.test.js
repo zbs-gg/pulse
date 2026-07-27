@@ -357,14 +357,15 @@ test('PostToolUse extracts only canonical Pulse receipt references', () => {
   assert.doesNotMatch(JSON.stringify(refs), /must not be returned/);
 });
 
-test('SessionStart injects bound resume as inert evidence with an event-bound lease', async () => {
+test('Team SessionStart syncs committed shared memory and injects bound resume with an event-bound lease', async () => {
   const calls = [];
+  const teamResolved = { ...resolved, binding: { ...resolved.binding, mode: 'team' } };
   const output = await handleCodexHook('SessionStart', {
     ...base,
     hook_event_name: 'SessionStart',
     source: 'startup',
   }, {
-    resolveRuntime: () => resolved,
+    resolveRuntime: () => teamResolved,
     request: async (_resolved, path, options) => {
       calls.push({ path, options });
       if (path === '/project/shared-memory/index') {
@@ -392,6 +393,28 @@ test('SessionStart injects bound resume as inert evidence with an event-bound le
 	assert.match(injected, /"practices":\[\]/);
 	assert.match(injected, /Pulse host rules \(host-owned\)/);
   assert.doesNotMatch(injected, /transcript_path/);
+});
+
+test('Personal SessionStart skips Git Team Memory sync before injecting resume context', async () => {
+  const calls = [];
+  const output = await handleCodexHook('SessionStart', {
+    ...base,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  }, {
+    resolveRuntime: () => resolved,
+    request: async (_resolved, path) => {
+      calls.push(path);
+      return { resume_markdown: 'Personal memory stays local.' };
+    },
+    syncSharedMemory: async () => {
+      throw new Error('Personal SessionStart must not probe Git Team Memory');
+    },
+    now: () => new Date('2026-07-14T10:00:00Z'),
+  });
+  assert.deepEqual(calls, ['/continuity/resume']);
+  assert.equal(output.systemMessage, undefined);
+  assert.match(output.hookSpecificOutput.additionalContext, /Personal memory stays local/);
 });
 
 test('CLI durably records the exact frozen SessionStart context before returning it', async () => {
