@@ -348,19 +348,32 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       }), resolved, event, context.manifest);
     }
     if (eventName === 'UserPromptSubmit') {
-      let hadObservedSessionDelivery = false;
-      try {
-        hadObservedSessionDelivery =
-          await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
-            platformServices: dependencies.platformServices,
-          });
-      } catch { /* missing observation proof requires the prompt bootstrap */ }
       try {
         await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
           request: dependencies.deliveryRequest ?? request,
           platformServices: dependencies.platformServices,
         });
       } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
+      let memorySnapshotDigest;
+      if (dependencies.hasSessionDelivery === undefined) {
+        try {
+          const status = await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
+          if (/^[a-f0-9]{64}$/.test(status?.memory_snapshot_digest ?? '')) {
+            memorySnapshotDigest = status.memory_snapshot_digest;
+          }
+        } catch { /* a missing current snapshot requires the prompt bootstrap */ }
+      }
+      let hadObservedSessionDelivery = false;
+      try {
+        hadObservedSessionDelivery = memorySnapshotDigest === undefined && dependencies.hasSessionDelivery === undefined
+          ? false
+          : await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
+              platformServices: dependencies.platformServices,
+              ...(memorySnapshotDigest === undefined ? {} : {
+                expectedMemorySnapshotDigest: memorySnapshotDigest,
+              }),
+            });
+      } catch { /* stale or missing observation proof requires the prompt bootstrap */ }
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
       let approval;
@@ -393,7 +406,9 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: `${renderAdditionalContext([], contextLease(resolved.binding, now))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
+          additionalContext: `${renderAdditionalContext([], contextLease(
+            resolved.binding, now, 30_000, memorySnapshotDigest,
+          ))}${approvalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       });
     }

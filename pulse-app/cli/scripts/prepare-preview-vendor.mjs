@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   canonicalReleaseJSON,
   pinnedReleaseKeyring,
-  verifyReleaseManifestEnvelope,
+  verifyPersonalReleaseArtifactSet,
 } from '../src/release-manifest.js';
 import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from '../src/desktop-target.js';
 import { publicMcpPackageManifest } from './public-package-audit.mjs';
@@ -30,6 +30,7 @@ const expectedHelperTeamID = '44N4NZ86S5';
 const nativeHelper = join(appRoot, 'native', 'pulse-presence-helper', 'dist', expectedHelperIdentifier);
 const vendorHelperRoot = join(cliRoot, 'vendor', 'pulse-presence-helper');
 const defaultReleaseManifest = join(cliRoot, 'release', 'personal-preview-manifest.json');
+const defaultReleaseSnapshot = join(cliRoot, 'release', 'personal-release-snapshot.json');
 const productionPackaging = process.env.npm_lifecycle_event === 'prepublishOnly' ||
   process.env.PULSE_REQUIRE_RELEASE_MANIFEST === '1';
 
@@ -158,6 +159,7 @@ if (process.platform === 'darwin') {
 
 if (productionPackaging) {
   const releaseManifestPath = process.env.PULSE_RELEASE_MANIFEST_PATH ?? defaultReleaseManifest;
+  const releaseSnapshotPath = process.env.PULSE_RELEASE_SNAPSHOT_PATH ?? defaultReleaseSnapshot;
   const releaseRootPath = process.env.PULSE_RELEASE_TEST_ROOT_PATH;
   if ((process.env.PULSE_RELEASE_MANIFEST_PATH || releaseRootPath) && process.env.PULSE_RELEASE_TEST_MODE !== '1') {
     throw new Error('release manifest/root overrides are forbidden outside explicit test mode');
@@ -179,9 +181,18 @@ if (productionPackaging) {
   }
   const now = new Date();
   const trustedKeys = pinnedReleaseKeyring(releaseRootPath);
+  if (envelope.schema !== 'pulse.personal_release_artifact_set.v1' || !existsSync(releaseSnapshotPath)) {
+    throw new Error('refusing production packaging: immutable v3 artifact set and signed snapshot are required');
+  }
+  const snapshotBytes = readFileSync(releaseSnapshotPath, 'utf8');
+  const snapshot = JSON.parse(snapshotBytes);
+  if (snapshotBytes !== `${canonicalReleaseJSON(snapshot)}\n` ||
+      snapshot.schema !== 'pulse.release_snapshot_envelope.v1') {
+    throw new Error('refusing production packaging: release snapshot is not canonical v3');
+  }
   const verifiedTargets = DESKTOP_TARGET_IDS.map((targetID) => {
     const target = desktopTargetDefinition(targetID);
-    const verified = verifyReleaseManifestEnvelope(envelope, {
+    const verified = verifyPersonalReleaseArtifactSet(envelope, snapshot, {
       architecture: target.architecture,
       libc: target.libc,
       minimumAcceptedEpoch: envelope?.payload?.release?.epoch,

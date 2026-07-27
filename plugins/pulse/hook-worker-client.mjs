@@ -269,6 +269,45 @@ export async function runHookWorkerClient({
   await emit(output, outputStream);
 }
 
+export async function prewarmHookWorker({
+  host,
+  pluginRoot,
+  workspacePath,
+  resolveEnvironment,
+  services = {},
+} = {}) {
+  if (!['claude-code', 'codex', 'cursor'].includes(host) || typeof pluginRoot !== 'string' ||
+      typeof workspacePath !== 'string' || !isAbsolute(workspacePath) ||
+      typeof resolveEnvironment !== 'function') {
+    throw new Error('hook_worker_prewarm_invalid');
+  }
+  const resolveWorkspace = services.workerWorkspace ?? workerWorkspace;
+  const receiptForWorkspace = services.workerReceiptPath ?? workerReceiptPath;
+  const readReceipt = services.privateReceipt ?? privateReceipt;
+  const receiptIsValid = services.validReceipt ?? validReceipt;
+  const ensure = services.ensureWorker ?? ensureWorker;
+  const workspace = resolveWorkspace(pluginRoot, { cwd: workspacePath });
+  const receiptPath = receiptForWorkspace(host, workspace.digest);
+  const expected = await resolveEnvironment();
+  let receipt = readReceipt(receiptPath);
+  let reused = receiptIsValid(receipt, { host, workspaceDigest: workspace.digest, expected });
+  if (!reused) {
+    receipt = await ensure({ host, expected, receiptPath, workspace });
+    if (!receiptIsValid(receipt, { host, workspaceDigest: workspace.digest, expected })) {
+      throw new Error('hook_worker_prewarm_unverified');
+    }
+  }
+  return Object.freeze({
+    schema: 'pulse.hook_worker_prewarm.v1',
+    host,
+    workspace_digest: workspace.digest,
+    hook_digest: expected.hookDigest,
+    plugin_digest: expected.productEnvironment.PULSE_PLUGIN_TREE_DIGEST,
+    runtime_digest: expected.productEnvironment.PULSE_RUNTIME_DIGEST,
+    reused,
+  });
+}
+
 export const __hookWorkerClientTest = Object.freeze({
   MAX_WORKER_LIFETIME_MS,
   privateReceipt,

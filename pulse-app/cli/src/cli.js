@@ -156,6 +156,7 @@ import {
 	inspectPersonalRuntime,
 	packagedPersonalRuntimeOptions,
 	provisionPersonalRuntime,
+  refreshPackagedPersonalRelease,
 } from './personal-runtime-installer.js';
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
@@ -350,6 +351,7 @@ const PERSONAL_INSTALL_TEST_OVERRIDE_NAMES = Object.freeze([
   'PULSE_BINDING_ANCHOR_PATH',
   'PULSE_CODEX_MARKETPLACE_SOURCE',
   'PULSE_RELEASE_MANIFEST_PATH',
+  'PULSE_RELEASE_SNAPSHOT_PATH',
   'PULSE_RELEASE_TEST_ROOT_PATH',
   'PULSE_RELEASE_TEST_ASSET_ROOT',
   'PULSE_RELEASE_TEST_MATERIALIZER_SPEC',
@@ -392,11 +394,12 @@ function currentNativePackedFixtureAttestation(workspace, release) {
   return attestation;
 }
 
-function currentPersonalInstallPlan() {
+async function currentPersonalInstallPlan() {
   let releaseInspection;
   let releaseReasonCode;
   try {
-    releaseInspection = inspectPersonalRelease(packagedPersonalRuntimeOptions(DATA_DIR));
+    const releaseOptions = await refreshPackagedPersonalRelease(DATA_DIR);
+    releaseInspection = inspectPersonalRelease(releaseOptions);
   } catch (error) {
     releaseReasonCode = typeof error?.code === 'string' ? error.code : 'release_manifest_unavailable';
   }
@@ -838,6 +841,39 @@ async function activatePersonalInstallCore(binding) {
   }
 }
 
+function prewarmPersonalHostWorker(host, pluginRoot, binding) {
+  const launchers = {
+    'claude-code': join(pluginRoot, 'hooks', 'claude-hook.mjs'),
+    codex: join(pluginRoot, 'hooks', 'pulse-hook.mjs'),
+    cursor: join(pluginRoot, 'hooks', 'cursor-hook.mjs'),
+  };
+  const launcher = launchers[host];
+  const workspace = binding?.workspace?.canonical_path;
+  if (!launcher || typeof pluginRoot !== 'string' || !isAbsolute(pluginRoot) ||
+      typeof workspace !== 'string' || !isAbsolute(workspace) || !existsSync(launcher)) {
+    throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
+  }
+  const result = spawnSync(process.execPath, [launcher, '--prewarm'], {
+    cwd: workspace,
+    env: process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
+    killSignal: 'SIGTERM',
+    windowsHide: true,
+  });
+  let receipt;
+  try { receipt = JSON.parse(result.stdout); } catch { receipt = undefined; }
+  if (result.status !== 0 || receipt?.schema !== 'pulse.hook_worker_prewarm.v1' ||
+      receipt.host !== host || receipt.workspace_digest?.length !== 64 ||
+      ![receipt.hook_digest, receipt.plugin_digest, receipt.runtime_digest]
+        .every((value) => /^[a-f0-9]{64}$/.test(value ?? '')) ||
+      typeof receipt.reused !== 'boolean') {
+    throw new PersonalInstallError(`${host.replaceAll('-', '_')}_hook_worker_prewarm_failed`);
+  }
+  return receipt;
+}
+
 function personalInstallHostRegistry(targets) {
   const codexExecutable = targets.get('codex')?.executable_path;
   const claudeExecutable = targets.get('claude-code')?.executable_path;
@@ -918,8 +954,9 @@ function personalInstallHostRegistry(targets) {
             globalDataDir: DATA_DIR, binding: context.binding, host: 'claude-code', enabled: true,
             reason: 'claude_code_native_plugin_connected',
           });
-          activateClaudePlugin(context.edge, { executable: claudeExecutable });
+          const activation = activateClaudePlugin(context.edge, { executable: claudeExecutable });
           removeLegacyClaudeProductRegistration(claudeExecutable);
+          prewarmPersonalHostWorker('claude-code', activation.plugin.path, context.binding);
         } catch (error) {
           const failures = [];
           try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
@@ -958,7 +995,7 @@ function personalInstallHostRegistry(targets) {
         ]);
         const transaction = snapshotCodexHostActivation(codexExecutable);
         try {
-          const { source } = activateExactCodexProductEdge(context.edge, transaction, codexExecutable);
+          const { plugin, source } = activateExactCodexProductEdge(context.edge, transaction, codexExecutable);
           const migration = migrateLegacyPulseHookFiles({ cwd: process.cwd() });
           const defaults = defaultBindingPaths();
           writeCodexProductLocator({
@@ -975,6 +1012,7 @@ function personalInstallHostRegistry(targets) {
           writeProductHostAccess({
             productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'codex',
           });
+          prewarmPersonalHostWorker('codex', plugin.path, context.binding);
           discardPluginTreeSnapshot(transaction.pluginTree);
           return { migration, source };
         } catch (error) {
@@ -1011,7 +1049,7 @@ function personalInstallHostRegistry(targets) {
         };
       },
       activate: async (context) => {
-        installCursorPlugin(context.edge.plugin_root, {
+        const installed = installCursorPlugin(context.edge.plugin_root, {
           cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
         });
         writeCaptureStateFiles({
@@ -1021,6 +1059,7 @@ function personalInstallHostRegistry(targets) {
         writeProductHostAccess({
           productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'cursor',
         });
+        prewarmPersonalHostWorker('cursor', installed.path, context.binding);
       },
     },
   };
@@ -10091,7 +10130,7 @@ async function main() {
     if (target !== undefined && target !== '--json' && target !== 'codex') {
       throw new Error('pulse install-plan supports host-neutral Personal or the legacy claude-code preview plan');
     }
-    printPersonalInstallPlan(currentPersonalInstallPlan(), { json: args.includes('--json') });
+    printPersonalInstallPlan(await currentPersonalInstallPlan(), { json: args.includes('--json') });
     return;
   }
 

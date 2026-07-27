@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zbs.gg/schemas/pulse/release-snapshot.v1.json",
+  "title": "Pulse root-signed release snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "schema", "signature"],
+  "properties": {
+    "schema": { "const": "pulse.release_snapshot_envelope.v1" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_set", "channel", "expires_at", "issued_at", "package", "release_epoch", "revoked_key_ids", "schema", "version"],
+      "properties": {
+        "schema": { "const": "pulse.release_snapshot.v1" },
+        "artifact_set": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "url"],
+          "properties": {
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "url": { "type": "string", "pattern": "^https://.*/artifact-set\\.json$" }
+          }
+        },
+        "channel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key_id", "public_key_pem", "valid_from_epoch", "valid_through_epoch"],
+          "properties": {
+            "key_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "public_key_pem": { "type": "string" },
+            "valid_from_epoch": { "type": "integer", "minimum": 1 },
+            "valid_through_epoch": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "package": { "const": "@zbs-gg/pulse" },
+        "release_epoch": { "type": "integer", "minimum": 1 },
+        "revoked_key_ids": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+        "version": { "type": "string" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "value": { "type": "string" }
+      }
+    }
+  }
+}

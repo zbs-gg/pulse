@@ -786,6 +786,23 @@ test('Codex UserPromptSubmit attempts only a correlated pending-offer observatio
   assert.equal(observations, 1);
 });
 
+test('UserPromptSubmit rechecks the just-observed SessionStart lease before any bootstrap retrieval', async () => {
+  let observed = false;
+  let checks = 0;
+  const output = await handleCodexHook('UserPromptSubmit', {
+    ...base, hook_event_name: 'UserPromptSubmit', prompt: 'continue',
+  }, {
+    resolveRuntime: () => resolved,
+    writeTurnContext: () => {},
+    observeDelivery: async () => { observed = true; },
+    hasSessionDelivery: async () => { checks += 1; return observed; },
+    composeResume: async () => assert.fail('unchanged same-session memory must not run a second retrieval'),
+  });
+  assert.equal(checks, 1);
+  assert.equal(observed, true);
+  assert.match(output.hookSpecificOutput.additionalContext, /pulse\.context_lease/);
+});
+
 test('PostToolUse trusts only the plugin-owned product receipt namespace', async () => {
   const calls = [];
   const stopEvent = normalizeCodexHook('Stop', {

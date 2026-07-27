@@ -1,0 +1,240 @@
+name: Seal production candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Production candidate input run for this exact main commit
+        required: true
+        type: string
+      origin_run_id:
+        description: Successful Production origin run for the same candidate
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact unpublished npm tarball SHA-256
+        required: true
+        type: string
+      confirmation:
+        description: Type "seal pulse 0.7.0 production candidate"
+        required: true
+        type: string
+
+concurrency:
+  group: pulse-production-candidate-seal-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  authorize:
+    name: Bind exact inputs, origin, and 18-pair matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+      universal_run_id: ${{ steps.inputs.outputs.universal_run_id }}
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Require exact protected release intent and successful upstream runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$RELEASE_CONFIRMATION" = 'seal pulse 0.7.0 production candidate'
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$ORIGIN_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          for run_id in "$CANDIDATE_RUN_ID" "$ORIGIN_RUN_ID"; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/run-$run_id.json"
+            test "$(jq -r .head_branch "$RUNNER_TEMP/run-$run_id.json")" = main
+            test "$(jq -r .head_sha "$RUNNER_TEMP/run-$run_id.json")" = "$GITHUB_SHA"
+            test "$(jq -r .conclusion "$RUNNER_TEMP/run-$run_id.json")" = success
+          done
+          test "$(jq -r .path "$RUNNER_TEMP/run-$CANDIDATE_RUN_ID.json")" = '.github/workflows/production-candidate.yml'
+          test "$(jq -r .path "$RUNNER_TEMP/run-$ORIGIN_RUN_ID.json")" = '.github/workflows/publish-production-origin.yml'
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-inputs --dir "$RUNNER_TEMP/seal-inputs/npm"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-production-release-catalog --dir "$RUNNER_TEMP/seal-inputs/catalog"
+          gh run download "$ORIGIN_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-production-origin-receipt --dir "$RUNNER_TEMP/origin"
+          test "$(jq -r .schema "$RUNNER_TEMP/origin/pulse-r2-publication.json")" = pulse.r2_release_publication.v1
+          test "$(jq -r .object_count "$RUNNER_TEMP/origin/pulse-r2-publication.json")" = 16
+      - id: inputs
+        name: Verify exact unsealed inputs
+        shell: bash
+        run: |
+          receipt="$RUNNER_TEMP/seal-inputs/npm/candidate-inputs.json"
+          test "$(jq -r .schema "$receipt")" = pulse.npm_production_inputs.v1
+          test "$(jq -r .commit "$receipt")" = "$GITHUB_SHA"
+          test "$(jq -r .package_sha256 "$receipt")" = "$CANDIDATE_SHA256"
+          test "$(jq -r .production_ready "$receipt")" = false
+          test "$(jq -r .support_claim "$receipt")" = false
+          echo "universal_run_id=$(jq -r .universal_run_id "$receipt")" >> "$GITHUB_OUTPUT"
+      - id: matrix
+        name: Freeze all 18 host-target jobs
+        working-directory: pulse-app/cli
+        shell: bash
+        run: echo "value=$(node scripts/native-universal-matrix.mjs --github)" >> "$GITHUB_OUTPUT"
+      - name: Preserve exact seal inputs for the protected matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-seal-inputs
+          path: ${{ runner.temp }}/seal-inputs
+          if-no-files-found: error
+          retention-days: 30
+
+  native:
+    name: Production harness / ${{ matrix.host }} / ${{ matrix.target_id }}
+    needs: authorize
+    environment: production-harness-e2e
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.authorize.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      PULSE_PROTECTED_HARNESS_AUTHORITY: production_candidate
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-seal-inputs
+          path: ${{ runner.temp }}/seal-inputs
+      - name: Install and verify exact vendor harness
+        uses: ./.github/actions/setup-pulse-vendor-harness
+        with:
+          host: ${{ matrix.host }}
+          distribution: ${{ matrix.harness_distribution }}
+          identity: ${{ matrix.harness_identity }}
+          version: ${{ matrix.harness_version }}
+          download-url: ${{ matrix.harness_download_url }}
+          platform: ${{ matrix.platform }}
+      - name: Require only the selected restricted vendor credential
+        shell: bash
+        run: |
+          case "${{ matrix.host }}" in
+            codex) test -n "$OPENAI_API_KEY" ;;
+            claude-code) test -n "$ANTHROPIC_API_KEY" ;;
+            cursor) test -n "$CURSOR_API_KEY" ;;
+            *) exit 1 ;;
+          esac
+      - name: Install exact tarball and run the real fresh-session lifecycle
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          tarballs=("$RUNNER_TEMP"/seal-inputs/npm/*.tgz)
+          test "${#tarballs[@]}" = 1
+          mkdir "$RUNNER_TEMP/pulse-session-root"
+          chmod 700 "$RUNNER_TEMP/pulse-session-root"
+          export PULSE_PROTECTED_HARNESS_ROOT="$RUNNER_TEMP/pulse-session-root"
+          npm run --silent test:native-vendor-session -- \
+            --authority production_candidate \
+            --host "${{ matrix.host }}" \
+            --target "${{ matrix.target_id }}" \
+            --tarball "${tarballs[0]}" \
+            --catalog "$RUNNER_TEMP/seal-inputs/catalog" \
+            --out "$RUNNER_TEMP/pulse-native-${{ matrix.host }}-${{ matrix.target_id }}.json" \
+            --commit "$GITHUB_SHA" \
+            --repeat "${{ matrix.stability_runs }}"
+      - name: Upload content-free production-candidate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-native-${{ matrix.host }}-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/pulse-native-${{ matrix.host }}-${{ matrix.target_id }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  seal:
+    name: Seal exact npm bytes after 18 real vendor sessions
+    needs: [authorize, native]
+    environment: production-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-seal-inputs
+          path: ${{ runner.temp }}/seal-inputs
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: pulse-production-native-*
+          path: ${{ runner.temp }}/native-evidence
+      - name: Validate 18 receipts and seal candidate bytes
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          node scripts/validate-native-evidence-set.mjs \
+            --directory "$RUNNER_TEMP/native-evidence" --authority production_candidate
+          tarballs=("$RUNNER_TEMP"/seal-inputs/npm/*.tgz)
+          test "${#tarballs[@]}" = 1
+          npm run build:npm-production-candidate -- \
+            --catalog "$RUNNER_TEMP/seal-inputs/catalog" \
+            --commit "$GITHUB_SHA" \
+            --evidence "$RUNNER_TEMP/native-evidence" \
+            --output "$RUNNER_TEMP/pulse-npm-production-candidate" \
+            --security "$RUNNER_TEMP/seal-inputs/npm" \
+            --tarball "${tarballs[0]}" \
+            --universal-run-id "${{ needs.authorize.outputs.universal_run_id }}"
+          sha="$(jq -r .sha256 "$RUNNER_TEMP/pulse-npm-production-candidate/candidate.json")"
+          node scripts/verify-npm-stage-candidate.mjs \
+            --candidate "$RUNNER_TEMP/pulse-npm-production-candidate/candidate.json" \
+            --commit "$GITHUB_SHA" --sha256 "$sha"
+          echo "Sealed production candidate SHA-256: $sha"
+      - name: Upload exact sealed candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-npm-production-candidate
+          path: ${{ runner.temp }}/pulse-npm-production-candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  required:
+    name: Production candidate seal / required
+    if: always()
+    needs: [authorize, native, seal]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - shell: bash
+        env:
+          AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          SEAL_RESULT: ${{ needs.seal.result }}
+        run: |
+          test "$AUTHORIZE_RESULT" = success
+          test "$NATIVE_RESULT" = success
+          test "$SEAL_RESULT" = success

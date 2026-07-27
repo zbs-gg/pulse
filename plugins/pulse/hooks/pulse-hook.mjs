@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runHookWorkerClient } from '../hook-worker-client.mjs';
+import { prewarmHookWorker, runHookWorkerClient } from '../hook-worker-client.mjs';
 
 const eventName = process.argv[2];
 const hookRoot = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +12,8 @@ const pluginRoot = resolve(hookRoot, '..');
 async function resolveEnvironment() {
   const { resolveProductEnvironment } = await import('../runtime-locator.mjs');
   const productEnvironment = resolveProductEnvironment({
-    edgeProfile: 'hook', host: 'codex', integrity: eventName === 'SessionStart' ? 'refresh' : 'reuse',
+    edgeProfile: 'hook', host: 'codex',
+    integrity: eventName === 'SessionStart' || eventName === '--prewarm' ? 'refresh' : 'reuse',
   });
   const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
   const runtimeRoot = resolve(cliPath, '..', '..');
@@ -39,10 +40,16 @@ async function resolveEnvironment() {
   };
 }
 
-await runHookWorkerClient({
-  host: 'codex',
-  eventName,
-  pluginRoot,
-  pluginData: process.env.PLUGIN_DATA,
-  resolveEnvironment,
-});
+if (eventName === '--prewarm') {
+  process.stdout.write(`${JSON.stringify(await prewarmHookWorker({
+    host: 'codex', pluginRoot, workspacePath: process.cwd(), resolveEnvironment,
+  }))}\n`);
+} else {
+  await runHookWorkerClient({
+    host: 'codex',
+    eventName,
+    pluginRoot,
+    pluginData: process.env.PLUGIN_DATA,
+    resolveEnvironment,
+  });
+}

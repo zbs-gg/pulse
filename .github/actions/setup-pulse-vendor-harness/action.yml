@@ -1,0 +1,107 @@
+name: Set up exact Pulse vendor harness
+description: Installs and verifies one calibrated Codex, Claude Code, or Cursor harness without exposing credentials.
+
+inputs:
+  host:
+    required: true
+  distribution:
+    required: true
+  identity:
+    required: true
+  version:
+    required: true
+  download-url:
+    required: true
+  platform:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install exact npm CLI harness
+      if: inputs.distribution == 'npm'
+      shell: bash
+      env:
+        HARNESS_DOWNLOAD_URL: ${{ inputs.download-url }}
+        HARNESS_HOST: ${{ inputs.host }}
+        HARNESS_IDENTITY: ${{ inputs.identity }}
+        HARNESS_VERSION: ${{ inputs.version }}
+      run: |
+        test "$(npm view "$HARNESS_IDENTITY@$HARNESS_VERSION" dist.tarball)" = "$HARNESS_DOWNLOAD_URL"
+        npm install --ignore-scripts --no-audit --no-fund \
+          --prefix "$RUNNER_TEMP/vendor-harness" "$HARNESS_IDENTITY@$HARNESS_VERSION"
+        node - <<'NODE'
+        const fs = require('fs');
+        const path = require('path');
+        const host = process.env.HARNESS_HOST;
+        const executable = process.platform === 'win32'
+          ? path.join(process.env.RUNNER_TEMP, 'vendor-harness', 'node_modules', '.bin', host === 'codex' ? 'codex.cmd' : 'claude.cmd')
+          : path.join(process.env.RUNNER_TEMP, 'vendor-harness', 'node_modules', '.bin', host === 'codex' ? 'codex' : 'claude');
+        if (!fs.statSync(executable).isFile()) process.exit(1);
+        const name = host === 'codex' ? 'PULSE_PROTECTED_HARNESS_CODEX_EXECUTABLE' : 'PULSE_PROTECTED_HARNESS_CLAUDE_EXECUTABLE';
+        fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${executable}\n`);
+        NODE
+    - name: Download exact Cursor Desktop installer
+      if: inputs.distribution == 'vendor-desktop-installer'
+      shell: bash
+      env:
+        HARNESS_DOWNLOAD_URL: ${{ inputs.download-url }}
+      run: |
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 1 \
+          --connect-timeout 15 --max-time 600 --write-out '%{url_effective}\n' \
+          --output "$RUNNER_TEMP/cursor-installer" "$HARNESS_DOWNLOAD_URL" \
+          > "$RUNNER_TEMP/cursor-effective-url"
+        grep -Eq '^https://downloads\.cursor\.com/production/[a-f0-9]{40}/' "$RUNNER_TEMP/cursor-effective-url"
+        test -s "$RUNNER_TEMP/cursor-installer"
+    - name: Verify signed Cursor Desktop on macOS
+      if: inputs.distribution == 'vendor-desktop-installer' && inputs.platform == 'darwin'
+      shell: bash
+      run: |
+        mv "$RUNNER_TEMP/cursor-installer" "$RUNNER_TEMP/cursor.dmg"
+        mount="$(hdiutil attach -readonly -nobrowse "$RUNNER_TEMP/cursor.dmg" | awk '/\/Volumes\// {sub(/^.*\/Volumes\//,"/Volumes/"); print; exit}')"
+        ditto "$mount/Cursor.app" "$RUNNER_TEMP/Cursor.app"
+        hdiutil detach "$mount"
+        codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/Cursor.app"
+        spctl --assess --type execute --verbose=2 "$RUNNER_TEMP/Cursor.app"
+        version="$(defaults read "$RUNNER_TEMP/Cursor.app/Contents/Info" CFBundleShortVersionString)"
+        [[ "$version" = 3.13 || "$version" = 3.13.* ]]
+        echo "PULSE_PROTECTED_HARNESS_CURSOR_APP=$RUNNER_TEMP/Cursor.app" >> "$GITHUB_ENV"
+    - name: Verify Cursor Desktop package on GNU/Linux
+      if: inputs.distribution == 'vendor-desktop-installer' && inputs.platform == 'linux'
+      shell: bash
+      run: |
+        mv "$RUNNER_TEMP/cursor-installer" "$RUNNER_TEMP/cursor.deb"
+        version="$(dpkg-deb --field "$RUNNER_TEMP/cursor.deb" Version)"
+        [[ "$version" = 3.13 || "$version" = 3.13.* ]]
+        test "$(dpkg-deb --field "$RUNNER_TEMP/cursor.deb" Package)" = cursor
+        mkdir "$RUNNER_TEMP/cursor-root"
+        dpkg-deb --extract "$RUNNER_TEMP/cursor.deb" "$RUNNER_TEMP/cursor-root"
+        test -x "$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor"
+        echo "PULSE_PROTECTED_HARNESS_CURSOR_APP=$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor" >> "$GITHUB_ENV"
+    - name: Verify signed Cursor Desktop on Windows
+      if: inputs.distribution == 'vendor-desktop-installer' && inputs.platform == 'win32'
+      shell: pwsh
+      run: |
+        $installer = Join-Path $env:RUNNER_TEMP 'cursor-installer'
+        $signature = Get-AuthenticodeSignature -FilePath $installer
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Anysphere') { throw 'Cursor signature invalid' }
+        $destination = Join-Path $env:RUNNER_TEMP 'Cursor'
+        $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$destination") -PassThru -Wait
+        if ($process.ExitCode -ne 0) { throw "Cursor installer failed: $($process.ExitCode)" }
+        $executable = Join-Path $destination 'Cursor.exe'
+        if ((Get-Item $executable).VersionInfo.ProductVersion -notmatch '^3\.13(?:\.|$)') { throw 'Cursor version mismatch' }
+        "PULSE_PROTECTED_HARNESS_CURSOR_APP=$executable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Install official Cursor session CLI
+      if: inputs.host == 'cursor'
+      shell: bash
+      run: |
+        export HOME="$RUNNER_TEMP/cursor-session-home"
+        mkdir -p "$HOME"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 1 \
+          --connect-timeout 15 --max-time 60 https://cursor.com/install -o "$RUNNER_TEMP/cursor-install.sh"
+        test -s "$RUNNER_TEMP/cursor-install.sh"
+        bash "$RUNNER_TEMP/cursor-install.sh"
+        session="$HOME/.local/bin/cursor-agent"
+        test -x "$session"
+        "$session" --version
+        echo "PULSE_PROTECTED_HARNESS_CURSOR_SESSION_EXECUTABLE=$session" >> "$GITHUB_ENV"

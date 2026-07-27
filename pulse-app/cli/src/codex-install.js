@@ -227,7 +227,7 @@ function requireProductEdgeFile(root, relative, label) {
 export function resolveSignedCodexProductEdge({
 	release, activation, platformServices = defaultPlatformServices,
 } = {}) {
-	if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2'].includes(release?.schema) ||
+	if (!['pulse.verified_release_manifest.v1', 'pulse.verified_release_manifest.v2', 'pulse.verified_release_manifest.v3'].includes(release?.schema) ||
 		!SHA256.test(release.manifest_digest ?? '') ||
 		typeof release.version !== 'string' || release.version.length < 1 ||
 		!Number.isSafeInteger(release.epoch) || release.epoch < 1) {

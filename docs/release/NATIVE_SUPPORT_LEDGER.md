@@ -1,99 +1,67 @@
 # Pulse Native Support Ledger
 
-This ledger is the authority for public desktop support claims. Code paths,
-cross-builds, unit tests, and unsigned PR fixtures are necessary evidence, but
-none of them alone makes a target publicly supported.
+This tracked file states the current public-support boundary. It must stay
+`pending` until `Verify Gold publication` generates its replacement from the
+signed promotion authorization and the final 18 public-registry receipts.
+Rows must never be promoted by hand.
 
-## Evidence classes
+## Gold matrix contract
 
-1. **PR fixture** — the exact source commit builds a target fixture, packs the
-   npm package, invokes the public install command shape, starts the native
-   daemon and local fixture embedder, shows a Memory Home card, records a
-   terminal receipt, recalls the same object in a fresh host session, repairs,
-   produces one byte-preserving consolidation report through CLI, MCP, and
-   Memory Home, and uploads content-free evidence. Its receipt says
-   `production:false` and `support_claim:false`.
-2. **Production candidate** — signed/notarized target artifacts, the real
-   portable model quality and resource gates, npm OIDC provenance, and the
-   exact registry-published candidate bytes pass the same native flow.
-3. **Public support** — the unchanged candidate digest is promoted to
-   `preview`, its evidence is retained, and this ledger names the target and
-   harness as supported.
+The calibrated matrix is `pulse.native_universal_matrix.v2`: three harnesses
+times six native targets, with no allowed failures.
 
-## Native target gate
+| Harness | Exact calibrated version | Vendor distribution | Targets | Candidate | Public support |
+|---|---:|---|---:|---:|---:|
+| Codex | `0.145.0` | `@openai/codex` | 6 | pending | pending |
+| Claude Code | `2.1.220` | `@anthropic-ai/claude-code` | 6 | pending | pending |
+| Cursor Desktop | `3.13` | signed vendor installers | 6 | pending | pending |
 
-The required workflow is [`.github/workflows/verify.yml`](../../.github/workflows/verify.yml).
-It runs the complete Go, MCP, and CLI suite on the reference macOS host, then
-builds and proves the exact packed Personal product separately on every native
-target below. It has no allowed failures and aggregates both evidence classes
-to the `Universal / required` check.
+The six targets are `darwin-arm64`, `darwin-x64`, `linux-arm64-gnu`,
+`linux-x64-gnu`, `win32-arm64`, and `win32-x64`. A newer uncalibrated harness
+may still run, but doctor must report `harness_version_unverified`; it does not
+extend this ledger.
 
-| Target | GitHub runner | Required PR fixture | Production candidate | Public support |
-|---|---|---:|---:|---:|
-| `darwin-arm64` | `macos-26` | passed — run `29701975544` | pending | pending |
-| `darwin-x64` | `macos-26-intel` | passed — run `29701975544` | pending | pending |
-| `linux-arm64-gnu` | `ubuntu-24.04-arm` | passed — run `29701975544` | pending | pending |
-| `linux-x64-gnu` | `ubuntu-24.04` | passed — run `29701975544` | pending | pending |
-| `win32-arm64` | `windows-11-arm` | passed — run `29701975544` | pending | pending |
-| `win32-x64` | `windows-2025` | passed — run `29701975544` | pending | pending |
+## Evidence authority
 
-## First complete PR fixture
+- `fixture` proves repository orchestration only. It always has
+  `support_claim:false`.
+- `production_candidate` requires signed/notarized release assets and a real
+  vendor session for every host-target pair. It still has
+  `support_claim:false`.
+- `public_registry` installs the exact npm bytes and R2 assets and is the only
+  authority allowed to emit `support_claim:true`.
 
-The first complete six-target fixture passed on 2026-07-19 in
-[Universal run `29701975544`](https://github.com/zbs-gg/pulse/actions/runs/29701975544).
-The PR source head was `a4e04a28a8c45a997aa84b098c83dacf13e86c04`; GitHub tested merge checkout
-`95250675486d33ae38b53d63a62e941ca221fb35`. `Full product suite`, every
-native matrix job, and `Universal / required` completed successfully.
+Every retained record uses `pulse.native_host_target_evidence.v2`, is
+content-free, binds the source commit, package and catalog digests, vendor
+executable and session executable digests, privacy defaults, lifecycle
+milestones, and first-value stage durations. Fixture calls, direct hook calls,
+and Safe Mode cannot produce public authority.
 
-Every retained receipt is `pulse.native_universal_target_evidence.v1` with
-`authority:pr-fixture`, `production:false`, and `support_claim:false`. Each
-target installed the exact packed command path, reached full retrieval, showed
-a visible first memory card, recalled the same object in a fresh Codex session,
-and finished lifecycle readiness. Token economy remains honestly labeled
-`collecting_baseline`; this fixture proves continuity, not a production release
-or a token-savings claim.
+## Required gates
 
-New candidate receipts also carry a `consolidation` proof from the exact packed
-tarball. It must be `report_ready`, match across CLI, MCP, and Memory Home,
-preserve every synthetic source byte-for-byte, and state that no import, merge,
-delete, or publish authority was exercised. Historical run `29701975544`
-predates that field, so it remains continuity evidence only; a new green
-six-target run is required before the consolidation report can enter a
-production candidate.
+1. `Universal / required` passes on the exact `main` SHA.
+2. Production inputs build six signed native target sets, two common assets,
+   a signed epoch-8 artifact set and snapshot, security evidence, and the exact
+   unpublished npm tarball.
+3. The origin workflow publishes immutable assets before the snapshot and
+   verifies each object from `releases.zbs.gg`.
+4. `Seal production candidate` runs all 18 real vendor sessions and seals the
+   npm candidate only after `18/18` production-candidate receipts pass.
+5. npm `preview` is approved by a human through 2FA.
+6. Public-registry matrices pass at 0, 24, 48, and 72 hours. Windows ARM64
+   Codex must have five consecutive runs at or below 60 seconds and median at
+   or below 55 seconds; every other first-value run is at or below 60 seconds.
+7. `Authorize Gold promotion` signs the four-checkpoint receipt but performs
+   no publication. A human moves the unchanged bytes to `latest`, creates tag
+   and release `v0.7.0`, then `Verify Gold publication` generates the final
+   ledger.
 
-The current `first_value` boundary is the moment a fresh host session receives
-and verifies the exact saved memory (`fresh_session_context`). Prompt-context
-lifecycle calibration still runs immediately afterward and remains required for
-the target to pass. The historical values below used the stricter earlier
-boundary through that fresh prompt, so they are conservative rather than
-directly comparable to newer receipts.
+## Current state
 
-| Target | Evidence artifact | First value | Packed package SHA-256 | Release manifest digest |
-|---|---|---:|---|---|
-| `darwin-arm64` | `pulse-native-darwin-arm64` | 13,058 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `c2cda1aeab2f81c32061a689e0ee2c45d524f70c60a4a4b33ba643e7ca66bcb0` |
-| `darwin-x64` | `pulse-native-darwin-x64` | 17,571 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `606be8aefc82da40fc2dca0f857489d83f3c6b100a1affeac2f8808190db74df` |
-| `linux-arm64-gnu` | `pulse-native-linux-arm64-gnu` | 12,882 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `f8a1cde14b23c19d4668fbd49e6a267826a8414dd0b3a7d9f23800f0a231ca71` |
-| `linux-x64-gnu` | `pulse-native-linux-x64-gnu` | 13,305 ms | `70895172f1b46bf455dbdc2adbb8519fba71ab069e71b63a70322049d91056c8` | `15495d2f8c4fcbdf5b22213ca7aaf453bc2dcf8abf050355e15a7204cf707964` |
-| `win32-arm64` | `pulse-native-win32-arm64` | 58,235 ms | `8a471d726e6aa888030cd3a29dd6ae180562415c6237aaeec1aab4a04609d76a` | `787e431c068664f86d8fe38984ec9d6945b15d2b3aa3328958b2092135c06a86` |
-| `win32-x64` | `pulse-native-win32-x64` | 50,337 ms | `8a471d726e6aa888030cd3a29dd6ae180562415c6237aaeec1aab4a04609d76a` | `c67348b48e438323d0b2d0ffb09685b6ab5a31716fa83c9272f40a2b20e6a808` |
+All Gold columns are intentionally pending. The repository contains the gates,
+but no production candidate, public-registry 72-hour evidence set, npm
+promotion, Git tag, or GitHub Release has been produced by this branch.
 
-## Harness calibration
-
-| Harness | Native PR coverage | Public support |
-|---|---|---:|
-| Codex `0.136.0` | required singleton proof on all six targets | pending production candidate |
-| Claude Code | shared Core/adapter contract is tested; six-target native lifecycle calibration pending | pending |
-| Cursor | shared Core/adapter contract is tested; six-target native lifecycle calibration pending | pending |
-
-The table is intentionally conservative. A green Codex fixture cannot be used
-to claim that Claude Code or Cursor is calibrated on the same target. Safe Mode
-remains separately labeled and never upgrades a missing native product claim.
-
-## Promotion rule
-
-`preview` must remain unchanged when any target, harness, artifact signature,
-model quality/resource gate, npm provenance check, or package digest check is
-missing or red. Publishing requires an explicitly authorized protected release
-workflow; the PR workflow never publishes npm packages or production assets.
-The fail-closed OIDC and human-approval contract is documented in
-[`NPM_STAGED_PREVIEW.md`](NPM_STAGED_PREVIEW.md).
+Historical six-target Codex fixture run `29701975544` predates matrix v2 and
+evidence v2. It remains useful engineering history, but it is not Gold support
+evidence and cannot populate this table.

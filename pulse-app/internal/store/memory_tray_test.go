@@ -1880,6 +1880,10 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	globalSnapshotDigest := requestScopeB.Digest()
+	if !trayBindingDigestPattern.MatchString(globalSnapshotDigest) {
+		t.Fatalf("invalid content-free snapshot digest: %q", globalSnapshotDigest)
+	}
 	requestGlobalResume, err := s.BuildResumeForPersonalScope(ResumeQuery{
 		ThreadID: "project-b-request", ProjectID: "repository_project_b",
 	}, requestScopeB)
@@ -1887,6 +1891,9 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 		requestGlobalResume.ResumeMarkdown, "Keep scope changes explicit and reversible.",
 	) {
 		t.Fatalf("request-scoped global resume=%q err=%v", requestGlobalResume.ResumeMarkdown, err)
+	}
+	if requestGlobalResume.MemorySnapshotDigest != globalSnapshotDigest {
+		t.Fatalf("resume snapshot=%q want %q", requestGlobalResume.MemorySnapshotDigest, globalSnapshotDigest)
 	}
 	replay, err := s.MoveCommittedMemoryScope(
 		created.ObjectID, 1, MemoryScopePersonalGlobal, "move_global_01", now.Add(3*time.Second),
@@ -1940,6 +1947,9 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if requestScopeB.Digest() == globalSnapshotDigest {
+		t.Fatal("scope mutation did not invalidate the content-free memory snapshot")
 	}
 	requestProjectResume, err := s.BuildResumeForPersonalScope(ResumeQuery{
 		ThreadID: "project-b-request", ProjectID: "repository_project_b",

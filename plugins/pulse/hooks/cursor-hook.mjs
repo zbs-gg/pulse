@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runHookWorkerClient } from '../hook-worker-client.mjs';
+import { prewarmHookWorker, runHookWorkerClient } from '../hook-worker-client.mjs';
 
 const eventName = process.argv[2];
 const hookRoot = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +12,8 @@ const pluginRoot = resolve(hookRoot, '..');
 async function resolveEnvironment() {
   const { resolveProductEnvironment } = await import('../runtime-locator.mjs');
   const productEnvironment = resolveProductEnvironment({
-    edgeProfile: 'hook', host: 'cursor', integrity: eventName === 'sessionStart' ? 'refresh' : 'reuse',
+    edgeProfile: 'hook', host: 'cursor',
+    integrity: eventName === 'sessionStart' || eventName === '--prewarm' ? 'refresh' : 'reuse',
   });
   const cliPath = productEnvironment.PULSE_RUNTIME_PATH;
   const entrypointPath = join(resolve(cliPath, '..', '..'), 'src', 'product-hook-entrypoint.bundle.js');
@@ -28,10 +29,16 @@ async function resolveEnvironment() {
   return { entrypointPath, hookDigest, productEnvironment };
 }
 
-await runHookWorkerClient({
-  host: 'cursor',
-  eventName,
-  pluginRoot,
-  pluginData: process.env.CURSOR_PLUGIN_DATA,
-  resolveEnvironment,
-});
+if (eventName === '--prewarm') {
+  process.stdout.write(`${JSON.stringify(await prewarmHookWorker({
+    host: 'cursor', pluginRoot, workspacePath: process.cwd(), resolveEnvironment,
+  }))}\n`);
+} else {
+  await runHookWorkerClient({
+    host: 'cursor',
+    eventName,
+    pluginRoot,
+    pluginData: process.env.CURSOR_PLUGIN_DATA,
+    resolveEnvironment,
+  });
+}

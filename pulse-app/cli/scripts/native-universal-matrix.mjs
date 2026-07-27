@@ -9,15 +9,15 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const matrixPath = join(scriptRoot, 'native-universal-matrix.json');
 const TARGET = /^(?:darwin-(?:arm64|x64)|linux-(?:arm64|x64)-gnu|win32-(?:arm64|x64))$/;
 const RUNNER = /^(?:macos-26|macos-26-intel|ubuntu-24\.04|ubuntu-24\.04-arm|windows-2025|windows-11-arm)$/;
+const HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
 
 export function loadNativeUniversalMatrix(path = matrixPath) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(value.schema, 'pulse.native_universal_matrix.v1');
+  assert.equal(value.schema, 'pulse.native_universal_matrix.v2');
   assert.match(value.node_version, /^\d+$/);
   assert.match(value.go_version, /^\d+\.\d+\.\d+$/);
-  assert.deepEqual(value.harness, {
-    host: 'codex', package: '@openai/codex', version: '0.136.0',
-  });
+  assert.equal(Array.isArray(value.harnesses), true);
+  assert.equal(value.harnesses.length, 3);
   assert.equal(Array.isArray(value.targets), true);
   assert.equal(value.targets.length, 6);
   const targets = value.targets.map((target) => {
@@ -42,22 +42,68 @@ export function loadNativeUniversalMatrix(path = matrixPath) {
     assert.deepEqual(targets.filter((target) => target.platform === platform)
       .map((target) => target.architecture).sort(), ['arm64', 'x64']);
   }
-  return Object.freeze({ ...value, targets: Object.freeze(targets) });
+  const targetIDs = targets.map((target) => target.target_id).sort();
+  const harnesses = value.harnesses.map((harness) => {
+    assert.deepEqual(Object.keys(harness).sort(), [
+      'distribution', 'downloads', 'executable', 'executable_digest_policy', 'host', 'identity',
+      'supported_targets', 'vendor', 'vendor_source', 'version',
+    ].sort());
+    assert.equal(HOSTS.includes(harness.host), true);
+    assert.equal(['npm', 'vendor-desktop-installer'].includes(harness.distribution), true);
+    assert.equal(typeof harness.identity, 'string');
+    assert.match(harness.version, /^\d+\.\d+(?:\.\d+)?$/);
+    assert.match(harness.executable, /^[a-z][a-z0-9-]*$/);
+    assert.equal(new URL(harness.vendor_source).protocol, 'https:');
+    assert.equal(harness.executable_digest_policy, 'native_evidence_sha256');
+    assert.deepEqual([...harness.supported_targets].sort(), targetIDs);
+    assert.deepEqual(Object.keys(harness.downloads ?? {}).sort(), targetIDs);
+    for (const targetID of targetIDs) {
+      const download = new URL(harness.downloads[targetID]);
+      assert.equal(download.protocol, 'https:');
+      if (harness.distribution === 'npm') assert.equal(download.origin, 'https://registry.npmjs.org');
+      else assert.equal(download.origin, 'https://api2.cursor.sh');
+    }
+    if (harness.distribution === 'npm') assert.match(harness.identity, /^@[^/]+\/[^/]+$/);
+    return Object.freeze({
+      ...harness,
+      downloads: Object.freeze({ ...harness.downloads }),
+      supported_targets: Object.freeze([...harness.supported_targets]),
+    });
+  });
+  assert.deepEqual(harnesses.map((harness) => harness.host).sort(), [...HOSTS].sort());
+  return Object.freeze({
+    ...value,
+    harnesses: Object.freeze(harnesses),
+    targets: Object.freeze(targets),
+  });
 }
 
-export function githubNativeUniversalMatrix(value = loadNativeUniversalMatrix(), platform) {
+export function githubNativeUniversalMatrix(value = loadNativeUniversalMatrix(), platform, host) {
   if (platform !== undefined && !['darwin', 'linux', 'win32'].includes(platform)) {
     throw new Error('native universal matrix platform is unsupported');
   }
+  if (host !== undefined && !HOSTS.includes(host)) {
+    throw new Error('native universal matrix host is unsupported');
+  }
   return {
-    include: value.targets.filter((target) => platform === undefined || target.platform === platform).map((target) => ({
-      ...target,
-      host: value.harness.host,
-      harness_package: value.harness.package,
-      harness_version: value.harness.version,
-      node_version: value.node_version,
-      go_version: value.go_version,
-    })),
+    include: value.harnesses
+      .filter((harness) => host === undefined || harness.host === host)
+      .flatMap((harness) => value.targets
+        .filter((target) => platform === undefined || target.platform === platform)
+        .filter((target) => harness.supported_targets.includes(target.target_id))
+        .map((target) => ({
+          ...target,
+          host: harness.host,
+          harness_distribution: harness.distribution,
+          harness_identity: harness.identity,
+          harness_executable: harness.executable,
+          harness_download_url: harness.downloads[target.target_id],
+          harness_version: harness.version,
+          harness_vendor_source: harness.vendor_source,
+          stability_runs: harness.host === 'codex' && target.target_id === 'win32-arm64' ? 5 : 1,
+          node_version: value.node_version,
+          go_version: value.go_version,
+        }))),
   };
 }
 
@@ -81,10 +127,16 @@ export function currentNativeTargetID({
 function main() {
   const matrix = loadNativeUniversalMatrix();
   const platformIndex = process.argv.indexOf('--github-platform');
-  if (platformIndex >= 0) {
-    const platform = process.argv[platformIndex + 1];
-    if (process.argv.length !== 4 || !platform) throw new Error('native universal matrix arguments are invalid');
-    process.stdout.write(JSON.stringify(githubNativeUniversalMatrix(matrix, platform)));
+  const hostIndex = process.argv.indexOf('--github-host');
+  if (platformIndex >= 0 || hostIndex >= 0) {
+    const platform = platformIndex >= 0 ? process.argv[platformIndex + 1] : undefined;
+    const host = hostIndex >= 0 ? process.argv[hostIndex + 1] : undefined;
+    const expectedLength = 2 + (platform === undefined ? 0 : 2) + (host === undefined ? 0 : 2);
+    if (process.argv.length !== expectedLength ||
+        (platformIndex >= 0 && !platform) || (hostIndex >= 0 && !host)) {
+      throw new Error('native universal matrix arguments are invalid');
+    }
+    process.stdout.write(JSON.stringify(githubNativeUniversalMatrix(matrix, platform, host)));
     return;
   }
   if (process.argv.includes('--github')) {
@@ -92,7 +144,7 @@ function main() {
     return;
   }
   if (process.argv.includes('--check')) {
-    process.stdout.write(`Pulse universal matrix: ${matrix.targets.map((target) => target.target_id).join(', ')}\n`);
+    process.stdout.write(`Pulse universal matrix: ${matrix.harnesses.length * matrix.targets.length} host-target pairs (${matrix.harnesses.map((harness) => harness.host).join(', ')})\n`);
     return;
   }
   throw new Error('use --check or --github');

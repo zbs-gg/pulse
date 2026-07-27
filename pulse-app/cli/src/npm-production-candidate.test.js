@@ -8,6 +8,7 @@ import { gzipSync } from 'node:zlib';
 import { pack } from 'tar-stream';
 
 import { buildNpmProductionCandidate } from '../scripts/build-npm-production-candidate.mjs';
+import { buildNpmProductionInputs } from '../scripts/build-npm-production-inputs.mjs';
 import { loadNativeUniversalMatrix } from '../scripts/native-universal-matrix.mjs';
 import { DESKTOP_TARGET_IDS } from './desktop-target.js';
 import { verifyNpmStageCandidate } from '../scripts/verify-npm-stage-candidate.mjs';
@@ -50,61 +51,47 @@ async function fixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const catalogRoot = join(root, 'catalog');
   const evidenceRoot = join(root, 'evidence');
+  const securityRoot = join(root, 'security');
   mkdirSync(catalogRoot, { mode: 0o700 });
   mkdirSync(evidenceRoot, { mode: 0o700 });
+  mkdirSync(securityRoot, { mode: 0o700 });
   const manifest = {
-    authority: { payload: {}, schema: 'pulse.release_authority_envelope.v1', signature: {} },
     payload: {
       release: { package: '@zbs-gg/pulse', version: '0.7.0' },
       targets: Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => [targetID, {}])),
     },
-    schema: 'pulse.release_catalog_envelope.v2',
+    schema: 'pulse.personal_release_artifact_set.v1',
     signature: {},
   };
   const manifestBytes = `${canonical(manifest)}\n`;
+  const artifactSetDigest = createHash('sha256').update(manifestBytes).digest('hex');
+  const snapshot = {
+    payload: { artifact_set: { sha256: artifactSetDigest }, release_epoch: 8 },
+    schema: 'pulse.release_snapshot_envelope.v1',
+    signature: {},
+  };
+  const snapshotBytes = `${canonical(snapshot)}\n`;
+  const snapshotDigest = createHash('sha256').update(snapshotBytes).digest('hex');
   writeFileSync(join(catalogRoot, 'personal-preview-manifest.json'), manifestBytes, { mode: 0o600 });
+  writeFileSync(join(catalogRoot, 'snapshot.json'), snapshotBytes, { mode: 0o600 });
   writeCanonical(join(catalogRoot, 'catalog-build-receipt.json'), {
     artifact_count: 14,
+    artifact_set_digest: artifactSetDigest,
+    artifact_set_url: 'https://releases.zbs.gg/pulse/0.7.0/epoch-8/catalog/artifact-set.json',
     channel_key_id: 'channel',
-    manifest_digest: 'a'.repeat(64),
+    host_target_count: 18,
+    hosts: ['claude-code', 'codex', 'cursor'],
+    manifest_digest: artifactSetDigest,
     production_ready: true,
+    release_epoch: 8,
     root_key_id: 'root',
-    schema: 'pulse.personal_release_catalog_build.v2',
+    schema: 'pulse.personal_release_catalog_build.v3',
+    snapshot_digest: snapshotDigest,
+    snapshot_expires_at: '2026-08-26T00:00:00.000Z',
+    snapshot_url: 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json',
     target_count: 6,
     target_ids: DESKTOP_TARGET_IDS,
   });
-  const matrix = loadNativeUniversalMatrix();
-  for (const target of matrix.targets) {
-    const kinds = ['daemon', 'embedder-runtime', 'model', 'plugin-runtime'];
-    if (target.platform === 'darwin') kinds.push('presence-helper');
-    writeFileSync(join(evidenceRoot, `${target.target_id}.json`), `${JSON.stringify({
-      authority: 'pr-fixture',
-      commit: COMMIT,
-      consolidation: {
-        cli_parity: true,
-        mcp_parity: true,
-        memory_home_visible: true,
-        mutation_authority_exercised: false,
-        phase: 'report_ready',
-        sources_byte_preserved: true,
-      },
-      first_value: {
-        boundary: 'fresh_session_context',
-        milliseconds: 1200,
-        same_object_recalled: true,
-        visible_card: true,
-      },
-      harness: matrix.harness,
-      package: { bytes: 1234, sha256: createHash('sha256').update(target.target_id).digest('hex') },
-      production: false,
-      release: { artifact_ids: kinds.map((kind) => `pulse-0.7.0-${target.target_id}-${kind}`) },
-      runtime: { full_retrieval: true, lifecycle_ready: true },
-      schema: 'pulse.native_universal_target_evidence.v1',
-      support_claim: false,
-      target,
-      token_economy: { state: 'collecting_baseline' },
-    })}\n`, { mode: 0o600 });
-  }
   const tarball = await packageTarball({
     name: '@zbs-gg/pulse',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
@@ -112,16 +99,80 @@ async function fixture(t) {
   }, manifestBytes);
   const tarballPath = resolve(root, 'zbs-gg-pulse-0.7.0.tgz');
   writeFileSync(tarballPath, tarball, { mode: 0o600 });
+  const matrix = loadNativeUniversalMatrix();
+  const packageSHA256 = createHash('sha256').update(tarball).digest('hex');
+  const sbomBytes = `${canonical({ bomFormat: 'CycloneDX', components: [] })}\n`;
+  const licenseBytes = `${canonical({ dependencies: [], schema: 'pulse.release_license_inventory.v1' })}\n`;
+  writeFileSync(join(securityRoot, 'sbom.cdx.json'), sbomBytes, { mode: 0o600 });
+  writeFileSync(join(securityRoot, 'licenses.json'), licenseBytes, { mode: 0o600 });
+  writeCanonical(join(securityRoot, 'dependency-receipt.json'), {
+    audit: { command: 'npm audit --omit=dev --audit-level=high', critical: 0, high: 0, total: 0 },
+    content_free: true,
+    dependency_count: 100,
+    license_inventory_sha256: createHash('sha256').update(licenseBytes).digest('hex'),
+    package: '@zbs-gg/pulse',
+    package_bytes: tarball.length,
+    package_sha256: packageSHA256,
+    sbom_sha256: createHash('sha256').update(sbomBytes).digest('hex'),
+    schema: 'pulse.release_dependency_receipt.v1',
+    version: '0.7.0',
+  });
+  for (const harness of matrix.harnesses) {
+    for (const target of matrix.targets) {
+      writeFileSync(join(evidenceRoot, `${harness.host}-${target.target_id}.json`), `${JSON.stringify({
+        schema: 'pulse.native_host_target_evidence.v2',
+        authority: 'production_candidate',
+        content_free: true,
+        support_claim: false,
+        source_commit: COMMIT,
+        host: harness.host,
+        host_version: harness.version,
+        target_id: target.target_id,
+        target,
+        runner: { name: 'fixture', image: target.runner },
+        harness: {
+          vendor: harness.vendor,
+          distribution: harness.distribution,
+          identity: harness.identity,
+          vendor_source: harness.vendor_source,
+          download_url: harness.downloads[target.target_id],
+          executable_kind: 'vendor_executable',
+          executable_sha256: createHash('sha256').update(`${harness.host}:${target.target_id}`).digest('hex'),
+          session_executable_sha256: createHash('sha256').update(`session:${harness.host}:${target.target_id}`).digest('hex'),
+        },
+        package: { bytes: tarball.length, sha256: packageSHA256 },
+        release: {
+          artifact_set_digest: artifactSetDigest, snapshot_digest: snapshotDigest,
+          fixture_manifest_digest: null, artifact_ids: [],
+        },
+        milestones: {
+          install: true, vendor_session: true, lifecycle: true, memory_home: true,
+          fresh_recall: true, repair: true, disconnect: true,
+        },
+        first_value: {
+          measured: true, boundary: 'fresh_session_context', milliseconds: 1200,
+          stages_ms: { install: 400, lifecycle: 800 }, degraded_lifecycle: false,
+          stability: harness.host === 'codex' && target.target_id === 'win32-arm64'
+            ? { consecutive_runs: 5, runs_ms: [1200, 1200, 1200, 1200, 1200], median_ms: 1200 }
+            : { consecutive_runs: 1, runs_ms: [1200], median_ms: 1200 },
+        },
+        privacy_defaults: { raw_transcripts: false, old_chat_import: false, backend_llm: false },
+        token_economy: { state: 'collecting_baseline' },
+        consolidation: { mutation_authority_exercised: false },
+      })}\n`, { mode: 0o600 });
+    }
+  }
   return {
     catalogRoot: resolve(catalogRoot),
     evidenceRoot: resolve(evidenceRoot),
     outputRoot: resolve(root, 'candidate'),
     root,
+    securityRoot: resolve(securityRoot),
     tarballPath,
   };
 }
 
-test('production candidate binds the exact npm bytes to catalog and all six native proofs', async (t) => {
+test('production candidate binds the exact npm bytes to catalog and all 18 native proofs', async (t) => {
   const current = await fixture(t);
   const candidate = await buildNpmProductionCandidate({
     ...current,
@@ -130,7 +181,16 @@ test('production candidate binds the exact npm bytes to catalog and all six nati
   });
   assert.deepEqual(candidate.targets, DESKTOP_TARGET_IDS);
   assert.equal(candidate.production, true);
+  assert.equal(candidate.production_ready, true);
   assert.equal(candidate.support_claim, false);
+  assert.equal(candidate.host_target_count, 18);
+  assert.deepEqual(candidate.hosts, ['claude-code', 'codex', 'cursor']);
+  assert.equal(candidate.release_epoch, 8);
+  assert.equal(candidate.dependency_count, 100);
+  assert.match(candidate.sbom_sha256, /^[a-f0-9]{64}$/);
+  assert.match(candidate.license_inventory_sha256, /^[a-f0-9]{64}$/);
+  assert.match(candidate.artifact_set_digest, /^[a-f0-9]{64}$/);
+  assert.match(candidate.snapshot_digest, /^[a-f0-9]{64}$/);
   assert.equal(readFileSync(join(current.outputRoot, 'candidate.json'), 'utf8'), `${canonical(candidate)}\n`);
   const stage = await verifyNpmStageCandidate({
     candidatePath: join(current.outputRoot, 'candidate.json'),
@@ -141,9 +201,27 @@ test('production candidate binds the exact npm bytes to catalog and all six nati
   assert.deepEqual(stage.targets, DESKTOP_TARGET_IDS);
 });
 
+test('production inputs bind exact catalog, security, and tarball bytes without claiming readiness', async (t) => {
+  const current = await fixture(t);
+  const outputRoot = resolve(current.root, 'inputs');
+  const inputs = await buildNpmProductionInputs({
+    catalogRoot: current.catalogRoot,
+    commit: COMMIT,
+    outputRoot,
+    securityRoot: current.securityRoot,
+    tarballPath: current.tarballPath,
+    universalRunID: 918273,
+  });
+  assert.equal(inputs.schema, 'pulse.npm_production_inputs.v1');
+  assert.equal(inputs.production_ready, false);
+  assert.equal(inputs.support_claim, false);
+  assert.equal(inputs.package_sha256, createHash('sha256').update(readFileSync(current.tarballPath)).digest('hex'));
+  assert.equal(readFileSync(join(outputRoot, 'candidate-inputs.json'), 'utf8'), `${canonical(inputs)}\n`);
+});
+
 test('production candidate rejects incomplete native proof and packaged manifest drift', async (t) => {
   const incomplete = await fixture(t);
-  rmSync(join(incomplete.evidenceRoot, 'win32-arm64.json'));
+  rmSync(join(incomplete.evidenceRoot, 'cursor-win32-arm64.json'));
   await assert.rejects(
     buildNpmProductionCandidate({ ...incomplete, commit: COMMIT, universalRunID: 11 }),
     { code: 'npm_production_candidate_evidence_incomplete' },
@@ -154,7 +232,7 @@ test('production candidate rejects incomplete native proof and packaged manifest
     name: '@zbs-gg/pulse',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
     version: '0.7.0',
-  }, `${canonical({ schema: 'pulse.release_catalog_envelope.v2', payload: { release: { version: '0.7.0' } } })}\n`);
+  }, `${canonical({ schema: 'pulse.personal_release_artifact_set.v1', payload: { release: { version: '0.7.0' } } })}\n`);
   writeFileSync(drift.tarballPath, badTarball);
   await assert.rejects(
     buildNpmProductionCandidate({ ...drift, commit: COMMIT, universalRunID: 12 }),

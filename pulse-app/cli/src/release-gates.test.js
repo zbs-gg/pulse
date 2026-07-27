@@ -330,18 +330,24 @@ test('npm publication runs the repository release gate before preparing package 
   );
 });
 
-test('npm preview release is manual, OIDC-only, staged, and still requires human 2FA approval', () => {
+test('npm preview auto-stages an exact successful seal through OIDC and still requires human 2FA approval', () => {
   const workflow = readFileSync(join(root, '.github', 'workflows', 'stage-npm-preview.yml'), 'utf8');
   assert.match(workflow, /^\s*workflow_dispatch:/m);
+  assert.match(workflow, /^\s*workflow_run:/m);
+  assert.match(workflow, /^\s*- Seal production candidate$/m);
   assert.match(workflow, /^\s*id-token: write$/m);
   assert.match(workflow, /^\s*environment: npm-preview$/m);
   assert.match(workflow, /test "\$GITHUB_REF" = refs\/heads\/main/);
   assert.match(workflow, /test "\$STAGE_CONFIRMATION" = 'stage @zbs-gg\/pulse preview'/);
+  assert.match(workflow, /github\.event\.workflow_run\.conclusion == 'success'/);
+  assert.match(workflow, /github\.event\.workflow_run\.head_branch == 'main'/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: \$\{\{ github\.event\.workflow_run\.id \|\| inputs\.production_candidate_run_id \}\}/);
+  assert.match(workflow, /sealed_sha256="\$\(jq -r \.sha256 candidate\/candidate\.json\)"/);
   assert.match(workflow, /test -z "\$\{NODE_AUTH_TOKEN:-\}"/);
   assert.match(workflow, /test -z "\$\{NPM_TOKEN:-\}"/);
   assert.match(workflow, /npm@11\.18\.0/);
   assert.match(workflow, /pulse-npm-production-candidate/);
-  assert.match(workflow, /\.github\/workflows\/production-candidate\.yml/);
+  assert.match(workflow, /\.github\/workflows\/seal-production-candidate\.yml/);
   assert.match(workflow, /\.github\/workflows\/verify\.yml/);
   assert.match(workflow, /verify-npm-stage-candidate\.mjs/);
   assert.match(workflow, /npm stage publish "\$GITHUB_WORKSPACE\/candidate\/\$tarball"/);
@@ -351,39 +357,61 @@ test('npm preview release is manual, OIDC-only, staged, and still requires human
 
   const release = readFileSync(join(root, 'docs', 'release', 'NPM_STAGED_PREVIEW.md'), 'utf8');
   assert.match(release, /npm stage publish/);
+  assert.match(release, /automatically starts/);
   assert.match(release, /2FA/);
-  assert.match(release, /production:false/);
-  assert.match(release, /Long-lived publication tokens are forbidden/);
+  assert.match(release, /production_ready:false/);
+  assert.match(release, /Long-lived npm publication\s+tokens are forbidden/);
 });
 
-test('production candidate builds one protected exact six-target catalog without publishing', () => {
-  const workflow = readFileSync(join(root, '.github', 'workflows', 'production-candidate.yml'), 'utf8');
-  assert.match(workflow, /^name: Production candidate$/m);
-  assert.match(workflow, /^\s*workflow_dispatch:/m);
-  assert.match(workflow, /test "\$GITHUB_REF" = refs\/heads\/main/);
-  assert.match(workflow, /test "\$RELEASE_CONFIRMATION" = 'build universal production candidate'/);
-  assert.match(workflow, /\.github\/workflows\/verify\.yml/);
+test('production release is split into immutable inputs, origin publication, and 18 real vendor sessions', () => {
+  const inputsWorkflow = readFileSync(join(root, '.github', 'workflows', 'production-candidate.yml'), 'utf8');
+  assert.match(inputsWorkflow, /^name: Production candidate$/m);
+  assert.match(inputsWorkflow, /^\s*workflow_dispatch:/m);
+  assert.match(inputsWorkflow, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(inputsWorkflow, /test "\$RELEASE_CONFIRMATION" = 'build universal production candidate'/);
+  assert.match(inputsWorkflow, /\.github\/workflows\/verify\.yml/);
   for (const environment of [
     'production-linux', 'production-apple', 'production-windows',
     'production-model', 'production-catalog', 'production-candidate',
-  ]) assert.match(workflow, new RegExp(`environment: ${environment}`));
+  ]) assert.match(inputsWorkflow, new RegExp(`environment: ${environment}`));
   for (const platform of ['darwin', 'linux', 'win32']) {
-    assert.match(workflow, new RegExp(`--github-platform ${platform}`));
+    assert.match(inputsWorkflow, new RegExp(`--github-platform ${platform}`));
   }
   for (const targetID of [
     'darwin-arm64', 'darwin-x64', 'linux-arm64-gnu',
     'linux-x64-gnu', 'win32-arm64', 'win32-x64',
-  ]) assert.match(workflow, new RegExp(`pulse-production-target-${targetID}`));
-  assert.match(workflow, /PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved/);
-  assert.match(workflow, /npm run build:personal-catalog/);
-  assert.match(workflow, /npm run build:npm-production-candidate/);
-  assert.match(workflow, /pulse-production-release-catalog/);
-  assert.match(workflow, /pulse-npm-production-candidate/);
-  assert.doesNotMatch(workflow, /npm publish|npm stage publish|npm stage approve|continue-on-error/);
-  assert.ok(workflow.indexOf('npm run build:personal-catalog') <
-    workflow.indexOf('npm run build:npm-production-candidate'));
+  ]) assert.match(inputsWorkflow, new RegExp(`pulse-production-target-${targetID}`));
+  assert.match(inputsWorkflow, /PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved/);
+  assert.match(inputsWorkflow, /npm run build:personal-catalog/);
+  assert.match(inputsWorkflow, /npm run build:npm-production-inputs/);
+  assert.match(inputsWorkflow, /pulse-production-release-catalog/);
+  assert.match(inputsWorkflow, /pulse-npm-production-inputs/);
+  assert.doesNotMatch(inputsWorkflow, /npm publish|npm stage publish|npm stage approve|continue-on-error/);
+  assert.ok(inputsWorkflow.indexOf('npm run build:personal-catalog') <
+    inputsWorkflow.indexOf('npm run build:npm-production-inputs'));
+
+  const originWorkflow = readFileSync(join(root, '.github', 'workflows', 'publish-production-origin.yml'), 'utf8');
+  assert.match(originWorkflow, /^name: Production origin$/m);
+  assert.match(originWorkflow, /^\s*environment: production-origin$/m);
+  assert.match(originWorkflow, /pulse\.npm_production_inputs\.v1/);
+  assert.match(originWorkflow, /publish-r2-release\.mjs/);
+  assert.doesNotMatch(originWorkflow, /npm publish|npm stage publish|npm stage approve|continue-on-error/);
+
+  const sealWorkflow = readFileSync(join(root, '.github', 'workflows', 'seal-production-candidate.yml'), 'utf8');
+  assert.match(sealWorkflow, /^name: Seal production candidate$/m);
+  assert.match(sealWorkflow, /^\s*environment: production-harness-e2e$/m);
+  assert.match(sealWorkflow, /--authority production_candidate/);
+  assert.match(sealWorkflow, /test:native-vendor-session/);
+  assert.match(sealWorkflow, /validate-native-evidence-set\.mjs/);
+  assert.match(sealWorkflow, /npm run build:npm-production-candidate/);
+  assert.match(sealWorkflow, /pulse-npm-production-candidate/);
+  assert.doesNotMatch(sealWorkflow, /personal-native-packed-e2e|authority fixture|npm publish|npm stage publish|continue-on-error/);
 
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    packageJSON.scripts?.['build:npm-production-inputs'],
+    'node scripts/build-npm-production-inputs.mjs',
+  );
   assert.equal(
     packageJSON.scripts?.['build:npm-production-candidate'],
     'node scripts/build-npm-production-candidate.mjs',
@@ -392,10 +420,53 @@ test('production candidate builds one protected exact six-target catalog without
     join(root, 'pulse-app', 'cli', 'scripts', 'build-npm-production-candidate.mjs'), 'utf8',
   );
   assert.match(builder, /DESKTOP_TARGET_IDS/);
-  assert.match(builder, /pulse\.native_universal_target_evidence\.v1/);
-  assert.match(builder, /evidence\.production !== false/);
+  assert.match(builder, /pulse\.native_host_target_evidence\.v2|validateNativeEvidenceSet/);
+  assert.match(builder, /production_candidate/);
   assert.match(builder, /production: true/);
   assert.match(builder, /support_claim: false/);
+});
+
+test('public soak requires four timed 18-pair registry runs and Gold remains human-promoted', () => {
+  const soak = readFileSync(join(root, '.github', 'workflows', 'public-registry-soak.yml'), 'utf8');
+  assert.match(soak, /^name: Public registry soak$/m);
+  assert.match(soak, /options: \['0', '24', '48', '72'\]/);
+  assert.match(soak, /dist-tags\.preview/);
+  assert.match(soak, /npm pack @zbs-gg\/pulse@0\.7\.0/);
+  assert.match(soak, /https:\/\/releases\.zbs\.gg\/pulse\/0\.7\.0\/catalog\/snapshot\.json/);
+  assert.match(soak, /--max-redirs 0/);
+  assert.match(soak, /--range 0-1023/);
+  assert.match(soak, /npm audit --omit=dev --audit-level=high/);
+  assert.match(soak, /--authority public_registry/);
+  assert.match(soak, /test:native-vendor-session/);
+  assert.match(soak, /build:public-soak-receipt/);
+  assert.match(soak, /environment: production-harness-e2e/);
+  assert.doesNotMatch(soak, /continue-on-error|npm publish|npm stage publish|npm dist-tag/);
+
+  const authorize = readFileSync(join(root, '.github', 'workflows', 'authorize-gold-promotion.yml'), 'utf8');
+  assert.match(authorize, /^name: Authorize Gold promotion$/m);
+  assert.match(authorize, /for checkpoint in 0 24 48 72/);
+  assert.match(authorize, /--name "pulse-public-soak-\$checkpoint"/);
+  assert.match(authorize, /environment: npm-gold/);
+  assert.match(authorize, /environment: production-catalog/);
+  assert.match(authorize, /build:gold-promotion-receipt/);
+  assert.match(authorize, /publication_performed/);
+  assert.doesNotMatch(authorize, /npm publish|npm stage publish|npm dist-tag|gh release create|git tag/);
+
+  const verify = readFileSync(join(root, '.github', 'workflows', 'verify-gold-publication.yml'), 'utf8');
+  assert.match(verify, /^name: Verify Gold publication$/m);
+  assert.match(verify, /dist-tags\.preview/);
+  assert.match(verify, /dist-tags\.latest/);
+  assert.match(verify, /cmp "\$\{preview\[0\]\}" "\$\{latest\[0\]\}"/);
+  assert.match(verify, /v0\.7\.0\^\{commit\}/);
+  assert.match(verify, /generate:native-support-ledger/);
+  assert.doesNotMatch(verify, /npm publish|npm stage publish|npm dist-tag|gh release create|git tag/);
+
+  const ledger = readFileSync(join(root, 'docs', 'release', 'NATIVE_SUPPORT_LEDGER.md'), 'utf8');
+  assert.match(ledger, /Codex \| `0\.145\.0`/);
+  assert.match(ledger, /Claude Code \| `2\.1\.220`/);
+  assert.match(ledger, /Cursor Desktop \| `3\.13`/);
+  assert.match(ledger, /Rows must never be promoted by hand/);
+  assert.match(ledger, /All Gold columns are intentionally pending/);
 });
 
 test('optional macOS presence carrier stays exact-tree while npm packaging requires the universal catalog', () => {

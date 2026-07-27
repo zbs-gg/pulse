@@ -1,0 +1,265 @@
+name: Public registry soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_candidate_run_id:
+        description: Successful sealed candidate run whose exact bytes are on npm preview
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact SHA-256 of @zbs-gg/pulse 0.7.0
+        required: true
+        type: string
+      checkpoint_hours:
+        description: Soak checkpoint after npm publication
+        required: true
+        type: choice
+        options: ['0', '24', '48', '72']
+      confirmation:
+        description: Type "run pulse 0.7.0 public soak <checkpoint>"
+        required: true
+        type: string
+
+concurrency:
+  group: pulse-public-soak-${{ inputs.checkpoint_hours }}-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  authorize:
+    name: Bind npm preview, R2, candidate, and checkpoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      commit: ${{ steps.bind.outputs.commit }}
+      matrix: ${{ steps.matrix.outputs.value }}
+      published_at: ${{ steps.registry.outputs.published_at }}
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.production_candidate_run_id }}
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      CHECKPOINT: ${{ inputs.checkpoint_hours }}
+      SOAK_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - id: bind
+        name: Require exact sealed candidate and explicit checkpoint intent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$SOAK_CONFIRMATION" = "run pulse 0.7.0 public soak $CHECKPOINT"
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$CHECKPOINT" =~ ^(0|24|48|72)$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          test "$(jq -r .name "$RUNNER_TEMP/candidate-run.json")" = 'Seal production candidate'
+          test "$(jq -r .path "$RUNNER_TEMP/candidate-run.json")" = '.github/workflows/seal-production-candidate.yml'
+          test "$(jq -r .head_branch "$RUNNER_TEMP/candidate-run.json")" = main
+          test "$(jq -r .conclusion "$RUNNER_TEMP/candidate-run.json")" = success
+          commit="$(jq -r .head_sha "$RUNNER_TEMP/candidate-run.json")"
+          [[ "$commit" =~ ^[a-f0-9]{40}$ ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-candidate --dir "$RUNNER_TEMP/sealed-candidate"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.bind.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - id: matrix
+        name: Freeze all 18 public host-target jobs
+        working-directory: pulse-app/cli
+        shell: bash
+        run: echo "value=$(node scripts/native-universal-matrix.mjs --github)" >> "$GITHUB_OUTPUT"
+      - id: registry
+        name: Fetch only exact npm preview bytes
+        shell: bash
+        run: |
+          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.0
+          test "$(npm view @zbs-gg/pulse@0.7.0 version)" = 0.7.0
+          published_at="$(npm view @zbs-gg/pulse time --json | jq -er '.["0.7.0"]')"
+          node -e 'if (Number.isNaN(new Date(process.argv[1]).valueOf())) process.exit(1)' "$published_at"
+          echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/public-inputs/package"
+          npm pack @zbs-gg/pulse@0.7.0 --pack-destination "$RUNNER_TEMP/public-inputs/package" --silent
+          tarballs=("$RUNNER_TEMP"/public-inputs/package/*.tgz)
+          test "${#tarballs[@]}" = 1
+          test "$(sha256sum "${tarballs[0]}" | cut -d' ' -f1)" = "$CANDIDATE_SHA256"
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          node pulse-app/cli/scripts/verify-npm-stage-candidate.mjs \
+            --candidate "$RUNNER_TEMP/sealed-candidate/candidate.json" \
+            --commit "${{ steps.bind.outputs.commit }}" --sha256 "$CANDIDATE_SHA256"
+          cp "$RUNNER_TEMP/sealed-candidate/candidate.json" "$RUNNER_TEMP/public-inputs/candidate.json"
+      - name: Require current signed R2 snapshot and immutable artifact set
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/public-inputs/catalog"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
+            --connect-timeout 10 --max-time 10 --max-filesize 2097152 \
+            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            -o "$RUNNER_TEMP/public-inputs/catalog/snapshot.json"
+          artifact_url="$(jq -er .payload.artifact_set.url "$RUNNER_TEMP/public-inputs/catalog/snapshot.json")"
+          test "$artifact_url" = https://releases.zbs.gg/pulse/0.7.0/epoch-8/catalog/artifact-set.json
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 --max-filesize 2097152 "$artifact_url" \
+            -o "$RUNNER_TEMP/public-inputs/catalog/personal-preview-manifest.json"
+          artifact_sha="$(sha256sum "$RUNNER_TEMP/public-inputs/catalog/personal-preview-manifest.json" | cut -d' ' -f1)"
+          test "$artifact_sha" = "$(jq -r .payload.artifact_set.sha256 "$RUNNER_TEMP/public-inputs/catalog/snapshot.json")"
+          test "$artifact_sha" = "$(jq -r .artifact_set_digest "$RUNNER_TEMP/public-inputs/candidate.json")"
+      - name: Probe no-redirect range, ETag, and interrupted resume
+        shell: bash
+        run: |
+          artifact="$RUNNER_TEMP/public-inputs/catalog/personal-preview-manifest.json"
+          probe_url="$(jq -er '.payload.common_artifacts["plugin-runtime"].url' "$artifact")"
+          probe_sha="$(jq -er '.payload.common_artifacts["plugin-runtime"].sha256' "$artifact")"
+          test "${probe_url#https://releases.zbs.gg/}" != "$probe_url"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 -D "$RUNNER_TEMP/range.headers" \
+            --range 0-1023 "$probe_url" -o "$RUNNER_TEMP/plugin-runtime.tar.gz"
+          grep -Eiq '^HTTP/[^ ]+ 206([[:space:]]|$)' "$RUNNER_TEMP/range.headers"
+          grep -Eiq '^etag:[[:space:]]*[^[:space:]]+' "$RUNNER_TEMP/range.headers"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
+            --connect-timeout 10 --max-time 300 -C - "$probe_url" -o "$RUNNER_TEMP/plugin-runtime.tar.gz"
+          test "$(sha256sum "$RUNNER_TEMP/plugin-runtime.tar.gz" | cut -d' ' -f1)" = "$probe_sha"
+      - name: Require zero high or critical shipped dependency vulnerabilities from registry bytes
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/public-audit"
+          (cd "$RUNNER_TEMP/public-audit" && npm init --yes >/dev/null)
+          npm install --ignore-scripts --package-lock-only --prefix "$RUNNER_TEMP/public-audit" @zbs-gg/pulse@0.7.0
+          npm audit --omit=dev --audit-level=high --prefix "$RUNNER_TEMP/public-audit"
+      - name: Preserve public-only matrix inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-public-soak-inputs-${{ inputs.checkpoint_hours }}
+          path: ${{ runner.temp }}/public-inputs
+          if-no-files-found: error
+          retention-days: 30
+
+  native:
+    name: Public ${{ inputs.checkpoint_hours }}h / ${{ matrix.host }} / ${{ matrix.target_id }}
+    needs: authorize
+    environment: production-harness-e2e
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.authorize.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      PULSE_PROTECTED_HARNESS_AUTHORITY: public_registry
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-public-soak-inputs-${{ inputs.checkpoint_hours }}
+          path: ${{ runner.temp }}/public-inputs
+      - name: Install and verify exact vendor harness
+        uses: ./.github/actions/setup-pulse-vendor-harness
+        with:
+          host: ${{ matrix.host }}
+          distribution: ${{ matrix.harness_distribution }}
+          identity: ${{ matrix.harness_identity }}
+          version: ${{ matrix.harness_version }}
+          download-url: ${{ matrix.harness_download_url }}
+          platform: ${{ matrix.platform }}
+      - name: Require only the selected restricted vendor credential
+        shell: bash
+        run: |
+          case "${{ matrix.host }}" in
+            codex) test -n "$OPENAI_API_KEY" ;;
+            claude-code) test -n "$ANTHROPIC_API_KEY" ;;
+            cursor) test -n "$CURSOR_API_KEY" ;;
+            *) exit 1 ;;
+          esac
+      - name: Run exact public npm and R2 lifecycle
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          tarballs=("$RUNNER_TEMP"/public-inputs/package/*.tgz)
+          test "${#tarballs[@]}" = 1
+          mkdir "$RUNNER_TEMP/pulse-public-session-root"
+          chmod 700 "$RUNNER_TEMP/pulse-public-session-root"
+          export PULSE_PROTECTED_HARNESS_ROOT="$RUNNER_TEMP/pulse-public-session-root"
+          npm run --silent test:native-vendor-session -- \
+            --authority public_registry \
+            --host "${{ matrix.host }}" \
+            --target "${{ matrix.target_id }}" \
+            --tarball "${tarballs[0]}" \
+            --catalog "$RUNNER_TEMP/public-inputs/catalog" \
+            --out "$RUNNER_TEMP/pulse-public-${{ matrix.host }}-${{ matrix.target_id }}.json" \
+            --commit "${{ needs.authorize.outputs.commit }}" \
+            --repeat "${{ matrix.stability_runs }}"
+      - name: Upload content-free public-registry evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-public-native-${{ inputs.checkpoint_hours }}-${{ matrix.host }}-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/pulse-public-${{ matrix.host }}-${{ matrix.target_id }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    name: Public registry soak / required
+    needs: [authorize, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-public-soak-inputs-${{ inputs.checkpoint_hours }}
+          path: ${{ runner.temp }}/public-inputs
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: pulse-public-native-${{ inputs.checkpoint_hours }}-*
+          path: ${{ runner.temp }}/public-evidence
+      - name: Require exact 18 of 18 and bind timed soak receipt
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          node scripts/validate-native-evidence-set.mjs \
+            --directory "$RUNNER_TEMP/public-evidence" --authority public_registry
+          tarballs=("$RUNNER_TEMP"/public-inputs/package/*.tgz)
+          test "${#tarballs[@]}" = 1
+          npm run --silent build:public-soak-receipt -- \
+            --candidate "$RUNNER_TEMP/public-inputs/candidate.json" \
+            --checkpoint "${{ inputs.checkpoint_hours }}" \
+            --evidence "$RUNNER_TEMP/public-evidence" \
+            --output "$RUNNER_TEMP/public-soak-${{ inputs.checkpoint_hours }}.json" \
+            --published-at "${{ needs.authorize.outputs.published_at }}" \
+            --tarball "${tarballs[0]}"
+      - name: Preserve 18 receipts and checkpoint aggregate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-public-soak-${{ inputs.checkpoint_hours }}
+          path: |
+            ${{ runner.temp }}/public-evidence
+            ${{ runner.temp }}/public-soak-${{ inputs.checkpoint_hours }}.json
+          if-no-files-found: error
+          retention-days: 30

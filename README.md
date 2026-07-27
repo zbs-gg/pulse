@@ -49,11 +49,11 @@ recalling it after deletion. The same local vault now keeps project memory and
 Personal Global separate while Memory Home can inspect and manage both.
 
 That is real single-machine product evidence, not a public release claim.
-Packed Claude Code, Cursor, and Codex tests and the six-target native matrix
-cover macOS, Windows, and GNU/Linux on arm64 and x64, but **Gold / production
+Packed Claude Code, Cursor, and Codex tests and the 18-pair native matrix
+cover all three harnesses on macOS, Windows, and GNU/Linux arm64/x64, but **Gold / production
 release is still blocked** until protected workflows produce and verify the
-signed/notarized artifacts for all six targets and the exact npm candidate is
-separately staged and published. A DMG proves only a macOS carrier and can
+signed/notarized artifacts, 18 real vendor-session receipts, the 72-hour public
+soak, and the exact npm candidate are separately verified and published. A DMG proves only a macOS carrier and can
 never satisfy the universal release gate by itself.
 
 Memory Home currently labels token evidence as estimated or collecting a

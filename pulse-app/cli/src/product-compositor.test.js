@@ -242,6 +242,7 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     };
     const measurement = createContinuityDeliveryOffer(runtime, start, 'remembered context payload', {
       object_ids: ['memory_1'], evidence_ids: ['pulse:memory_1'],
+      memory_snapshot_digest: 'd'.repeat(64),
     });
     const offerReceipt = {
       schema: 'pulse.continuity_delivery_receipt.v1', receipt_id: 'delivery_offer_1',
@@ -254,7 +255,9 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     };
     const ticket = recordContinuityObservationTicket({
       resolved: runtime, offer: measurement.offer, receipt: offerReceipt,
+      memory_snapshot_digest: measurement.memory_snapshot_digest,
     });
+    assert.equal(ticket.schema, 'pulse.continuity_observation_ticket.v2');
     const ticketDirectory = join(root, 'runtime', 'continuity-observations');
     const ticketPath = join(ticketDirectory, readdirSync(ticketDirectory)[0]);
     assert.doesNotMatch(readFileSync(ticketPath, 'utf8'), /remembered context payload|memory_1/);
@@ -287,6 +290,12 @@ test('a later same-session host event promotes only a receipt-backed content-fre
     assert.doesNotMatch(readFileSync(join(observedDirectory, observedFiles[0]), 'utf8'),
       /remembered context payload|memory_1/);
     assert.equal(hasContinuitySessionDelivery(runtime, promptEvent), true);
+    assert.equal(hasContinuitySessionDelivery(runtime, promptEvent, {
+      expectedMemorySnapshotDigest: 'd'.repeat(64),
+    }), true);
+    assert.equal(hasContinuitySessionDelivery(runtime, promptEvent, {
+      expectedMemorySnapshotDigest: 'e'.repeat(64),
+    }), false);
     assert.equal(await observePendingContinuityDelivery(runtime, promptEvent, { request: async () => assert.fail() }), undefined);
 
     const stopEvent = {
@@ -315,6 +324,7 @@ test('composition returns only the structured IDs declared as included in render
     host: 'codex',
     request: async () => ({
       resume_markdown: 'Rendered personal memory.',
+      memory_snapshot_digest: 'f'.repeat(64),
       included_object_ids: ['memory_2', 'memory_1', 'memory_2'],
       included_evidence_ids: ['pulse:memory_2', 'pulse:memory_1', 'pulse:memory_2'],
       // Legacy aggregate refs can include entries removed by bounded rendering
@@ -327,6 +337,7 @@ test('composition returns only the structured IDs declared as included in render
   assert.deepEqual(result.manifest, {
     object_ids: ['memory_1', 'memory_2'],
     evidence_ids: ['pulse:memory_1', 'pulse:memory_2'],
+    memory_snapshot_digest: 'f'.repeat(64),
   });
   assert.equal(Object.isFrozen(result.manifest), true);
   assert.equal(Object.isFrozen(result.manifest.object_ids), true);

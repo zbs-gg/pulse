@@ -10,11 +10,12 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyReleaseManifestEnvelope,
+  canonicalReleaseJSON, pinnedReleaseKeyring, releaseKeyID, verifyPersonalReleaseArtifactSet,
 } from '../src/release-manifest.js';
 import {
   DESKTOP_TARGET_IDS, desktopTargetDefinition,
 } from '../src/desktop-target.js';
+import { loadNativeUniversalMatrix } from './native-universal-matrix.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptRoot = dirname(scriptPath);
@@ -316,7 +317,7 @@ export function buildPersonalCatalog({
   mkdirSync(outputRoot, { mode: 0o700 });
   let complete = false;
   try {
-    const assetRoot = join(outputRoot, 'assets', 'pulse', PACKAGE_VERSION);
+    const assetRoot = join(outputRoot, 'pulse', PACKAGE_VERSION, `epoch-${epoch}`);
     const commonAssets = join(assetRoot, 'common');
     for (const targetID of DESKTOP_TARGET_IDS) {
       const input = targetInputs[targetID];
@@ -332,7 +333,7 @@ export function buildPersonalCatalog({
     }
     copyCarrier(modelRoot, model.artifact.filename, model.artifact, join(commonAssets, 'model.tar.gz'));
     copyCarrier(pluginRoot, plugin.artifact.filename, plugin.artifact, join(commonAssets, 'plugin-runtime.tar.gz'));
-    const prefix = `${origin}/pulse/${PACKAGE_VERSION}`;
+    const prefix = `${origin}/pulse/${PACKAGE_VERSION}/epoch-${epoch}`;
     const commonArtifacts = {
       model: descriptor({
         artifact: model.artifact,
@@ -382,54 +383,66 @@ export function buildPersonalCatalog({
         verification_profile: input.fragment.verification_profile,
       })];
     }));
-    const now = new Date();
-    const issuedAt = new Date(now.valueOf() - 60_000);
-    const releaseExpiresAt = new Date(now.valueOf() + 7 * 24 * 60 * 60 * 1000);
-    const authorityExpiresAt = new Date(now.valueOf() + 8 * 24 * 60 * 60 * 1000);
-    const payload = Object.freeze({
+    const matrix = loadNativeUniversalMatrix();
+    const snapshotURL = `${origin}/pulse/${PACKAGE_VERSION}/catalog/snapshot.json`;
+    const artifactSetPayload = Object.freeze({
       allowed_origins: [origin],
       common_artifacts: {
         model: commonArtifacts.model,
         'plugin-runtime': commonArtifacts['plugin-runtime'],
       },
+      host_policy: {
+        harnesses: matrix.harnesses.map((harness) => Object.freeze({ ...harness })),
+      },
       release: {
         channel: 'preview',
         epoch,
-        expires_at: releaseExpiresAt.toISOString(),
-        issued_at: issuedAt.toISOString(),
         key_id: channelAuthority.keyID,
         package: '@zbs-gg/pulse',
         version: PACKAGE_VERSION,
       },
-      schema: 'pulse.personal_preview.release_catalog.v2',
+      schema: 'pulse.personal_release_artifact_set_payload.v1',
+      snapshot_url: snapshotURL,
       targets: catalogTargets,
     });
-    const authorityPayload = Object.freeze({
-      channel: 'preview',
-      epoch,
-      expires_at: authorityExpiresAt.toISOString(),
-      issued_at: issuedAt.toISOString(),
-      keys: [{
+    const artifactSet = Object.freeze({
+      payload: artifactSetPayload,
+      schema: 'pulse.personal_release_artifact_set.v1',
+      signature: manifestSignature(artifactSetPayload, channelAuthority),
+    });
+    const artifactSetBytes = `${canonicalReleaseJSON(artifactSet)}\n`;
+    const artifactSetDigest = createHash('sha256').update(artifactSetBytes).digest('hex');
+    const now = new Date();
+    const issuedAt = new Date(now.valueOf() - 60_000);
+    const snapshotExpiresAt = new Date(issuedAt.valueOf() + 30 * 24 * 60 * 60 * 1000);
+    const snapshotPayload = Object.freeze({
+      artifact_set: {
+        sha256: artifactSetDigest,
+        url: `${prefix}/catalog/artifact-set.json`,
+      },
+      channel: {
         key_id: channelAuthority.keyID,
         public_key_pem: channelAuthority.publicKey,
         valid_from_epoch: epoch,
         valid_through_epoch: epoch,
-      }],
-      revoked_key_ids: [],
-      schema: 'pulse.release_authority.v1',
-    });
-    const envelope = Object.freeze({
-      authority: {
-        payload: authorityPayload,
-        schema: 'pulse.release_authority_envelope.v1',
-        signature: manifestSignature(authorityPayload, rootAuthority),
       },
-      payload,
-      schema: 'pulse.release_catalog_envelope.v2',
-      signature: manifestSignature(payload, channelAuthority),
+      expires_at: snapshotExpiresAt.toISOString(),
+      issued_at: issuedAt.toISOString(),
+      package: '@zbs-gg/pulse',
+      release_epoch: epoch,
+      revoked_key_ids: [],
+      schema: 'pulse.release_snapshot.v1',
+      version: PACKAGE_VERSION,
     });
+    const snapshot = Object.freeze({
+      payload: snapshotPayload,
+      schema: 'pulse.release_snapshot_envelope.v1',
+      signature: manifestSignature(snapshotPayload, rootAuthority),
+    });
+    const snapshotBytes = `${canonicalReleaseJSON(snapshot)}\n`;
+    const snapshotDigest = createHash('sha256').update(snapshotBytes).digest('hex');
     const releases = DESKTOP_TARGET_IDS.map((targetID) => {
-      const release = verifyReleaseManifestEnvelope(envelope, {
+      const release = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
         ...verificationHost(targetInputs[targetID].definition),
         minimumAcceptedEpoch: epoch,
         now,
@@ -443,14 +456,29 @@ export function buildPersonalCatalog({
       fail('release_catalog_target_verification_failed');
     }
     const manifestPath = join(outputRoot, 'personal-preview-manifest.json');
-    writeFileSync(manifestPath, `${canonicalReleaseJSON(envelope)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const artifactSetPath = join(assetRoot, 'catalog', 'artifact-set.json');
+    const snapshotPath = join(outputRoot, 'pulse', PACKAGE_VERSION, 'catalog', 'snapshot.json');
+    mkdirSync(dirname(artifactSetPath), { recursive: true, mode: 0o700 });
+    mkdirSync(dirname(snapshotPath), { recursive: true, mode: 0o700 });
+    writeFileSync(artifactSetPath, artifactSetBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    writeFileSync(snapshotPath, snapshotBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    writeFileSync(manifestPath, artifactSetBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    writeFileSync(join(outputRoot, 'snapshot.json'), snapshotBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const receipt = Object.freeze({
       artifact_count: 2 + DESKTOP_TARGET_IDS.length * TARGET_ARTIFACT_KINDS.length,
+      artifact_set_digest: artifactSetDigest,
+      artifact_set_url: snapshotPayload.artifact_set.url,
       channel_key_id: channelAuthority.keyID,
-      manifest_digest: releases[0].manifest_digest,
+      host_target_count: matrix.harnesses.length * DESKTOP_TARGET_IDS.length,
+      hosts: matrix.harnesses.map((harness) => harness.host).sort(),
+      manifest_digest: artifactSetDigest,
       production_ready: testMode !== true,
+      release_epoch: epoch,
       root_key_id: rootAuthority.keyID,
-      schema: 'pulse.personal_release_catalog_build.v2',
+      schema: 'pulse.personal_release_catalog_build.v3',
+      snapshot_digest: snapshotDigest,
+      snapshot_expires_at: snapshotPayload.expires_at,
+      snapshot_url: snapshotURL,
       target_count: DESKTOP_TARGET_IDS.length,
       target_ids: [...DESKTOP_TARGET_IDS],
     });
@@ -458,7 +486,7 @@ export function buildPersonalCatalog({
       encoding: 'utf8', flag: 'wx', mode: 0o600,
     });
     complete = true;
-    return Object.freeze({ manifestPath, receipt });
+    return Object.freeze({ artifactSetPath, manifestPath, receipt, snapshotPath });
   } finally {
     if (!complete) rmSync(outputRoot, { recursive: true, force: true });
   }

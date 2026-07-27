@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -38,6 +39,21 @@ type PersonalMemoryScopeSnapshot struct {
 	RepositoryID        string
 	ProjectNamespaceID  string
 	EligibilityRevision int64
+}
+
+// Digest is a content-free lease identity. It changes whenever the verified
+// binding, repository scope, project namespace, or eligibility revision
+// changes, without exposing a memory body.
+func (snapshot PersonalMemoryScopeSnapshot) Digest() string {
+	material := strings.Join([]string{
+		"pulse-personal-memory-snapshot-v1",
+		snapshot.BindingDigest,
+		snapshot.RepositoryID,
+		snapshot.ProjectNamespaceID,
+		fmt.Sprintf("%d", snapshot.EligibilityRevision),
+	}, "\x1f")
+	digest := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(digest[:])
 }
 
 func stableProjectNamespace(repositoryID string) string {

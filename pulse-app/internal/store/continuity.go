@@ -109,6 +109,7 @@ type ResumeBlock struct {
 	SourceEquivalentTokens *int           `json:"source_equivalent_tokens,omitempty"`
 	CoverageCounted        int            `json:"coverage_counted,omitempty"`
 	CoverageTotal          int            `json:"coverage_total,omitempty"`
+	MemorySnapshotDigest   string         `json:"memory_snapshot_digest,omitempty"`
 }
 
 type TokenEconomy struct {
@@ -470,6 +471,10 @@ func (s *Store) buildResume(
 		PulseTokens:   tokenEstimate,
 		ReasonCode:    "comparable_receipt_required",
 	}
+	memorySnapshotDigest := ""
+	if requestedScope != nil {
+		memorySnapshotDigest = requestedScope.Digest()
+	}
 	return ResumeBlock{
 		Schema:                 ContinuitySchema,
 		ThreadID:               threadID,
@@ -488,6 +493,7 @@ func (s *Store) buildResume(
 		SourceEquivalentTokens: sourceEquivalentTokens,
 		CoverageCounted:        coverageCounted,
 		CoverageTotal:          coverageTotal,
+		MemorySnapshotDigest:   memorySnapshotDigest,
 	}, nil
 }
 

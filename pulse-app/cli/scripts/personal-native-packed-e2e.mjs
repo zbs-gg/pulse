@@ -876,6 +876,7 @@ try {
     same_object_recalled: true,
     first_value_boundary: 'fresh_session_context',
     first_value_ms: firstValueMs,
+    first_value_stages_ms: Object.fromEntries(firstValueStages),
     token_economy: {
       state: economy.state,
       method_id: economy.method_id,

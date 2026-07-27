@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
   executePersonalInstallCommand,
   hasMatchingResumableInstallJournal,
   nativePackedFixtureApprovalDigest,
+  protectedHarnessApproval,
   requestConsent,
 } from './personal-install-command.js';
 
@@ -175,6 +176,46 @@ test('native packed fixture approval is digest-bound and confined to its disposa
     resources: { ...exactPlan.resources, disk_free_bytes: 1, memory_total_bytes: 2, port_18789: 'occupied' },
   };
   assert.equal(nativePackedFixtureApprovalDigest(driftedTelemetry), nativePackedFixtureApprovalDigest(exactPlan));
+});
+
+test('protected harness approval is exact-plan bound and confined to an ephemeral GitHub root', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-protected-harness.'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cwd = join(root, 'workspace');
+  const dataDir = join(root, 'data');
+  const home = join(root, 'home');
+  const approvalPath = join(root, 'approval.json');
+  for (const path of [cwd, dataDir, home]) mkdirSync(path, { mode: 0o700 });
+  const exactPlan = plan({
+    detected: {
+      hosts: [{ host: 'codex', activation_target: true }],
+      workspace: { canonical_path: cwd, repository_id: 'repository_test', workspace_id: 'workspace_test' },
+    },
+  });
+  const sourceCommit = 'a'.repeat(40);
+  const packageSHA256 = 'b'.repeat(64);
+  const approval = protectedHarnessApproval(exactPlan, {
+    authority: 'production_candidate', dataDir, packageSHA256, sourceCommit, workspace: cwd,
+  });
+  writeFileSync(approvalPath, `${JSON.stringify(approval)}\n`, { mode: 0o600 });
+  const env = {
+    CI: 'true', GITHUB_ACTIONS: 'true', RUNNER_TEMP: root,
+    PULSE_PROTECTED_HARNESS_APPROVAL_PATH: approvalPath,
+    PULSE_PROTECTED_HARNESS_AUTHORITY: 'production_candidate',
+    PULSE_PROTECTED_HARNESS_PACKAGE_SHA256: packageSHA256,
+    PULSE_PROTECTED_HARNESS_SOURCE_COMMIT: sourceCommit,
+  };
+  assert.equal(await requestConsent({
+    cwd, dataDir, env, home, input: { isTTY: false }, output: { isTTY: false }, plan: exactPlan, platform: 'linux',
+  }), true);
+  assert.equal(await requestConsent({
+    cwd, dataDir, env: { ...env, PULSE_PROTECTED_HARNESS_PACKAGE_SHA256: 'c'.repeat(64) }, home,
+    input: { isTTY: false }, output: { isTTY: false }, plan: exactPlan, platform: 'linux',
+  }), false);
+  assert.equal(await requestConsent({
+    cwd: '/tmp/outside', dataDir, env, home,
+    input: { isTTY: false }, output: { isTTY: false }, plan: exactPlan, platform: 'linux',
+  }), false);
 });
 
 function readyActivation() {
