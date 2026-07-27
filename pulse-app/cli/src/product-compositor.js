@@ -123,10 +123,24 @@ export async function persistContinuityDelivery(output, payload, {
     return request(resolved, '/continuity/delivery/offers', {
       body: offer,
       idempotencyKey,
-      timeoutMs: 1200,
+      timeoutMs: 2500,
     });
   });
-  const receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  let receipt;
+  try {
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  } catch (error) {
+    const status = error?.status;
+    const code = error?.code ?? error?.cause?.code;
+    const transient = error?.name === 'TimeoutError' || error?.name === 'AbortError' ||
+      ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
+      status === 408 || status === 425 || status === 429 || status >= 500;
+    if (!transient) throw error;
+    // The native source event supplies an exact idempotency key. Retrying the
+    // same offer can recover a slow local daemon without creating a second
+    // delivery fact when the first request committed before its timeout.
+    receipt = await persist(measurement.offer, source.resolved, measurement.idempotencyKey);
+  }
   return Object.freeze({ resolved: source.resolved, receipt, ...measurement });
 }
 

@@ -546,7 +546,7 @@ test('CLI default delivery adapter posts the offer with its exact idempotency ke
   assert.equal(calls[0].path, '/continuity/delivery/offers');
   assert.match(calls[0].options.idempotencyKey, /^continuity-offer:[a-f0-9]{64}$/);
   assert.equal('idempotency_key' in calls[0].options.body, false);
-  assert.equal(calls[0].options.timeoutMs, 1200);
+  assert.equal(calls[0].options.timeoutMs, 2500);
 });
 
 test('PreToolUse denies a supported side effect when binding recheck fails', async () => {
