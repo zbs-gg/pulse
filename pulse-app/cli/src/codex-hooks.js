@@ -908,16 +908,25 @@ export function projectReadinessLifecycleInputs(memories = [], deliveries = []) 
 	if (!terminal) return result;
 	result.terminal_memory = terminal.fact;
 	result.state = 'context_offer_pending';
-	const offered = earliestReadinessFact(deliveries.map((fact) =>
-		matchingContextReadinessFact(fact, terminal.fact, terminal.at, 'offered_to_host')).filter(Boolean));
-	if (!offered) return result;
-	result.offered_to_host = offered.fact;
+	const offers = deliveries.map((fact) =>
+		matchingContextReadinessFact(fact, terminal.fact, terminal.at, 'offered_to_host')).filter(Boolean);
+	offers.sort((left, right) => {
+		if (left.at < right.at) return -1;
+		if (left.at > right.at) return 1;
+		return String(left.fact.context_id).localeCompare(String(right.fact.context_id));
+	});
+	if (offers.length === 0) return result;
+	result.offered_to_host = offers[0].fact;
 	result.state = 'host_observation_pending';
-	const observed = earliestReadinessFact(deliveries.map((fact) =>
-		matchingContextReadinessFact(fact, terminal.fact, offered.at, 'host_observed', offered.fact)).filter(Boolean));
-	if (!observed) return result;
-	result.host_observed = observed.fact;
-	result.state = 'ready';
+	for (const offered of offers) {
+		const observed = earliestReadinessFact(deliveries.map((fact) =>
+			matchingContextReadinessFact(fact, terminal.fact, offered.at, 'host_observed', offered.fact)).filter(Boolean));
+		if (!observed) continue;
+		result.offered_to_host = offered.fact;
+		result.host_observed = observed.fact;
+		result.state = 'ready';
+		break;
+	}
 	return result;
 }
 

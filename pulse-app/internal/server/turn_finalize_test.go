@@ -470,6 +470,24 @@ func TestProjectReadinessLifecycleRequiresOneRealTerminalMemoryAndMatchingFreshS
 			}
 		})
 	}
+
+	laterOffered := offered
+	laterOffered.ContextID = "context_later"
+	laterOffered.PayloadDigest = strings.Repeat("e", 64)
+	laterOffered.SessionRef = "session:" + strings.Repeat("9", 64)
+	laterOffered.CreatedAt = "2026-07-16T01:03:00Z"
+	laterObserved := laterOffered
+	laterObserved.Acknowledgement = "host_observed"
+	laterObserved.CreatedAt = "2026-07-16T01:04:00Z"
+	recovered := ProjectReadinessLifecycleInputs(
+		[]TerminalMemoryReadinessFact{terminal},
+		[]ContextDeliveryReadinessFact{offered, laterOffered, laterObserved},
+	)
+	if recovered.State != "ready" || recovered.OfferedToHost == nil || recovered.HostObserved == nil ||
+		recovered.OfferedToHost.ContextID != laterOffered.ContextID ||
+		recovered.HostObserved.ContextID != laterOffered.ContextID {
+		t.Fatalf("later observed delivery did not recover readiness: %#v", recovered)
+	}
 }
 
 func TestMemoryTrayRecoveryScheduleSkipsUnpresentedCandidate(t *testing.T) {

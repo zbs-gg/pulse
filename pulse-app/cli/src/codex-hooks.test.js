@@ -1237,6 +1237,20 @@ test('readiness lifecycle projection requires a terminal user memory and a match
 	assert.equal(Object.hasOwn(ready.terminal_memory, 'presentation_receipt_id'), false);
 	assert.equal(ready.offered_to_host.context_id, offered.context_id);
 	assert.equal(ready.host_observed.context_id, offered.context_id);
+
+	const laterOffered = {
+		...offered, context_id: 'context_later', payload_digest: 'e'.repeat(64),
+		session_ref: opaque('session', 'session-c'), created_at: '2026-07-16T01:03:00Z',
+	};
+	const laterObserved = {
+		...laterOffered, acknowledgement: 'host_observed', created_at: '2026-07-16T01:04:00Z',
+	};
+	const recovered = projectReadinessLifecycleInputs(
+		[terminal], [offered, laterOffered, laterObserved],
+	);
+	assert.equal(recovered.state, 'ready');
+	assert.equal(recovered.offered_to_host.context_id, laterOffered.context_id);
+	assert.equal(recovered.host_observed.context_id, laterOffered.context_id);
 });
 
 test('native hook query hard-stops an app-server child that ignores SIGTERM', async () => {

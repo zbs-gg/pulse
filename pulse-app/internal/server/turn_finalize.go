@@ -67,19 +67,23 @@ func ProjectReadinessLifecycleInputs(
 	result.TerminalMemory = &terminal
 	result.State = "context_offer_pending"
 
-	offered, offeredTime, ok := firstMatchingContextFact(deliveries, terminal, terminalTime, "offered_to_host", nil)
-	if !ok {
+	offers := matchingContextFacts(deliveries, terminal, terminalTime, "offered_to_host", nil)
+	if len(offers) == 0 {
 		return result
 	}
-	result.OfferedToHost = &offered
+	result.OfferedToHost = &offers[0].fact
 	result.State = "host_observation_pending"
 
-	observed, _, ok := firstMatchingContextFact(deliveries, terminal, offeredTime, "host_observed", &offered)
-	if !ok {
+	for _, offer := range offers {
+		observations := matchingContextFacts(deliveries, terminal, offer.at, "host_observed", &offer.fact)
+		if len(observations) == 0 {
+			continue
+		}
+		result.OfferedToHost = &offer.fact
+		result.HostObserved = &observations[0].fact
+		result.State = "ready"
 		return result
 	}
-	result.HostObserved = &observed
-	result.State = "ready"
 	return result
 }
 
@@ -120,18 +124,19 @@ func firstTerminalMemoryReadinessFact(facts []TerminalMemoryReadinessFact) (Term
 	return valid[0].fact, valid[0].at, true
 }
 
-func firstMatchingContextFact(
+type contextReadinessCandidate struct {
+	fact ContextDeliveryReadinessFact
+	at   time.Time
+}
+
+func matchingContextFacts(
 	facts []ContextDeliveryReadinessFact,
 	terminal TerminalMemoryReadinessFact,
 	after time.Time,
 	acknowledgement string,
 	offered *ContextDeliveryReadinessFact,
-) (ContextDeliveryReadinessFact, time.Time, bool) {
-	type candidate struct {
-		fact ContextDeliveryReadinessFact
-		at   time.Time
-	}
-	valid := make([]candidate, 0, len(facts))
+) []contextReadinessCandidate {
+	valid := make([]contextReadinessCandidate, 0, len(facts))
 	for _, fact := range facts {
 		at, validTime := canonicalReadinessTime(fact.CreatedAt)
 		if !validTime || !at.After(after) || fact.Acknowledgement != acknowledgement ||
@@ -151,10 +156,7 @@ func firstMatchingContextFact(
 		copyFact := fact
 		copyFact.ObjectIDs = append([]string(nil), fact.ObjectIDs...)
 		copyFact.EvidenceIDs = append([]string(nil), fact.EvidenceIDs...)
-		valid = append(valid, candidate{fact: copyFact, at: at})
-	}
-	if len(valid) == 0 {
-		return ContextDeliveryReadinessFact{}, time.Time{}, false
+		valid = append(valid, contextReadinessCandidate{fact: copyFact, at: at})
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].at.Equal(valid[j].at) {
@@ -162,7 +164,7 @@ func firstMatchingContextFact(
 		}
 		return valid[i].at.Before(valid[j].at)
 	})
-	return valid[0].fact, valid[0].at, true
+	return valid
 }
 
 func contextFactReferencesTerminal(fact ContextDeliveryReadinessFact, terminal TerminalMemoryReadinessFact) bool {

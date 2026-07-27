@@ -719,8 +719,23 @@ try {
   }), { cwd: workspace, env: hookEnv });
   assert.equal(freshPrompt.continue, true);
 
-  const lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
-  const codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  let lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
+  let codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  // Delivery observation is intentionally bounded and non-blocking. A slow
+  // local platform may leave the prompt offer pending, so exercise the same
+  // trusted Stop retry that closes the proof during ordinary host use.
+  for (let attempt = 0;
+    codexLifecycle?.state === 'host_observation_pending' && attempt < 3;
+    attempt += 1) {
+    const observationRetry = codexHook(pluginRoot, 'Stop', codexHookInput({
+      eventName: 'Stop', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
+      extra: { stop_hook_active: false, last_assistant_message: 'Continue from the saved decision.' },
+    }), { cwd: workspace, env: hookEnv });
+    assert.deepEqual(observationRetry, {});
+    await new Promise((accept) => setTimeout(accept, 250));
+    lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
+    codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
+  }
   assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify(codexLifecycle));
   assert.equal(codexLifecycle.state, 'ready');
   assert.equal(codexLifecycle.object_id, objectID);
