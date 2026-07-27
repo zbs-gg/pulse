@@ -11,6 +11,16 @@ const TARGET = /^(?:darwin-(?:arm64|x64)|linux-(?:arm64|x64)-gnu|win32-(?:arm64|
 const RUNNER = /^(?:macos-26|macos-26-intel|ubuntu-24\.04|ubuntu-24\.04-arm|windows-2025|windows-11-arm)$/;
 const HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
 
+export function exactHarnessVersionPattern(version) {
+  assert.match(version, /^\d+\.\d+(?:\.\d+)?$/);
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`);
+}
+
+export function nativeHarnessCommandUsesShell(command, platform = process.platform) {
+  return platform === 'win32' && ['claude', 'codex'].includes(command);
+}
+
 export function loadNativeUniversalMatrix(path = matrixPath) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
   assert.equal(value.schema, 'pulse.native_universal_matrix.v2');

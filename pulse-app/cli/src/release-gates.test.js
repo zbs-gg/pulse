@@ -398,6 +398,9 @@ test('production release is split into immutable inputs, origin publication, and
   assert.doesNotMatch(originWorkflow, /npm publish|npm stage publish|npm stage approve|continue-on-error/);
 
   const sealWorkflow = readFileSync(join(root, '.github', 'workflows', 'seal-production-candidate.yml'), 'utf8');
+  const vendorAction = readFileSync(
+    join(root, '.github', 'actions', 'setup-pulse-vendor-harness', 'action.yml'), 'utf8',
+  );
   assert.match(sealWorkflow, /^name: Seal production candidate$/m);
   assert.match(sealWorkflow, /^\s*environment: production-harness-e2e$/m);
   assert.match(sealWorkflow, /--authority production_candidate/);
@@ -406,6 +409,9 @@ test('production release is split into immutable inputs, origin publication, and
   assert.match(sealWorkflow, /npm run build:npm-production-candidate/);
   assert.match(sealWorkflow, /pulse-npm-production-candidate/);
   assert.doesNotMatch(sealWorkflow, /personal-native-packed-e2e|authority fixture|npm publish|npm stage publish|continue-on-error/);
+  assert.match(vendorAction, /sudo chmod 4755 "\$sandbox"/);
+  assert.match(vendorAction, /root:root 4755/);
+  assert.match(vendorAction, /cursor-installer\.exe/);
 
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
   assert.equal(

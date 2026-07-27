@@ -2,8 +2,24 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  currentNativeTargetID, githubNativeUniversalMatrix, loadNativeUniversalMatrix,
+  currentNativeTargetID, exactHarnessVersionPattern, githubNativeUniversalMatrix,
+  loadNativeUniversalMatrix, nativeHarnessCommandUsesShell,
 } from '../scripts/native-universal-matrix.mjs';
+
+test('calibrated version matching accepts vendor labels without accepting adjacent digits', () => {
+  const claude = exactHarnessVersionPattern('2.1.220');
+  assert.match('2.1.220 (Claude Code)', claude);
+  assert.match('claude 2.1.220', claude);
+  assert.doesNotMatch('12.1.220', claude);
+  assert.doesNotMatch('2.1.2201', claude);
+});
+
+test('Windows uses a command shell only for the two pinned npm CLI shims', () => {
+  assert.equal(nativeHarnessCommandUsesShell('codex', 'win32'), true);
+  assert.equal(nativeHarnessCommandUsesShell('claude', 'win32'), true);
+  assert.equal(nativeHarnessCommandUsesShell('cursor', 'win32'), false);
+  assert.equal(nativeHarnessCommandUsesShell('claude', 'linux'), false);
+});
 
 test('required universal matrix has eighteen exact host-target pairs with no allowed failure', () => {
   const matrix = loadNativeUniversalMatrix();

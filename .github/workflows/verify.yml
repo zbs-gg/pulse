@@ -134,12 +134,19 @@ jobs:
           mkdir "$RUNNER_TEMP/cursor-root"
           dpkg-deb --extract "$RUNNER_TEMP/cursor.deb" "$RUNNER_TEMP/cursor-root"
           test -x "$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor"
+          sandbox="$RUNNER_TEMP/cursor-root/usr/share/cursor/chrome-sandbox"
+          test -f "$sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          test "$(stat -c '%U:%G %a' "$sandbox")" = 'root:root 4755'
           echo "PULSE_CURSOR_EXECUTABLE=$RUNNER_TEMP/cursor-root/usr/share/cursor/cursor" >> "$GITHUB_ENV"
       - name: Verify and expose signed Cursor Desktop on Windows
         if: matrix.harness_distribution == 'vendor-desktop-installer' && matrix.platform == 'win32'
         shell: pwsh
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP 'cursor-installer'
+          $download = Join-Path $env:RUNNER_TEMP 'cursor-installer'
+          $installer = Join-Path $env:RUNNER_TEMP 'cursor-installer.exe'
+          Move-Item -LiteralPath $download -Destination $installer
           $signature = Get-AuthenticodeSignature -FilePath $installer
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Anysphere') {
             throw 'Cursor Authenticode verification failed'

@@ -7,7 +7,10 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSyn
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { currentNativeTargetID, loadNativeUniversalMatrix } from './native-universal-matrix.mjs';
+import {
+  currentNativeTargetID, exactHarnessVersionPattern, loadNativeUniversalMatrix,
+  nativeHarnessCommandUsesShell,
+} from './native-universal-matrix.mjs';
 
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -20,7 +23,7 @@ function command(command, args, { env = process.env, timeout = 20 * 60_000 } = {
   const result = spawnSync(command, args, {
     cwd: cliRoot, env, encoding: 'utf8', timeout,
     stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
-    shell: process.platform === 'win32' && command === 'codex',
+    shell: nativeHarnessCommandUsesShell(command),
   });
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(' ')} exited ${result.status}\n${result.stdout}\n${result.stderr}`);
@@ -93,7 +96,7 @@ let harnessExecutable;
 const stdoutRuns = [];
 if (harness.host === 'codex') {
   const version = command(harness.executable, ['--version']);
-  assert.match(version, new RegExp(`(?:^|\\s)${harness.version.replaceAll('.', '\\.')}$(?:|\\s)`));
+  assert.match(version, exactHarnessVersionPattern(harness.version));
   const codexExecutable = nativeCodexExecutable(npmExecPath);
   harnessExecutable = { ...fileSHA256(codexExecutable), kind: 'vendor_executable' };
   for (let index = 0; index < repeat; index += 1) {
@@ -108,7 +111,7 @@ if (harness.host === 'codex') {
 } else {
   if (harness.distribution === 'npm') {
     const version = command(harness.executable, ['--version']);
-    assert.match(version, new RegExp(`(?:^|\\s)${harness.version.replaceAll('.', '\\.')}$(?:|\\s)`));
+    assert.match(version, exactHarnessVersionPattern(harness.version));
     harnessExecutable = { ...commandExecutable(harness.executable), kind: 'vendor_executable' };
   } else {
     const cursorExecutable = process.env.PULSE_CURSOR_EXECUTABLE;
