@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 const SCHEMA_VERSION = 'https://zbs.gg/schemas/pulse/historical-ingest/v1';
 const HEX_DIGEST = /^[a-f0-9]{64}$/;
 const JOB_ID = /^job_[a-f0-9]{16,64}$/;
@@ -204,8 +206,51 @@ export function normalizeCodexHistoricalIngestManifest(value) {
       }
     }
   }
-  normalized.items = normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind));
+  normalized.items = normalizeDuplicateCandidateIDs(
+    normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind)),
+  );
   return normalized;
+}
+
+function canonicalJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function itemContentDigest(item) {
+  const { candidate_id: _candidateID, ...content } = item;
+  return createHash('sha256').update(canonicalJSON(content)).digest('hex');
+}
+
+function normalizeDuplicateCandidateIDs(items) {
+  const seenIDs = new Set();
+  const contentByOriginalID = new Map();
+  const result = [];
+  for (const item of items) {
+    const originalID = item?.candidate_id;
+    const contentDigest = itemContentDigest(item);
+    if (!seenIDs.has(originalID)) {
+      seenIDs.add(originalID);
+      contentByOriginalID.set(originalID, new Set([contentDigest]));
+      result.push(item);
+      continue;
+    }
+    const originalContents = contentByOriginalID.get(originalID);
+    if (originalContents?.has(contentDigest)) continue;
+    originalContents?.add(contentDigest);
+    let replacementID = `candidate_${contentDigest}`;
+    let collision = 0;
+    while (seenIDs.has(replacementID)) {
+      collision += 1;
+      replacementID = `candidate_${createHash('sha256').update(`${contentDigest}:${collision}`).digest('hex')}`;
+    }
+    seenIDs.add(replacementID);
+    result.push({ ...item, candidate_id: replacementID });
+  }
+  return result;
 }
 
 function payloadIsCanonical(payloadValue, kind) {

@@ -285,6 +285,27 @@ test('Codex normalization discards an invalid optional end time before canonical
   assert.deepEqual(assertHistoricalIngestManifest(normalized), normalized);
 });
 
+test('Codex normalization collapses exact candidate duplicates and rekeys divergent collisions', () => {
+  const base = {
+    candidate_id: 'candidate_fedcba9876543210', kind: 'decision', confidence: 0.8, privacy: 'private',
+    epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z', to: null },
+    scope: { kind: 'unassigned', project_id: null },
+    source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:2' }],
+    payload: { title: null, summary: 'keep this decision', subject_id: null, predicate: null, object_value: null, object_id: null, entity_type: null, name: null, state_kind: null, intensity: null, continuity_status: null },
+  };
+  const value = manifest({ items: [
+    base,
+    structuredClone(base),
+    { ...structuredClone(base), payload: { ...base.payload, summary: 'keep the other decision' } },
+  ] });
+  const normalized = normalizeCodexHistoricalIngestManifest(value);
+  assert.equal(normalized.items.length, 2);
+  assert.equal(normalized.items[0].candidate_id, base.candidate_id);
+  assert.match(normalized.items[1].candidate_id, /^candidate_[a-f0-9]{64}$/);
+  assert.notEqual(normalized.items[1].candidate_id, base.candidate_id);
+  assert.deepEqual(assertHistoricalIngestManifest(normalized), normalized);
+});
+
 test('unit run sends evidence only on stdin and returns a content-free receipt', async () => {
   const expected = manifest();
   const qualification = {
