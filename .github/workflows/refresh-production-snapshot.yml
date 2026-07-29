@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       candidate_run_id: ${{ steps.release.outputs.candidate_run_id }}
-      refresh_required: ${{ steps.freshness.outputs.refresh_required }}
+      refresh_required: ${{ steps.activation.outputs.gold_active == 'true' && steps.freshness.outputs.refresh_required == 'true' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -45,8 +45,45 @@ jobs:
           else
             test "$GITHUB_EVENT_NAME" = schedule
           fi
+      - id: activation
+        name: Require the public Gold release before refreshing its snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          status="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 30 --max-redirs 0 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -o "$RUNNER_TEMP/gold-release.json" -w '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.7.0")"
+          if test "$status" = 200; then
+            test "$(jq -r .tag_name "$RUNNER_TEMP/gold-release.json")" = v0.7.0
+            test "$(jq -r .draft "$RUNNER_TEMP/gold-release.json")" = false
+            test "$(jq -r .prerelease "$RUNNER_TEMP/gold-release.json")" = false
+            echo 'gold_active=true' >> "$GITHUB_OUTPUT"
+          else
+            tag_status="$(curl --silent --show-error \
+              --connect-timeout 10 --max-time 30 --max-redirs 0 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -o "$RUNNER_TEMP/gold-tag.json" -w '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/v0.7.0")"
+            if test "$status" = 404 && test "$tag_status" = 404 && \
+                test "$GITHUB_EVENT_NAME" = schedule; then
+              echo 'gold_active=false' >> "$GITHUB_OUTPUT"
+              echo 'Pulse 0.7.0 Gold is not published; scheduled snapshot refresh is inactive.' \
+                >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Gold activation check failed: release status $status, tag status $tag_status." >&2
+              exit 1
+            fi
+          fi
       - id: freshness
         name: Download and inspect the canonical public snapshot
+        if: steps.activation.outputs.gold_active == 'true'
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error \

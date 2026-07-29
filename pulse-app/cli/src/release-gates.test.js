@@ -455,6 +455,25 @@ test('production release is split into immutable inputs, origin publication, and
   assert.match(builder, /support_claim: false/);
 });
 
+test('scheduled snapshot refresh is inactive before Gold and fail-closed after activation', () => {
+  const workflow = readFileSync(
+    join(root, '.github', 'workflows', 'refresh-production-snapshot.yml'), 'utf8',
+  );
+  assert.match(workflow, /releases\/tags\/v0\.7\.0/);
+  assert.match(workflow, /git\/ref\/tags\/v0\.7\.0/);
+  assert.match(workflow, /test "\$status" = 200/);
+  assert.match(workflow, /test "\$status" = 404 && test "\$tag_status" = 404/);
+  assert.match(workflow, /test "\$GITHUB_EVENT_NAME" = schedule/);
+  assert.match(workflow, /echo 'gold_active=false' >> "\$GITHUB_OUTPUT"/);
+  assert.match(workflow, /Gold activation check failed: release status[\s\S]*?exit 1/);
+  assert.match(workflow, /if: steps\.activation\.outputs\.gold_active == 'true'/);
+  assert.match(
+    workflow,
+    /refresh_required: \$\{\{ steps\.activation\.outputs\.gold_active == 'true' && steps\.freshness\.outputs\.refresh_required == 'true' \}\}/,
+  );
+  assert.match(workflow, /if: needs\.inspect\.outputs\.refresh_required == 'true'/);
+});
+
 test('public soak requires four timed 18-pair registry runs and Gold remains human-promoted', () => {
   const soak = readFileSync(join(root, '.github', 'workflows', 'public-registry-soak.yml'), 'utf8');
   assert.match(soak, /^name: Public registry soak$/m);
