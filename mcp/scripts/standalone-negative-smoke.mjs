@@ -2,8 +2,8 @@
 /**
  * Published-tarball NEGATIVE smoke for the Safe Mode standalone store.
  *
- * WHY: the existing claude-connector smoke only proves the happy path — a
- * dangerous payload that is wrongly ACCEPTED still exits 0. This script is the
+ * WHY: a happy-path smoke alone cannot catch a dangerous payload that is
+ * wrongly accepted. This script is the
  * regression guard on the SHIPPED ARTIFACT: it builds the package, imports the
  * BUILT StandaloneStore from dist/ (not src/), and fires a battery of
  * dangerous / out-of-contract payloads at remember() and graphDelta(). Every

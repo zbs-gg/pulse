@@ -1,0 +1,131 @@
+name: Verify Gold publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_run_id:
+        description: Successful Authorize Gold promotion run
+        required: true
+        type: string
+      soak_72_run_id:
+        description: Successful 72-hour public-registry soak run
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact 0.7.0 npm tarball SHA-256
+        required: true
+        type: string
+      confirmation:
+        description: Type "verify pulse 0.7.0 gold publication"
+        required: true
+        type: string
+
+concurrency:
+  group: pulse-verify-gold-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    name: Verify unchanged npm tags, Git tag, release, and generated ledger
+    environment: npm-gold
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PROMOTION_RUN_ID: ${{ inputs.promotion_run_id }}
+      SOAK_72_RUN_ID: ${{ inputs.soak_72_run_id }}
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      GOLD_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Bind successful promotion authorization
+        id: bind
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GOLD_CONFIRMATION" = 'verify pulse 0.7.0 gold publication'
+          [[ "$PROMOTION_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$SOAK_72_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROMOTION_RUN_ID" > "$RUNNER_TEMP/promotion-run.json"
+          test "$(jq -r .path "$RUNNER_TEMP/promotion-run.json")" = '.github/workflows/authorize-gold-promotion.yml'
+          test "$(jq -r .head_branch "$RUNNER_TEMP/promotion-run.json")" = main
+          test "$(jq -r .conclusion "$RUNNER_TEMP/promotion-run.json")" = success
+          gh run download "$PROMOTION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-gold-promotion-authorization --dir "$RUNNER_TEMP/gold"
+          gh run download "$PROMOTION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-gold-promotion-inputs --dir "$RUNNER_TEMP/gold-inputs"
+          commit="$(jq -r .payload.commit "$RUNNER_TEMP/gold/pulse-gold-promotion.json")"
+          [[ "$commit" =~ ^[a-f0-9]{40}$ ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOAK_72_RUN_ID" > "$RUNNER_TEMP/soak-run.json"
+          test "$(jq -r .path "$RUNNER_TEMP/soak-run.json")" = '.github/workflows/public-registry-soak.yml'
+          test "$(jq -r .conclusion "$RUNNER_TEMP/soak-run.json")" = success
+          gh run download "$SOAK_72_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-public-soak-72 --dir "$RUNNER_TEMP/soak-72"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.bind.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Verify preview and latest resolve to unchanged bytes
+        shell: bash
+        run: |
+          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.0
+          test "$(npm view @zbs-gg/pulse dist-tags.latest)" = 0.7.0
+          mkdir "$RUNNER_TEMP/npm-preview" "$RUNNER_TEMP/npm-latest"
+          npm pack @zbs-gg/pulse@preview --pack-destination "$RUNNER_TEMP/npm-preview" --silent
+          npm pack @zbs-gg/pulse@latest --pack-destination "$RUNNER_TEMP/npm-latest" --silent
+          preview=("$RUNNER_TEMP"/npm-preview/*.tgz)
+          latest=("$RUNNER_TEMP"/npm-latest/*.tgz)
+          test "${#preview[@]}" = 1
+          test "${#latest[@]}" = 1
+          test "$(sha256sum "${preview[0]}" | cut -d' ' -f1)" = "$CANDIDATE_SHA256"
+          test "$(sha256sum "${latest[0]}" | cut -d' ' -f1)" = "$CANDIDATE_SHA256"
+          cmp "${preview[0]}" "${latest[0]}"
+      - name: Verify immutable Git tag and public GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.bind.outputs.commit }}
+        shell: bash
+        run: |
+          git fetch --force --tags origin v0.7.0
+          test "$(git rev-parse 'v0.7.0^{commit}')" = "$SOURCE_COMMIT"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.7.0" > "$RUNNER_TEMP/github-release.json"
+          test "$(jq -r .tag_name "$RUNNER_TEMP/github-release.json")" = v0.7.0
+          test "$(jq -r .draft "$RUNNER_TEMP/github-release.json")" = false
+          test "$(jq -r .prerelease "$RUNNER_TEMP/github-release.json")" = false
+      - name: Validate signed promotion and generate ledger only from 72-hour receipts
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          evidence="$(find "$RUNNER_TEMP/soak-72" -type d -name public-evidence -print -quit)"
+          test -n "$evidence"
+          npm run --silent generate:native-support-ledger -- \
+            --evidence "$evidence" \
+            --output "$RUNNER_TEMP/NATIVE_SUPPORT_LEDGER.generated.md" \
+            --promotion "$RUNNER_TEMP/gold/pulse-gold-promotion.json"
+          jq -S -c -n \
+            --arg candidate_sha256 "$CANDIDATE_SHA256" \
+            --arg commit "${{ steps.bind.outputs.commit }}" \
+            '{candidate_sha256:$candidate_sha256,commit:$commit,github_release:"v0.7.0",latest:"0.7.0",preview:"0.7.0",publication_verified:true,schema:"pulse.gold_publication_verification.v1"}' \
+            > "$RUNNER_TEMP/pulse-gold-publication-verification.json"
+      - name: Preserve verification and generated documentation input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-gold-publication-verification
+          path: |
+            ${{ runner.temp }}/NATIVE_SUPPORT_LEDGER.generated.md
+            ${{ runner.temp }}/pulse-gold-publication-verification.json
+          if-no-files-found: error
+          retention-days: 30

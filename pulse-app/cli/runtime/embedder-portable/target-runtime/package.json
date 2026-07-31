@@ -1,0 +1,13 @@
+{
+  "name": "@zbs-gg/pulse-embedder-target-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "onnxruntime-node": "1.24.3"
+  }
+}

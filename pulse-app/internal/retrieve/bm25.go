@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 // BM25Search runs an FTS5 lexical search across events / facts / entities
@@ -25,6 +27,20 @@ import (
 // Returns at most topK event IDs, best first. Empty result if query
 // parses to nothing or DB is nil.
 func BM25Search(ctx context.Context, db *sql.DB, query string, topK int) ([]int64, error) {
+	return BM25SearchScoped(ctx, db, query, topK, nil)
+}
+
+// BM25SearchScoped applies Personal project/global eligibility inside every
+// lexical source before LIMIT or RRF. This is deliberately not a post-filter:
+// an excellent foreign-project match must be unable to crowd an eligible event
+// out of the lexical candidate window.
+func BM25SearchScoped(
+	ctx context.Context,
+	db *sql.DB,
+	query string,
+	topK int,
+	scope *store.PersonalMemoryScopeSnapshot,
+) ([]int64, error) {
 	if db == nil || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -72,7 +88,76 @@ FROM (
 GROUP BY event_id
 ORDER BY best_score ASC
 LIMIT ?2`
-	rows, err := db.QueryContext(ctx, sqlStr, matchExpr, topK*3)
+	args := []any{matchExpr, topK * 3}
+	if scope != nil {
+		sqlStr = `
+WITH eligible_objects AS (
+    SELECT object_id
+      FROM private_memory_objects
+     WHERE lifecycle='active'
+       AND (
+           memory_scope='personal_global' OR
+           (memory_scope='project' AND project_namespace_id=?3)
+       )
+),
+eligible_events(event_id) AS (
+    SELECT capsule.event_id
+      FROM eligible_objects object
+      JOIN memory_capsules capsule ON capsule.id=object.object_id
+     WHERE capsule.event_id IS NOT NULL
+    UNION
+    SELECT CAST(projection.row_ref AS INTEGER)
+      FROM eligible_objects object
+      JOIN private_semantic_projection_rows projection
+        ON projection.object_id=object.object_id
+       AND projection.row_kind='event'
+),
+events_hits AS (
+    SELECT fts.rowid AS event_id, bm25(events_fts) AS score
+      FROM events_fts fts
+      JOIN eligible_events eligible ON eligible.event_id=fts.rowid
+     WHERE events_fts MATCH ?1
+     ORDER BY score LIMIT ?2
+),
+facts_hits AS (
+    SELECT ee.event_id AS event_id, bm25(facts_fts) AS score
+      FROM facts_fts
+      JOIN facts fact ON fact.id=facts_fts.rowid
+      JOIN private_semantic_projection_rows fact_projection
+        ON fact_projection.row_kind='fact'
+       AND fact_projection.row_ref=CAST(fact.id AS TEXT)
+      JOIN eligible_objects fact_object
+        ON fact_object.object_id=fact_projection.object_id
+      JOIN event_entities ee ON ee.entity_id=fact.entity_id
+      JOIN eligible_events eligible ON eligible.event_id=ee.event_id
+     WHERE facts_fts MATCH ?1
+     ORDER BY score LIMIT ?2
+),
+entity_hits AS (
+    SELECT ee.event_id AS event_id, bm25(entities_fts) AS score
+      FROM entities_fts
+      JOIN private_semantic_projection_rows entity_projection
+        ON entity_projection.row_kind='entity'
+       AND entity_projection.row_ref=CAST(entities_fts.rowid AS TEXT)
+      JOIN eligible_objects entity_object
+        ON entity_object.object_id=entity_projection.object_id
+      JOIN event_entities ee ON ee.entity_id=entities_fts.rowid
+      JOIN eligible_events eligible ON eligible.event_id=ee.event_id
+     WHERE entities_fts MATCH ?1
+     ORDER BY score LIMIT ?2
+)
+SELECT event_id, MIN(score) AS best_score
+  FROM (
+      SELECT * FROM events_hits
+      UNION ALL SELECT * FROM facts_hits
+      UNION ALL SELECT * FROM entity_hits
+  )
+ GROUP BY event_id
+ ORDER BY best_score ASC
+ LIMIT ?2`
+		args = []any{matchExpr, topK * 3, scope.ProjectNamespaceID}
+	}
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 query (%q): %w", matchExpr, err)
 	}

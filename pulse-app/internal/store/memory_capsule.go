@@ -10,9 +10,23 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const MemoryCapsuleSchema = "pulse.memory_capsule.v1"
+
+var (
+	credentialJWTPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	credentialBearer     = regexp.MustCompile(`(?i)authorization\s*:\s*bearer\s+[A-Za-z0-9._~-]{12,}`)
+	embeddedPOSIXPath    = regexp.MustCompile(`(?i)(^|[\s"'(=])/(?:etc|tmp|var|opt|usr|bin|sbin|dev|private|applications|library|users|home|volumes)(?:/[A-Za-z0-9._~@%+,:=-]+)+`)
+	genericEmbeddedPath  = regexp.MustCompile(`(?i)(^|[\s"'(=])/(?:[A-Za-z0-9._~@%+,:=-]+/)+(?:[A-Za-z0-9._~@%+,:=-]+\.(?:md|txt|json|ya?ml|toml|ini|conf|env|pem|key|db|sqlite|log|go|js|ts|py|sh)|[A-Za-z0-9._~@%+,:=-]+/[A-Za-z0-9._~@%+,:=-]+)`)
+	highEntropyToken     = regexp.MustCompile(`[A-Za-z0-9_-]{40,}`)
+	transcriptRoleLine   = regexp.MustCompile(`(?im)^\s*(user|assistant|human|system|ai)\s*:`)
+	transcriptRoleJSON   = regexp.MustCompile(`(?i)"role"\s*:\s*"(user|assistant|system)"`)
+	windowsDrivePath     = regexp.MustCompile(`(?i)(^|[\s"'(=])[a-z]:\\(?:[^\\\s]+\\)*[^\\\s]*`)
+	windowsUNCPath       = regexp.MustCompile(`^\\\\[^\\\s]+\\[^\\\s]+`)
+)
 
 // Unicode-aware: tags/slugs may be Cyrillic etc. (RU users). Still excludes
 // whitespace and path/secret-like content (the looksSensitiveOrPathLike guard
@@ -98,13 +112,34 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 	if err := validateMemoryCapsule(capsule); err != nil {
 		return nil, err
 	}
+	if s.storeKind == StoreKindPersonal {
+		return nil, ErrMemoryTrayRequired
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	ids, err := rememberCapsuleTx(tx, capsule)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
 
+func rememberCapsuleTx(tx *sql.Tx, capsule MemoryCapsule) ([]string, error) {
+	return rememberCapsuleTxWithPrivacy(tx, capsule, false)
+}
+
+func rememberPrivateCapsuleTx(tx *sql.Tx, capsule MemoryCapsule) ([]string, error) {
+	return rememberCapsuleTxWithPrivacy(tx, capsule, true)
+}
+
+func rememberCapsuleTxWithPrivacy(tx *sql.Tx, capsule MemoryCapsule, projectPrivate bool) ([]string, error) {
 	ids := make([]string, 0, len(capsule.Items))
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	projectEvents := capsuleEventsEnabled()
@@ -119,13 +154,20 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 		}
 		// Capsule → event projection (migration 032): 'normal' tier items also
 		// get a linked event row so the retrieval engine can surface them.
-		// Sensitive/private stay out of the graph (conservative privacy floor).
+		// Legacy Local Preview keeps sensitive/private out of the graph. Product
+		// Personal vaults are physically isolated, so their already-redacted
+		// private tiers must also be projected or full retrieval would silently
+		// lose the memories users most need continuity for.
 		// The event copies ONLY the already-validated redacted_summary — the
 		// transcript/secret/path guards above have already run.
 		var eventID any
-		if projectEvents && item.PrivacyTier == "normal" {
+		if projectEvents && (projectPrivate || item.PrivacyTier == "normal") {
+			eventTags := append([]string(nil), item.Tags...)
+			if projectPrivate {
+				eventTags = append(eventTags, "privacy:"+item.PrivacyTier)
+			}
 			eid, err := projectCapsuleEvent(tx, item.Kind, item.RedactedSummary,
-				capsule.Source.Timestamp, createdAt, item.Tags)
+				capsule.Source.Timestamp, createdAt, eventTags)
 			if err != nil {
 				return nil, err
 			}
@@ -145,9 +187,6 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 			return nil, fmt.Errorf("insert memory capsule: %w", err)
 		}
 		ids = append(ids, id)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	return ids, nil
 }
@@ -233,19 +272,56 @@ func (s *Store) CapsuleEventDocs(capsuleIDs []string) ([]CapsuleEventDoc, error)
 	return docs, nil
 }
 
-// BackfillCapsuleEvents projects every not-yet-projected 'normal'-tier active
-// capsule into a linked event (idempotent: WHERE event_id IS NULL, so a second
-// run finds nothing). Called once at daemon startup. Returns the docs to
-// embed-index; no-op (nil, nil) when PULSE_CAPSULE_EVENTS is off.
-func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
+func (s *Store) UnindexedHostEventDocs(limit int) ([]CapsuleEventDoc, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`
+		SELECT event.id,
+		       COALESCE(
+		         (SELECT capsule.redacted_summary
+		            FROM memory_capsules capsule
+		           WHERE capsule.event_id=event.id
+		           LIMIT 1),
+		         event.title || CASE
+		           WHEN COALESCE(event.description, '')='' THEN ''
+		           ELSE char(10) || event.description
+		         END)
+		  FROM events event
+		  LEFT JOIN event_embeddings embedding ON embedding.event_id=event.id
+		 WHERE event.scorer_version='host-extracted' AND embedding.event_id IS NULL
+		 ORDER BY event.id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []CapsuleEventDoc
+	for rows.Next() {
+		var doc CapsuleEventDoc
+		if err := rows.Scan(&doc.EventID, &doc.Text); err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+// BackfillCapsuleEventsBatch projects a bounded set of not-yet-projected
+// normal-tier capsules. Keeping each transaction bounded prevents a large
+// existing vault from delaying daemon readiness indefinitely.
+func (s *Store) BackfillCapsuleEventsBatch(limit int) ([]CapsuleEventDoc, error) {
 	if !capsuleEventsEnabled() {
 		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
 	}
 	rows, err := s.db.Query(`
 		SELECT id, kind, redacted_summary, source_timestamp, created_at, tags
 		  FROM memory_capsules
 		 WHERE event_id IS NULL AND privacy_tier='normal' AND status='active'
-		 ORDER BY created_at ASC, id ASC`)
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +371,23 @@ func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
 	return docs, nil
 }
 
+// BackfillCapsuleEvents preserves the complete idempotent store API while
+// executing it as bounded transactions. Product startup uses the batch method
+// directly so it can yield between batches and index from the durable outbox.
+func (s *Store) BackfillCapsuleEvents() ([]CapsuleEventDoc, error) {
+	var all []CapsuleEventDoc
+	for {
+		docs, err := s.BackfillCapsuleEventsBatch(500)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, docs...)
+		if len(docs) < 500 {
+			return all, nil
+		}
+	}
+}
+
 func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) {
 	query := strings.TrimSpace(q.Query)
 	if query == "" {
@@ -312,17 +405,43 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 	}
 	retention := retentionFilter(q.Scope)
 
-	rows, err := s.db.Query(`
+	scope, scoped, err := s.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	querySQL := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
 		 WHERE redacted_summary LIKE ?
 		   AND status = 'active'
-		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
+		   AND privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
 		   AND (? = '' OR retention = ?)
 		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		append([]any{"%" + query + "%"}, append(privacyArgs(ceiling), retention, retention, limit)...)...,
-	)
+		 LIMIT ?`
+	args := append([]any{"%" + query + "%"}, append(privacyArgs(ceiling), retention, retention, limit)...)
+	if scoped {
+		querySQL = `
+			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
+			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
+			  FROM memory_capsules capsule
+			  JOIN private_memory_objects object ON object.object_id=capsule.id
+			 WHERE capsule.redacted_summary LIKE ?
+			   AND capsule.status='active'
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			   AND capsule.privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
+			   AND (? = '' OR capsule.retention = ?)
+			 ORDER BY capsule.created_at DESC
+			 LIMIT ?`
+		args = append(
+			[]any{"%" + query + "%", scope.ProjectNamespaceID},
+			append(privacyArgs(ceiling), retention, retention, limit)...,
+		)
+	}
+	rows, err := s.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -343,10 +462,18 @@ func (s *Store) RecallMemory(q RecallMemoryQuery) ([]RecalledMemoryItem, error) 
 		return out, nil
 	}
 
-	return s.recallMemoryFallback(query, ceiling, retention, limit)
+	var scopePtr *PersonalMemoryScopeSnapshot
+	if scoped {
+		scopePtr = &scope
+	}
+	return s.recallMemoryFallback(query, ceiling, retention, limit, scopePtr)
 }
 
-func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int) ([]RecalledMemoryItem, error) {
+func (s *Store) recallMemoryFallback(
+	query, ceiling, retention string,
+	limit int,
+	scope *PersonalMemoryScopeSnapshot,
+) ([]RecalledMemoryItem, error) {
 	terms := significantTerms(query)
 	if len(terms) == 0 {
 		return []RecalledMemoryItem{}, nil
@@ -369,15 +496,47 @@ func (s *Store) recallMemoryFallback(query, ceiling, retention string, limit int
 	args = append(args, likeArgs...)             // ORDER BY term-coverage score
 	args = append(args, limit)
 
-	rows, err := s.db.Query(`
+	querySQL := `
 		SELECT id, redacted_summary, kind, confidence, privacy_tier, retention, tags, created_at
 		  FROM memory_capsules
-		 WHERE (`+strings.Join(where, " OR ")+`)
+		 WHERE (` + strings.Join(where, " OR ") + `)
 		   AND status = 'active'
-		   AND privacy_tier IN (`+privacyPlaceholders(ceiling)+`)
+		   AND privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
 		   AND (? = '' OR retention = ?)
-		 ORDER BY (`+strings.Join(score, " + ")+`) DESC, created_at DESC
-		 LIMIT ?`, args...)
+		 ORDER BY (` + strings.Join(score, " + ") + `) DESC, created_at DESC
+		 LIMIT ?`
+	if scope != nil {
+		scopedWhere := make([]string, len(where))
+		scopedScore := make([]string, len(score))
+		for index := range where {
+			scopedWhere[index] = strings.ReplaceAll(where[index], "redacted_summary", "capsule.redacted_summary")
+			scopedScore[index] = strings.ReplaceAll(score[index], "redacted_summary", "capsule.redacted_summary")
+		}
+		querySQL = `
+			SELECT capsule.id, capsule.redacted_summary, capsule.kind, capsule.confidence,
+			       capsule.privacy_tier, capsule.retention, capsule.tags, capsule.created_at
+			  FROM memory_capsules capsule
+			  JOIN private_memory_objects object ON object.object_id=capsule.id
+			 WHERE (` + strings.Join(scopedWhere, " OR ") + `)
+			   AND capsule.status='active'
+			   AND object.lifecycle='active'
+			   AND (
+			       object.memory_scope='personal_global' OR
+			       (object.memory_scope='project' AND object.project_namespace_id=?)
+			   )
+			   AND capsule.privacy_tier IN (` + privacyPlaceholders(ceiling) + `)
+			   AND (? = '' OR capsule.retention = ?)
+			 ORDER BY (` + strings.Join(scopedScore, " + ") + `) DESC, capsule.created_at DESC
+			 LIMIT ?`
+		args = make([]any, 0, len(terms)*2+4)
+		args = append(args, likeArgs...)
+		args = append(args, scope.ProjectNamespaceID)
+		args = append(args, privacyArgs(ceiling)...)
+		args = append(args, retention, retention)
+		args = append(args, likeArgs...)
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -429,6 +588,9 @@ func (s *Store) ExportMemory() (MemoryExport, error) {
 }
 
 func (s *Store) ImportMemory(in MemoryExport) ([]string, error) {
+	if s.productTrayRequired() {
+		return nil, ErrMemoryTrayRequired
+	}
 	ids := make([]string, 0, len(in.Items))
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -497,6 +659,9 @@ func (s *Store) ImportMemory(in MemoryExport) ([]string, error) {
 }
 
 func (s *Store) DeleteMemory(id string) error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("id is required")
 	}
@@ -521,6 +686,9 @@ func (s *Store) DeleteMemory(id string) error {
 }
 
 func (s *Store) WipeMemory() error {
+	if s.productTrayRequired() {
+		return ErrMemoryTrayRequired
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -580,6 +748,15 @@ func wipeHostExtractedGraph(tx *sql.Tx) error {
 
 func (s *Store) MemoryStatus() (MemoryStoreStatus, error) {
 	var status MemoryStoreStatus
+	if s.storeKind == StoreKindPersonal {
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*), COALESCE(MAX(created_at), '')
+			  FROM private_memory_objects WHERE lifecycle='active'`,
+		).Scan(&status.ItemCount, &status.LastWrite); err != nil {
+			return status, err
+		}
+		return status, nil
+	}
 	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(created_at), '') FROM memory_capsules`).Scan(&status.ItemCount, &status.LastWrite); err != nil {
 		return status, err
 	}
@@ -627,6 +804,9 @@ func validateMemoryCapsule(capsule MemoryCapsule) error {
 		}
 		if looksSensitiveOrPathLike(summary) {
 			return fmt.Errorf("items[%d].redacted_summary contains secret/path-like text", i)
+		}
+		if looksLikeEphemeralControl(summary) {
+			return fmt.Errorf("items[%d].redacted_summary looks like ephemeral evaluation control", i)
 		}
 		if item.Confidence < 0 || item.Confidence > 1 {
 			return fmt.Errorf("items[%d].confidence must be 0..1", i)
@@ -725,15 +905,42 @@ func validRetention(retention string) bool {
 
 func looksLikeTranscript(text string) bool {
 	lower := strings.ToLower(text)
-	return strings.Count(lower, "user:") >= 3 ||
+	return len(transcriptRoleLine.FindAllStringIndex(text, -1)) >= 1 ||
+		len(transcriptRoleJSON.FindAllStringIndex(text, -1)) >= 1 ||
+		strings.Count(lower, "user:") >= 3 ||
 		strings.Count(lower, "assistant:") >= 3 ||
 		strings.Count(lower, "\n") > 30
 }
 
-func looksSensitiveOrPathLike(text string) bool {
+func looksLikeEphemeralControl(text string) bool {
 	lower := strings.ToLower(text)
+	return strings.Contains(lower, "no_auto_context") ||
+		((strings.Contains(lower, "answer with") || strings.Contains(lower, "return")) &&
+			strings.Contains(lower, "exact injected marker"))
+}
+
+func looksSensitiveOrPathLike(text string) bool {
+	if !norm.NFC.IsNormalString(text) || containsUnsafeMemoryUnicode(text) {
+		return true
+	}
+	lower := strings.ToLower(text)
+	trimmed := strings.TrimSpace(lower)
+	if credentialJWTPattern.MatchString(text) || credentialBearer.MatchString(text) ||
+		embeddedPOSIXPath.MatchString(text) || genericEmbeddedPath.MatchString(text) || looksLikeHighEntropyCredential(text) {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "~/") ||
+		strings.HasPrefix(trimmed, "./") || strings.HasPrefix(trimmed, "../") ||
+		windowsDrivePath.MatchString(" "+trimmed) || windowsUNCPath.MatchString(trimmed) ||
+		strings.Contains(trimmed, `\users\`) || strings.Contains(trimmed, `\.ssh\`) {
+		return true
+	}
 	for _, marker := range []string{
 		"/users/",
+		"/home/",
+		"/volumes/",
+		"/.ssh/",
+		"../",
 		"file://",
 		"token=",
 		"api_key",
@@ -746,8 +953,63 @@ func looksSensitiveOrPathLike(text string) bool {
 		"akia",
 		"xoxb-",
 		"ghp_",
+		"gho_",
+		"ghu_",
+		"ghs_",
+		"github_pat_",
+		"aiza",
+		"ya29.",
+		"xoxp-",
+		"xapp-",
 	} {
 		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUnsafeMemoryUnicode(text string) bool {
+	for _, r := range text {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return true
+		case r >= 0x200b && r <= 0x200f:
+			return true
+		case r >= 0x2028 && r <= 0x202e:
+			return true
+		case r >= 0x2060 && r <= 0x2069:
+			return true
+		case r == 0xfeff:
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeHighEntropyCredential(text string) bool {
+	for _, token := range highEntropyToken.FindAllString(text, -1) {
+		var lower, upper, digit, separator bool
+		hexOnly := true
+		for _, char := range token {
+			switch {
+			case char >= 'a' && char <= 'z':
+				lower = true
+			case char >= 'A' && char <= 'Z':
+				upper = true
+			case char >= '0' && char <= '9':
+				digit = true
+			case char == '_' || char == '-':
+				separator = true
+			}
+			if !((char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F') || (char >= '0' && char <= '9')) {
+				hexOnly = false
+			}
+		}
+		if (hexOnly && len(token) >= 64) ||
+			(lower && upper && digit && (separator || len(token) >= 48)) ||
+			(len(token) >= 48 && lower && (digit || separator)) ||
+			(len(token) >= 56 && lower) {
 			return true
 		}
 	}

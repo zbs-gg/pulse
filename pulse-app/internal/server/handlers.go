@@ -208,8 +208,12 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "retrieval error", http.StatusInternalServerError)
 		return
 	}
+	eventIDs := resp.EventIDs
+	if eventIDs == nil {
+		eventIDs = []int64{}
+	}
 	out := retrieveResponse{
-		EventIDs:             resp.EventIDs,
+		EventIDs:             eventIDs,
 		ModeUsed:             string(resp.ModeUsed),
 		Confidence:           resp.RouterDecision.Confidence,
 		Classifier:           resp.RouterDecision.Classifier,

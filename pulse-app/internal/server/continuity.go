@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html"
 	"net/http"
+	"path/filepath"
 	"strconv"
 
 	"github.com/nkkmnk/pulse/internal/store"
@@ -27,12 +28,56 @@ func (s *Server) handleContinuityResume(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	resume, err := s.cfg.Store.BuildResume(req)
-	if err != nil {
-		http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+	if s.cfg.Store.StoreKind() != store.StoreKindPersonal {
+		resume, err := s.cfg.Store.BuildResume(req)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resume)
 		return
 	}
-	writeJSON(w, resume)
+	if s.cfg.ProductBindingVerifier == nil {
+		resume, err := s.cfg.Store.BuildResume(req)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resume)
+		return
+	}
+	authority, ok := s.requireProductBindingAuthority(w, r)
+	if !ok {
+		return
+	}
+	if err := s.cfg.Store.RegisterPersonalProjectLabel(
+		authority.RepositoryID, filepath.Base(authority.Workspace),
+	); err != nil {
+		http.Error(w, "continuity resume authority unavailable", http.StatusForbidden)
+		return
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		scope, err := s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(
+			authority.BindingDigest, authority.RepositoryID,
+		)
+		if err != nil {
+			http.Error(w, "continuity resume authority unavailable", http.StatusForbidden)
+			return
+		}
+		resume, err := s.cfg.Store.BuildResumeForPersonalScope(req, scope)
+		if err != nil {
+			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		latest, err := s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(
+			authority.BindingDigest, authority.RepositoryID,
+		)
+		if err == nil && latest.EligibilityRevision == scope.EligibilityRevision {
+			writeJSON(w, resume)
+			return
+		}
+	}
+	http.Error(w, "continuity eligibility changed; retry", http.StatusConflict)
 }
 
 func (s *Server) handleContinuityCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +115,7 @@ func (s *Server) handleContinuityObserve(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleViewerData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	budget, _ := strconv.Atoi(r.URL.Query().Get("token_budget"))
 	data, err := s.cfg.Store.ViewerData(store.ResumeQuery{
 		ThreadID:    r.URL.Query().Get("thread_id"),
@@ -104,11 +150,13 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 		host = s.cfg.Billing.Host
 	}
 	hostName := viewerHostDisplayName(host)
+	productDestructiveOpsLocked := s.cfg.Store.StoreKind() == store.StoreKindPersonal
+	productDestructiveOpsLockedAttr := strconv.FormatBool(productDestructiveOpsLocked)
 	firstRunAttr := "false"
 	firstRunHTML := ""
 	if r.URL.Query().Get("first_run") == "1" {
 		firstRunAttr = "true"
-		firstRunHTML = viewerFirstRunHTML(hostName)
+		firstRunHTML = viewerFirstRunHTML(hostName, productDestructiveOpsLocked)
 	}
 	rawRefs := "disabled"
 	if s.cfg.Billing.RawCaptureEnabled {
@@ -125,6 +173,33 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	rawLine := "Raw transcript capture is off."
 	if s.cfg.Billing.RawCaptureEnabled {
 		rawLine = "Raw refs are enabled for this local setup."
+	}
+	wipeControlsHTML := `<div class="controls"><input id="wipe-confirm" placeholder='type: wipe pulse memory'><button id="wipe-button">Wipe</button></div>
+        <div id="wipe-status" class="muted"></div>`
+	deleteControlsHTML := `<div class="controls"><input id="delete-id" placeholder="pulse:id"><button id="delete-button">Delete</button></div>
+        <div id="delete-status" class="muted"></div>`
+	deleteScriptHTML := `document.getElementById("delete-button").addEventListener("click", async () => {
+  const id = document.getElementById("delete-id").value.trim();
+  if (!id) return;
+  await postJSON("/memory/delete", { id });
+  document.getElementById("delete-status").textContent = "Deleted " + id;
+});`
+	wipeScriptHTML := `document.getElementById("wipe-button").addEventListener("click", async () => {
+  const confirm = document.getElementById("wipe-confirm").value.trim();
+  if (confirm !== "wipe pulse memory") {
+    document.getElementById("wipe-status").textContent = "Type the exact confirmation phrase.";
+    return;
+  }
+  await postJSON("/memory/wipe", { confirm });
+  document.getElementById("wipe-status").textContent = "Wiped Pulse memory and continuity.";
+});`
+	if productDestructiveOpsLocked {
+		deleteControlsHTML = `<button id="delete-button" disabled>OS confirmation required</button>
+        <div id="delete-status" class="muted">Product memory deletion stays locked until the privileged OS-backed Pulse surface is active.</div>`
+		deleteScriptHTML = ""
+		wipeControlsHTML = `<button id="wipe-button" disabled>OS confirmation required</button>
+        <div id="wipe-status" class="muted">Product vault wipe stays locked until the privileged OS-backed Pulse surface is active.</div>`
+		wipeScriptHTML = ""
 	}
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -210,6 +285,11 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
     .action-card { padding:16px; border-radius:var(--radius); background:rgba(255,255,255,.58); border:1px solid rgba(86,70,86,.10); }
     .action-card h3 { font-size:17px; }
     .action-card p { margin-top:7px; font-size:14px; }
+	.tray-grid { display:grid; gap:10px; }
+	.tray-card { padding:14px; border-radius:var(--radius); background:rgba(255,255,255,.62); border:1px solid rgba(86,70,86,.12); }
+	.tray-card pre { margin:10px 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; border-radius:var(--radius); background:rgba(255,255,255,.72); }
+	.tray-meta, .tray-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+	.tray-actions button { margin-top:0; }
 	    .action-card button, .action-card a { display:inline-flex; align-items:center; justify-content:center; min-height:40px; margin-top:12px; padding:8px 13px; border-radius:999px; border:1px solid rgba(141,111,131,.22); background:rgba(255,255,255,.84); color:#5f4f5b; text-decoration:none; }
 	    .action-card.primary-action { background:linear-gradient(135deg,rgba(255,255,255,.72),rgba(223,241,229,.54)); }
 	    .action-card.primary-action button { background:#6f5d69; border-color:#6f5d69; color:white; box-shadow:0 8px 14px rgba(111,93,105,.14); }
@@ -269,14 +349,14 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 		    @media (max-width:620px) { main { padding:14px 12px 32px; } .surface { padding:16px; } h1 { font-size:28px; } .subtitle { margin-top:10px; font-size:15px; } .pulse-ecg { grid-template-columns:1fr; } .status-row { gap:6px; margin-top:16px; } .hero { min-height:auto; } .panel-head { display:block; } .panel-head .label { margin-top:10px; } .path-summary { display:block; margin:5px 0 0; } .resume-card { min-height:150px; max-height:150px; padding:12px; } .stepper, .journey, .action-grid, .activity-grid, .metrics, .controls, .proof-grid, .wizard-grid, .thread-grid, .decision-grid, .gate-grid, .source-scan-grid, .state-signal-grid { grid-template-columns:1fr; } }
 	  </style>
 	</head>
-	<body data-design="pulse-first-run-home-v0" data-flow="pulse-onboarding-v2" data-first-run="` + firstRunAttr + `">
+	<body data-design="pulse-first-run-home-v0" data-flow="pulse-onboarding-v2" data-first-run="` + firstRunAttr + `" data-destructive-ops-locked="` + productDestructiveOpsLockedAttr + `">
 	<main>
   <header class="top">
 	    <section class="surface hero">
 	      <div>
 	        <span class="label">Pulse Home</span>
 	        <h1>Pulse keeps the thread</h1>
-	        <p class="subtitle">Pulse is working locally. Check what Pulse will tell Claude next, then start a live memory proof. Old chat import can wait.</p>
+	        <p class="subtitle">Pulse is working locally. Inspect the next bounded continuity pack, then start a live memory proof. Old chat import can wait.</p>
 	      </div>
 	      <div class="pulse-ecg" data-motion="pulse-ecg" aria-label="Pulse is breathing locally.">
 	        <div class="pulse-ecg-track" aria-hidden="true">
@@ -288,9 +368,8 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	      </div>
 	      <div class="status-row" aria-label="Pulse trust status">
         <span class="label"><strong>Pulse is alive</strong></span>
-        <span class="label">Claude Code connected</span>
-        <span class="label">MCP configured</span>
-        <span class="label">hooks installed</span>
+		<span class="label">bound local vault</span>
+		<span class="label">harness readiness: see doctor</span>
         <span class="label">raw refs ` + rawRefs + `</span>
         <span class="label">backend LLM ` + backend + `</span>
         <span class="label">local SQLite</span>
@@ -300,12 +379,12 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
     <section class="surface">
       <div class="panel-head">
         <div>
-          <h2>What Pulse will tell Claude next</h2>
+		  <h2>What Pulse will provide next</h2>
           <p>You can inspect this before every new session.</p>
         </div>
         <span class="label" id="resume-budget">bounded</span>
       </div>
-      <div id="resume-summary" class="resume-summary">Pulse will tell Claude: No resume block yet. Start with one proof memory before importing archives.</div>
+	  <div id="resume-summary" class="resume-summary">Pulse will provide: No resume block yet. Start with one proof memory before importing archives.</div>
       <div id="harness-digest-panel" class="harness-digest" hidden>
         <div class="harness-digest-title">🌱 Across your harnesses</div>
         <ul id="harness-digest" class="harness-digest-list"></ul>
@@ -313,25 +392,30 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
       <details class="raw-resume">
         <summary>View raw resume block</summary>
         <pre id="resume" class="resume-card">No resume block yet.
-Start a Claude Code session or import one small source.
+	Start a connected harness session or import one small source.
 Pulse will show the next resume block here before it is injected.</pre>
       </details>
 	    </section>
 	  </header>
 ` + firstRunHTML + `
 
+	<section class="surface section-gap" id="memory-tray-panel">
+	  <div class="panel-head"><div><h2>Memory Tray</h2><p>Exact private candidates appear here before canonical commit. Destination is fixed by workspace binding.</p></div><span class="label" id="memory-tray-count">0 candidates</span></div>
+	  <div id="memory-tray" class="tray-grid"><p>No private writes are waiting.</p></div>
+	</section>
+
 	  <details class="surface onboarding-path">
-    <summary>Onboarding path <span class="path-summary">Connected -> Try first memory -> Import later</span></summary>
+	    <summary>Onboarding path <span class="path-summary">Bound vault -> Verify harness -> Try first memory -> Import later</span></summary>
     <div class="path-groups">
       <section class="path-group"><h3>Now</h3><div class="stepper" aria-label="Now">
-        <div class="step"><b data-step="1">Connected</b><span>Pulse is local, MCP is configured, hooks are installed.</span></div>
+	        <div class="step"><b data-step="1">Bound vault</b><span>Pulse is serving this local vault. Run doctor to verify the active harness MCP and hooks.</span></div>
         <div class="step"><b data-step="2">Proof</b><span>Save one decision and recall it in a fresh session.</span></div>
       </div></section>
       <section class="path-group"><h3>Later</h3><div class="stepper" aria-label="Later">
         <div class="step"><b data-step="3">Import</b><span>Optional old chats, always previewed first.</span></div>
         <div class="step"><b data-step="4">Preview</b><span>Threads, decisions, open loops, and resume size.</span></div>
         <div class="step"><b data-step="5">Review</b><span>Confirm, edit, ignore, mark private, or merge.</span></div>
-        <div class="step"><b data-step="6">Resume</b><span>Inspect what Claude will receive next time.</span></div>
+		<div class="step"><b data-step="6">Resume</b><span>Inspect what the next bound session will receive.</span></div>
       </div></section>
     </div>
   </details>
@@ -342,7 +426,7 @@ Pulse will show the next resume block here before it is injected.</pre>
 	      <article class="action-card primary-action" data-primary-action="first-memory-proof">
 	        <span class="label">Try first memory</span>
 	        <h3 class="section-gap">Start first memory proof</h3>
-	        <p>Save one decision, open a fresh Claude Code session, and see Pulse resume it.</p>
+	        <p>Save one decision, open a fresh bound session, and see Pulse resume it.</p>
 	        <button type="button" class="copy-command" data-copy="Remember this in Pulse: Atlas must not own the People Graph; Pulse owns portable continuity memory.">Copy proof prompt</button>
 	      </article>
 	      <article class="action-card secondary-action" data-secondary-action="import-later">
@@ -357,13 +441,13 @@ Pulse will show the next resume block here before it is injected.</pre>
     <div class="panel-head"><div><h2>First memory proof</h2><p>Use this before archive migration. It proves Pulse is useful without importing anything scary.</p></div></div>
     <h3>Proof checklist</h3>
     <div class="proof-grid section-gap">
-      <article class="mini-card"><b>Remember one decision</b><p>Ask Claude Code to save a small project decision into Pulse.</p></article>
-      <article class="mini-card"><b>Open a fresh session</b><p>Start a new Claude Code chat without re-explaining the project.</p></article>
+	  <article class="mini-card"><b>Remember one decision</b><p>Ask the connected harness to save a small project decision into Pulse.</p></article>
+	  <article class="mini-card"><b>Open a fresh session</b><p>Start a new bound session without re-explaining the project.</p></article>
       <article class="mini-card"><b>Confirm recall</b><p>Ask what Pulse remembers and compare it with the resume block above.</p></article>
     </div>
     <div class="journey" aria-label="First memory proof">
-      <article class="mini-card"><b>Save one decision</b><p>Ask Claude Code: “Remember that Atlas must not own People Graph.”</p></article>
-      <article class="mini-card"><b>Start fresh</b><p>Open a new Claude Code session and ask what Pulse remembers about Atlas and People Graph.</p></article>
+	      <article class="mini-card"><b>Save one decision</b><p>Ask the connected harness: “Remember that Atlas must not own People Graph.”</p></article>
+	      <article class="mini-card"><b>Start fresh</b><p>Open a new bound harness session and ask what Pulse remembers about Atlas and People Graph.</p></article>
     </div>
   </section>
 
@@ -383,7 +467,7 @@ Pulse will show the next resume block here before it is injected.</pre>
     <section class="section-gap">
       <h3>What should Pulse learn from?</h3>
       <div class="wizard-grid section-gap">
-        <article class="source-option"><h3>Claude Code sessions</h3><p>Connector installed. Sessions are not scanned yet.</p><span class="label">preview later</span></article>
+		<article class="source-option"><h3>Claude Code sessions</h3><p>Connector available. Run doctor for actual connection status; sessions are not scanned yet.</p><span class="label">preview later</span></article>
         <article class="source-option"><h3>Codex sessions</h3><p>Connector available. Sessions are not scanned yet.</p><span class="label">preview later</span></article>
         <article class="source-option"><h3>ChatGPT export</h3><p>Archive zip from settings export, never raw-imported.</p><span class="label">waiting</span></article>
         <article class="source-option"><h3>Claude export</h3><p>Downloaded archive, reviewed locally before commit.</p><span class="label">waiting</span></article>
@@ -536,13 +620,11 @@ Pulse will show the next resume block here before it is injected.</pre>
     <div class="trust-tools">
       <div class="stack">
         <h3>Delete memory</h3>
-        <div class="controls"><input id="delete-id" placeholder="pulse:id"><button id="delete-button">Delete</button></div>
-        <div id="delete-status" class="muted"></div>
+		` + deleteControlsHTML + `
       </div>
       <div class="stack">
         <h3>Wipe memory</h3>
-        <div class="controls"><input id="wipe-confirm" placeholder='type: wipe pulse memory'><button id="wipe-button">Wipe</button></div>
-        <div id="wipe-status" class="muted"></div>
+        ` + wipeControlsHTML + `
       </div>
     </div>
   </section>
@@ -643,7 +725,7 @@ function resumeSummary(data) {
   const sections = data?.next_resume?.sections || {};
   const where = firstText(sections.where_we_left_off, "Start with one proof memory before importing archives.");
   const decision = firstText(sections.active_decisions, "Import is optional and private by default.");
-  return "Pulse will tell Claude: " + where + " " + decision;
+	return "Pulse will provide: " + where + " " + decision;
 }
 function renderHarnessDigest(data) {
   const items = asArray(data?.next_resume?.sections?.harness_activity);
@@ -670,14 +752,12 @@ function updateTokenHeart(data) {
   const el = document.getElementById("context-heart-copy");
   if (!el) return;
   const economy = data?.next_resume?.token_economy || {};
-  const saved = Number(economy.estimated_saved_tokens || 0);
-  const resume = Number(economy.resume_tokens || data?.next_resume?.token_estimate || 0);
-  const raw = Number(economy.estimated_raw_tokens || 0);
-  if (economy.estimated && saved > 0 && raw > 0) {
-    el.textContent = "♥ estimated " + formatApproxTokens(saved) + " tokens avoided. Pulse resume: approx. " + formatApproxTokens(resume) + " tokens.";
+	const offered = Number(economy.pulse_tokens || data?.next_resume?.token_estimate || 0);
+	if (offered > 0) {
+		el.textContent = "♥ Local Pulse context: " + formatApproxTokens(offered) + " tokens by " + String(economy.method_id || "local count") + ". Savings need comparable delivery receipts.";
     return;
   }
-  el.textContent = "Token savings appear after your first resume.";
+	el.textContent = "Token economy is collecting a comparable baseline.";
 }
 function updateFirstMemory(data) {
   const title = document.querySelector("[data-first-memory-title]");
@@ -686,17 +766,20 @@ function updateFirstMemory(data) {
   const id = document.querySelector("[data-first-memory-id]");
   const status = document.querySelector("[data-memory-action-status]");
   const forget = document.querySelector('[data-first-memory-action="forget"]');
+	const destructiveOpsLocked = document.body.dataset.destructiveOpsLocked === "true";
   const firstMemory = data?.first_memory || {};
   if (firstMemory.status === "saved" && firstMemory.id) {
     currentFirstMemoryID = firstMemory.id;
     title.textContent = "Your first memory is saved";
-    if (summary) summary.textContent = "“" + (firstMemory.summary || "You installed Pulse MCP and connected it to this host.") + "”";
+    if (summary) summary.textContent = "“" + (firstMemory.summary || "No saved structured memory is loaded yet.") + "”";
     if (id) {
       id.hidden = false;
       id.textContent = "Memory ID: " + firstMemory.id;
     }
-    if (status) status.textContent = "Saved locally. You can forget this memory from here.";
-    if (forget) forget.textContent = "Forget";
+	if (status) status.textContent = destructiveOpsLocked
+	  ? "Saved locally. Forgetting requires the privileged OS-backed Pulse surface."
+	  : "Saved locally. You can forget this memory from here.";
+	if (forget && !destructiveOpsLocked) forget.textContent = "Forget";
     return;
   }
   currentFirstMemoryID = "";
@@ -705,8 +788,8 @@ function updateFirstMemory(data) {
     id.hidden = true;
     id.textContent = "";
   }
-  if (status) status.textContent = "Pending until the local Pulse daemon saves it.";
-  if (forget) forget.textContent = "Hide in this preview";
+	if (status) status.textContent = "Nothing is pending until a harness submits a visible Memory Tray candidate.";
+	if (forget && !destructiveOpsLocked) forget.textContent = "Hide in this preview";
 }
 function emotionLabel(value) {
   switch (value) {
@@ -731,7 +814,7 @@ async function saveEmotionFeedback(value) {
   const label = emotionLabel(value);
   status.textContent = "Saving confirmed feedback locally...";
   try {
-    await postJSON("/memory/remember", {
+    const result = await postJSON("/memory/remember", {
       schema: "pulse.memory_capsule.v1",
       source: {
         host: "pulse-cli",
@@ -749,7 +832,10 @@ async function saveEmotionFeedback(value) {
       }],
       raw_input_included: false
     });
-    status.textContent = "Saved as emotional feedback. You can edit or delete it anytime.";
+    const pending = safeArray(result?.receipts).find(receipt => receipt.status === "pending");
+    status.textContent = pending
+      ? "Visible in Memory Tray and not saved yet. Receipt " + pending.receipt_id + "."
+      : "Saved as emotional feedback. You can edit or delete it anytime.";
   } catch (err) {
     status.textContent = "Could not persist yet. This stays local to the preview until Pulse accepts feedback.";
   }
@@ -907,19 +993,91 @@ function renderGraphProfile(data) {
   const status = document.getElementById("graph-filter-status");
   status.textContent = query ? 'Filtered graph memory by "' + query + '".' : "Showing reviewed graph memory.";
 }
+function renderMemoryTray(candidates) {
+  const root = document.getElementById("memory-tray");
+  const count = document.getElementById("memory-tray-count");
+  const items = safeArray(candidates);
+  count.textContent = String(items.length) + (items.length === 1 ? " candidate" : " candidates");
+  root.replaceChildren();
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No private writes are waiting.";
+    root.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const card = document.createElement("article");
+    card.className = "tray-card";
+    const meta = document.createElement("div");
+    meta.className = "tray-meta";
+	    for (const text of [item.latest_receipt?.status || item.state, item.operation, item.current ? "current" : "historical", item.destination_class, item.projection_status, "v" + item.version, item.latest_receipt?.receipt_id || "no receipt"]) {
+      const tag = document.createElement("span");
+      tag.className = "label";
+      tag.textContent = text;
+      meta.appendChild(tag);
+    }
+    const exact = document.createElement("pre");
+    exact.textContent = JSON.stringify(item.candidate, null, 2);
+    card.append(meta, exact);
+    const history = safeArray(item.receipt_history);
+    const historyDetails = document.createElement("details");
+    const historySummary = document.createElement("summary");
+    historySummary.textContent = "Receipt history (" + history.length + ")";
+    const historyList = document.createElement("ul");
+    for (const receipt of history) {
+      const row = document.createElement("li");
+      row.textContent = [receipt.status, receipt.receipt_id, receipt.object_id || "no object", receipt.reason_code || ""].filter(Boolean).join(" / ");
+      historyList.appendChild(row);
+    }
+    historyDetails.append(historySummary, historyList);
+    card.appendChild(historyDetails);
+    if (item.state === "pending") {
+      const actions = document.createElement("div");
+      actions.className = "tray-actions";
+	      const edit = document.createElement("button");
+	      edit.type = "button";
+	      edit.textContent = "Edit exact candidate";
+	      edit.dataset.trayEdit = item.candidate_id;
+	      edit.dataset.version = String(item.version);
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.dataset.trayCancel = item.candidate_id;
+      cancel.dataset.version = String(item.version);
+	      actions.appendChild(edit);
+	      actions.appendChild(cancel);
+      card.appendChild(actions);
+    }
+	    if (item.state === "committed" && item.current && item.latest_receipt?.object_id && item.latest_receipt?.reason_code !== "user_deleted" && (item.candidate?.capsule || item.candidate?.semantic_delta)) {
+	      const actions = document.createElement("div");
+	      actions.className = "tray-actions";
+	      const correct = document.createElement("button");
+	      correct.type = "button";
+	      correct.textContent = "Correct committed memory";
+	      correct.dataset.memoryCorrect = item.latest_receipt.object_id;
+	      correct.dataset.candidateId = item.candidate_id;
+	      actions.appendChild(correct);
+	      card.appendChild(actions);
+	    }
+    root.appendChild(card);
+  }
+}
+let viewerLoadInFlight = false;
 async function loadViewerData() {
+  if (viewerLoadInFlight) return;
+  viewerLoadInFlight = true;
   try {
     const resp = await fetch("/viewer/data?key=" + encodeURIComponent(key) + "&thread_id=" + encodeURIComponent(thread));
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
     viewerData = data;
     const estimate = data.next_resume?.token_estimate || 0;
-    document.getElementById("resume").textContent = data.next_resume?.resume_markdown || "No resume block yet.\nStart a Claude Code session or import one small source.\nPulse will show the next resume block here before it is injected.";
+	document.getElementById("resume").textContent = data.next_resume?.resume_markdown || "No resume block yet.\nStart a connected harness session or import one small source.\nPulse will show the next resume block here before it is injected.";
     document.getElementById("resume-summary").textContent = resumeSummary(data);
     renderHarnessDigest(data);
     document.getElementById("resume-budget").textContent = String(estimate) + " tokens";
-    const economy = data.next_resume?.token_economy || {};
-    document.getElementById("resume-token-economy").textContent = String(economy.resume_tokens || estimate) + " tokens";
+		const economy = data.next_resume?.token_economy || {};
+		document.getElementById("resume-token-economy").textContent = String(economy.pulse_tokens || estimate) + " local tokens";
     updateTokenHeart(data);
     updateFirstMemory(data);
     list("open-loops", data.open_loops);
@@ -929,12 +1087,64 @@ async function loadViewerData() {
 	    list("activity-log", data.activity, activityLabel, "No activity yet. Save one memory or start a new session to see what Pulse did.");
 	    updateActivityState(data);
 	    renderGraphProfile(data);
+    renderMemoryTray(data.memory_tray);
     renderHiddenEntities(data.hidden_entities);
   } catch (err) {
     document.getElementById("resume").textContent = "Viewer error: " + err.message;
+  } finally {
+    viewerLoadInFlight = false;
   }
 }
 loadViewerData();
+const viewerRefreshTimer = window.setInterval(() => {
+  if (!document.hidden) loadViewerData();
+}, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) loadViewerData();
+});
+window.addEventListener("beforeunload", () => window.clearInterval(viewerRefreshTimer));
+document.getElementById("memory-tray").addEventListener("click", async event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+	if (button.dataset.memoryCorrect) {
+	  const item = safeArray(viewerData?.memory_tray).find(value => value.candidate_id === button.dataset.candidateId);
+	  if (!item) return;
+	  const currentJSON = JSON.stringify(item.candidate, null, 2);
+	  const replacementJSON = window.prompt("Correct the exact structured memory. It returns to the Tray for 10 seconds before replacing the same object ID.", currentJSON);
+	  if (replacementJSON === null || replacementJSON === currentJSON) return;
+	  let candidate;
+	  try { candidate = JSON.parse(replacementJSON); } catch { window.alert("Correction must be valid JSON."); return; }
+	  await postJSON("/memory/" + encodeURIComponent(button.dataset.memoryCorrect) + "/correct", { candidate });
+	  await loadViewerData();
+	  return;
+	}
+  const candidateID = button.dataset.trayCancel || button.dataset.trayEdit;
+  const version = Number(button.dataset.version || 0);
+  if (!candidateID || version < 1) return;
+  if (button.dataset.trayCancel) {
+    await postJSON("/memory/tray/" + encodeURIComponent(candidateID) + "/cancel", { expected_version: version });
+    await loadViewerData();
+    return;
+  }
+  const item = safeArray(viewerData?.memory_tray).find(value => value.candidate_id === candidateID);
+  if (!item) return;
+	let candidate;
+	if (item.candidate?.capsule) {
+	  const current = item.candidate.capsule.items?.[0]?.redacted_summary;
+	  if (typeof current !== "string") return;
+	  const replacement = window.prompt("Edit the exact redacted summary. The 10 second grace period restarts.", current);
+	  if (replacement === null || replacement === current) return;
+	  candidate = JSON.parse(JSON.stringify(item.candidate));
+	  candidate.capsule.items[0].redacted_summary = replacement;
+	} else {
+	  const currentJSON = JSON.stringify(item.candidate, null, 2);
+	  const replacementJSON = window.prompt("Edit the exact structured semantic candidate. The 10 second grace period restarts.", currentJSON);
+	  if (replacementJSON === null || replacementJSON === currentJSON) return;
+	  try { candidate = JSON.parse(replacementJSON); } catch { window.alert("Candidate must be valid JSON."); return; }
+	}
+  await postJSON("/memory/tray/" + encodeURIComponent(candidateID) + "/edit", { expected_version: version, candidate });
+  await loadViewerData();
+});
 document.getElementById("graph-filter").addEventListener("input", () => renderGraphProfile(viewerData));
 document.getElementById("graph-filter-clear").addEventListener("click", () => {
   document.getElementById("graph-filter").value = "";
@@ -946,21 +1156,8 @@ document.getElementById("search-button").addEventListener("click", async () => {
   const out = await postJSON("/memory/recall", { query, limit: 10, privacy_ceiling: "private" });
   list("search-results", out.items || [], item => item.id + " / " + item.kind + " / " + item.summary);
 });
-document.getElementById("delete-button").addEventListener("click", async () => {
-  const id = document.getElementById("delete-id").value.trim();
-  if (!id) return;
-  await postJSON("/memory/delete", { id });
-  document.getElementById("delete-status").textContent = "Deleted " + id;
-});
-document.getElementById("wipe-button").addEventListener("click", async () => {
-  const confirm = document.getElementById("wipe-confirm").value.trim();
-  if (confirm !== "wipe pulse memory") {
-    document.getElementById("wipe-status").textContent = "Type the exact confirmation phrase.";
-    return;
-  }
-  await postJSON("/memory/wipe", { confirm });
-  document.getElementById("wipe-status").textContent = "Wiped Pulse memory and continuity.";
-});
+` + deleteScriptHTML + `
+` + wipeScriptHTML + `
 for (const button of Array.from(document.querySelectorAll(".copy-command"))) {
   button.addEventListener("click", async () => {
     const command = button.getAttribute("data-copy") || "";
@@ -1052,6 +1249,8 @@ func viewerHostDisplayName(host string) string {
 	switch host {
 	case "codex":
 		return "Codex"
+	case "claude-code":
+		return "Claude Code"
 	case "gemini-cli":
 		return "Gemini CLI"
 	case "cursor":
@@ -1059,12 +1258,18 @@ func viewerHostDisplayName(host string) string {
 	case "claude", "claude-chat":
 		return "Claude"
 	default:
-		return "Claude Code"
+		return "Pulse product"
 	}
 }
 
-func viewerFirstRunHTML(hostName string) string {
+func viewerFirstRunHTML(hostName string, productDestructiveOpsLocked bool) string {
 	hostName = html.EscapeString(hostName)
+	forgetButton := `<button type="button" data-first-memory-action="forget">Hide in this preview</button>`
+	forgetPromise := "Forget deletes only when a saved memory ID is loaded."
+	if productDestructiveOpsLocked {
+		forgetButton = `<button type="button" data-first-memory-action="forget" disabled>OS confirmation required to forget</button>`
+		forgetPromise = "Forgetting product memory stays locked until the privileged OS-backed Pulse surface is active."
+	}
 	return `
   <section class="surface first-run" id="first-run">
     <div class="panel-head">
@@ -1078,18 +1283,18 @@ func viewerFirstRunHTML(hostName string) string {
       <article class="first-memory-card">
         <span class="label">Memory</span>
         <h3 data-first-memory-title>Your first memory starts here</h3>
-        <p data-first-memory-summary>“You installed Pulse MCP and connected it to ` + hostName + `.”</p>
+        <p data-first-memory-summary>“No saved structured memory is loaded for ` + hostName + ` yet.”</p>
         <p class="memory-action-status" data-first-memory-id hidden></p>
         <h3 class="section-gap">Why it matters</h3>
-        <p>This proves Pulse can store a small memory and show what will be available next session.</p>
-        <p class="memory-action-status" data-memory-action-status>Pending until the local Pulse daemon saves it.</p>
+	        <p>A saved candidate will prove what Pulse can carry into the next session.</p>
+	        <p class="memory-action-status" data-memory-action-status>Nothing is pending until a harness submits a visible Memory Tray candidate.</p>
         <div class="memory-actions">
           <button type="button" data-first-memory-action="edit">Edit preview only</button>
           <button type="button" data-first-memory-action="important">Mark important preview only</button>
           <button type="button" data-first-memory-action="emotion">Change emotion feedback</button>
-          <button type="button" data-first-memory-action="forget">Hide in this preview</button>
-        </div>
-        <p class="emotion-status">Edit preview only and Mark important preview only do not persist yet. Change emotion saves only after you choose a feeling. Forget deletes only when a saved memory ID is loaded.</p>
+	          ` + forgetButton + `
+	        </div>
+	        <p class="emotion-status">Edit preview only and Mark important preview only do not persist yet. Change emotion saves only after you choose a feeling. ` + forgetPromise + `</p>
       </article>
       <article class="feeling-card">
         <h3>How did that feel?</h3>
@@ -1108,7 +1313,7 @@ func viewerFirstRunHTML(hostName string) string {
       </article>
     </div>
     <div class="context-heart">
-      <h3>♥ Context saved</h3>
+	      <h3>♥ Context continuity</h3>
       <p id="context-heart-copy">Token savings appear after your first resume.</p>
     </div>
     <section class="section-gap">
@@ -1122,7 +1327,7 @@ func viewerFirstRunHTML(hostName string) string {
       <p>Preview sources after proof. Import stays optional and private by default.</p>
       <p>Preview first. Import later.</p>
       <div class="source-scan-grid section-gap">
-        <article class="source-scan-card"><h3>Claude Code sessions</h3><p>Connector: installed. Hooks: ready. Sessions: not scanned yet.</p><button type="button" class="jump-to-import">Preview sessions</button></article>
+		<article class="source-scan-card"><h3>Claude Code sessions</h3><p>Connector: available. Run doctor for actual MCP and hook readiness. Sessions: not scanned yet.</p><button type="button" class="jump-to-import">Preview sessions</button></article>
         <article class="source-scan-card"><h3>Codex sessions</h3><p>Connector: available. Source: not scanned yet. Sessions: not scanned yet.</p><button type="button" class="jump-to-import">Preview</button></article>
         <article class="source-scan-card"><h3>Gemini CLI</h3><p>Connector: available. Source: not connected yet. Sessions: not scanned yet.</p><button type="button">Connect later</button></article>
         <article class="source-scan-card"><h3>ChatGPT export</h3><p>Connector: archive import. Source: choose an archive first. Sessions: not scanned yet.</p><button type="button" class="jump-to-import">Choose file</button></article>

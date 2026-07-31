@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
@@ -11,8 +12,26 @@ import (
 
 func (s *Server) handleGraphDelta(w http.ResponseWriter, r *http.Request) {
 	var req store.SemanticDelta
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+	var decodeErr error
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal {
+		decodeErr = decodeMemoryTrayBody(r, &req)
+	} else {
+		decodeErr = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if decodeErr != nil {
+		http.Error(w, "bad request: "+decodeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.cfg.Store.StoreKind() == store.StoreKindPersonal {
+		result, err := s.cfg.Store.PrepareManualSemanticDeltaWithInvocation(
+			req, r.Header.Get("Idempotency-Key"), time.Now().UTC(), s.cfg.TrayGracePeriod,
+		)
+		if err != nil {
+			writeMemoryTrayError(w, err)
+			return
+		}
+		result = s.commitTurnResultNow(result)
+		writeJSON(w, result)
 		return
 	}
 	res, err := s.cfg.Store.SaveSemanticDelta(req)

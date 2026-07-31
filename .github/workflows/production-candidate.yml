@@ -1,0 +1,586 @@
+name: Production candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      universal_run_id:
+        description: Successful Universal push run for this exact main commit
+        required: true
+        type: string
+      release_epoch:
+        description: Monotonic signed release epoch
+        required: true
+        type: string
+      confirmation:
+        description: Type "build universal production candidate"
+        required: true
+        type: string
+
+concurrency:
+  group: production-candidate
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  authorize:
+    name: Bind reviewed main and Universal evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      darwin: ${{ steps.matrix.outputs.darwin }}
+      linux: ${{ steps.matrix.outputs.linux }}
+      win32: ${{ steps.matrix.outputs.win32 }}
+    env:
+      UNIVERSAL_RUN_ID: ${{ inputs.universal_run_id }}
+      RELEASE_EPOCH: ${{ inputs.release_epoch }}
+      RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Require exact protected release intent
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$RELEASE_CONFIRMATION" = 'build universal production candidate'
+          [[ "$UNIVERSAL_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          test "$RELEASE_EPOCH" = 8
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+      - name: Require successful Universal run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$UNIVERSAL_RUN_ID" > universal-run.json
+          test "$(jq -r .name universal-run.json)" = Universal
+          test "$(jq -r .path universal-run.json)" = '.github/workflows/verify.yml'
+          test "$(jq -r .event universal-run.json)" = push
+          test "$(jq -r .head_branch universal-run.json)" = main
+          test "$(jq -r .head_sha universal-run.json)" = "$GITHUB_SHA"
+          test "$(jq -r .conclusion universal-run.json)" = success
+          mkdir universal-evidence
+          gh run download "$UNIVERSAL_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'pulse-native-*' \
+            --dir universal-evidence
+          test "$(find universal-evidence -type f -name '*.json' | wc -l | tr -d ' ')" = 18
+          node pulse-app/cli/scripts/validate-native-evidence-set.mjs \
+            --directory universal-evidence --authority fixture
+      - id: matrix
+        name: Freeze exact native production matrices
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          node scripts/native-universal-matrix.mjs --check
+          echo "darwin=$(node scripts/native-universal-matrix.mjs --github-platform darwin --github-host codex)" >> "$GITHUB_OUTPUT"
+          echo "linux=$(node scripts/native-universal-matrix.mjs --github-platform linux --github-host codex)" >> "$GITHUB_OUTPUT"
+          echo "win32=$(node scripts/native-universal-matrix.mjs --github-platform win32 --github-host codex)" >> "$GITHUB_OUTPUT"
+      - name: Preserve exact content-free Universal evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-universal-evidence
+          path: universal-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-target:
+    name: Production / ${{ matrix.target_id }}
+    needs: authorize
+    environment: production-linux
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.authorize.outputs.linux) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: pulse-app/go.sum
+      - name: Install exact release dependencies
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          npm ci --ignore-scripts --omit=dev --prefix pulse-app/cli/runtime/embedder-portable/target-runtime
+      - name: Build exact native production carriers
+        working-directory: pulse-app/cli
+        env:
+          PULSE_PRODUCTION_RELEASE: '1'
+          PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved
+        shell: bash
+        run: >-
+          npm run build:personal-release --
+          --mode production
+          --target "${{ matrix.target_id }}"
+          --target-runtime "$GITHUB_WORKSPACE/pulse-app/cli/runtime/embedder-portable/target-runtime"
+          --output "$RUNNER_TEMP/pulse-target-${{ matrix.target_id }}"
+      - name: Upload exact target fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-target-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/pulse-target-${{ matrix.target_id }}
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-target:
+    name: Production / ${{ matrix.target_id }}
+    needs: authorize
+    environment: production-apple
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.authorize.outputs.darwin) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: pulse-app/go.sum
+      - name: Install ephemeral Apple signing authority
+        shell: bash
+        run: |
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_NOTARY_KEY_BASE64"
+          test -n "$APPLE_NOTARY_KEY_ID"
+          test -n "$APPLE_NOTARY_ISSUER_ID"
+          certificate="$RUNNER_TEMP/pulse-release.p12"
+          notary_key="$RUNNER_TEMP/AuthKey.p8"
+          keychain="$RUNNER_TEMP/pulse-release.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 --decode > "$notary_key"
+          chmod 600 "$certificate" "$notary_key"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          xcrun notarytool store-credentials pulse-production \
+            --key "$notary_key" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --keychain "$keychain"
+          echo "PULSE_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Install exact release dependencies
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          npm ci --ignore-scripts --omit=dev --prefix pulse-app/cli/runtime/embedder-portable/target-runtime
+      - name: Build, sign, and notarize exact native carriers
+        working-directory: pulse-app/cli
+        env:
+          PULSE_APPLE_SIGNING_IDENTITY: 'Developer ID Application: Nikita Shilov (44N4NZ86S5)'
+          PULSE_NOTARYTOOL_PROFILE: pulse-production
+          PULSE_PRODUCTION_RELEASE: '1'
+          PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved
+        shell: bash
+        run: >-
+          npm run build:personal-release --
+          --mode production
+          --target "${{ matrix.target_id }}"
+          --target-runtime "$GITHUB_WORKSPACE/pulse-app/cli/runtime/embedder-portable/target-runtime"
+          --output "$RUNNER_TEMP/pulse-target-${{ matrix.target_id }}"
+      - name: Build and notarize the optional native presence helper
+        if: matrix.target_id == 'darwin-arm64'
+        working-directory: pulse-app/cli
+        env:
+          PULSE_NOTARYTOOL_PROFILE: pulse-production
+          PULSE_PRESENCE_CODESIGN_IDENTITY: 'Developer ID Application: Nikita Shilov (44N4NZ86S5)'
+          PULSE_PRODUCTION_RELEASE: '1'
+        shell: bash
+        run: npm run build:presence-helper
+      - name: Upload exact target fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-target-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/pulse-target-${{ matrix.target_id }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload notarized presence helper
+        if: matrix.target_id == 'darwin-arm64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-presence-helper
+          path: pulse-app/native/pulse-presence-helper/dist/gg.zbs.pulse.presence-helper
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove ephemeral Apple signing authority
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "${PULSE_RELEASE_KEYCHAIN:-$RUNNER_TEMP/pulse-release.keychain-db}" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/pulse-release.p12" "$RUNNER_TEMP/AuthKey.p8"
+
+  windows-target:
+    name: Production / ${{ matrix.target_id }}
+    needs: authorize
+    environment: production-windows
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.authorize.outputs.win32) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_SIGNING_PUBLISHER: ${{ secrets.WINDOWS_SIGNING_PUBLISHER }}
+      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node_version }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: pulse-app/go.sum
+      - name: Install ephemeral Authenticode authority
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_PUBLISHER) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) { throw 'Windows release credentials are missing' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'pulse-release.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false
+          if (-not $certificate.HasPrivateKey -or $certificate.Subject -ne $env:WINDOWS_SIGNING_PUBLISHER) { throw 'Windows signing identity mismatch' }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          if ($null -eq $signtool) { throw 'signtool is unavailable' }
+          "PULSE_WINDOWS_CERTIFICATE_SHA1=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PULSE_SIGNTOOL_PATH=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install exact release dependencies
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          npm ci --ignore-scripts --omit=dev --prefix pulse-app/cli/runtime/embedder-portable/target-runtime
+      - name: Build, sign, and timestamp exact native carriers
+        working-directory: pulse-app/cli
+        env:
+          PULSE_PRODUCTION_RELEASE: '1'
+          PULSE_RELEASE_SUBMISSION_AUTHORIZATION: target-build-approved
+          PULSE_WINDOWS_SIGNING_PUBLISHER: ${{ secrets.WINDOWS_SIGNING_PUBLISHER }}
+          PULSE_WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          npm run build:personal-release -- `
+            --mode production `
+            --target "${{ matrix.target_id }}" `
+            --target-runtime "$env:GITHUB_WORKSPACE\pulse-app\cli\runtime\embedder-portable\target-runtime" `
+            --output "$env:RUNNER_TEMP\pulse-target-${{ matrix.target_id }}"
+      - name: Upload exact target fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-target-${{ matrix.target_id }}
+          path: ${{ runner.temp }}\pulse-target-${{ matrix.target_id }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove ephemeral Authenticode authority
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:PULSE_WINDOWS_CERTIFICATE_SHA1)) {
+            Remove-Item "Cert:\CurrentUser\My\$env:PULSE_WINDOWS_CERTIFICATE_SHA1" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'pulse-release.pfx') -Force -ErrorAction SilentlyContinue
+
+  portable-model:
+    name: Production / portable model
+    needs: authorize
+    environment: production-model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: 3.12.9
+          cache: pip
+      - name: Install exact offline exporter toolchain
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --no-input \
+            numpy==2.3.1 onnx==1.19.1 onnxruntime==1.23.2 safetensors==0.7.0 \
+            tokenizers==0.22.2 torch==2.11.0 transformers==4.57.3 huggingface_hub==0.36.0
+          npm ci --ignore-scripts --prefix pulse-app/cli
+      - name: Fetch the exact pinned data-only source snapshot
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/pulse-model-source"
+          hf download mlx-community/bge-m3-mlx-fp16 \
+            config.json model.safetensors special_tokens_map.json tokenizer.json tokenizer_config.json \
+            --revision a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec \
+            --local-dir "$RUNNER_TEMP/pulse-model-source"
+          rm -rf "$RUNNER_TEMP/pulse-model-source/.cache"
+      - name: Export and quality-prove the portable model
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          npm run build:portable-model --
+          --python "$(command -v python)"
+          --source-model "$RUNNER_TEMP/pulse-model-source"
+          --output "$RUNNER_TEMP/pulse-portable-model"
+      - name: Upload exact portable model fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-portable-model
+          path: ${{ runner.temp }}/pulse-portable-model
+          if-no-files-found: error
+          retention-days: 30
+
+  plugin-runtime:
+    name: Production / host-neutral runtime
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build exact MCP and hook runtime inputs
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          npm ci --ignore-scripts --prefix mcp
+          npm run build --prefix mcp
+          mkdir -p pulse-app/cli/vendor/pulse-mcp-dist
+          cp -R mcp/dist/. pulse-app/cli/vendor/pulse-mcp-dist/
+          npm run build:product-hook-bundle --prefix pulse-app/cli
+      - name: Build host-neutral production runtime
+        working-directory: pulse-app/cli
+        shell: bash
+        run: npm run build:plugin-runtime -- --output "$RUNNER_TEMP/pulse-plugin-runtime"
+      - name: Upload exact plugin runtime fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-plugin-runtime
+          path: ${{ runner.temp }}/pulse-plugin-runtime
+          if-no-files-found: error
+          retention-days: 30
+
+  catalog:
+    name: Sign immutable epoch-8 artifact set and 30-day snapshot
+    needs: [authorize, linux-target, macos-target, windows-target, portable-model, plugin-runtime]
+    environment: production-catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_EPOCH: ${{ inputs.release_epoch }}
+      RELEASE_ROOT_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_ROOT_PRIVATE_KEY_BASE64 }}
+      RELEASE_CHANNEL_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_CHANNEL_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: pulse-production-target-*
+          path: ${{ runner.temp }}/pulse-production-targets
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-portable-model
+          path: ${{ runner.temp }}/pulse-portable-model
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-plugin-runtime
+          path: ${{ runner.temp }}/pulse-plugin-runtime
+      - name: Materialize private catalog authorities
+        shell: bash
+        run: |
+          test -n "$RELEASE_ROOT_PRIVATE_KEY_BASE64"
+          test -n "$RELEASE_CHANNEL_PRIVATE_KEY_BASE64"
+          mkdir "$RUNNER_TEMP/pulse-release-keys"
+          printf '%s' "$RELEASE_ROOT_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/pulse-release-keys/root.pem"
+          printf '%s' "$RELEASE_CHANNEL_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/pulse-release-keys/channel.pem"
+          chmod 600 "$RUNNER_TEMP/pulse-release-keys/root.pem" "$RUNNER_TEMP/pulse-release-keys/channel.pem"
+          npm ci --ignore-scripts --prefix pulse-app/cli
+      - name: Require the private root to match the committed public root
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node scripts/verify-release-private-key.mjs
+          "$RUNNER_TEMP/pulse-release-keys/root.pem"
+          "$GITHUB_WORKSPACE/pulse-app/cli/release/pulse-release-root.pem"
+      - name: Build and verify the exact universal catalog
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          npm run build:personal-catalog --
+          --epoch "$RELEASE_EPOCH"
+          --origin https://releases.zbs.gg
+          --root-key "$RUNNER_TEMP/pulse-release-keys/root.pem"
+          --channel-key "$RUNNER_TEMP/pulse-release-keys/channel.pem"
+          --model "$RUNNER_TEMP/pulse-portable-model"
+          --plugin "$RUNNER_TEMP/pulse-plugin-runtime"
+          --target darwin-arm64="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-darwin-arm64"
+          --target darwin-x64="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-darwin-x64"
+          --target linux-arm64-gnu="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-linux-arm64-gnu"
+          --target linux-x64-gnu="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-linux-x64-gnu"
+          --target win32-arm64="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-win32-arm64"
+          --target win32-x64="$RUNNER_TEMP/pulse-production-targets/pulse-production-target-win32-x64"
+          --output "$RUNNER_TEMP/pulse-production-catalog"
+      - name: Upload immutable catalog and all release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-release-catalog
+          path: ${{ runner.temp }}/pulse-production-catalog
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private catalog authorities
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/pulse-release-keys"
+
+  candidate:
+    name: Build immutable npm candidate inputs
+    needs: [authorize, catalog, macos-target]
+    environment: production-candidate
+    runs-on: ${{ fromJSON(needs.authorize.outputs.darwin).include[0].runner }}
+    timeout-minutes: 25
+    env:
+      UNIVERSAL_RUN_ID: ${{ inputs.universal_run_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-release-catalog
+          path: ${{ runner.temp }}/pulse-production-catalog
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-presence-helper
+          path: pulse-app/native/pulse-presence-helper/dist
+      - name: Pack the exact universal npm bytes
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          npm ci --ignore-scripts --prefix mcp
+          install -m 600 \
+            "$RUNNER_TEMP/pulse-production-catalog/personal-preview-manifest.json" \
+            pulse-app/cli/release/personal-preview-manifest.json
+          install -m 600 \
+            "$RUNNER_TEMP/pulse-production-catalog/snapshot.json" \
+            pulse-app/cli/release/personal-release-snapshot.json
+          mkdir "$RUNNER_TEMP/pulse-npm-pack"
+          PULSE_REQUIRE_RELEASE_MANIFEST=1 \
+          PULSE_RELEASE_SNAPSHOT_PATH="$GITHUB_WORKSPACE/pulse-app/cli/release/personal-release-snapshot.json" \
+          npm pack \
+            --prefix pulse-app/cli \
+            --pack-destination "$RUNNER_TEMP/pulse-npm-pack"
+      - name: Bind unpublished npm bytes to catalog and security evidence
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          tarballs=("$RUNNER_TEMP"/pulse-npm-pack/*.tgz)
+          test "${#tarballs[@]}" = 1
+          mkdir "$RUNNER_TEMP/pulse-production-audit"
+          npm install --ignore-scripts --no-audit --no-fund --omit=dev \
+            --prefix "$RUNNER_TEMP/pulse-production-audit" "${tarballs[0]}"
+          npm audit --omit=dev --audit-level=high --json \
+            --prefix "$RUNNER_TEMP/pulse-production-audit" \
+            > "$RUNNER_TEMP/pulse-production-audit.json"
+          node scripts/generate-release-security-evidence.mjs \
+            --audit "$RUNNER_TEMP/pulse-production-audit.json" \
+            --install-root "$RUNNER_TEMP/pulse-production-audit" \
+            --output "$RUNNER_TEMP/pulse-production-security" \
+            --tarball "${tarballs[0]}"
+          npm run build:npm-production-inputs -- \
+            --catalog "$RUNNER_TEMP/pulse-production-catalog" \
+            --commit "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/pulse-npm-production-inputs" \
+            --security "$RUNNER_TEMP/pulse-production-security" \
+            --tarball "${tarballs[0]}" \
+            --universal-run-id "$UNIVERSAL_RUN_ID"
+          candidate_sha="$(node -p "JSON.parse(require('fs').readFileSync('$RUNNER_TEMP/pulse-npm-production-inputs/candidate-inputs.json')).package_sha256")"
+          echo "Unsealed candidate input SHA-256: $candidate_sha"
+      - name: Upload exact npm inputs without claiming candidate readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-npm-production-inputs
+          path: ${{ runner.temp }}/pulse-npm-production-inputs
+          if-no-files-found: error
+          retention-days: 30
+
+  production-candidate-required:
+    name: Production candidate / required
+    if: always()
+    needs: [authorize, linux-target, macos-target, windows-target, portable-model, plugin-runtime, catalog, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require the complete universal candidate
+        env:
+          AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          LINUX_RESULT: ${{ needs.linux-target.result }}
+          MACOS_RESULT: ${{ needs.macos-target.result }}
+          WINDOWS_RESULT: ${{ needs.windows-target.result }}
+          MODEL_RESULT: ${{ needs.portable-model.result }}
+          PLUGIN_RESULT: ${{ needs.plugin-runtime.result }}
+          CATALOG_RESULT: ${{ needs.catalog.result }}
+          CANDIDATE_RESULT: ${{ needs.candidate.result }}
+        shell: bash
+        run: |
+          test "$AUTHORIZE_RESULT" = success
+          test "$LINUX_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+          test "$MODEL_RESULT" = success
+          test "$PLUGIN_RESULT" = success
+          test "$CATALOG_RESULT" = success
+          test "$CANDIDATE_RESULT" = success

@@ -2,6 +2,21 @@
 
 All notable changes to Pulse.
 
+## 0.7.0 — 2026-08-01
+
+- Split the public product into local-only Pulse Personal. The shared-memory
+  server, cloud synchronization, shared database, device keys, and team
+  commands are not shipped in the public repository or npm package.
+- Added one reviewed local install path for Codex, Claude Code, and Cursor,
+  together with Memory Home, structured MCP results, and truthful write
+  receipts.
+- Kept optional memory fail-open: failure must not block host tools, Stop,
+  goal controls, or normal session completion, and must not create an
+  automatic continuation.
+- Added a non-mutating refusal for databases made by unpublished shared-memory
+  builds while preserving the upgrade path from official Personal 0.6.7.
+- Added an exact npm archive audit and clean isolated installation check.
+
 ## 0.6.7 — 2026-07-04
 
 ### Added

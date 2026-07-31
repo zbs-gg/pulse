@@ -1,0 +1,162 @@
+name: Authorize Gold promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_candidate_run_id:
+        description: Successful sealed candidate run
+        required: true
+        type: string
+      soak_0_run_id:
+        description: Successful public-registry 0-hour soak run
+        required: true
+        type: string
+      soak_24_run_id:
+        description: Successful public-registry 24-hour soak run
+        required: true
+        type: string
+      soak_48_run_id:
+        description: Successful public-registry 48-hour soak run
+        required: true
+        type: string
+      soak_72_run_id:
+        description: Successful public-registry 72-hour soak run
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact 0.7.0 npm tarball SHA-256
+        required: true
+        type: string
+      confirmation:
+        description: Type "authorize pulse 0.7.0 gold promotion"
+        required: true
+        type: string
+
+concurrency:
+  group: pulse-authorize-gold-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  bind:
+    name: Require the sealed candidate and four green timed soaks
+    environment: npm-gold
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.production_candidate_run_id }}
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      SOAK_0_RUN_ID: ${{ inputs.soak_0_run_id }}
+      SOAK_24_RUN_ID: ${{ inputs.soak_24_run_id }}
+      SOAK_48_RUN_ID: ${{ inputs.soak_48_run_id }}
+      SOAK_72_RUN_ID: ${{ inputs.soak_72_run_id }}
+      GOLD_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - id: candidate
+        name: Bind exact candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GOLD_CONFIRMATION" = 'authorize pulse 0.7.0 gold promotion'
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          test "$(jq -r .path "$RUNNER_TEMP/candidate-run.json")" = '.github/workflows/seal-production-candidate.yml'
+          test "$(jq -r .head_branch "$RUNNER_TEMP/candidate-run.json")" = main
+          test "$(jq -r .conclusion "$RUNNER_TEMP/candidate-run.json")" = success
+          commit="$(jq -r .head_sha "$RUNNER_TEMP/candidate-run.json")"
+          [[ "$commit" =~ ^[a-f0-9]{40}$ ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-candidate --dir "$RUNNER_TEMP/gold-inputs/candidate"
+          test "$(jq -r .sha256 "$RUNNER_TEMP/gold-inputs/candidate/candidate.json")" = "$CANDIDATE_SHA256"
+      - name: Bind each checkpoint to one successful public-registry run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.candidate.outputs.commit }}
+        shell: bash
+        run: |
+          for checkpoint in 0 24 48 72; do
+            variable="SOAK_${checkpoint}_RUN_ID"
+            run_id="${!variable}"
+            [[ "$run_id" =~ ^[1-9][0-9]{0,19}$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/soak-$checkpoint-run.json"
+            test "$(jq -r .path "$RUNNER_TEMP/soak-$checkpoint-run.json")" = '.github/workflows/public-registry-soak.yml'
+            test "$(jq -r .head_branch "$RUNNER_TEMP/soak-$checkpoint-run.json")" = main
+            test "$(jq -r .conclusion "$RUNNER_TEMP/soak-$checkpoint-run.json")" = success
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name "pulse-public-soak-$checkpoint" --dir "$RUNNER_TEMP/gold-inputs/soaks/$checkpoint"
+            receipt="$(find "$RUNNER_TEMP/gold-inputs/soaks/$checkpoint" -type f -name "public-soak-$checkpoint.json" -print -quit)"
+            test -n "$receipt"
+            test "$(jq -r .checkpoint_hours "$receipt")" = "$checkpoint"
+            test "$(jq -r .commit "$receipt")" = "$COMMIT"
+            test "$(jq -r .package_sha256 "$receipt")" = "$CANDIDATE_SHA256"
+            test "$(jq -r .evidence_count "$receipt")" = 18
+          done
+      - name: Preserve reviewed Gold inputs without mutating npm or GitHub
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-gold-promotion-inputs
+          path: ${{ runner.temp }}/gold-inputs
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    name: Sign promotion authorization without publishing
+    needs: bind
+    environment: production-catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_ROOT_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_ROOT_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.bind.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-gold-promotion-inputs
+          path: ${{ runner.temp }}/gold-inputs
+      - name: Materialize and verify private root authority
+        shell: bash
+        run: |
+          test -n "$RELEASE_ROOT_PRIVATE_KEY_BASE64"
+          printf '%s' "$RELEASE_ROOT_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/root.pem"
+          chmod 600 "$RUNNER_TEMP/root.pem"
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          node pulse-app/cli/scripts/verify-release-private-key.mjs \
+            "$RUNNER_TEMP/root.pem" "$GITHUB_WORKSPACE/pulse-app/cli/release/pulse-release-root.pem"
+      - name: Sign exact four-checkpoint promotion authorization
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          npm run --silent build:gold-promotion-receipt -- \
+            --candidate "$RUNNER_TEMP/gold-inputs/candidate/candidate.json" \
+            --output "$RUNNER_TEMP/pulse-gold-promotion.json" \
+            --root-key "$RUNNER_TEMP/root.pem" \
+            --soaks "$RUNNER_TEMP/gold-inputs/soaks"
+          test "$(jq -r .payload.publication_performed "$RUNNER_TEMP/pulse-gold-promotion.json")" = false
+          test "$(jq -r .payload.promotion_authorized "$RUNNER_TEMP/pulse-gold-promotion.json")" = true
+      - name: Remove private authority
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/root.pem"
+      - name: Preserve signed authorization for human 2FA promotion
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-gold-promotion-authorization
+          path: ${{ runner.temp }}/pulse-gold-promotion.json
+          if-no-files-found: error
+          retention-days: 30

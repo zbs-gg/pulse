@@ -1,7 +1,24 @@
-import { execSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  canonicalReleaseJSON,
+  pinnedReleaseKeyring,
+  verifyPersonalReleaseArtifactSet,
+} from '../src/release-manifest.js';
+import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from '../src/desktop-target.js';
+import { publicMcpPackageManifest } from './public-package-audit.mjs';
+import {
+  EXPECTED_HELPER_CAPABILITIES,
+  EXPECTED_HELPER_CONTRACT_VERSION,
+  EXPECTED_HELPER_SELF_TEST,
+} from '../src/trust-helper.js';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
@@ -9,6 +26,68 @@ const appRoot = resolve(cliRoot, '..');
 const pulseRoot = resolve(appRoot, '..');
 const mcpRoot = join(pulseRoot, 'mcp');
 const vendorRoot = join(cliRoot, 'vendor', 'pulse-preview-source');
+const expectedHelperIdentifier = 'gg.zbs.pulse.presence-helper';
+const expectedHelperTeamID = '44N4NZ86S5';
+const nativeHelper = join(appRoot, 'native', 'pulse-presence-helper', 'dist', expectedHelperIdentifier);
+const vendorHelperRoot = join(cliRoot, 'vendor', 'pulse-presence-helper');
+const defaultReleaseManifest = join(cliRoot, 'release', 'personal-preview-manifest.json');
+const defaultReleaseSnapshot = join(cliRoot, 'release', 'personal-release-snapshot.json');
+const productionPackaging = process.env.npm_lifecycle_event === 'prepublishOnly' ||
+  process.env.PULSE_REQUIRE_RELEASE_MANIFEST === '1';
+
+// npm pack runs prepack in every product E2E. Two packs must never race while
+// npm ci replaces mcp/node_modules and the generated vendor trees. Re-exec the
+// whole preparation under a kernel-held lock before touching either tree.
+if (process.env.PULSE_PREVIEW_VENDOR_LOCKED !== '1') {
+  const digest = createHash('sha256').update(pulseRoot).digest('hex').slice(0, 20);
+  const lockPath = join(tmpdir(), `pulse-preview-vendor-${digest}.lock`);
+  let windowsLockAcquired = false;
+  if (process.platform === 'win32') {
+    const deadline = Date.now() + 300_000;
+    const waiter = new Int32Array(new SharedArrayBuffer(4));
+    while (!windowsLockAcquired && Date.now() < deadline) {
+      try {
+        writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+        windowsLockAcquired = true;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 10 * 60_000) rmSync(lockPath);
+        } catch (inspectionError) {
+          if (inspectionError?.code !== 'ENOENT') throw inspectionError;
+        }
+        if (!windowsLockAcquired) Atomics.wait(waiter, 0, 0, 100);
+      }
+    }
+    if (!windowsLockAcquired) throw new Error('could not acquire the Pulse preview vendor lock (timeout)');
+  }
+  let result;
+  try {
+    if (process.platform === 'win32') {
+      result = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
+        stdio: 'inherit',
+        timeout: 330_000,
+      });
+    } else {
+      const lockTool = process.platform === 'darwin' ? '/usr/bin/lockf' : '/usr/bin/flock';
+      const lockArgs = process.platform === 'darwin'
+        ? ['-k', '-t', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)]
+        : ['-w', '300', lockPath, process.execPath, fileURLToPath(import.meta.url)];
+      result = spawnSync(lockTool, lockArgs, {
+        env: { ...process.env, PULSE_PREVIEW_VENDOR_LOCKED: '1' },
+        stdio: 'inherit',
+        timeout: 330_000,
+      });
+    }
+  } finally {
+    if (windowsLockAcquired) rmSync(lockPath, { force: true });
+  }
+  if (result.status !== 0) {
+    throw new Error(`could not acquire the Pulse preview vendor lock (status ${result.status})`);
+  }
+  process.exit(0);
+}
 
 function copyFileList(fromRoot, toRoot, files) {
   mkdirSync(toRoot, { recursive: true });
@@ -40,7 +119,159 @@ function copyTree(from, to) {
   });
 }
 
+function verifyHelperProtocol(helperPath) {
+  const run = (command) => spawnSync(helperPath, [command], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000,
+  });
+  const contractResult = run('contract');
+  const selfTestResult = run('self-test');
+  if (contractResult.status !== 0 || selfTestResult.status !== 0) return false;
+  try {
+    const contract = JSON.parse(contractResult.stdout);
+    const selfTest = JSON.parse(selfTestResult.stdout);
+    return contract.schema === 'pulse.presence_helper.contract.v1' &&
+      contract.version === EXPECTED_HELPER_CONTRACT_VERSION &&
+      JSON.stringify(contract.capabilities) === JSON.stringify(EXPECTED_HELPER_CAPABILITIES) &&
+      JSON.stringify(contract.self_test) === JSON.stringify(EXPECTED_HELPER_SELF_TEST) &&
+      Object.keys(selfTest).sort().join('\0') === 'contract_version\0schema\0status\0suite\0vectors' &&
+      selfTest.status === 'pass' &&
+      Object.keys(EXPECTED_HELPER_SELF_TEST).every((key) => selfTest[key] === EXPECTED_HELPER_SELF_TEST[key]);
+  } catch {
+    return false;
+  }
+}
+
 rmSync(vendorRoot, { recursive: true, force: true });
+
+const internalPreviewHelper = process.env.PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW === '1';
+let includePresenceHelper = false;
+if (!existsSync(nativeHelper)) {
+  if (productionPackaging || internalPreviewHelper) {
+    throw new Error('signed Pulse presence helper is missing; run npm run build:presence-helper before packing');
+  }
+  console.error('[pulse] optional macOS presence helper is not included in this npm package');
+} else if (process.platform === 'darwin') {
+  execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', nativeHelper], {
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  const signature = spawnSync('/usr/bin/codesign', ['-d', '--verbose=4', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const signatureText = `${signature.stdout ?? ''}\n${signature.stderr ?? ''}`;
+  if (signature.status !== 0 || !signatureText.includes(`Identifier=${expectedHelperIdentifier}`) ||
+      !signatureText.includes(`TeamIdentifier=${expectedHelperTeamID}`)) {
+    throw new Error('Pulse presence helper has the wrong code-signing identity');
+  }
+  const buildVersion = spawnSync('/usr/bin/vtool', ['-show-build', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const architectures = spawnSync('/usr/bin/lipo', ['-archs', nativeHelper], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const shippedArchitectures = new Set(architectures.stdout.trim().split(/\s+/).filter(Boolean));
+  const minimumVersions = [...buildVersion.stdout.matchAll(/\bminos ([0-9.]+)/g)].map((match) => match[1]);
+  const macOSPlatforms = [...buildVersion.stdout.matchAll(/\bplatform MACOS\b/g)];
+  const architectureSetValid = shippedArchitectures.has('arm64') &&
+    [...shippedArchitectures].every((architecture) => architecture === 'arm64' || architecture === 'x86_64');
+  if (architectures.status !== 0 || !architectureSetValid ||
+      buildVersion.status !== 0 || macOSPlatforms.length !== shippedArchitectures.size ||
+      minimumVersions.length !== shippedArchitectures.size ||
+      minimumVersions.some((version) => version !== '13.0')) {
+    throw new Error('optional macOS presence helper must include Apple Silicon and target macOS 13.0');
+  }
+  const assessment = spawnSync('/usr/bin/codesign', [
+    '-vvvv', '-R=notarized', '--check-notarization', nativeHelper,
+  ], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (assessment.status !== 0) {
+    if (process.env.npm_lifecycle_event === 'prepublishOnly') {
+      throw new Error('refusing npm publish: Pulse presence helper has no accepted notarization ticket');
+    }
+    if (productionPackaging) {
+      throw new Error('refusing production packaging: Pulse presence helper has no accepted notarization ticket');
+    }
+    if (internalPreviewHelper) {
+      includePresenceHelper = true;
+      console.error('[pulse] explicit internal-preview override: helper is signed but not notarized; do not redistribute this tarball');
+    } else {
+      console.error('[pulse] optional macOS presence helper is signed but not notarized, so it is not included in this npm package');
+    }
+  } else {
+    includePresenceHelper = true;
+  }
+} else if (productionPackaging) {
+  throw new Error('refusing production packaging: Pulse presence helper must be verified on macOS');
+} else if (internalPreviewHelper) {
+  includePresenceHelper = true;
+  console.error('[pulse] explicit internal-preview override: helper notarization was not checked on this platform; do not redistribute this tarball');
+} else {
+  console.error('[pulse] optional macOS presence helper was not checked on this platform, so it is not included in this npm package');
+}
+
+if (productionPackaging) {
+  const releaseManifestPath = process.env.PULSE_RELEASE_MANIFEST_PATH ?? defaultReleaseManifest;
+  const releaseSnapshotPath = process.env.PULSE_RELEASE_SNAPSHOT_PATH ?? defaultReleaseSnapshot;
+  const releaseRootPath = process.env.PULSE_RELEASE_TEST_ROOT_PATH;
+  if ((process.env.PULSE_RELEASE_MANIFEST_PATH || releaseRootPath) && process.env.PULSE_RELEASE_TEST_MODE !== '1') {
+    throw new Error('release manifest/root overrides are forbidden outside explicit test mode');
+  }
+  if (!existsSync(releaseManifestPath)) {
+    throw new Error('refusing production packaging: canonical signed Personal release manifest is missing');
+  }
+  const manifestBytes = readFileSync(releaseManifestPath, 'utf8');
+  const envelope = JSON.parse(manifestBytes);
+  if (manifestBytes !== `${canonicalReleaseJSON(envelope)}\n`) {
+    throw new Error('refusing production packaging: release manifest envelope is not canonical');
+  }
+  const packageJSON = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
+  const macOS = spawnSync('/usr/bin/sw_vers', ['-productVersion'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (macOS.status !== 0 || !/^\d+\.\d+(?:\.\d+)?\n?$/.test(macOS.stdout)) {
+    throw new Error('refusing production packaging: cannot determine the macOS compatibility version');
+  }
+  const now = new Date();
+  const trustedKeys = pinnedReleaseKeyring(releaseRootPath);
+  if (envelope.schema !== 'pulse.personal_release_artifact_set.v1' || !existsSync(releaseSnapshotPath)) {
+    throw new Error('refusing production packaging: immutable v3 artifact set and signed snapshot are required');
+  }
+  const snapshotBytes = readFileSync(releaseSnapshotPath, 'utf8');
+  const snapshot = JSON.parse(snapshotBytes);
+  if (snapshotBytes !== `${canonicalReleaseJSON(snapshot)}\n` ||
+      snapshot.schema !== 'pulse.release_snapshot_envelope.v1') {
+    throw new Error('refusing production packaging: release snapshot is not canonical v3');
+  }
+  const verifiedTargets = DESKTOP_TARGET_IDS.map((targetID) => {
+    const target = desktopTargetDefinition(targetID);
+    const verified = verifyPersonalReleaseArtifactSet(envelope, snapshot, {
+      architecture: target.architecture,
+      libc: target.libc,
+      minimumAcceptedEpoch: envelope?.payload?.release?.epoch,
+      now,
+      osVersion: target.platform === 'darwin' ? macOS.stdout.trim() : '0.0',
+      packageVersion: packageJSON.version,
+      platform: target.platform,
+      trustedKeys,
+    });
+    if (verified.target_id !== targetID ||
+        Object.values(verified.artifacts).some((artifact) => artifact.format !== 'tar.gz')) {
+      throw new Error(`refusing production packaging: universal target verification failed for ${targetID}`);
+    }
+    return verified;
+  });
+  if (new Set(verifiedTargets.map((release) => release.manifest_digest)).size !== 1) {
+    throw new Error('refusing production packaging: universal catalog digest mismatch');
+  }
+  if (!verifyHelperProtocol(nativeHelper)) {
+    throw new Error('refusing production packaging: optional macOS presence helper protocol is incompatible');
+  }
+}
+rmSync(vendorHelperRoot, { recursive: true, force: true });
+if (includePresenceHelper) {
+  mkdirSync(vendorHelperRoot, { recursive: true });
+  cpSync(nativeHelper, join(vendorHelperRoot, expectedHelperIdentifier));
+}
 
 const vendorApp = join(vendorRoot, 'pulse-app');
 copyFileList(appRoot, vendorApp, [
@@ -60,11 +291,13 @@ copyFileList(mcpRoot, vendorMcp, [
   'README_DEV_PREVIEW.md',
   'tsconfig.json',
 ]);
+const sourceMcpPackageJSON = JSON.parse(readFileSync(join(mcpRoot, 'package.json'), 'utf8'));
+writeFileSync(
+  join(vendorMcp, 'package.json'),
+  `${JSON.stringify(publicMcpPackageManifest(sourceMcpPackageJSON), null, 2)}\n`,
+);
 // Whole src tree (minus tests): index.ts alone no longer builds since standalone.ts.
 copyTree(join(mcpRoot, 'src'), join(vendorMcp, 'src'));
-copyTree(join(mcpRoot, 'scripts'), join(vendorMcp, 'scripts'));
-copyTree(join(mcpRoot, 'docs'), join(vendorMcp, 'docs'));
-
 // Prebuilt MCP server so `pulse mcp` works from the published package with no
 // TS toolchain on the user machine.
 const vendorMcpDist = join(cliRoot, 'vendor', 'pulse-mcp-dist');
@@ -72,11 +305,6 @@ rmSync(vendorMcpDist, { recursive: true, force: true });
 execSync('npm ci', { cwd: mcpRoot, stdio: ['ignore', 'inherit', 'inherit'] });
 execSync('npm run build', { cwd: mcpRoot, stdio: ['ignore', 'inherit', 'inherit'] });
 cpSync(join(mcpRoot, 'dist'), vendorMcpDist, { recursive: true });
-
-copyFileList(pulseRoot, vendorRoot, [
-  'AGENTS.md',
-]);
-copyTree(join(pulseRoot, 'docs'), join(vendorRoot, 'docs'));
 
 writeFileSync(join(vendorRoot, 'README.md'), `# Pulse preview vendor source
 
@@ -86,8 +314,9 @@ This directory is generated by \`scripts/prepare-preview-vendor.mjs\` during
 It contains the minimal source needed for the Pulse preview CLI to build and
 start the local Pulse daemon and MCP package.
 
-It intentionally excludes tests, node_modules, dist, local databases, secrets,
-raw archives, and private operator artifacts.
+It intentionally excludes tests, documentation archives, agent instructions,
+node_modules, dist, local databases, secrets, raw archives, and private
+operator artifacts.
 `);
 
 console.error(`[pulse] prepared preview vendor source at ${vendorRoot}`);

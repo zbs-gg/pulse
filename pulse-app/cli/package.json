@@ -1,33 +1,116 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.6.7",
-  "description": "Pulse portable memory for AI agents: MCP server (pulse mcp) + installer/CLI in one package.",
+  "version": "0.7.0",
+  "description": "Local Personal memory for Codex, Claude Code, and Cursor.",
   "license": "AGPL-3.0-only",
-  "author": "Nikita Shilov",
+  "author": "ZBS GG",
   "type": "module",
   "bin": {
     "pulse": "src/cli.js"
   },
   "files": [
     "src/cli.js",
+    "src/consolidation-report.js",
+    "src/historical-ingest-schema.js",
+    "src/historical-ingest-protocol.js",
+    "src/codex-subscription-runner.js",
+    "src/historical-ingest-worker.js",
+    "src/historical-ingest.js",
+    "src/capture-state.js",
+    "src/cli-idempotency.js",
+    "src/host-adapter.js",
+    "src/home-doctor.js",
+    "src/codex-hooks.js",
+    "src/claude-hooks.js",
+    "src/claude-plugin-install.js",
+    "src/cursor-hooks.js",
+    "src/cursor-install.js",
+    "src/codex-install.js",
+    "src/codex-runtime.js",
+    "src/product-compositor.js",
+    "src/binding-admin.js",
+    "src/trust-helper.js",
+    "src/workspace-binding.js",
+    "src/windows-bootstrap-adapter.js",
+    "src/unassigned-inbox.js",
+    "src/product-binding-verifier.js",
+    "src/local-supervisor.js",
+    "src/artifact-installer.js",
+    "src/install-journal.js",
+    "src/install-plan.js",
+    "src/personal-install-command.js",
+    "src/personal-install.js",
+    "src/personal-authority-profile.js",
+    "src/personal-host-adapters.js",
+    "src/personal-live-readiness.js",
+    "src/personal-principal.js",
+    "src/personal-runtime-installer.js",
+    "src/product-hook-entrypoint.js",
+    "src/product-hook-entrypoint.bundle.js",
+    "src/product-hook-worker.js",
+    "src/release-attestation.js",
+    "src/target-release-attestation.js",
+    "src/release-manifest.js",
+    "src/supported-hosts.js",
+    "src/managed-embedder-release.js",
+    "src/managed-embedder-download.js",
+    "src/native-packed-fixture.js",
+    "src/desktop-target.js",
+    "src/platform-services.js",
     "src/demo-corpus.json",
     "scripts",
+    "runtime",
     "vendor/pulse-preview-source",
     "vendor/pulse-mcp-dist",
+    "vendor/pulse-presence-helper",
+    "release/README.md",
+    "release/personal-preview-manifest.json",
+    "release/personal-preview-manifest.schema.json",
+    "release/personal-release-artifact-set.schema.json",
+    "release/release-snapshot.schema.json",
+    "release/pulse-release-root.pem",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.4.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "tar-stream": "3.1.7"
   },
   "scripts": {
     "check": "node src/cli.js --help",
-    "test": "node --test src/*.test.js",
-    "prepack": "node scripts/prepare-preview-vendor.mjs",
-    "prepublishOnly": "node scripts/prepare-preview-vendor.mjs"
+    "test": "node --test --test-concurrency=1 src/*.test.js",
+    "test:codex-product": "node scripts/codex-product-e2e.mjs",
+    "test:personal-clean-room": "node scripts/personal-preview-clean-room.mjs",
+    "test:personal-interruption": "node scripts/personal-preview-interruption-e2e.mjs",
+    "test:personal-multiharness": "node scripts/personal-preview-multiharness-e2e.mjs",
+    "test:personal-native-packed": "node scripts/personal-native-packed-e2e.mjs",
+    "test:personal-consolidation-report": "node scripts/personal-consolidation-report-e2e.mjs",
+    "test:native-universal-target": "node scripts/native-universal-target.mjs",
+    "test:native-vendor-session": "node scripts/native-vendor-session-e2e.mjs",
+    "attest:personal-preview": "node scripts/personal-preview-release-attestation.mjs",
+    "test:codex-product:real-mlx": "PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs",
+    "test:claude-product": "node scripts/claude-product-e2e.mjs",
+    "verify:personal-package": "node scripts/verify-personal-package.mjs",
+    "build:presence-helper": "node scripts/build-presence-helper.mjs",
+    "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",
+    "build:portable-model": "node scripts/build-portable-model.mjs",
+    "build:product-hook-bundle": "node scripts/build-product-hook-bundle.mjs",
+    "build:windows-bootstrap-adapter": "node scripts/build-windows-bootstrap-adapter.mjs",
+    "build:npm-production-candidate": "node scripts/build-npm-production-candidate.mjs",
+    "build:npm-production-inputs": "node scripts/build-npm-production-inputs.mjs",
+    "build:public-soak-receipt": "node scripts/build-public-soak-receipt.mjs",
+    "build:gold-promotion-receipt": "node scripts/build-gold-promotion-receipt.mjs",
+    "generate:native-support-ledger": "node scripts/generate-native-support-ledger.mjs",
+    "build:personal-release": "node scripts/build-personal-release.mjs",
+    "build:personal-catalog": "node scripts/build-personal-catalog.mjs",
+    "build:plugin-runtime": "node scripts/build-plugin-runtime.mjs",
+    "fixture:target-release": "node scripts/target-release-fixture.mjs",
+    "sign:release-manifest": "node scripts/sign-release-manifest.mjs",
+    "prepack": "node scripts/build-product-hook-bundle.mjs && node scripts/prepare-preview-vendor.mjs",
+    "prepublishOnly": "cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "pulse",
@@ -53,7 +136,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zbs-gg/pulse.git",
-    "directory": "cli"
+    "directory": "pulse-app/cli"
   },
   "bugs": {
     "url": "https://github.com/zbs-gg/pulse/issues"
@@ -61,5 +144,8 @@
   "homepage": "https://github.com/zbs-gg/pulse#readme",
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
   }
 }

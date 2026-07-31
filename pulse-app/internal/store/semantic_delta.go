@@ -152,44 +152,31 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 	if err := validateSemanticDelta(delta); err != nil {
 		return SemanticDeltaResult{}, err
 	}
-	now := delta.Source.Timestamp
-	result := SemanticDeltaResult{OK: true}
+	if s.storeKind == StoreKindPersonal {
+		return SemanticDeltaResult{}, ErrMemoryTrayRequired
+	}
 	tx, err := s.db.Begin()
+	if err != nil {
+		return SemanticDeltaResult{}, err
+	}
+	defer tx.Rollback()
+	result, err := saveSemanticDeltaTx(tx, delta)
 	if err != nil {
 		return result, err
 	}
-	defer tx.Rollback()
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
 
-	nodeIDs := make(map[string]int64, len(delta.Nodes))
-	for _, node := range delta.Nodes {
-		id, err := upsertSemanticNode(tx, node, now)
-		if err != nil {
-			return result, err
+	// Legacy Local Preview claim resolution remains an asynchronous projection.
+	// Personal commits enqueue the same work in the private
+	// projection outbox and never performs a second canonical write here.
+	var pendingClaims []Assertion
+	for index, event := range delta.Events {
+		if index >= len(result.EventIDs) {
+			break
 		}
-		nodeIDs[node.ClientID] = id
-		result.NodesUpserted++
-	}
-	for _, edge := range delta.Edges {
-		if err := upsertSemanticRelation(tx, nodeIDs, edge, now); err != nil {
-			return result, err
-		}
-		result.EdgesUpserted++
-	}
-	for _, fact := range delta.Facts {
-		if err := upsertSemanticFact(tx, nodeIDs, fact, now); err != nil {
-			return result, err
-		}
-		result.FactsUpserted++
-	}
-	var pendingClaims []Assertion // resolved AFTER commit (embedding is IO, not in-tx)
-	for _, event := range delta.Events {
-		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
-		if err != nil {
-			return result, err
-		}
-		result.EventIDs = append(result.EventIDs, id)
-		result.EventsInserted++
-		validFrom := now
+		validFrom := delta.Source.Timestamp
 		if strings.TrimSpace(event.OccurredAt) != "" {
 			validFrom = strings.TrimSpace(event.OccurredAt)
 		}
@@ -199,7 +186,7 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 			}
 			pendingClaims = append(pendingClaims, Assertion{
 				Subject: cl.Subject, Predicate: cl.Predicate, ObjectText: cl.Object,
-				ValidFrom: validFrom, SystemFrom: now, SourceEventIDs: []int64{id},
+				ValidFrom: validFrom, SystemFrom: delta.Source.Timestamp, SourceEventIDs: []int64{result.EventIDs[index]},
 				ExtractorVersion: "host-extracted",
 				// Scope is no longer hard-coded: claims isolate by the delta's
 				// conversation_scope so a fact in one scope never supersedes the
@@ -209,9 +196,6 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 				ChangeCue: cl.ChangeCue,
 			})
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return result, err
 	}
 
 	// Claims become bitemporal assertions via the precision-first resolver, but
@@ -238,35 +222,100 @@ func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, err
 		}
 	}
 
+	return result, nil
+}
+
+// saveSemanticDeltaTx writes every canonical graph/continuity component in the
+// caller's transaction. External projections (claims and embeddings) are
+// deliberately excluded and represented by the Tray projection outbox.
+func saveSemanticDeltaTx(tx *sql.Tx, delta SemanticDelta) (SemanticDeltaResult, error) {
+	if err := validateSemanticDelta(delta); err != nil {
+		return SemanticDeltaResult{}, err
+	}
+	now := delta.Source.Timestamp
+	result := SemanticDeltaResult{OK: true}
+	nodeIDs := make(map[string]int64, len(delta.Nodes))
+	for _, node := range delta.Nodes {
+		id, err := upsertSemanticNode(tx, node, now)
+		if err != nil {
+			return result, err
+		}
+		nodeIDs[node.ClientID] = id
+		result.NodesUpserted++
+	}
+	for _, edge := range delta.Edges {
+		if err := upsertSemanticRelation(tx, nodeIDs, edge, now); err != nil {
+			return result, err
+		}
+		result.EdgesUpserted++
+	}
+	for _, fact := range delta.Facts {
+		if err := upsertSemanticFact(tx, nodeIDs, fact, now); err != nil {
+			return result, err
+		}
+		result.FactsUpserted++
+	}
+	for _, event := range delta.Events {
+		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
+		if err != nil {
+			return result, err
+		}
+		result.EventIDs = append(result.EventIDs, id)
+		result.EventsInserted++
+	}
 	if delta.Continuity != nil {
 		threadID := normalizeThreadID(delta.Source.ThreadID, delta.Source.ProjectID, delta.Source.SessionID)
 		sessionID := strings.TrimSpace(delta.Source.SessionID)
 		if sessionID == "" {
 			sessionID = threadID + ":semantic-delta"
 		}
-		err := s.SaveCheckpoint(ContinuityCheckpoint{
-			ThreadID:         threadID,
-			SessionID:        sessionID,
-			Host:             delta.Source.Host,
-			ProjectID:        delta.Source.ProjectID,
-			Summary:          delta.Continuity.Summary,
-			Decisions:        delta.Continuity.Decisions,
-			OpenLoops:        delta.Continuity.OpenLoops,
-			DoNotRepeat:      delta.Continuity.DoNotRepeat,
-			EmotionalAnchors: delta.Continuity.EmotionalAnchors,
-			StateSignals:     delta.Continuity.StateSignals,
-			ActiveThreads:    delta.Continuity.ActiveThreads,
-			ReviewInsights:   delta.Continuity.ReviewInsights,
-			SourceRefs:       []string{fmt.Sprintf("pulse:semantic_delta:%d", time.Now().UTC().UnixNano())},
-			Confidence:       0.8,
-			CreatedAt:        now,
-		})
-		if err != nil {
+		if err := saveSemanticContinuityTx(tx, delta, threadID, sessionID, now); err != nil {
 			return result, err
 		}
 		result.CheckpointSaved = true
 	}
 	return result, nil
+}
+
+func saveSemanticContinuityTx(tx *sql.Tx, delta SemanticDelta, threadID, sessionID, now string) error {
+	return saveSemanticContinuityWithRefsTx(
+		tx, delta, threadID, sessionID, now,
+		[]string{fmt.Sprintf("pulse:semantic_delta:%d", time.Now().UTC().UnixNano())},
+	)
+}
+
+func saveSemanticContinuityWithRefsTx(tx *sql.Tx, delta SemanticDelta, threadID, sessionID, now string, sourceRefs []string) error {
+	continuity := delta.Continuity
+	if continuity == nil {
+		return nil
+	}
+	if err := upsertContinuityThread(tx, threadID, delta.Source.ProjectID, now); err != nil {
+		return err
+	}
+	if err := upsertContinuitySession(tx, sessionID, threadID, delta.Source.Host, delta.Source.ProjectID, now, now, "checkpointed"); err != nil {
+		return err
+	}
+	decisions, _ := json.Marshal(continuity.Decisions)
+	openLoops, _ := json.Marshal(continuity.OpenLoops)
+	doNotRepeat, _ := json.Marshal(continuity.DoNotRepeat)
+	emotional, _ := json.Marshal(continuity.EmotionalAnchors)
+	state, _ := json.Marshal(continuity.StateSignals)
+	activeThreads, _ := json.Marshal(continuity.ActiveThreads)
+	reviewInsights, _ := json.Marshal(continuity.ReviewInsights)
+	refs, _ := json.Marshal(sourceRefs)
+	_, err := tx.Exec(`
+		INSERT INTO continuity_checkpoints(
+			thread_id, session_id, host, project_id, summary, decisions_json,
+			open_loops_json, do_not_repeat_json, emotional_anchors_json,
+			state_signals_json, active_threads_json, review_insights_json,
+			source_refs_json, confidence, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.8, ?)`,
+		threadID, sessionID, delta.Source.Host, delta.Source.ProjectID,
+		continuity.Summary, string(decisions), string(openLoops), string(doNotRepeat),
+		string(emotional), string(state), string(activeThreads), string(reviewInsights),
+		string(refs), now,
+	)
+	return err
 }
 
 func upsertSemanticNode(tx *sql.Tx, node SemanticNode, now string) (int64, error) {
@@ -531,6 +580,15 @@ func validateSemanticDelta(delta SemanticDelta) error {
 	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(delta.Source.Timestamp)); err != nil {
 		return fmt.Errorf("source.timestamp must be RFC3339")
 	}
+	for field, value := range map[string]string{
+		"source.thread_id":  delta.Source.ThreadID,
+		"source.session_id": delta.Source.SessionID,
+		"source.project_id": delta.Source.ProjectID,
+	} {
+		if value != "" && !validSemanticRef(value) {
+			return fmt.Errorf("%s is unsafe", field)
+		}
+	}
 	if len(delta.Nodes) == 0 && len(delta.Edges) == 0 && len(delta.Facts) == 0 && len(delta.Events) == 0 && delta.Continuity == nil {
 		return fmt.Errorf("semantic delta must include graph content or continuity")
 	}
@@ -715,6 +773,19 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 		if bio.HRV != nil && (*bio.HRV < 0 || *bio.HRV > 300) {
 			return fmt.Errorf("events[%d].biometrics.hrv is out of range", i)
 		}
+		if bio.HRTrend != nil {
+			value := strings.TrimSpace(*bio.HRTrend)
+			if value != "stable" && value != "low" && value != "rising" && value != "falling" &&
+				value != "elevated_3d" && value != "elevated_overnight" {
+				return fmt.Errorf("events[%d].biometrics.hr_trend is unsupported", i)
+			}
+		}
+		if bio.HRVTrend != nil {
+			value := strings.TrimSpace(*bio.HRVTrend)
+			if value != "stable" && value != "rising" && value != "falling" && value != "declining_3d" {
+				return fmt.Errorf("events[%d].biometrics.hrv_trend is unsupported", i)
+			}
+		}
 	}
 	if len(event.Claims) > 20 {
 		return fmt.Errorf("events[%d].claims has too many items", i)
@@ -780,6 +851,9 @@ func validateSemanticText(field, value string, max int, required bool) error {
 
 func validSemanticRef(ref string) bool {
 	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "session:") && trayBindingDigestPattern.MatchString(strings.TrimPrefix(ref, "session:")) {
+		return true
+	}
 	return semanticRefPattern.MatchString(ref) && !looksSensitiveOrPathLike(ref)
 }
 

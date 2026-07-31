@@ -1,0 +1,72 @@
+{
+  "schema": "pulse.native_universal_matrix.v2",
+  "node_version": "22",
+  "go_version": "1.25.6",
+  "harnesses": [
+    {
+      "host": "codex",
+      "vendor": "OpenAI",
+      "distribution": "npm",
+      "identity": "@openai/codex",
+      "version": "0.145.0",
+      "executable": "codex",
+      "vendor_source": "https://registry.npmjs.org/@openai/codex",
+      "downloads": {
+        "darwin-arm64": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+        "darwin-x64": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+        "linux-arm64-gnu": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+        "linux-x64-gnu": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+        "win32-arm64": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+        "win32-x64": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz"
+      },
+      "executable_digest_policy": "native_evidence_sha256",
+      "supported_targets": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"]
+    },
+    {
+      "host": "claude-code",
+      "vendor": "Anthropic",
+      "distribution": "npm",
+      "identity": "@anthropic-ai/claude-code",
+      "version": "2.1.220",
+      "executable": "claude",
+      "vendor_source": "https://registry.npmjs.org/@anthropic-ai/claude-code",
+      "downloads": {
+        "darwin-arm64": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz",
+        "darwin-x64": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz",
+        "linux-arm64-gnu": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz",
+        "linux-x64-gnu": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz",
+        "win32-arm64": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz",
+        "win32-x64": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.220.tgz"
+      },
+      "executable_digest_policy": "native_evidence_sha256",
+      "supported_targets": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"]
+    },
+    {
+      "host": "cursor",
+      "vendor": "Anysphere",
+      "distribution": "vendor-desktop-installer",
+      "identity": "Cursor Desktop",
+      "version": "3.13",
+      "executable": "cursor",
+      "vendor_source": "https://cursor.com/download",
+      "downloads": {
+        "darwin-arm64": "https://api2.cursor.sh/updates/download/golden/darwin-arm64/cursor/3.13",
+        "darwin-x64": "https://api2.cursor.sh/updates/download/golden/darwin-x64/cursor/3.13",
+        "linux-arm64-gnu": "https://api2.cursor.sh/updates/download/golden/linux-arm64-deb/cursor/3.13",
+        "linux-x64-gnu": "https://api2.cursor.sh/updates/download/golden/linux-x64-deb/cursor/3.13",
+        "win32-arm64": "https://api2.cursor.sh/updates/download/golden/win32-arm64-user/cursor/3.13",
+        "win32-x64": "https://api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/3.13"
+      },
+      "executable_digest_policy": "native_evidence_sha256",
+      "supported_targets": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"]
+    }
+  ],
+  "targets": [
+    { "target_id": "darwin-arm64", "runner": "macos-26", "platform": "darwin", "architecture": "arm64", "libc": null },
+    { "target_id": "darwin-x64", "runner": "macos-26-intel", "platform": "darwin", "architecture": "x64", "libc": null },
+    { "target_id": "linux-arm64-gnu", "runner": "ubuntu-24.04-arm", "platform": "linux", "architecture": "arm64", "libc": "gnu" },
+    { "target_id": "linux-x64-gnu", "runner": "ubuntu-24.04", "platform": "linux", "architecture": "x64", "libc": "gnu" },
+    { "target_id": "win32-arm64", "runner": "windows-11-arm", "platform": "win32", "architecture": "arm64", "libc": null },
+    { "target_id": "win32-x64", "runner": "windows-2025", "platform": "win32", "architecture": "x64", "libc": null }
+  ]
+}

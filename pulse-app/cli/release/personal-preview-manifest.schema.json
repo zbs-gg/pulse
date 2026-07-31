@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zbs.gg/schemas/pulse/personal-preview-release-catalog.v2.json",
+  "title": "Pulse Personal Preview signed desktop release catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["allowed_origins", "common_artifacts", "release", "schema", "targets"],
+  "properties": {
+    "schema": { "const": "pulse.personal_preview.release_catalog.v2" },
+    "allowed_origins": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "uri", "pattern": "^https://" }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "epoch", "expires_at", "issued_at", "key_id", "package", "version"],
+      "properties": {
+        "channel": { "const": "preview" },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "key_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "package": { "const": "@zbs-gg/pulse" },
+        "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$" }
+      }
+    },
+    "common_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "plugin-runtime"],
+      "properties": {
+        "model": { "$ref": "#/$defs/artifact" },
+        "plugin-runtime": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 6,
+      "maxProperties": 6,
+      "required": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"],
+      "propertyNames": {
+        "enum": ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64", "win32-x64"]
+      },
+      "patternProperties": {
+        "^(darwin-(arm64|x64)|linux-(arm64|x64)-gnu|win32-(arm64|x64))$": { "$ref": "#/$defs/target" }
+      }
+    }
+  },
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "artifacts", "capabilities", "libc", "platform", "verification_profile"],
+      "properties": {
+        "architecture": { "enum": ["arm64", "x64"] },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["daemon", "embedder-runtime"],
+          "properties": {
+            "daemon": { "$ref": "#/$defs/artifact" },
+            "embedder-runtime": { "$ref": "#/$defs/artifact" },
+            "presence-helper": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" }
+        },
+        "libc": { "enum": ["gnu", null] },
+        "platform": { "enum": ["darwin", "linux", "win32"] },
+        "verification_profile": { "$ref": "#/$defs/verification_profile" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture", "bytes", "epoch", "executable", "format", "id", "kind", "minimum_os",
+        "model_policy", "origin", "platform", "sha256", "signing", "tree_digest", "url", "version"
+      ],
+      "properties": {
+        "architecture": { "enum": ["all", "arm64", "x64"] },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 68719476736 },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "executable": { "type": "boolean" },
+        "format": { "enum": ["tar.gz"] },
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+        "kind": { "enum": ["daemon", "embedder-runtime", "model", "plugin-runtime", "presence-helper"] },
+        "minimum_os": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+        "model_policy": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["custom_code", "data_only", "engine", "model", "required_files", "revision"],
+              "properties": {
+                "custom_code": { "const": false },
+                "data_only": { "const": true },
+                "engine": { "const": "transformers-js-onnx" },
+                "model": { "const": "BAAI/bge-m3" },
+                "required_files": {
+                  "const": [
+                    "LICENSES/BGE-M3-MIT.txt",
+                    "PROVENANCE.json",
+                    "model_int8.onnx",
+                    "pulse-model-contract.json",
+                    "support/config.json",
+                    "support/special_tokens_map.json",
+                    "support/tokenizer.json",
+                    "support/tokenizer_config.json"
+                  ]
+                },
+                "revision": { "const": "5617a9f61b028005a4858fdac845db406aefb181" }
+              }
+            }
+          ]
+        },
+        "origin": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "platform": { "enum": ["all", "darwin", "linux", "win32"] },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "tree_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "signing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gatekeeper", "identifier", "notarized", "scheme", "stapled", "team_id"],
+          "properties": {
+            "gatekeeper": { "type": "boolean" },
+            "identifier": { "type": ["string", "null"] },
+            "notarized": { "type": "boolean" },
+            "scheme": { "enum": ["apple-developer-id", "fixture", "release-manifest", "windows-authenticode"] },
+            "stapled": { "type": "boolean" },
+            "team_id": { "type": ["string", "null"] }
+          }
+        },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "version": { "type": "string" }
+      }
+    },
+    "verification_profile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fixture_id", "kind", "production"],
+          "properties": {
+            "fixture_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+            "kind": { "const": "fixture" },
+            "production": { "const": false }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gatekeeper", "kind", "notarized", "stapled", "team_id"],
+          "properties": {
+            "gatekeeper": { "const": true },
+            "kind": { "const": "apple" },
+            "notarized": { "const": true },
+            "stapled": { "const": false },
+            "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "publisher", "timestamp_url", "timestamped"],
+          "properties": {
+            "kind": { "const": "windows" },
+            "publisher": { "type": "string", "pattern": "^CN=[^,\\r\\n]{1,128}(, ?(O|OU|L|S|C)=[^,\\r\\n]{1,128})*$" },
+            "timestamp_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "timestamped": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "policy"],
+          "properties": {
+            "kind": { "const": "linux" },
+            "policy": { "const": "signed-catalog-tree-v1" }
+          }
+        }
+      ]
+    }
+  }
+}

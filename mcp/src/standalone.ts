@@ -152,6 +152,24 @@ function dedupe(values: string[], cap = 12): string[] {
   return out;
 }
 
+function truncateToUTF8ByteBudget(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+    return value;
+  }
+
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > maxBytes) {
+      break;
+    }
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return value.slice(0, end);
+}
+
 export class StandaloneStore {
   private readonly storePath: string;
 
@@ -492,17 +510,15 @@ export class StandaloneStore {
         'No stored continuity for this thread yet. Save decisions with pulse_remember or pulse_graph_delta first.',
       );
     }
-    let resumeMarkdown = markdownParts.join('\n\n');
-    if (Math.ceil(resumeMarkdown.length / 4) > tokenBudget) {
-      resumeMarkdown = resumeMarkdown.slice(0, tokenBudget * 4);
-    }
-    const tokenEstimate = Math.ceil(resumeMarkdown.length / 4);
+    const resumeMarkdown = truncateToUTF8ByteBudget(markdownParts.join('\n\n'), tokenBudget * 4);
+    const renderedBytes = Buffer.byteLength(resumeMarkdown, 'utf8');
+    const tokenEstimate = Math.ceil(renderedBytes / 4);
     const sessionId =
       (typeof body.session_id === 'string' && body.session_id) ||
       `${host}:${threadId}:${new Date().toISOString()}`;
 
     return {
-      schema: 'pulse.continuity.v1',
+      schema: 'pulse.continuity.v2',
       engine: 'standalone_lite',
       ...(storeIsEmpty ? { first_run: FIRST_RUN } : {}),
       thread_id: threadId,
@@ -511,10 +527,12 @@ export class StandaloneStore {
       token_budget: tokenBudget,
       token_estimate: tokenEstimate,
       token_economy: {
-        resume_tokens: tokenEstimate,
-        estimated_raw_tokens: tokenEstimate * 8,
-        estimated_saved_tokens: tokenEstimate * 7,
-        estimated: true,
+        state: 'collecting_baseline',
+        method_id: 'utf8_bytes_div4_ceil',
+        method_version: '1',
+        rendered_bytes: renderedBytes,
+        pulse_tokens: tokenEstimate,
+        reason_code: 'comparable_receipt_required',
       },
       resume_markdown: resumeMarkdown,
       sections: {

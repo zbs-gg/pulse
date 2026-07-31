@@ -1,0 +1,692 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+
+import {
+  PERSONAL_AUTHORITY_PROFILE_SCHEMA,
+  PERSONAL_INSTALL_STEPS,
+  PersonalInstallError,
+  runPersonalInstall,
+  writePersonalInstallReceipt,
+} from './personal-install.js';
+
+function supportedPlan(overrides = {}) {
+  return {
+    schema: 'pulse.personal_install_plan.v2',
+    contract_version: 2,
+    outcome: 'ready_to_install',
+    reason_codes: [],
+    detected: {
+      workspace: {
+        workspace_id: 'workspace_test',
+        repository_id: 'repository_test',
+        canonical_path: '/private/project',
+        checkout_kind: 'primary',
+      },
+    },
+    ...overrides,
+  };
+}
+
+function hostStatus(host, {
+  ready = false,
+  installed = ready,
+  mcpReady = ready,
+  activated = installed,
+  reasonCode = ready ? `${host.replaceAll('-', '_')}_verified` : `${host.replaceAll('-', '_')}_activation_required`,
+  milestones = ready ? ['turn_capture'] : [],
+} = {}) {
+  return {
+    host, detected: true, compatible: true, installed, mcp_ready: mcpReady, activated,
+    verified: mcpReady && ready, lifecycle_ready: ready, reload_required: mcpReady && !ready,
+    milestones, reason_code: reasonCode,
+  };
+}
+
+function harness(overrides = {}) {
+  const state = {
+    runtime: false,
+    presence: true,
+    principal: null,
+    binding: null,
+    core: false,
+    activation: false,
+    health: false,
+  };
+  const mutations = [];
+  const receipts = [];
+  const dependencies = {
+    inspectRuntime: async () => ({ ready: state.runtime }),
+    provisionRuntime: async () => {
+      mutations.push('runtime');
+      state.runtime = true;
+      return { manifest_digest: 'a'.repeat(64), release_epoch: 1 };
+    },
+    inspectPresence: async () => ({ ready: state.presence }),
+    installPresence: async () => {
+      mutations.push('presence');
+      state.presence = true;
+    },
+    inspectPrincipal: async () => state.principal,
+    createPrincipal: async () => {
+      mutations.push('principal');
+      state.principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
+      return state.principal;
+    },
+    inspectBinding: async ({ principal }) => state.binding && state.binding.principal_ref === principal.principal_id
+      ? { ready: true, binding: state.binding }
+      : { ready: false, status: 'missing' },
+    createBinding: async ({ principal }) => {
+      mutations.push('binding');
+      state.binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
+      return state.binding;
+    },
+    inspectCore: async () => ({ ready: state.core, full_retrieval: state.core, context: {} }),
+    activateCore: async () => {
+      mutations.push('core');
+      state.core = true;
+    },
+    inspectActivation: async () => ({
+      product_ready: state.activation,
+      parity: state.activation ? 'complete' : 'blocked',
+      hosts: [hostStatus('codex', { ready: state.activation })],
+    }),
+    activateHosts: async () => {
+      mutations.push('activation');
+      state.activation = true;
+      state.health = true;
+    },
+    inspectHealth: async () => ({ ready: state.health, full_retrieval: state.health }),
+    writeReceipt: async (receipt) => { receipts.push(structuredClone(receipt)); },
+    ...overrides,
+  };
+  return { state, mutations, receipts, dependencies };
+}
+
+test('cancel before disclosure consent performs no product mutation or journal write', async () => {
+  const run = harness();
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: false,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'disclosure_consent_required');
+  assert.deepEqual(result.completed_steps, []);
+  assert.deepEqual(run.mutations, []);
+  assert.deepEqual(run.receipts, []);
+});
+
+test('unsupported preflight fails before consent and mutation with one next action', async () => {
+  const run = harness();
+  const result = await runPersonalInstall({
+    plan: supportedPlan({ outcome: 'unsupported', reason_codes: ['platform_unsupported'] }),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal(result.reason_code, 'platform_unsupported');
+  assert.equal(typeof result.next_action, 'string');
+  assert.deepEqual(run.mutations, []);
+  assert.deepEqual(run.receipts, []);
+});
+
+test('an unmet supported-host prerequisite is action-required before consent and mutation', async () => {
+  const run = harness();
+  const result = await runPersonalInstall({
+    plan: supportedPlan({ outcome: 'action_required', reason_codes: ['supported_harness_missing'] }),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'supported_harness_missing');
+  assert.deepEqual(run.mutations, []);
+  assert.deepEqual(run.receipts, []);
+});
+
+test('new install rechecks every durable fact and executes the security ordering', async () => {
+  const run = harness();
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'installed');
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.deepEqual(result.completed_steps, PERSONAL_INSTALL_STEPS);
+  assert.equal(PERSONAL_INSTALL_STEPS[1], 'authority_profile_ready');
+  assert.deepEqual(result.authority_profile, {
+    schema: PERSONAL_AUTHORITY_PROFILE_SCHEMA,
+    version: 1,
+    kind: 'portable',
+    ordinary_ready: true,
+    enhanced_presence: {
+      schema: 'pulse.enhanced_presence.profile.v1',
+      version: 1,
+      kind: 'unavailable',
+      available: false,
+      protected_actions: [],
+      reason_code: 'enhanced_presence_unavailable',
+    },
+  });
+  assert.deepEqual(run.receipts.at(-1).authority_profile, result.authority_profile);
+  assert.equal(result.preserved_data, true);
+  assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
+  assert.match(result.next_action, /Continue working/);
+  assert.match(result.next_action, /Optional: run pulse home/);
+  assert.equal(run.receipts.at(-1).outcome, 'ready');
+  assert.equal(run.receipts.at(-1).reason_code, 'installed');
+  assert.deepEqual(
+    run.receipts.slice(0, -1).map((receipt) => receipt.reason_code),
+    PERSONAL_INSTALL_STEPS.slice(0, -1).map((step) => `checkpoint_${step}`),
+  );
+});
+
+test('post-consent CLI identity drift stops before the first product mutation', async () => {
+  const run = harness({
+    inspectRuntime: async () => { throw new PersonalInstallError('claude_identity_changed'); },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'claude_identity_changed');
+  assert.deepEqual(run.mutations, []);
+});
+
+test('one verified harness makes the product ready while secondary parity stays degraded', async () => {
+  const run = harness();
+  let activationAttempts = 0;
+  const degraded = {
+    product_ready: true,
+    parity: 'degraded',
+    hosts: [
+      hostStatus('claude-code', { ready: true, reasonCode: 'host_verified' }),
+      hostStatus('cursor', { ready: false, installed: true, mcpReady: true, reasonCode: 'cursor_lifecycle_required' }),
+    ],
+  };
+  run.dependencies.inspectActivation = async () => degraded;
+  run.dependencies.activateHosts = async () => { activationAttempts += 1; };
+  run.dependencies.inspectHealth = async () => ({ ready: true, full_retrieval: true });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.host_status.parity, 'degraded');
+  assert.match(result.next_action, /run pulse repair/);
+  assert.equal(activationAttempts, 1, 'unfinished secondary host is retried without blocking the healthy primary');
+  assert.equal(run.receipts.at(-1).host_status.hosts[1].reason_code, 'cursor_lifecycle_required');
+});
+
+test('a host rollback failure blocks readiness even when another host is verified', async () => {
+  const run = harness();
+  const unsafe = {
+    product_ready: true,
+    parity: 'degraded',
+    hosts: [
+      hostStatus('claude-code', { ready: true, reasonCode: 'claude_plugin_verified' }),
+      hostStatus('codex', { ready: false, reasonCode: 'codex_activation_rollback_failed' }),
+    ],
+  };
+  run.dependencies.inspectActivation = async () => unsafe;
+  run.dependencies.activateHosts = async () => unsafe;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'codex_activation_rollback_failed');
+  assert.equal(result.host_status.hosts[0].verified, true);
+  assert.match(result.next_action, /uncertain plugin state/);
+});
+
+test('already healthy install is idempotent and finishes with an already-installed receipt', async () => {
+  const run = harness();
+  run.state.runtime = true;
+  run.state.principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
+  run.state.binding = { binding_id: 'binding_test', principal_ref: run.state.principal.principal_id };
+  run.state.core = true;
+  run.state.activation = true;
+  run.state.health = true;
+
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    resumeEvidence: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'already_installed');
+  assert.deepEqual(run.mutations, []);
+  assert.deepEqual(result.completed_steps, PERSONAL_INSTALL_STEPS);
+  assert.equal(run.receipts.at(-1).reason_code, 'already_installed');
+});
+
+test('reused prerequisites do not label a fresh install as resumed', async () => {
+  const run = harness();
+  run.state.runtime = true;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    mode: 'repair',
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'installed');
+  assert.deepEqual(run.mutations, ['principal', 'binding', 'core', 'activation']);
+});
+
+test('only explicit repair may replace a reviewed active runtime with the exact signed release', async () => {
+  function runtimeTransitionHarness() {
+    let repaired = false;
+    const run = harness({
+      inspectRuntime: async () => {
+        if (!repaired) throw new PersonalInstallError('runtime_repair_required');
+        return { ready: true, reason_code: 'runtime_candidate_staged' };
+      },
+      provisionRuntime: async () => {
+        run.mutations.push('runtime');
+        repaired = true;
+      },
+    });
+    return run;
+  }
+
+  const install = runtimeTransitionHarness();
+  const blocked = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, mode: 'install', dependencies: install.dependencies,
+  });
+  assert.equal(blocked.outcome, 'action_required');
+  assert.equal(blocked.reason_code, 'runtime_repair_required');
+  assert.deepEqual(install.mutations, []);
+
+  const repair = runtimeTransitionHarness();
+  const completed = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, mode: 'repair', dependencies: repair.dependencies,
+  });
+  assert.equal(completed.outcome, 'ready');
+  assert.equal(completed.reason_code, 'installed');
+  assert.deepEqual(repair.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.deepEqual(completed.completed_steps, PERSONAL_INSTALL_STEPS);
+});
+
+test('a healthy old core is reactivated when it is not bound to the reviewed release manifest', async () => {
+  const oldDigest = 'a'.repeat(64);
+  const newDigest = 'b'.repeat(64);
+  let activeDigest = oldDigest;
+  const run = harness({
+    inspectCore: async () => ({
+      ready: true,
+      full_retrieval: true,
+      context: { edge: { release_manifest_digest: activeDigest } },
+    }),
+    activateCore: async () => {
+      run.mutations.push('core');
+      activeDigest = newDigest;
+    },
+  });
+  run.state.runtime = true;
+
+  const result = await runPersonalInstall({
+    plan: supportedPlan({ release: { manifest_digest: newDigest } }),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(activeDigest, newDigest);
+  assert.deepEqual(run.mutations, ['principal', 'binding', 'core', 'activation']);
+});
+
+test('resume label requires explicit durable resume evidence and still rechecks facts', async () => {
+  const run = harness();
+  run.state.runtime = true;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    resumeEvidence: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'resumed');
+  assert.deepEqual(run.mutations, ['principal', 'binding', 'core', 'activation']);
+});
+
+test('a fresh process resumes from durable inspected facts without repeating the runtime mutation', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-restart.'));
+  const statePath = join(root, 'state.json');
+  const receiptPath = join(root, 'receipt.json');
+  const vaultPath = join(root, 'vault.marker');
+  writeFileSync(vaultPath, 'private-memory-survives\n', { mode: 0o600 });
+  const runner = String.raw`
+    import fs from 'node:fs';
+    const { runPersonalInstall } = await import(process.env.PULSE_INSTALL_MODULE);
+    const statePath = process.env.PULSE_STATE_PATH;
+    const receiptPath = process.env.PULSE_RECEIPT_PATH;
+    const interrupted = process.env.PULSE_INTERRUPT === '1';
+    const initial = { runtime: false, principal: null, binding: null, core: false, activation: false, health: false, runtime_mutations: 0, core_mutations: 0 };
+    const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : initial;
+    const save = () => fs.writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
+    const plan = { schema: 'pulse.personal_install_plan.v2', contract_version: 2, outcome: 'ready_to_install', reason_codes: [], detected: { workspace: { workspace_id: 'workspace_test', repository_id: 'repository_test', canonical_path: '/private/project' } } };
+    const dependencies = {
+      inspectRuntime: async () => ({ ready: state.runtime }),
+      provisionRuntime: async () => { state.runtime = true; state.runtime_mutations += 1; save(); },
+      inspectPrincipal: async () => state.principal,
+      createPrincipal: async () => { state.principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' }; save(); return state.principal; },
+      inspectBinding: async () => state.binding ? { ready: true, binding: state.binding } : { ready: false, status: 'missing' },
+      createBinding: async ({ principal }) => { state.binding = { binding_id: 'binding_test', principal_ref: principal.principal_id }; save(); },
+      inspectCore: async () => ({ ready: state.core, full_retrieval: state.core, context: {} }),
+      activateCore: async () => { state.core = true; state.core_mutations += 1; save(); },
+      inspectActivation: async () => ({ product_ready: state.activation, parity: state.activation ? 'complete' : 'blocked', hosts: [{ host: 'codex', detected: true, compatible: true, installed: state.activation, mcp_ready: state.activation, activated: state.activation, verified: state.activation, lifecycle_ready: state.activation, reload_required: false, milestones: state.activation ? ['turn_capture'] : [], reason_code: state.activation ? 'codex_verified' : 'codex_activation_required' }] }),
+      activateHosts: async () => { state.activation = true; state.health = true; save(); },
+      inspectHealth: async () => ({ ready: state.health, full_retrieval: state.health }),
+      writeReceipt: async (receipt) => {
+        fs.writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 });
+        if (interrupted && receipt.reason_code === 'checkpoint_artifacts_staged') process.exit(73);
+        return 'receipt_restart_test';
+      },
+    };
+    const prior = fs.existsSync(receiptPath) ? JSON.parse(fs.readFileSync(receiptPath, 'utf8')) : null;
+    const result = await runPersonalInstall({ plan, consent: true, resumeEvidence: prior?.outcome === 'partial', dependencies });
+    process.stdout.write(JSON.stringify(result));
+  `;
+  const environment = {
+    ...process.env,
+    PULSE_INSTALL_MODULE: new URL('./personal-install.js', import.meta.url).href,
+    PULSE_STATE_PATH: statePath,
+    PULSE_RECEIPT_PATH: receiptPath,
+  };
+  try {
+    const interrupted = spawnSync(process.execPath, ['--input-type=module', '--eval', runner], {
+      env: { ...environment, PULSE_INTERRUPT: '1' }, encoding: 'utf8',
+    });
+    assert.equal(interrupted.status, 73, interrupted.stderr);
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).runtime_mutations, 1);
+    assert.equal(JSON.parse(readFileSync(receiptPath, 'utf8')).reason_code, 'checkpoint_artifacts_staged');
+
+    const resumed = spawnSync(process.execPath, ['--input-type=module', '--eval', runner], {
+      env: environment, encoding: 'utf8',
+    });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    const result = JSON.parse(resumed.stdout);
+    assert.equal(result.outcome, 'ready');
+    assert.equal(result.reason_code, 'resumed');
+    assert.equal(result.receipt_ref, 'receipt_restart_test');
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).runtime_mutations, 1);
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).core_mutations, 1);
+    assert.equal(readFileSync(vaultPath, 'utf8'), 'private-memory-survives\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('terminal result exposes a safe writer reference and rejects path-like references', async () => {
+  const safe = harness();
+  safe.dependencies.writeReceipt = async (receipt) => {
+    safe.receipts.push(structuredClone(receipt));
+    return 'receipt_install_test';
+  };
+  const safeResult = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: safe.dependencies,
+  });
+  assert.equal(safeResult.receipt_ref, 'receipt_install_test');
+
+  const pathLike = harness();
+  pathLike.dependencies.writeReceipt = async (receipt) => {
+    pathLike.receipts.push(structuredClone(receipt));
+    return '/Users/person/.pulse/receipts/install/workspace_test.json';
+  };
+  const pathResult = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: pathLike.dependencies,
+  });
+  assert.equal(pathResult.receipt_ref, 'pulse://receipts/install/latest');
+});
+
+test('optional enhanced-presence setup is never invoked by ordinary Personal install', async () => {
+  const run = harness({
+    installPresence: async () => {
+      run.mutations.push('presence_attempt');
+      throw new PersonalInstallError('presence_denied');
+    },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.equal(result.reason_code, 'installed');
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.equal(result.authority_profile.enhanced_presence.available, false);
+  assert.deepEqual(result.authority_profile.enhanced_presence.protected_actions, []);
+});
+
+test('missing enhanced presence does not block the first principal or binding write', async () => {
+  const run = harness({
+    installPresence: async () => {
+      run.mutations.push('presence_attempt');
+      throw new PersonalInstallError('presence_denied');
+    },
+  });
+  run.state.presence = false;
+  const result = await runPersonalInstall({
+    plan: supportedPlan(),
+    consent: true,
+    dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'ready');
+  assert.deepEqual(run.mutations, ['runtime', 'principal', 'binding', 'core', 'activation']);
+  assert.equal(result.authority_profile.ordinary_ready, true);
+  assert.equal(result.authority_profile.enhanced_presence.available, false);
+});
+
+test('healthy retrieval with incomplete activation reports the exact activation reason', async () => {
+  const run = harness({
+    inspectHealth: async () => ({
+      ready: false, full_retrieval: true, reason_code: 'codex_activation_incomplete',
+    }),
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'codex_activation_incomplete');
+  assert.match(result.next_action, /pulse doctor codex --json/);
+  assert.equal(run.receipts.at(-1).reason_code, 'codex_activation_incomplete');
+});
+
+test('trusted Codex hooks with missing lifecycle evidence ask for a normal new task', async () => {
+  const run = harness({
+    inspectHealth: async () => ({
+      ready: false, full_retrieval: true, reason_code: 'codex_hook_lifecycle_required',
+    }),
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'codex_hook_lifecycle_required');
+  assert.match(result.next_action, /open.*normal new Codex task/i);
+  assert.doesNotMatch(result.next_action, /approve|trust.*hook/i);
+  assert.equal(run.receipts.at(-1).reason_code, 'codex_hook_lifecycle_required');
+});
+
+test('Codex native lifecycle capability gap has a truthful stable next action', async () => {
+	const run = harness({
+		inspectHealth: async () => ({
+			ready: false, full_retrieval: true,
+			reason_code: 'codex_native_lifecycle_attestation_unavailable',
+		}),
+	});
+	const result = await runPersonalInstall({
+		plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+	});
+
+	assert.equal(result.outcome, 'action_required');
+	assert.equal(result.reason_code, 'codex_native_lifecycle_attestation_unavailable');
+	assert.match(result.next_action, /use Pulse MCP tools explicitly/i);
+	assert.match(result.next_action, /Codex.*replayable native hook execution evidence/i);
+	assert.doesNotMatch(result.next_action, /normal new Codex task|approve|trust/i);
+});
+
+test('unsafe bindings stop on an existing read-only review action without replacement or repair recursion', async () => {
+  for (const status of ['conflict', 'legacy', 'repair_required']) {
+    const run = harness({
+      inspectBinding: async () => ({ ready: false, status, reason_code: `binding_${status}` }),
+    });
+    const result = await runPersonalInstall({
+      plan: supportedPlan(),
+      consent: true,
+      mode: 'repair',
+      dependencies: run.dependencies,
+    });
+
+    assert.equal(result.outcome, 'action_required');
+    assert.equal(result.reason_code, `binding_${status}`);
+    assert.match(result.next_action, /pulse install-plan --json/);
+    assert.doesNotMatch(result.next_action, /pulse repair/);
+    assert.deepEqual(run.mutations, ['runtime', 'principal']);
+    assert.equal(run.mutations.includes('activation'), false);
+  }
+});
+
+test('principal repair stops on read-only plan inspection without rerunning repair', async () => {
+  const run = harness({
+    inspectPrincipal: async () => { throw new PersonalInstallError('principal_repair_required'); },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, mode: 'repair', dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'action_required');
+  assert.equal(result.reason_code, 'principal_repair_required');
+  assert.match(result.next_action, /pulse install-plan --json/);
+  assert.doesNotMatch(result.next_action, /pulse repair/);
+});
+
+test('verification failure after mutation returns a stable blocked result and durable terminal receipt', async () => {
+  const run = harness({
+    provisionRuntime: async () => { run.mutations.push('runtime'); },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal(result.reason_code, 'runtime_verification_failed');
+  assert.deepEqual(result.completed_steps, []);
+  assert.deepEqual(run.mutations, ['runtime']);
+  assert.equal(run.receipts.length, 1);
+  assert.equal(run.receipts[0].reason_code, 'runtime_verification_failed');
+  assert.equal(result.receipt_ref, 'pulse://receipts/install/latest');
+});
+
+test('generic failure after a completed step is sanitized and writes one terminal partial receipt', async () => {
+  const run = harness({
+    inspectAuthorityProfile: async () => {
+      throw new Error('secret path: /Users/person/private');
+    },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'partial');
+  assert.equal(result.reason_code, 'install_failed');
+  assert.deepEqual(result.completed_steps, ['artifacts_staged']);
+  assert.equal(run.receipts.filter((receipt) => receipt.reason_code === 'install_failed').length, 1);
+  assert.doesNotMatch(`${result.reason_code} ${result.next_action}`, /\/Users|private|secret/i);
+});
+
+test('safe dependency failure codes stay visible without leaking the underlying message', async () => {
+  const run = harness({
+    provisionRuntime: async () => {
+      const error = new Error('private release diagnostic: /Users/person/secret');
+      error.code = 'artifact_etag_invalid';
+      throw error;
+    },
+  });
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal(result.reason_code, 'artifact_etag_invalid');
+  assert.deepEqual(result.completed_steps, []);
+  assert.match(result.next_action, /release source.*verification metadata/i);
+  assert.doesNotMatch(JSON.stringify(result), /Users|private release diagnostic|secret/i);
+});
+
+test('receipt writer failure returns a stable partial result without retrying the writer', async () => {
+  const run = harness();
+  let attempts = 0;
+  run.dependencies.writeReceipt = async () => {
+    attempts += 1;
+    throw new Error('disk failure');
+  };
+  const result = await runPersonalInstall({
+    plan: supportedPlan(), consent: true, dependencies: run.dependencies,
+  });
+
+  assert.equal(result.outcome, 'partial');
+  assert.equal(result.reason_code, 'install_receipt_write_failed');
+  assert.deepEqual(result.completed_steps, ['artifacts_staged']);
+  assert.equal('receipt_ref' in result, false);
+  assert.equal(attempts, 1);
+});
+
+test('terminal install receipt is durable, private, path-free, and content-free', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-install-receipt.'));
+  try {
+    const path = writePersonalInstallReceipt({
+      schema: 'pulse.personal_install_receipt.v2',
+      outcome: 'ready',
+      reason_code: 'installed',
+      completed_steps: [...PERSONAL_INSTALL_STEPS],
+      workspace_id: 'workspace_test',
+      repository_id: 'repository_test',
+      preserved_data: true,
+      host_status: { product_ready: true, parity: 'complete', hosts: [] },
+    }, { dataDir, now: new Date('2026-07-15T10:00:00.000Z') });
+    assert.equal(existsSync(path), true);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const bytes = readFileSync(path, 'utf8');
+    assert.match(bytes, /pulse\.personal_install_receipt\.v2/);
+    assert.doesNotMatch(bytes, /\/Users\/|prompt|transcript|secret/i);
+    assert.equal(JSON.parse(bytes).created_at, '2026-07-15T10:00:00.000Z');
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('receipt writer rejects an unsafe existing directory without repairing it silently', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-install-unsafe.'));
+  const receipts = join(dataDir, 'receipts');
+  mkdirSync(receipts, { mode: 0o755 });
+  chmodSync(receipts, 0o755);
+  try {
+    assert.throws(() => writePersonalInstallReceipt({
+      schema: 'pulse.personal_install_receipt.v2', outcome: 'ready', reason_code: 'installed',
+      completed_steps: [...PERSONAL_INSTALL_STEPS], workspace_id: 'workspace_test',
+      repository_id: 'repository_test', preserved_data: true,
+      host_status: { product_ready: true, parity: 'complete', hosts: [] },
+    }, { dataDir }), /install_receipt_directory_unsafe/);
+    assert.equal(statSync(receipts).mode & 0o777, 0o755);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

@@ -7,6 +7,7 @@ vendor/
 
 # Local workspace / release artifacts
 node_modules/
+.pulse-ci/
 /node_modules/
 /.worktrees/
 /artifacts/
@@ -21,6 +22,11 @@ node_modules/
 /pulse-app/.pytest_cache/
 /pulse-app/.venv-mlx/
 /pulse-app/bin/
+/pulse-app/native/pulse-embedder-runtime/
+/pulse-app/native/pulse-presence-helper/dist/*.dmg
+/pulse-app/cli/release/dist/
+/pulse-app/cli/release/personal-preview-manifest.payload.json
+/pulse-app/cli/release/personal-preview-manifest.json
 /pulse-app/pulse
 /pulse-app/pulse-data/
 /pulse-app/pulse-dev/

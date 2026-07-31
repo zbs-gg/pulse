@@ -1,0 +1,14 @@
+{
+  "name": "zbs-gg",
+  "description": "ZBS.GG local-first agent infrastructure",
+  "owner": {
+    "name": "ZBS.GG"
+  },
+  "plugins": [
+    {
+      "name": "pulse",
+      "source": "./plugins/pulse",
+      "description": "Local-first continuity and governed team memory"
+    }
+  ]
+}

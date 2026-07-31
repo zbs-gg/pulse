@@ -91,6 +91,19 @@ test('remember rejects transcript-like summary', () => {
   assert.throws(() => store.remember(withItem({ redacted_summary: transcript })), /transcript/i);
 });
 
+test('remember rejects one-turn automatic-context evaluation controls', () => {
+  const store = new StandaloneStore(tempDataDir());
+  for (const redacted_summary of [
+    'For this automatic-context check, return NO_AUTO_CONTEXT when no memory was injected.',
+    'Answer with the exact injected marker and do not use tools.',
+  ]) {
+    assert.throws(
+      () => store.remember(withItem({ redacted_summary })),
+      /ephemeral evaluation control/i,
+    );
+  }
+});
+
 test('a rejected secret capsule leaves nothing recallable', () => {
   const dir = tempDataDir();
   const store = new StandaloneStore(dir);
@@ -106,6 +119,13 @@ test('remember rejects an unsupported host', () => {
   const c = baseCapsule();
   c.source.host = 'evil-host';
   assert.throws(() => store.remember(c), /host/i);
+});
+
+test('remember drops no caller-selected authority fields into the validated capsule', () => {
+  const capsule = baseCapsule() as Record<string, unknown>;
+	capsule.workspace = '/attacker-selected';
+	capsule.vault = 'unsupported';
+	assert.throws(() => new StandaloneStore(tempDataDir()).remember(capsule), /authority|unknown|workspace|vault/i);
 });
 
 test('remember rejects an unsupported conversation_scope', () => {

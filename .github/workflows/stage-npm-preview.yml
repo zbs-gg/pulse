@@ -1,0 +1,137 @@
+name: Stage npm preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_candidate_run_id:
+        description: Successful Seal production candidate workflow run on main
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact SHA-256 printed by the protected candidate run
+        required: true
+        type: string
+      confirmation:
+        description: Type "stage @zbs-gg/pulse preview"
+        required: true
+        type: string
+  workflow_run:
+    workflows:
+      - Seal production candidate
+    types:
+      - completed
+    branches:
+      - main
+
+concurrency:
+  group: stage-npm-preview-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  stage:
+    name: Verify and stage immutable npm candidate
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-preview
+    env:
+      CANDIDATE_RUN_ID: ${{ github.event.workflow_run.id || inputs.production_candidate_run_id }}
+      CANDIDATE_SHA256_INPUT: ${{ inputs.candidate_sha256 }}
+      SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+      STAGE_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.4.1
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Require reviewed main or exact successful seal event
+        shell: bash
+        run: |
+          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+            test "$GITHUB_REF" = refs/heads/main
+            test "$STAGE_CONFIRMATION" = 'stage @zbs-gg/pulse preview'
+            [[ "$CANDIDATE_SHA256_INPUT" =~ ^[a-f0-9]{64}$ ]]
+          else
+            test "$GITHUB_EVENT_NAME" = workflow_run
+            test "${{ github.event.workflow_run.name }}" = 'Seal production candidate'
+            test "${{ github.event.workflow_run.conclusion }}" = success
+            test "${{ github.event.workflow_run.event }}" = workflow_dispatch
+            test "${{ github.event.workflow_run.head_branch }}" = main
+          fi
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+      - name: Install exact staged-publishing client
+        shell: bash
+        run: |
+          npm install --global npm@11.18.0
+          test "$(node --version)" = v24.4.1
+          test "$(npm --version)" = 11.18.0
+      - name: Require one successful production candidate for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > candidate-run.json
+          test "$(jq -r .name candidate-run.json)" = 'Seal production candidate'
+          test "$(jq -r .path candidate-run.json)" = '.github/workflows/seal-production-candidate.yml'
+          test "$(jq -r .event candidate-run.json)" = workflow_dispatch
+          test "$(jq -r .head_branch candidate-run.json)" = main
+          test "$(jq -r .head_sha candidate-run.json)" = "$SOURCE_COMMIT"
+          test "$(jq -r .conclusion candidate-run.json)" = success
+          mkdir candidate
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name pulse-npm-production-candidate \
+            --dir candidate
+          sealed_sha256="$(jq -r .sha256 candidate/candidate.json)"
+          [[ "$sealed_sha256" =~ ^[a-f0-9]{64}$ ]]
+          if test -n "$CANDIDATE_SHA256_INPUT"; then
+            test "$sealed_sha256" = "$CANDIDATE_SHA256_INPUT"
+          fi
+          echo "CANDIDATE_SHA256=$sealed_sha256" >> "$GITHUB_ENV"
+      - name: Verify candidate, universal proof, and exact package bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --prefix pulse-app/cli
+          node pulse-app/cli/scripts/verify-npm-stage-candidate.mjs \
+            --candidate "$GITHUB_WORKSPACE/candidate/candidate.json" \
+            --commit "$SOURCE_COMMIT" \
+            --sha256 "$CANDIDATE_SHA256" > stage-verification.json
+          universal_run_id="$(jq -r .universal_run_id stage-verification.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$universal_run_id" > universal-run.json
+          test "$(jq -r .name universal-run.json)" = Universal
+          test "$(jq -r .path universal-run.json)" = '.github/workflows/verify.yml'
+          test "$(jq -r .event universal-run.json)" = push
+          test "$(jq -r .head_branch universal-run.json)" = main
+          test "$(jq -r .head_sha universal-run.json)" = "$SOURCE_COMMIT"
+          test "$(jq -r .conclusion universal-run.json)" = success
+      - name: Stage exact candidate through npm OIDC
+        shell: bash
+        run: |
+          tarball="$(jq -r .tarball stage-verification.json)"
+          npm stage publish "$GITHUB_WORKSPACE/candidate/$tarball" \
+            --tag preview \
+            --access public
+      - name: Human approval remains mandatory
+        shell: bash
+        run: |
+          echo 'Exact sealed candidate was staged automatically from GitHub, not published.'
+          echo 'Review its immutable preview-tag bytes, then approve it with npm 2FA.'

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/nkkmnk/pulse/internal/embed"
 	"github.com/nkkmnk/pulse/internal/store"
 )
+
+var ErrPersonalMemoryEligibilityChanged = errors.New("personal memory eligibility changed during retrieval")
 
 // Embedder is the minimal interface Engine needs from a vector embedder.
 // Production callers pass a *embed.CohereClient; tests pass a fake.
@@ -85,6 +88,10 @@ type Engine struct {
 
 	embedModel    string
 	referenceTime time.Time
+	// personalScope is a content-free snapshot of the current product
+	// eligibility boundary. Nil keeps Local Preview and legacy unbound stores on
+	// their historical unscoped behavior.
+	personalScope *store.PersonalMemoryScopeSnapshot
 
 	// assertionOverlay, when true, demotes a stale fact-event below its own
 	// correction in the final ranked list (supersession-aware). Default false:
@@ -175,6 +182,15 @@ func (e *Engine) Init(ctx context.Context) error {
 	if e.store == nil {
 		return fmt.Errorf("retrieve: store is nil")
 	}
+	scope, enabled, err := e.store.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return fmt.Errorf("retrieve init personal scope: %w", err)
+	}
+	if enabled {
+		e.personalScope = &scope
+	} else {
+		e.personalScope = nil
+	}
 	if err := e.loadEvents(ctx); err != nil {
 		return fmt.Errorf("retrieve init events: %w", err)
 	}
@@ -187,6 +203,34 @@ func (e *Engine) Init(ctx context.Context) error {
 	return nil
 }
 
+func samePersonalScope(a, b *store.PersonalMemoryScopeSnapshot) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// reloadIfEligibilityChanged prevents a long-lived daemon from ranking against
+// a stale project/global membership set after a create, correction, move, or
+// delete committed outside the immediate indexing path.
+func (e *Engine) reloadIfEligibilityChanged(ctx context.Context) error {
+	scope, enabled, err := e.store.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return err
+	}
+	var current *store.PersonalMemoryScopeSnapshot
+	if enabled {
+		current = &scope
+	}
+	e.mu.RLock()
+	unchanged := samePersonalScope(e.personalScope, current)
+	e.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
+	return e.Reload(ctx)
+}
+
 // Reload re-reads the in-memory indexes under the write lock so events
 // ingested after startup become retrievable without a daemon restart.
 func (e *Engine) Reload(ctx context.Context) error {
@@ -197,7 +241,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 
 // EmbedderReady reports whether full retrieval can run (an embedder is wired).
 func (e *Engine) EmbedderReady() bool {
-	return e.embedder != nil
+	if e.embedder == nil {
+		return false
+	}
+	if live, ok := e.embedder.(interface{ Ready() bool }); ok {
+		return live.Ready()
+	}
+	return true
 }
 
 // EmbedderModel names the embedding model the index is built with.
@@ -211,33 +261,37 @@ type IndexEventDoc struct {
 	Text    string
 }
 
-// EmbedAndIndexEvents embeds freshly ingested events as search documents,
-// writes them into event_embeddings, and reloads the in-memory index. This is
-// what makes interactive ingest (/graph/delta) retrievable immediately.
-func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) error {
+// EmbedAndPersistEvents embeds event documents and durably writes their
+// vectors without reloading the in-memory index. Backfill callers use this to
+// persist multiple bounded pages, then perform one deliberate Reload.
+func (e *Engine) EmbedAndPersistEvents(ctx context.Context, docs []IndexEventDoc) (int, error) {
 	if e.embedder == nil {
-		return fmt.Errorf("retrieve index: embedder is nil")
+		return 0, fmt.Errorf("retrieve index: embedder is nil")
 	}
 	if len(docs) == 0 {
-		return nil
+		return 0, nil
 	}
-	texts := make([]string, len(docs))
-	for i, doc := range docs {
-		texts[i] = doc.Text
-	}
-	vecs, err := e.embedder.Embed(ctx, texts, embed.TypeSearchDocument)
-	if err != nil {
-		return fmt.Errorf("retrieve index embed: %w", err)
-	}
-	if len(vecs) != len(docs) {
-		return fmt.Errorf("retrieve index: embedder returned %d vectors for %d docs", len(vecs), len(docs))
-	}
-	for i, doc := range docs {
-		raw, err := json.Marshal(vecs[i])
-		if err != nil {
-			return fmt.Errorf("retrieve index marshal vector: %w", err)
+	persisted := 0
+	for start := 0; start < len(docs); start += embed.MaxBatchSize {
+		end := min(start+embed.MaxBatchSize, len(docs))
+		batch := docs[start:end]
+		texts := make([]string, len(batch))
+		for i, doc := range batch {
+			texts[i] = doc.Text
 		}
-		if _, err := e.store.DB().ExecContext(ctx, `
+		vecs, err := e.embedder.Embed(ctx, texts, embed.TypeSearchDocument)
+		if err != nil {
+			return persisted, fmt.Errorf("retrieve index embed: %w", err)
+		}
+		if len(vecs) != len(batch) {
+			return persisted, fmt.Errorf("retrieve index: embedder returned %d vectors for %d docs", len(vecs), len(batch))
+		}
+		for i, doc := range batch {
+			raw, err := json.Marshal(vecs[i])
+			if err != nil {
+				return persisted, fmt.Errorf("retrieve index marshal vector: %w", err)
+			}
+			if _, err := e.store.DB().ExecContext(ctx, `
 			INSERT INTO event_embeddings (event_id, model, dim, vector_json, text_source)
 			VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT(event_id) DO UPDATE SET
@@ -245,11 +299,26 @@ func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) 
 			  dim = excluded.dim,
 			  vector_json = excluded.vector_json,
 			  text_source = excluded.text_source`,
-			doc.EventID, e.embedModel, len(vecs[i]), string(raw), doc.Text); err != nil {
-			return fmt.Errorf("retrieve index upsert event %d: %w", doc.EventID, err)
+				doc.EventID, e.embedModel, len(vecs[i]), string(raw), doc.Text); err != nil {
+				return persisted, fmt.Errorf("retrieve index upsert event %d: %w", doc.EventID, err)
+			}
+			persisted++
 		}
 	}
-	return e.Reload(ctx)
+	return persisted, nil
+}
+
+// EmbedAndIndexEvents embeds freshly ingested events as search documents,
+// writes them into event_embeddings, and reloads the in-memory index. This is
+// what makes interactive ingest (/graph/delta) retrievable immediately.
+func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) error {
+	persisted, persistErr := e.EmbedAndPersistEvents(ctx, docs)
+	if persisted > 0 {
+		if reloadErr := e.Reload(ctx); reloadErr != nil && persistErr == nil {
+			return reloadErr
+		}
+	}
+	return persistErr
 }
 
 // loadEvents pulls (id, ts, embedding, emotion_vec) per event.
@@ -260,6 +329,29 @@ func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) 
 // days_ago is computed at load time as (referenceTime - ts) / 24h.
 // user_flag (anchor), sentiment_label, and biometric_json come from migration
 // 021 and feed the state / anchor / date boosts.
+const personalEligibleEventsCTE = `
+WITH eligible_objects AS (
+    SELECT object_id
+      FROM private_memory_objects
+     WHERE lifecycle='active'
+       AND (
+           memory_scope='personal_global' OR
+           (memory_scope='project' AND project_namespace_id=?)
+       )
+),
+eligible_events(event_id) AS (
+    SELECT capsule.event_id
+      FROM eligible_objects object
+      JOIN memory_capsules capsule ON capsule.id=object.object_id
+     WHERE capsule.event_id IS NOT NULL
+    UNION
+    SELECT CAST(projection.row_ref AS INTEGER)
+      FROM eligible_objects object
+      JOIN private_semantic_projection_rows projection
+        ON projection.object_id=object.object_id
+       AND projection.row_kind='event'
+)`
+
 func (e *Engine) loadEvents(ctx context.Context) error {
 	q := `
 SELECT
@@ -279,7 +371,33 @@ JOIN event_embeddings ee ON ee.event_id = e.id
 LEFT JOIN event_emotions em ON em.event_id = e.id
 WHERE ee.model = ?
 ORDER BY e.id`
-	rows, err := e.store.DB().QueryContext(ctx, q, e.embedModel)
+	args := []any{e.embedModel}
+	if e.personalScope != nil {
+		q = personalEligibleEventsCTE + `
+SELECT
+    e.id,
+    e.ts,
+    e.title,
+    COALESCE(e.description, ''),
+    ee.vector_json,
+    COALESCE(em.joy, 0), COALESCE(em.sadness, 0), COALESCE(em.anger, 0),
+    COALESCE(em.fear, 0), COALESCE(em.trust, 0), COALESCE(em.disgust, 0),
+    COALESCE(em.anticipation, 0), COALESCE(em.surprise, 0),
+    COALESCE(em.shame, 0), COALESCE(em.guilt, 0),
+    COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, ''),
+    COALESCE(e.access_count, 0), COALESCE(e.tags, '')
+FROM events e
+JOIN eligible_events eligible ON eligible.event_id=e.id
+JOIN event_embeddings ee ON ee.event_id = e.id
+LEFT JOIN event_emotions em ON em.event_id = e.id
+WHERE ee.model = ?
+ORDER BY e.id`
+		args = []any{
+			e.personalScope.ProjectNamespaceID,
+			e.embedModel,
+		}
+	}
+	rows, err := e.store.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
@@ -367,7 +485,23 @@ FROM atomic_facts f
 JOIN atomic_fact_embeddings fe ON fe.fact_id = f.id
 WHERE fe.model = ?
 ORDER BY f.id`
-	rows, err := e.store.DB().QueryContext(ctx, q, e.embedModel)
+	args := []any{e.embedModel}
+	if e.personalScope != nil {
+		q = personalEligibleEventsCTE + `
+SELECT f.id, f.event_id, fe.vector_json
+FROM atomic_facts f
+JOIN eligible_events eligible ON eligible.event_id=f.event_id
+JOIN atomic_fact_embeddings fe ON fe.fact_id = f.id
+WHERE fe.model = ?
+ORDER BY f.id`
+		args = []any{
+			e.personalScope.ProjectNamespaceID,
+			e.personalScope.RepositoryID,
+			e.personalScope.BindingDigest,
+			e.embedModel,
+		}
+	}
+	rows, err := e.store.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		// Phase G migration may not be applied yet — treat empty as fine
 		if isMissingTable(err) {
@@ -400,7 +534,20 @@ ORDER BY f.id`
 
 func (e *Engine) loadChains(ctx context.Context) error {
 	q := `SELECT parent_id, child_id FROM event_chains`
-	rows, err := e.store.DB().QueryContext(ctx, q)
+	var args []any
+	if e.personalScope != nil {
+		q = personalEligibleEventsCTE + `
+SELECT chain.parent_id, chain.child_id
+  FROM event_chains chain
+  JOIN eligible_events parent ON parent.event_id=chain.parent_id
+  JOIN eligible_events child ON child.event_id=chain.child_id`
+		args = []any{
+			e.personalScope.ProjectNamespaceID,
+			e.personalScope.RepositoryID,
+			e.personalScope.BindingDigest,
+		}
+	}
+	rows, err := e.store.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		if isMissingTable(err) {
 			return nil
@@ -510,11 +657,22 @@ type ScoreBreakdown struct {
 // anchor / date) on the v2_pure base; chain mode expands via the chain graph;
 // the hybrid layer fuses BM25 via RRF.
 func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveResponse, error) {
+	return e.retrieve(ctx, req, true)
+}
+
+func (e *Engine) retrieve(
+	ctx context.Context,
+	req RetrieveRequest,
+	retryOnEligibilityChange bool,
+) (*RetrieveResponse, error) {
 	if e.embedder == nil {
 		return nil, fmt.Errorf("retrieve: embedder is nil")
 	}
 	if req.Query == "" {
 		return nil, fmt.Errorf("retrieve: empty query")
+	}
+	if err := e.reloadIfEligibilityChanged(ctx); err != nil {
+		return nil, fmt.Errorf("retrieve refresh personal scope: %w", err)
 	}
 	topK := req.TopK
 	if topK <= 0 {
@@ -537,7 +695,6 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	}
 
 	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	var cosineIDs []int64
 	var breakdowns map[int64]ScoreBreakdown
@@ -568,12 +725,17 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// Empathic/chain keep the full hybrid fusion + surfaceability.
 	if mode != ModeFactual && e.store != nil {
 		bm25Query := req.Query
-		if e.expander != nil {
+		// The legacy local expander snapshots the whole graph vocabulary at
+		// helper startup and cannot accept a per-project eligibility fence.
+		// Disable it for scoped Personal retrieval until its transport carries
+		// the exact namespace/revision; letting foreign vocabulary rewrite the
+		// query would violate pre-influence isolation even if BM25 were scoped.
+		if e.expander != nil && e.personalScope == nil {
 			if extras, err := e.expander.Expand(ctx, req.Query); err == nil && len(extras) > 0 {
 				bm25Query = req.Query + " " + strings.Join(extras, " ")
 			}
 		}
-		bm25IDs, err := BM25Search(ctx, e.store.DB(), bm25Query, topK*2)
+		bm25IDs, err := BM25SearchScoped(ctx, e.store.DB(), bm25Query, topK*2, e.personalScope)
 		lists := [][]int64{cosineIDs}
 		if err == nil && len(bm25IDs) > 0 {
 			lists = append(lists, bm25IDs)
@@ -641,6 +803,27 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	if e.assertionOverlay {
 		ids = e.applyAssertionDemotion(ids)
 	}
+	var scopeUsed *store.PersonalMemoryScopeSnapshot
+	if e.personalScope != nil {
+		copy := *e.personalScope
+		scopeUsed = &copy
+	}
+	e.mu.RUnlock()
+
+	scopeNow, enabledNow, err := e.store.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("retrieve revalidate personal scope: %w", err)
+	}
+	var currentScope *store.PersonalMemoryScopeSnapshot
+	if enabledNow {
+		currentScope = &scopeNow
+	}
+	if !samePersonalScope(scopeUsed, currentScope) {
+		if retryOnEligibilityChange {
+			return e.retrieve(ctx, req, false)
+		}
+		return nil, ErrPersonalMemoryEligibilityChanged
+	}
 
 	// Access-frequency instrumentation (migration 029, Phase A). Best-effort and
 	// OFF by default: only when PULSE_ACCESS_FREQ is enabled do we bump a bare
@@ -649,8 +832,22 @@ func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// counter-write failure never fails the retrieval (error swallowed). Counts
 	// take effect on the next Reload, and the scorer never reads them in this
 	// phase, so scoring and Go==Python parity are untouched.
-	if e.accessFreqEnabled && e.store != nil && len(ids) > 0 {
+	if e.accessFreqEnabled && scopeUsed == nil && e.store != nil && len(ids) > 0 {
 		_ = e.store.IncrementAccessCounts(ids, time.Now())
+	}
+	scopeNow, enabledNow, err = e.store.CurrentPersonalMemoryScopeSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("retrieve final personal scope fence: %w", err)
+	}
+	currentScope = nil
+	if enabledNow {
+		currentScope = &scopeNow
+	}
+	if !samePersonalScope(scopeUsed, currentScope) {
+		if retryOnEligibilityChange {
+			return e.retrieve(ctx, req, false)
+		}
+		return nil, ErrPersonalMemoryEligibilityChanged
 	}
 
 	return &RetrieveResponse{

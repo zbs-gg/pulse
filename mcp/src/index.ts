@@ -7,10 +7,13 @@
  * an LLM backend by default. Export/import stay CLI-only in v1.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  readFileSync, realpathSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -21,6 +24,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { StandaloneStore } from './standalone.js';
+import { assertTruthfulDeletionReceipt, assertTruthfulWriteResponse, mcpRequestIdempotencyKey } from './write-receipts.js';
+import {
+  validateConsolidationExplanation,
+  validateConsolidationReport,
+} from './lifecycle-contracts.js';
 
 const PULSE_BASE_URL =
   process.env.PULSE_BASE_URL ?? 'http://127.0.0.1:18789';
@@ -29,9 +37,74 @@ const PULSE_DATA_DIR = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse');
 
 const VERSION = '0.4.1';
 const args = process.argv.slice(2);
+const HTTP_REQUESTED = args.includes('--http');
+const RUNTIME_MODE = resolveRuntimeMode(process.env.PULSE_RUNTIME_MODE, HTTP_REQUESTED);
+
+type RuntimeMode = 'local-stdio' | 'development-http';
+
+function resolveRuntimeMode(value: string | undefined, httpRequested: boolean): RuntimeMode {
+	if (value === undefined || value === '') {
+		return httpRequested ? 'development-http' : 'local-stdio';
+	}
+	if (value !== 'local-stdio' && value !== 'development-http') {
+		throw new Error(`invalid PULSE_RUNTIME_MODE: ${value} (use local-stdio or development-http)`);
+	}
+	if ((value === 'development-http') !== httpRequested) {
+		throw new Error('development-http requires --http and local-stdio forbids it');
+	}
+	return value;
+}
 
 type EngineMode = 'auto' | 'daemon' | 'standalone';
 const ENGINE_MODE = parseEngineMode(process.env.PULSE_MCP_MODE);
+const PRODUCT_HOST_ADAPTER = process.env.PULSE_HOST_ADAPTER === 'codex' ||
+  process.env.PULSE_HOST_ADAPTER === 'claude-code' ||
+  process.env.PULSE_HOST_ADAPTER === 'cursor';
+const PRODUCT_HOST = PRODUCT_HOST_ADAPTER
+  ? process.env.PULSE_HOST_ADAPTER as 'codex' | 'claude-code' | 'cursor'
+  : undefined;
+const PRODUCT_UNASSIGNED_REASON = PRODUCT_HOST_ADAPTER &&
+  (process.env.PULSE_PRODUCT_UNASSIGNED === 'binding_missing' || process.env.PULSE_PRODUCT_UNASSIGNED === 'workspace_not_git')
+  ? process.env.PULSE_PRODUCT_UNASSIGNED
+  : undefined;
+
+async function assertProductBindingCurrent(): Promise<void> {
+  if (!PRODUCT_HOST_ADAPTER) return;
+  const moduleURL = process.env.PULSE_HOST_AUTHORITY_MODULE ?? '';
+  const expectedWorkspace = process.env.PULSE_HOST_WORKSPACE ?? '';
+  if (!moduleURL.startsWith('file:') || expectedWorkspace === '') {
+    throw new Error('Pulse host binding authority is unavailable; restart this task');
+  }
+  const authority = await import(moduleURL) as {
+    inspectProductWorkspaceBinding(options: { cwd: string }): {
+      status: 'bound' | 'unassigned';
+      reason?: string;
+      workspace?: { canonical_path: string };
+    };
+    resolveProductWorkspaceBinding(options: { cwd: string }): {
+      binding_digest: string;
+      resolver_epoch: number;
+      workspace: { canonical_path: string; repository_id: string };
+    };
+  };
+  if (PRODUCT_UNASSIGNED_REASON) {
+    const inspected = authority.inspectProductWorkspaceBinding({ cwd: process.cwd() });
+    if (inspected.status !== 'unassigned' || inspected.reason !== PRODUCT_UNASSIGNED_REASON ||
+        !inspected.workspace || realpathSync(inspected.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
+        realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
+      throw new Error('Pulse unassigned workspace state changed; restart this task');
+    }
+    return;
+  }
+  const current = authority.resolveProductWorkspaceBinding({ cwd: process.cwd() });
+  if (current.binding_digest !== process.env.PULSE_BINDING_DIGEST ||
+      current.workspace.repository_id !== process.env.PULSE_REPOSITORY_ID ||
+      current.resolver_epoch !== Number(process.env.PULSE_RESOLVER_EPOCH) ||
+      realpathSync(current.workspace.canonical_path) !== realpathSync(expectedWorkspace) ||
+      realpathSync(process.cwd()) !== realpathSync(expectedWorkspace)) {
+    throw new Error('Pulse workspace binding changed or was revoked; restart this task');
+  }
+}
 // In auto mode the first daemon connection failure locks the process into the
 // standalone lite store; a daemon that answered once is never silently
 // downgraded, so one process never splits writes across two stores.
@@ -39,7 +112,7 @@ let resolvedEngine: 'daemon' | 'standalone' | null =
   ENGINE_MODE === 'auto' ? null : ENGINE_MODE;
 // Gate serializing tool calls while the engine is still unresolved.
 let firstCallGate: Promise<void> | null = null;
-const standaloneStore = new StandaloneStore(PULSE_DATA_DIR);
+let standaloneStore: StandaloneStore | null = null;
 
 function parseEngineMode(value: string | undefined): EngineMode {
   if (value === undefined || value === '' || value === 'auto') {
@@ -134,6 +207,20 @@ interface MemoryCapsule {
   raw_input_included: false;
 }
 
+interface HostTurnContext {
+  schema: string;
+  host: 'codex' | 'claude-code' | 'cursor';
+  session_id: string;
+  turn_id: string;
+  workspace: string;
+  source_event_key: string;
+  idempotency_key: string;
+  binding_digest: string;
+  policy_epoch: number;
+  resolver_epoch: number;
+  expires_at: string;
+}
+
 interface RecallBody {
   query: string;
   scope?: 'session' | 'project' | 'user';
@@ -145,7 +232,7 @@ interface ContextQueryBody {
   query: string;
   mode?: 'auto' | 'factual' | 'empathic' | 'chain';
   top_k?: number;
-  scope?: 'user' | 'assistant' | 'shared';
+	scope?: 'user' | 'assistant';
   audience?: string;
   privacy_floor?: string;
   include_trace?: boolean;
@@ -180,32 +267,39 @@ interface SemanticDeltaBody {
   raw_input_included: false;
 }
 
-interface DevOAuthCode {
-  clientId: string;
-  redirectUri: string;
-  codeChallenge: string;
-  scope: string;
-  expiresAt: number;
-}
-
-interface DevOAuthToken {
-  scope: string;
-  expiresAt: number;
-}
-
-async function pulseFetch<T>(
+ async function pulseFetch<T>(
   path: string,
   body?: unknown,
   method = 'POST',
+  idempotencyKey?: string,
 ): Promise<T> {
   const url = `${PULSE_BASE_URL.replace(/\/$/, '')}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
+  if (PRODUCT_HOST_ADAPTER) {
+    const workspace = process.env.PULSE_HOST_WORKSPACE ?? '';
+    const bindingDigest = process.env.PULSE_BINDING_DIGEST ?? '';
+    const repositoryID = process.env.PULSE_REPOSITORY_ID ?? '';
+    const resolverEpoch = process.env.PULSE_RESOLVER_EPOCH ?? '';
+    if (!isAbsolute(workspace) || Buffer.byteLength(workspace, 'utf8') > 4096 ||
+        !/^[a-f0-9]{64}$/.test(bindingDigest) ||
+        !/^repository_[A-Za-z0-9._:-]{1,240}$/.test(repositoryID) ||
+        !/^[1-9][0-9]*$/.test(resolverEpoch)) {
+      throw new Error('Pulse product request authority is unavailable; restart this task');
+    }
+    headers['X-Pulse-Product-Workspace'] = Buffer.from(workspace, 'utf8').toString('base64url');
+    headers['X-Pulse-Product-Binding'] = bindingDigest;
+    headers['X-Pulse-Product-Repository'] = repositoryID;
+    headers['X-Pulse-Product-Resolver-Epoch'] = resolverEpoch;
+  }
   const apiKey = resolveApiKey();
   if (apiKey) {
     headers['X-Pulse-Key'] = apiKey;
   }
+	if (method !== 'GET') {
+		headers['Idempotency-Key'] = idempotencyKey ?? `mcp_${randomUUID().replaceAll('-', '')}`;
+	}
   const resp = await fetch(url, {
     method,
     headers,
@@ -223,15 +317,114 @@ async function pulseFetch<T>(
   return (await resp.json()) as T;
 }
 
-function jsonText(value: unknown) {
+function productRuntimeResolution() {
   return {
-    content: [
+    binding: {
+      binding_digest: process.env.PULSE_BINDING_DIGEST ?? '',
+      resolver_epoch: Number(process.env.PULSE_RESOLVER_EPOCH),
+      workspace: {
+        canonical_path: process.env.PULSE_HOST_WORKSPACE ?? '',
+        repository_id: process.env.PULSE_REPOSITORY_ID ?? '',
+      },
+    },
+    runtime: { data_dir: PULSE_DATA_DIR },
+  };
+}
+
+interface ProductRuntimeModule {
+  stageUnassignedProductCandidate(
+    host: 'codex' | 'claude-code' | 'cursor',
+    input: unknown,
+    idempotencyKey: string,
+  ): unknown;
+  consumeHostToolLease(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    host: 'codex' | 'claude-code' | 'cursor',
+    name: string,
+    input: unknown,
+  ): HostTurnContext;
+  writeHostFinalizeMarker(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    event: HostTurnContext,
+    host: 'codex' | 'claude-code' | 'cursor',
+    result: unknown,
+  ): unknown;
+}
+
+async function productRuntimeModule(): Promise<ProductRuntimeModule> {
+  const moduleURL = process.env.PULSE_HOST_RUNTIME_MODULE ?? '';
+  if (!moduleURL.startsWith('file:') || !PRODUCT_HOST) {
+    throw new Error('Pulse tool lease authority is unavailable; restart this task');
+  }
+  return await import(moduleURL) as ProductRuntimeModule;
+}
+
+async function consumeProductTurnContext(toolInput: unknown): Promise<HostTurnContext> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  return runtime.consumeHostToolLease(
+    productRuntimeResolution(), PRODUCT_HOST, 'pulse_remember', toolInput,
+  );
+}
+
+function assertProductRememberSourceHost(toolInput: unknown): void {
+  if (!PRODUCT_HOST) return;
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+  const source = (toolInput as Record<string, unknown>).source;
+  if (!source || typeof source !== 'object' || Array.isArray(source) ||
+      (source as Record<string, unknown>).host !== PRODUCT_HOST) {
+    throw new Error('Pulse source host does not match the bound harness');
+  }
+}
+
+function productFinalizeBody(capsule: MemoryCapsule, context: HostTurnContext): Record<string, unknown> {
+  const timestamp = new Date().toISOString();
+  return {
+    schema: 'pulse.turn_finalize.v1',
+    host: context.host,
+    session_id: context.session_id,
+    turn_id: context.turn_id,
+    source_event_key: context.source_event_key,
+    idempotency_key: context.idempotency_key,
+    binding_digest: context.binding_digest,
+    policy_epoch: context.policy_epoch,
+    resolver_epoch: context.resolver_epoch,
+    candidates: capsule.items.map((item) => ({
+      kind: 'memory_capsule',
+      capsule: {
+        schema: 'pulse.memory_capsule.v1',
+        source: { host: context.host, conversation_scope: 'current_turn', timestamp },
+        items: [item],
+        raw_input_included: false,
+      },
+    })),
+  };
+}
+
+async function writeProductFinalizeMarker(context: HostTurnContext, value: unknown): Promise<void> {
+  if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+  const runtime = await productRuntimeModule();
+  runtime.writeHostFinalizeMarker(productRuntimeResolution(), context, PRODUCT_HOST, value);
+}
+
+function jsonText(value: unknown) {
+	const result: {
+		content: [{ type: 'text'; text: string }];
+		structuredContent?: Record<string, unknown>;
+	} = {
+		content: [
       {
         type: 'text' as const,
         text: JSON.stringify(value, null, 2),
       },
-    ],
-  };
+		],
+	};
+	if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+		result.structuredContent = value as Record<string, unknown>;
+	}
+	return result;
 }
 
 function redactStatusForMcp(value: unknown): unknown {
@@ -248,18 +441,18 @@ function redactStatusForMcp(value: unknown): unknown {
   return status;
 }
 
-function createPulseMcpServer(): Server {
+export function createPulseMcpServer(): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+		const tools = [
     {
       name: 'pulse_remember',
       description:
-        'Save a minimal, user-approved Pulse memory capsule. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
+			'Propose a minimal private Pulse memory capsule. Personal mode returns a truthful receipt and saves only after the local database commit; Local Preview stores immediately. Never send raw full transcripts, arbitrary chat history, secrets, credentials, or store-everything payloads. Use only when the user explicitly asks to remember something, confirms saving, selects an excerpt, or project rules allow it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -328,8 +521,9 @@ function createPulseMcpServer(): Server {
                   enum: [
                     'user_selected',
                     'current_turn',
-                    'assistant_inferred',
-                    'tool_result',
+					'assistant_inferred',
+					'tool_result',
+					'user_confirmed',
                   ],
                 },
                 privacy_tier: {
@@ -342,8 +536,13 @@ function createPulseMcpServer(): Server {
                 },
                 tags: {
                   type: 'array',
-                  items: { type: 'string' },
+                  items: {
+                    type: 'string',
+                    pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$',
+                  },
                   maxItems: 20,
+                  description:
+                    'Optional ASCII safe slugs. Omit tags when a concept needs spaces.',
                 },
               },
               required: [
@@ -406,7 +605,7 @@ function createPulseMcpServer(): Server {
             enum: ['auto', 'factual', 'empathic', 'chain'],
           },
           top_k: { type: 'integer', minimum: 1, maximum: 50 },
-          scope: { type: 'string', enum: ['user', 'assistant', 'shared'] },
+			scope: { type: 'string', enum: ['user', 'assistant'] },
           audience: { type: 'string' },
           privacy_floor: { type: 'string' },
           include_trace: { type: 'boolean' },
@@ -426,7 +625,7 @@ function createPulseMcpServer(): Server {
     {
       name: 'pulse_graph_delta',
       description:
-        'Write a host-extracted pulse.semantic_delta.v1 graph delta. Use when the current host model has identified durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
+		'Propose a private host-extracted pulse.semantic_delta.v1 graph delta. Personal mode returns a truthful receipt and saves only after the local database commit; Local Preview stores immediately. Use for durable semantic nodes, relations, facts, events, decisions, open loops, do-not-repeat, or emotional/state anchors. Never send raw transcript, secrets, credentials, local paths, or store-everything payloads.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -572,7 +771,7 @@ function createPulseMcpServer(): Server {
                 scope_id: { type: 'string', maxLength: 160 },
                 visibility: {
                   type: 'string',
-                  enum: ['private', 'shared'],
+				  const: 'private',
                 },
                 confidence: { type: 'number', minimum: 0, maximum: 1 },
                 privacy_tier: {
@@ -717,12 +916,45 @@ function createPulseMcpServer(): Server {
       },
     },
     {
+      name: 'pulse_tray',
+      description: 'Inspect pending and terminal private Memory Tray candidates and their truthful receipt state.',
+      inputSchema: {
+        type: 'object',
+        properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } },
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'pulse_status',
       description:
         'Show Pulse billing mode, host, backend LLM state, raw capture state, retention state, and last write. Local filesystem paths are redacted for MCP hosts.',
       inputSchema: {
         type: 'object',
         properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'pulse_consolidation_report',
+      description:
+        'Start or inspect the read-only local memory-source report for the current signed project binding. This tool cannot choose a destination, import, merge, delete, clean up, publish, or reveal local paths.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['start', 'status', 'explain', 'cancel', 'resume'] },
+          report_id: { type: 'string', pattern: '^report_[A-Za-z0-9._-]{1,128}$' },
+        },
+        required: ['action'],
+        allOf: [
+          {
+            if: { properties: { action: { enum: ['explain', 'cancel', 'resume'] } } },
+            then: { required: ['report_id'] },
+          },
+          {
+            if: { properties: { action: { const: 'start' } } },
+            then: { not: { required: ['report_id'] } },
+          },
+        ],
         additionalProperties: false,
       },
     },
@@ -754,13 +986,41 @@ function createPulseMcpServer(): Server {
         additionalProperties: false,
       },
     },
-    ],
-  }));
+      ];
+    const localTools = PRODUCT_HOST_ADAPTER
+      ? tools.filter((tool) => !['pulse_forget', 'pulse_wipe', 'pulse_graph_delta'].includes(tool.name))
+      : tools.filter((tool) => tool.name !== 'pulse_consolidation_report');
+    let productTools = PRODUCT_UNASSIGNED_REASON
+      ? localTools.filter((tool) => tool.name === 'pulse_remember')
+      : localTools;
+		if (PRODUCT_HOST) {
+      productTools = productTools.map((tool) => {
+        if (tool.name !== 'pulse_remember') return tool;
+        const descriptor = JSON.parse(JSON.stringify(tool)) as typeof tool;
+        const source = descriptor.inputSchema.properties?.source;
+        const host = source?.properties?.host;
+        if (host) {
+          source.properties.host = { type: 'string', const: PRODUCT_HOST } as unknown as typeof host;
+        }
+        return descriptor;
+      });
+		}
+		productTools = productTools.map((tool) => ({
+			...tool,
+			outputSchema: { type: 'object', additionalProperties: true },
+		}));
+		return { tools: productTools };
+  });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+	const invocationKey = mcpRequestIdempotencyKey(extra.sessionId, extra.requestId);
 
     try {
+      await assertProductBindingCurrent();
+      if (PRODUCT_UNASSIGNED_REASON && name !== 'pulse_remember') {
+        throw new Error('Choose a project before using Pulse recall or project memory tools');
+      }
       if (resolvedEngine === 'standalone') {
         return standaloneResult(name, args);
       }
@@ -775,14 +1035,14 @@ function createPulseMcpServer(): Server {
         if (resolvedEngine !== null) {
           return resolvedEngine === 'standalone'
             ? standaloneResult(name, args)
-            : await daemonToolCall(name, args);
+            : await daemonToolCall(name, args, invocationKey);
         }
         firstCallGate = new Promise((resolve) => {
           releaseGate = resolve;
         });
       }
       try {
-        const out = await daemonToolCall(name, args);
+        const out = await daemonToolCall(name, args, invocationKey);
         resolvedEngine = 'daemon';
         return out;
       } catch (err: unknown) {
@@ -821,16 +1081,45 @@ function createPulseMcpServer(): Server {
 }
 
 function standaloneResult(name: string, args: unknown) {
-  const out = standaloneStore.call(name, args);
+  const out = resolveStandaloneStore().call(name, args);
   return jsonText(name === 'pulse_status' ? redactStatusForMcp(out) : out);
 }
 
-async function daemonToolCall(name: string, args: Record<string, unknown> | undefined) {
+function resolveStandaloneStore(): StandaloneStore {
+	standaloneStore ??= new StandaloneStore(PULSE_DATA_DIR);
+  return standaloneStore;
+}
+
+async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
   if (name === 'pulse_remember') {
-    const out = await pulseFetch<{ ok: boolean; ids: string[] }>(
+    if (PRODUCT_HOST_ADAPTER) {
+      assertProductRememberSourceHost(args);
+      if (PRODUCT_UNASSIGNED_REASON) {
+        if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
+        const runtime = await productRuntimeModule();
+        return jsonText(runtime.stageUnassignedProductCandidate(PRODUCT_HOST, args, invocationKey));
+      }
+      const context = await consumeProductTurnContext(args);
+      const body = productFinalizeBody(args as unknown as MemoryCapsule, context);
+      const out = await pulseFetch<unknown>(
+        '/turn/finalize', body, 'POST', String(body.idempotency_key),
+      );
+      assertTruthfulWriteResponse(out);
+      try {
+        await writeProductFinalizeMarker(context, out);
+      } catch {
+        // The durable daemon receipt is authoritative. A missing local marker
+        // only causes Stop to perform the bounded server-side idempotency check.
+      }
+      return jsonText(out);
+    }
+    const out = await pulseFetch<unknown>(
       '/memory/remember',
       args as unknown as MemoryCapsule,
+      'POST',
+      invocationKey,
     );
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -845,7 +1134,9 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
   }
 
   if (name === 'pulse_graph_delta') {
-    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody);
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Product-host graph writes require the governed candidate path');
+    const out = await pulseFetch('/graph/delta', args as unknown as SemanticDeltaBody, 'POST', invocationKey);
+    assertTruthfulWriteResponse(out);
     return jsonText(out);
   }
 
@@ -859,16 +1150,61 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
     return jsonText(redactStatusForMcp(out));
   }
 
+  if (name === 'pulse_consolidation_report') {
+		if (!PRODUCT_HOST_ADAPTER) throw new Error('Consolidation reports require an installed Personal product binding');
+    const action = args?.action;
+    const reportId = args?.report_id;
+    if (!['start', 'status', 'explain', 'cancel', 'resume'].includes(String(action))) {
+      throw new Error('invalid consolidation report action');
+    }
+    if (reportId !== undefined && !/^report_[A-Za-z0-9._-]{1,128}$/.test(String(reportId))) {
+      throw new Error('invalid consolidation report id');
+    }
+    if (['explain', 'cancel', 'resume'].includes(String(action)) && reportId === undefined) {
+      throw new Error(`pulse_consolidation_report ${String(action)} requires report_id`);
+    }
+    if (action === 'start' && reportId !== undefined) {
+      throw new Error('pulse_consolidation_report start does not accept report_id');
+    }
+    let path = '/memory/consolidation/reports';
+    let method: 'GET' | 'POST' = 'POST';
+    if (action === 'status') {
+      method = 'GET';
+      path = reportId === undefined
+        ? '/memory/consolidation/reports/latest'
+        : `/memory/consolidation/reports/${String(reportId)}`;
+    } else if (action === 'explain') {
+      method = 'GET';
+      path = `/memory/consolidation/reports/${String(reportId)}/explain`;
+    } else if (action === 'cancel' || action === 'resume') {
+      path = `/memory/consolidation/reports/${String(reportId)}/${String(action)}`;
+    }
+    const out = await pulseFetch(path, method === 'POST' ? {} : undefined, method, invocationKey);
+    return jsonText(action === 'explain'
+      ? validateConsolidationExplanation(out)
+      : validateConsolidationReport(out));
+  }
+
+  if (name === 'pulse_tray') {
+    const limit = args?.limit === undefined ? 50 : Number(args.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('pulse_tray limit must be 1..100');
+    const out = await pulseFetch(`/memory/tray?limit=${limit}`, undefined, 'GET');
+    return jsonText(out);
+  }
+
   if (name === 'pulse_forget') {
-    const out = await pulseFetch('/memory/delete', { id: args?.id });
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product deletion requires the privileged OS-backed user-presence surface, which is not active');
+    const out = await pulseFetch('/memory/delete', { id: args?.id }, 'POST', invocationKey);
+    assertTruthfulDeletionReceipt(out, String(args?.id || ''));
     return jsonText(out);
   }
 
   if (name === 'pulse_wipe') {
+    if (PRODUCT_HOST_ADAPTER) throw new Error('Pulse product wipe requires the privileged OS-backed user-presence surface, which is not active');
     if (args?.confirm !== 'wipe pulse memory') {
       throw new Error('pulse_wipe requires confirm="wipe pulse memory"');
     }
-    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' });
+    const out = await pulseFetch('/memory/wipe', { confirm: 'wipe pulse memory' }, 'POST', invocationKey);
     return jsonText(out);
   }
 
@@ -876,8 +1212,8 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
 }
 
 async function main(): Promise<void> {
-  if (args.includes('--http')) {
-    await startHttpMode();
+	if (RUNTIME_MODE !== 'local-stdio') {
+		await startPersonalHttpMode();
     return;
   }
   const server = createPulseMcpServer();
@@ -895,465 +1231,124 @@ async function main(): Promise<void> {
   );
 }
 
-async function startHttpMode(): Promise<void> {
-  const host = argValue('--host') ?? process.env.PULSE_MCP_HOST ?? '127.0.0.1';
-  const port = Number(argValue('--port') ?? process.env.PULSE_MCP_PORT ?? 8787);
-  const bearer = process.env.PULSE_REMOTE_BEARER ?? '';
-  const publicBaseURL = trimTrailingSlash(process.env.PULSE_REMOTE_PUBLIC_BASE_URL ?? '');
-  const authIssuer = trimTrailingSlash(process.env.PULSE_REMOTE_AUTH_ISSUER ?? '');
-  const oauthMode = publicBaseURL !== '' && authIssuer !== '';
-  const oauthDevMode = oauthMode && process.env.PULSE_REMOTE_OAUTH_DEV === '1';
-  const devAuthCodes = new Map<string, DevOAuthCode>();
-  const devAccessTokens = new Map<string, DevOAuthToken>();
-  const devRefreshTokens = new Map<string, DevOAuthToken>();
-  // Persist OAuth tokens to disk so an mcp restart/redeploy does NOT log out
-  // connected clients (e.g. Claude.ai). Load non-expired tokens on start.
-  const oauthTokensFile = join(PULSE_DATA_DIR, 'oauth-tokens.json');
-  loadOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
-  const persistOAuth = () => persistOAuthTokens(oauthTokensFile, devAccessTokens, devRefreshTokens);
-  const allowUnauthenticated =
-    process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1' ||
-    args.includes('--allow-unauthenticated');
-  const publicBind = !isLoopbackHost(host);
-
-  if (oauthMode && (!isHTTPSURL(publicBaseURL) || !isHTTPSURL(authIssuer))) {
-    throw new Error('OAuth HTTP MCP mode requires HTTPS public base and authorization issuer URLs');
-  }
-  if (!bearer && publicBind && !oauthMode) {
-    throw new Error('refusing authless public HTTP MCP bind; set PULSE_REMOTE_BEARER');
-  }
-  if (!bearer && !allowUnauthenticated && !oauthMode) {
-    throw new Error(
-      '--http requires PULSE_REMOTE_BEARER. For local experiments only, set PULSE_REMOTE_ALLOW_UNAUTHENTICATED=1 or pass --allow-unauthenticated.',
-    );
-  }
-
-  const httpServer = createServer(async (req, res) => {
-    const path = requestPath(req, host);
-    if (path === '/health') {
-      writeCors(res);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
-        transport: 'streamable-http',
-        path: '/mcp',
-        auth: oauthMode ? 'oauth' : bearer ? 'bearer' : 'none',
-      }));
-      return;
-    }
-    if (oauthMode && isProtectedResourceMetadataPath(path)) {
-      writeCors(res);
-      writeJSON(res, protectedResourceMetadata(publicBaseURL, authIssuer));
-      return;
-    }
-    if (oauthDevMode && isAuthorizationServerMetadataPath(path)) {
-      writeCors(res);
-      writeJSON(res, authorizationServerMetadata(publicBaseURL));
-      return;
-    }
-    if (oauthDevMode && path === '/register' && req.method === 'POST') {
-      writeCors(res);
-      const body = await readRequestJSON(req) as Record<string, unknown> | undefined;
-      const redirectURIs = Array.isArray(body?.redirect_uris)
-        ? body.redirect_uris.filter((uri): uri is string => typeof uri === 'string')
-        : [];
-      writeJSON(res, {
-        client_id: 'pulse-dev-client',
-        client_id_issued_at: Math.floor(Date.now() / 1000),
-        token_endpoint_auth_method: 'none',
-        redirect_uris: redirectURIs,
-      }, 201);
-      return;
-    }
-    if (oauthDevMode && path === '/authorize' && req.method === 'GET') {
-      writeCors(res);
-      handleDevAuthorize(req, res, devAuthCodes);
-      return;
-    }
-    if (oauthDevMode && path === '/token' && req.method === 'POST') {
-      writeCors(res);
-      await handleDevToken(req, res, devAuthCodes, devAccessTokens, devRefreshTokens);
-      persistOAuth();
-      return;
-    }
-    if (!path.startsWith('/mcp')) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'not found' }));
-      return;
-    }
-    if (req.method === 'OPTIONS') {
-      writeCors(res);
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-    let parsedBody: unknown;
-    if (oauthMode && req.method === 'POST') {
-      parsedBody = await readRequestJSON(req);
-      if (callsProtectedTool(parsedBody) && !isAuthorized(req, bearer, devAccessTokens)) {
-        writeOAuthChallenge(res, publicBaseURL);
-        return;
-      }
-    }
-    if (!oauthMode && !allowUnauthenticated && req.headers.authorization !== `Bearer ${bearer}`) {
-      writeCors(res);
-      res.writeHead(401, {
-        'Content-Type': 'application/json',
-        'WWW-Authenticate': 'Bearer',
-      });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
-    try {
-      writeCors(res);
-      const requestServer = createPulseMcpServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      await requestServer.connect(transport);
-      await transport.handleRequest(req, res, parsedBody);
-      res.on('close', () => {
-        void requestServer.close();
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-      }
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: { code: -32603, message },
-        id: null,
-      }));
-    }
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    httpServer.once('error', reject);
-    httpServer.listen(port, host, () => resolve());
-  });
-  const address = httpServer.address();
-  const actualPort =
-    typeof address === 'object' && address !== null ? address.port : port;
-  // eslint-disable-next-line no-console
-  console.error(
-    `[pulse-mcp v${VERSION}] Streamable HTTP listening on http://${host}:${actualPort}/mcp; backing Pulse: ${PULSE_BASE_URL}`,
-  );
-
-  const shutdown = async () => {
-    httpServer.close(() => process.exit(0));
-  };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+async function startPersonalHttpMode(): Promise<void> {
+	const host = httpArgValue('--host') ?? process.env.PULSE_MCP_HOST ?? '127.0.0.1';
+	const port = Number(httpArgValue('--port') ?? process.env.PULSE_MCP_PORT ?? 8787);
+	const bearer = process.env.PULSE_REMOTE_BEARER ?? '';
+	const allowUnauthenticated = process.env.PULSE_REMOTE_ALLOW_UNAUTHENTICATED === '1';
+	if (host !== '127.0.0.1' && host !== '::1') {
+		throw new Error('development HTTP is local-only; use 127.0.0.1 or ::1');
+	}
+	if (!Number.isInteger(port) || port < 0 || port > 65535) {
+		throw new Error('invalid Pulse MCP HTTP port');
+	}
+	if (!bearer && !allowUnauthenticated) {
+		throw new Error('development HTTP requires PULSE_REMOTE_BEARER');
+	}
+	const httpServer = createServer(async (req, res) => {
+		try {
+			const requestURL = new URL(req.url ?? '/', `http://${host}`);
+			writeDevelopmentCors(res);
+			if (req.method === 'OPTIONS') {
+				res.writeHead(204);
+				res.end();
+				return;
+			}
+			if (req.method === 'GET' && requestURL.pathname === '/health' && requestURL.search === '') {
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ ok: true, mode: 'development-http' }));
+				return;
+			}
+			if (requestURL.pathname !== '/mcp' || requestURL.search !== '') {
+				res.writeHead(404, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'not found' }));
+				return;
+			}
+			if (!allowUnauthenticated && req.headers.authorization !== `Bearer ${bearer}`) {
+				res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+				res.end(JSON.stringify({ error: 'unauthorized' }));
+				return;
+			}
+			await dispatchPersonalMcpRequest(req, res);
+		} catch (error) {
+			if (!res.headersSent) {
+				res.writeHead(500, { 'Content-Type': 'application/json' });
+			}
+			res.end(JSON.stringify({
+				jsonrpc: '2.0', id: null,
+				error: { code: -32603, message: error instanceof Error ? error.message : String(error) },
+			}));
+		}
+	});
+	await new Promise<void>((resolvePromise, rejectPromise) => {
+		httpServer.once('error', rejectPromise);
+		httpServer.listen(port, host, resolvePromise);
+	});
+	const address = httpServer.address();
+	const actualPort = typeof address === 'object' && address !== null ? address.port : port;
+	console.error(`[pulse-mcp v${VERSION}] Streamable HTTP listening on http://${host}:${actualPort}/mcp; backing Pulse: ${PULSE_BASE_URL}`);
+	let closing = false;
+	const shutdown = () => {
+		if (closing) return;
+		closing = true;
+		httpServer.close(() => process.exit(0));
+	};
+	process.once('SIGTERM', shutdown);
+	process.once('SIGINT', shutdown);
 }
 
-function writeCors(res: ServerResponse): void {
-  res.setHeader('Access-Control-Allow-Origin', process.env.PULSE_REMOTE_CORS_ORIGIN ?? 'http://127.0.0.1');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
-  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+function httpArgValue(name: string): string | undefined {
+	const index = args.indexOf(name);
+	return index >= 0 ? args[index + 1] : undefined;
 }
 
-function writeJSON(res: ServerResponse, value: unknown, status = 200): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(value));
+function writeDevelopmentCors(res: ServerResponse): void {
+	res.setHeader('Access-Control-Allow-Origin', 'http://127.0.0.1');
+	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+	res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID');
+	res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-Id');
+	res.setHeader('Vary', 'Origin');
 }
 
-function argValue(name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index < 0) {
-    return undefined;
-  }
-  return args[index + 1];
+async function dispatchPersonalMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const requestServer = createPulseMcpServer();
+	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+	let cleaned = false;
+	const cleanup = () => {
+		if (cleaned) return;
+		cleaned = true;
+		void Promise.allSettled([transport.close(), requestServer.close()]);
+	};
+	try {
+		await requestServer.connect(transport);
+		res.once('close', cleanup);
+		await transport.handleRequest(req, res);
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 }
 
-function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
-}
-
-function trimTrailingSlash(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
-
-function requestPath(req: IncomingMessage, fallbackHost: string): string {
-  return new URL(req.url ?? '/', `http://${req.headers.host ?? fallbackHost}`).pathname;
-}
-
-function isProtectedResourceMetadataPath(path: string): boolean {
-  return path === '/.well-known/oauth-protected-resource' ||
-    path === '/.well-known/oauth-protected-resource/mcp';
-}
-
-function isAuthorizationServerMetadataPath(path: string): boolean {
-  return path === '/.well-known/oauth-authorization-server' ||
-    path === '/.well-known/openid-configuration';
-}
-
-function protectedResourceMetadata(publicBaseURL: string, authIssuer: string) {
-  return {
-    resource: `${publicBaseURL}/mcp`,
-    authorization_servers: [authIssuer],
-    bearer_methods_supported: ['header'],
-    scopes_supported: ['pulse:read', 'pulse:write'],
-  };
-}
-
-function authorizationServerMetadata(publicBaseURL: string) {
-  return {
-    issuer: publicBaseURL,
-    authorization_endpoint: `${publicBaseURL}/authorize`,
-    token_endpoint: `${publicBaseURL}/token`,
-    registration_endpoint: `${publicBaseURL}/register`,
-    response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code', 'refresh_token'],
-    token_endpoint_auth_methods_supported: ['none'],
-    code_challenge_methods_supported: ['S256'],
-    scopes_supported: ['pulse:read', 'pulse:write', 'offline_access'],
-    client_id_metadata_document_supported: true,
-  };
-}
-
-async function readRequestJSON(req: IncomingMessage): Promise<unknown> {
-  const text = await readRequestText(req);
-  if (text === '') {
-    return undefined;
-  }
-  return JSON.parse(text);
-}
-
-async function readRequestText(req: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  if (chunks.length === 0) {
-    return '';
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-function callsProtectedTool(body: unknown): boolean {
-  if (Array.isArray(body)) {
-    return body.some(callsProtectedTool);
-  }
-  if (!body || typeof body !== 'object') {
-    return false;
-  }
-  const message = body as Record<string, unknown>;
-  return message.method === 'tools/call';
-}
-
-function isAuthorized(req: IncomingMessage, bearer: string, devAccessTokens: Map<string, DevOAuthToken>): boolean {
-  const auth = req.headers.authorization ?? '';
-  if (bearer && auth === `Bearer ${bearer}`) {
-    return true;
-  }
-  const token = bearerToken(auth);
-  if (token) {
-    const devToken = devAccessTokens.get(token);
-    if (devToken && devToken.expiresAt > Date.now()) {
-      return true;
-    }
-  }
-  return process.env.PULSE_REMOTE_AUTH_PROXY_MODE === '1' &&
-    process.env.PULSE_REMOTE_TRUST_AUTH_HEADER === '1' &&
-    /^Bearer\s+\S+$/i.test(auth);
-}
-
-function bearerToken(header: string | string[] | undefined): string {
-  if (Array.isArray(header)) {
-    header = header[0] ?? '';
-  }
-  const match = (header ?? '').match(/^Bearer\s+(.+)$/i);
-  return match?.[1] ?? '';
-}
-
-function handleDevAuthorize(
-  req: IncomingMessage,
-  res: ServerResponse,
-  codes: Map<string, DevOAuthCode>,
-): void {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
-  const responseType = url.searchParams.get('response_type') ?? '';
-  const clientId = url.searchParams.get('client_id') ?? '';
-  const redirectUri = url.searchParams.get('redirect_uri') ?? '';
-  const codeChallenge = url.searchParams.get('code_challenge') ?? '';
-  const codeChallengeMethod = url.searchParams.get('code_challenge_method') ?? '';
-  const scope = url.searchParams.get('scope') || 'pulse:read pulse:write';
-  const state = url.searchParams.get('state') ?? '';
-  if (responseType !== 'code' || clientId === '' || redirectUri === '' || codeChallenge === '' || codeChallengeMethod !== 'S256') {
-    writeJSON(res, { error: 'invalid_request' }, 400);
-    return;
-  }
-  // PIN gate: when PULSE_OAUTH_PIN is set, the authorization code is only
-  // issued after the human enters the PIN. This keeps the public OAuth
-  // endpoint from auto-granting access to anyone who finds the URL.
-  const requiredPin = process.env.PULSE_OAUTH_PIN ?? '';
-  if (requiredPin) {
-    const givenPin = url.searchParams.get('pin') ?? '';
-    if (givenPin !== requiredPin) {
-      const esc = (s: string) => s.replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
-      const carry = new URLSearchParams(url.search);
-      carry.delete('pin');
-      const hidden = [...carry.entries()]
-        .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
-      const wrong = url.searchParams.has('pin') ? '<p style="color:#c00">Wrong PIN</p>' : '';
-      res.writeHead(url.searchParams.has('pin') ? 401 : 200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pulse</title><body style="font-family:system-ui;max-width:360px;margin:18vh auto;padding:0 20px"><h2>Pulse — authorize</h2><p>Enter your PIN to connect this app to your memory.</p>${wrong}<form method="GET" action="/authorize">${hidden}<input name="pin" type="password" inputmode="numeric" placeholder="PIN" autofocus style="font-size:18px;padding:10px;width:100%;box-sizing:border-box"><button style="margin-top:14px;padding:10px 18px;font-size:16px">Authorize</button></form></body>`);
-      return;
-    }
-  }
-  const code = `pulse_dev_code_${randomUUID()}`;
-  codes.set(code, {
-    clientId,
-    redirectUri,
-    codeChallenge,
-    scope,
-    expiresAt: Date.now() + 5 * 60 * 1000,
-  });
-  const callback = new URL(redirectUri);
-  callback.searchParams.set('code', code);
-  if (state) {
-    callback.searchParams.set('state', state);
-  }
-  res.writeHead(302, { Location: callback.toString() });
-  res.end();
-}
-
-async function handleDevToken(
-  req: IncomingMessage,
-  res: ServerResponse,
-  codes: Map<string, DevOAuthCode>,
-  accessTokens: Map<string, DevOAuthToken>,
-  refreshTokens: Map<string, DevOAuthToken>,
-): Promise<void> {
-  const form = new URLSearchParams(await readRequestText(req));
-  const grantType = form.get('grant_type') ?? '';
-  if (grantType === 'authorization_code') {
-    const code = form.get('code') ?? '';
-    const verifier = form.get('code_verifier') ?? '';
-    const clientId = form.get('client_id') ?? '';
-    const redirectUri = form.get('redirect_uri') ?? '';
-    const pending = codes.get(code);
-    if (!pending || pending.expiresAt <= Date.now() || pending.clientId !== clientId || pending.redirectUri !== redirectUri) {
-      writeJSON(res, { error: 'invalid_grant' }, 400);
-      return;
-    }
-    if (pkceChallenge(verifier) !== pending.codeChallenge) {
-      writeJSON(res, { error: 'invalid_grant' }, 400);
-      return;
-    }
-    codes.delete(code);
-    writeDevTokenResponse(res, pending.scope, accessTokens, refreshTokens);
-    return;
-  }
-  if (grantType === 'refresh_token') {
-    const refreshToken = form.get('refresh_token') ?? '';
-    const token = refreshTokens.get(refreshToken);
-    if (!token) {
-      writeJSON(res, { error: 'invalid_grant' }, 400);
-      return;
-    }
-    refreshTokens.delete(refreshToken);
-    writeDevTokenResponse(res, token.scope, accessTokens, refreshTokens);
-    return;
-  }
-  writeJSON(res, { error: 'unsupported_grant_type' }, 400);
-}
-
-function writeDevTokenResponse(
-  res: ServerResponse,
-  scope: string,
-  accessTokens: Map<string, DevOAuthToken>,
-  refreshTokens: Map<string, DevOAuthToken>,
-): void {
-  const accessToken = `pulse_dev_at_${randomUUID()}`;
-  const refreshToken = `pulse_dev_rt_${randomUUID()}`;
-  accessTokens.set(accessToken, {
-    scope,
-    expiresAt: Date.now() + 60 * 60 * 1000,
-  });
-  refreshTokens.set(refreshToken, {
-    scope,
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
-  });
-  writeJSON(res, {
-    access_token: accessToken,
-    token_type: 'Bearer',
-    expires_in: 3600,
-    refresh_token: refreshToken,
-    scope,
-  });
-}
-
-function persistOAuthTokens(
-  file: string,
-  access: Map<string, DevOAuthToken>,
-  refresh: Map<string, DevOAuthToken>,
-): void {
+const invokedAsEntrypoint = (() => {
+  if (!process.argv[1]) return false;
   try {
-    const now = Date.now();
-    const data = {
-      access: [...access.entries()].filter(([, t]) => t.expiresAt > now),
-      refresh: [...refresh.entries()].filter(([, t]) => t.expiresAt > now),
-    };
-    writeFileSync(file, JSON.stringify(data), { mode: 0o600 });
-  } catch {
-    // best-effort: never break the token response over a write failure
-  }
-}
-
-function loadOAuthTokens(
-  file: string,
-  access: Map<string, DevOAuthToken>,
-  refresh: Map<string, DevOAuthToken>,
-): void {
-  try {
-    if (!existsSync(file)) return;
-    const now = Date.now();
-    const data = JSON.parse(readFileSync(file, 'utf8')) as {
-      access?: [string, DevOAuthToken][];
-      refresh?: [string, DevOAuthToken][];
-    };
-    for (const [k, t] of data.access ?? []) {
-      if (t && t.expiresAt > now) access.set(k, t);
-    }
-    for (const [k, t] of data.refresh ?? []) {
-      if (t && t.expiresAt > now) refresh.set(k, t);
-    }
-  } catch {
-    // ignore a missing/corrupt token store
-  }
-}
-
-function pkceChallenge(verifier: string): string {
-  return createHash('sha256').update(verifier).digest('base64url');
-}
-
-function isHTTPSURL(value: string): boolean {
-  try {
-    return new URL(value).protocol === 'https:';
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
   } catch {
     return false;
   }
+})();
+
+// The published CLI imports the prebuilt MCP module instead of duplicating
+// its startup logic. Keep one explicit callable entrypoint while preserving
+// direct `node dist/index.js` execution.
+export async function runMcpEntrypoint(): Promise<void> {
+  await main();
 }
 
-function writeOAuthChallenge(res: ServerResponse, publicBaseURL: string): void {
-  writeCors(res);
-  const metadataURL = `${publicBaseURL}/.well-known/oauth-protected-resource/mcp`;
-  res.writeHead(401, {
-    'Content-Type': 'application/json',
-    'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${metadataURL}", scope="pulse:read pulse:write"`,
+if (invokedAsEntrypoint) {
+  runMcpEntrypoint().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('[pulse-mcp] fatal:', err);
+    process.exit(1);
   });
-  res.end(JSON.stringify({
-    error: 'invalid_token',
-    error_description: 'Authentication required for Pulse MCP tools',
-  }));
 }
-
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('[pulse-mcp] fatal:', err);
-  process.exit(1);
-});

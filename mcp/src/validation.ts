@@ -36,9 +36,13 @@ const ENTITY_KINDS = new Set([
 ]);
 const DOMAINS = new Set(['real', 'fiction_content', 'fiction_meta', 'meta_authorial']);
 const ASSERTION_SCOPE_TYPES = new Set(['personal', 'project', 'repo', 'agent', 'session']);
-const ASSERTION_VISIBILITY = new Set(['private', 'shared']);
+const ASSERTION_VISIBILITY = new Set(['private']);
 const PLUTCHIK = new Set([
   'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt',
+]);
+
+const AUTHORITY_FIELDS = new Set([
+	'audience', 'principal', 'role', 'scope', 'vault', 'visibility', 'workspace',
 ]);
 
 const SAFE_TAG = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -77,11 +81,23 @@ function looksSensitiveOrPathLike(text: string): boolean {
   return SECRET_MARKERS.some((marker) => lower.includes(marker));
 }
 
+function looksLikeEphemeralControl(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes('no_auto_context') ||
+    ((lower.includes('answer with') || lower.includes('return')) && lower.includes('exact injected marker'));
+}
+
 function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     fail(`invalid ${what}: expected an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function rejectAuthorityFields(value: Record<string, unknown>, what: string): void {
+  for (const key of Object.keys(value)) {
+    if (AUTHORITY_FIELDS.has(key.trim().toLowerCase())) fail(`${what} authority field is forbidden: ${key}`);
+  }
 }
 
 // Mirror of validateSemanticText: trims, enforces max length, rejects
@@ -100,6 +116,7 @@ function safeText(field: string, value: unknown, max: number, required: boolean)
   if (trimmed.length > max) fail(`${field} is too long`);
   if (looksLikeTranscript(trimmed)) fail(`${field} looks like raw transcript`);
   if (looksSensitiveOrPathLike(trimmed)) fail(`${field} contains secret/path-like text`);
+  if (looksLikeEphemeralControl(trimmed)) fail(`${field} looks like ephemeral evaluation control`);
   return trimmed;
 }
 
@@ -144,6 +161,7 @@ export interface CleanCapsule {
 
 export function validateCapsule(input: unknown): CleanCapsule {
   const capsule = asRecord(input, 'memory capsule');
+  rejectAuthorityFields(capsule, 'memory capsule');
   if (capsule.schema !== CAPSULE_SCHEMA) fail(`schema must be ${CAPSULE_SCHEMA}`);
   if (capsule.raw_input_included !== false) fail('raw_input_included must be false');
   const source = asRecord(capsule.source, 'memory capsule source');
@@ -274,6 +292,7 @@ function continuityStrings(field: string, value: unknown): string[] {
 
 export function validateDelta(input: unknown): CleanDelta {
   const delta = asRecord(input, 'semantic delta');
+  rejectAuthorityFields(delta, 'semantic delta');
   if (delta.schema !== DELTA_SCHEMA) fail(`schema must be ${DELTA_SCHEMA}`);
   if (delta.raw_input_included !== false) fail('raw_input_included must be false');
   const source = asRecord(delta.source, 'semantic delta source');

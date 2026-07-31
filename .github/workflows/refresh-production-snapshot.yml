@@ -1,0 +1,268 @@
+name: Production snapshot refresh
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Optional successful Production candidate run for Pulse 0.7.0
+        required: false
+        type: string
+      confirmation:
+        description: Type "refresh pulse 0.7.0 snapshot"
+        required: false
+        type: string
+
+concurrency:
+  group: pulse-production-snapshot-0.7.0
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect public snapshot freshness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      candidate_run_id: ${{ steps.release.outputs.candidate_run_id }}
+      refresh_required: ${{ steps.activation.outputs.gold_active == 'true' && steps.freshness.outputs.refresh_required == 'true' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Require protected main and explicit manual intent
+        env:
+          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+            test "$RELEASE_CONFIRMATION" = 'refresh pulse 0.7.0 snapshot'
+          else
+            test "$GITHUB_EVENT_NAME" = schedule
+          fi
+      - id: activation
+        name: Require the public Gold release before refreshing its snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          status="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 30 --max-redirs 0 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -o "$RUNNER_TEMP/gold-release.json" -w '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.7.0")"
+          if test "$status" = 200; then
+            test "$(jq -r .tag_name "$RUNNER_TEMP/gold-release.json")" = v0.7.0
+            test "$(jq -r .draft "$RUNNER_TEMP/gold-release.json")" = false
+            test "$(jq -r .prerelease "$RUNNER_TEMP/gold-release.json")" = false
+            echo 'gold_active=true' >> "$GITHUB_OUTPUT"
+          else
+            tag_status="$(curl --silent --show-error \
+              --connect-timeout 10 --max-time 30 --max-redirs 0 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -o "$RUNNER_TEMP/gold-tag.json" -w '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/v0.7.0")"
+            if test "$status" = 404 && test "$tag_status" = 404 && \
+                test "$GITHUB_EVENT_NAME" = schedule; then
+              echo 'gold_active=false' >> "$GITHUB_OUTPUT"
+              echo 'Pulse 0.7.0 Gold is not published; scheduled snapshot refresh is inactive.' \
+                >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Gold activation check failed: release status $status, tag status $tag_status." >&2
+              exit 1
+            fi
+          fi
+      - id: freshness
+        name: Download and inspect the canonical public snapshot
+        if: steps.activation.outputs.gold_active == 'true'
+        shell: bash
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 --max-redirs 0 --max-filesize 2097152 \
+            -H 'Accept: application/json' \
+            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            -o "$RUNNER_TEMP/current-snapshot.json"
+          node - <<'NODE'
+          const fs = require('fs');
+          const value = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/current-snapshot.json', 'utf8'));
+          if (value.schema !== 'pulse.release_snapshot_envelope.v1' ||
+              value.payload?.schema !== 'pulse.release_snapshot.v1' ||
+              value.payload?.package !== '@zbs-gg/pulse' || value.payload?.version !== '0.7.0' ||
+              value.payload?.release_epoch !== 8) process.exit(1);
+          const issued = Date.parse(value.payload.issued_at);
+          const expires = Date.parse(value.payload.expires_at);
+          const now = Date.now();
+          if (!Number.isFinite(issued) || !Number.isFinite(expires) || issued > now || expires <= now) process.exit(1);
+          const age = now - issued;
+          const remaining = expires - now;
+          const day = 24 * 60 * 60 * 1000;
+          const manual = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `refresh_required=${manual || age >= 14 * day || remaining <= 7 * day}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Snapshot expiry: ${value.payload.expires_at}; remaining: ${(remaining / day).toFixed(2)} days.\n` +
+            (remaining <= 7 * day ? 'WARNING: snapshot expires within seven days.\n' : ''));
+          NODE
+      - id: release
+        name: Resolve the immutable 0.7.0 production candidate
+        if: steps.freshness.outputs.refresh_required == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: |
+          run_id="$REQUESTED_RUN_ID"
+          if test -z "$run_id"; then
+            run_id="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/production-candidate.yml/runs?branch=main&event=workflow_dispatch&status=success&per_page=20" \
+              --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -n 1)"
+          fi
+          [[ "$run_id" =~ ^[1-9][0-9]{0,19}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/candidate-run.json"
+          test "$(jq -r .name "$RUNNER_TEMP/candidate-run.json")" = 'Production candidate'
+          test "$(jq -r .path "$RUNNER_TEMP/candidate-run.json")" = '.github/workflows/production-candidate.yml'
+          test "$(jq -r .event "$RUNNER_TEMP/candidate-run.json")" = workflow_dispatch
+          test "$(jq -r .head_branch "$RUNNER_TEMP/candidate-run.json")" = main
+          test "$(jq -r .conclusion "$RUNNER_TEMP/candidate-run.json")" = success
+          echo "candidate_run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+  sign:
+    name: Root-sign a new 30-day snapshot
+    needs: inspect
+    if: needs.inspect.outputs.refresh_required == 'true'
+    environment: production-catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.inspect.outputs.candidate_run_id }}
+      RELEASE_ROOT_PRIVATE_KEY_BASE64: ${{ secrets.RELEASE_ROOT_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Download immutable artifact set and current public snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-production-release-catalog --dir "$RUNNER_TEMP/pulse-production-release-catalog"
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 --max-redirs 0 --max-filesize 2097152 \
+            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            -o "$RUNNER_TEMP/current-snapshot.json"
+      - name: Materialize and verify the root authority
+        shell: bash
+        run: |
+          test -n "$RELEASE_ROOT_PRIVATE_KEY_BASE64"
+          printf '%s' "$RELEASE_ROOT_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/root.pem"
+          chmod 600 "$RUNNER_TEMP/root.pem"
+          node pulse-app/cli/scripts/verify-release-private-key.mjs \
+            "$RUNNER_TEMP/root.pem" "$GITHUB_WORKSPACE/pulse-app/cli/release/pulse-release-root.pem"
+      - name: Refresh freshness only
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node scripts/refresh-release-snapshot.mjs
+          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.0/epoch-8/catalog/artifact-set.json"
+          --current-snapshot "$RUNNER_TEMP/current-snapshot.json"
+          --output "$RUNNER_TEMP/pulse-snapshot-refresh"
+          --root-key "$RUNNER_TEMP/root.pem"
+      - name: Preserve signed freshness bytes and content-free receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-snapshot-refresh
+          path: ${{ runner.temp }}/pulse-snapshot-refresh
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private catalog authority
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/root.pem"
+
+  publish:
+    name: Publish the exact refreshed snapshot
+    needs: [inspect, sign]
+    environment: production-origin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.inspect.outputs.candidate_run_id }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      R2_PARENT_ACCESS_KEY_ID: ${{ secrets.R2_PARENT_ACCESS_KEY_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pulse-production-snapshot-refresh
+          path: ${{ runner.temp }}/pulse-snapshot-refresh
+      - name: Download the exact immutable candidate artifact set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$R2_BUCKET" = pulse-releases-prod
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name pulse-production-release-catalog --dir "$RUNNER_TEMP/pulse-production-release-catalog"
+      - name: Mint one-hour prefix-scoped R2 credentials
+        shell: bash
+        run: |
+          jq -n --arg bucket "$R2_BUCKET" --arg parent "$R2_PARENT_ACCESS_KEY_ID" \
+            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.0/"]}' \
+            > "$RUNNER_TEMP/r2-temp-request.json"
+          curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 30 \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $CLOUDFLARE_R2_API_TOKEN" \
+            --data-binary "@$RUNNER_TEMP/r2-temp-request.json" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/temp-access-credentials" \
+            > "$RUNNER_TEMP/r2-temp-response.json"
+          test "$(jq -r .success "$RUNNER_TEMP/r2-temp-response.json")" = true
+          access_key="$(jq -er .result.accessKeyId "$RUNNER_TEMP/r2-temp-response.json")"
+          secret_key="$(jq -er .result.secretAccessKey "$RUNNER_TEMP/r2-temp-response.json")"
+          session_token="$(jq -er .result.sessionToken "$RUNNER_TEMP/r2-temp-response.json")"
+          echo "::add-mask::$access_key"
+          echo "::add-mask::$secret_key"
+          echo "::add-mask::$session_token"
+          {
+            echo "AWS_ACCESS_KEY_ID=$access_key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret_key"
+            echo "AWS_SESSION_TOKEN=$session_token"
+            echo 'AWS_DEFAULT_REGION=auto'
+          } >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/r2-temp-request.json" "$RUNNER_TEMP/r2-temp-response.json"
+      - name: Prove artifact-set immutability and publish only freshness bytes
+        working-directory: pulse-app/cli
+        shell: bash
+        run: >-
+          node scripts/publish-r2-snapshot-refresh.mjs
+          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.0/epoch-8/catalog/artifact-set.json"
+          --bucket "$R2_BUCKET"
+          --endpoint "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
+          --out "$RUNNER_TEMP/pulse-r2-snapshot-publication.json"
+          --snapshot "$RUNNER_TEMP/pulse-snapshot-refresh/snapshot.json"
+      - name: Preserve the content-free publication receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulse-production-snapshot-publication
+          path: ${{ runner.temp }}/pulse-r2-snapshot-publication.json
+          if-no-files-found: error
+          retention-days: 30
