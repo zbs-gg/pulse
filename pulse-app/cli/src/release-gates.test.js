@@ -225,6 +225,7 @@ test('release verification includes the scanned archive and isolated native inst
 	assert.equal((universalWorkflow.match(/PULSE_CURSOR_VERSION=/g) ?? []).length, 3);
 	assert.match(universalWorkflow, /name: Packed npm input/);
 	assert.match(universalWorkflow, /needs: \[contract, package\]/);
+	assert.match(universalWorkflow, /timeout-minutes: \$\{\{ matrix\.job_timeout_minutes \}\}/);
 	assert.match(universalWorkflow, /PULSE_PERSONAL_PACKED_TARBALL/);
 	const runtimeInstaller = readFileSync(
 		join(root, 'pulse-app', 'cli', 'src', 'personal-runtime-installer.js'), 'utf8',
