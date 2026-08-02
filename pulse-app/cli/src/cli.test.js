@@ -7,6 +7,8 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { createPlatformServices } from './platform-services.js';
+
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
@@ -1185,6 +1187,41 @@ test('home bounds an unresponsive daemon session exchange', async () => {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test('home does not wait on a binding update held by another local process', async () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-home-binding-lock-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-binding-lock-cwd.'));
+	const trust = join(home, 'trust');
+	const registryPath = join(trust, 'bindings.json');
+	const publicKeyPath = join(trust, 'bindings.pub');
+	const anchorPath = join(trust, 'bindings.anchor');
+	mkdirSync(trust, { recursive: true, mode: 0o700 });
+	writeFileSync(publicKeyPath, 'synthetic public key\n', { mode: 0o600 });
+	writeFileSync(anchorPath, '{}\n', { mode: 0o600 });
+	const release = createPlatformServices().acquirePrivateLock(`${registryPath}.lock`, {
+		staleAfterMs: 0, timeoutMs: 0,
+	});
+	const startedAt = Date.now();
+
+	try {
+		const result = await runInWorkspaceAsync(['home'], cwd, home, {
+			PULSE_OPEN_DRY_RUN: '1',
+			PULSE_TRUST_MODE: 'test',
+			PULSE_BINDING_REGISTRY_PATH: registryPath,
+			PULSE_BINDING_PUBLIC_KEY_PATH: publicKeyPath,
+			PULSE_BINDING_ANCHOR_PATH: anchorPath,
+			PULSE_HOME_BINDING_LOCK_TIMEOUT_SECONDS: '1',
+			PULSE_HOME_REQUEST_TIMEOUT_MS: '50',
+		});
+
+		assert.equal(result.status, 1);
+		assert.ok(Date.now() - startedAt < 4_000,
+			'Memory Home must not inherit the ordinary 30 second binding recovery wait');
+		assert.doesNotMatch(result.stdout + result.stderr, /synthetic public key|bindings\.json|bindings\.anchor/);
+	} finally {
+		release();
+	}
 });
 
 test('home opens without waiting for a slow Codex inspection', async (t) => {

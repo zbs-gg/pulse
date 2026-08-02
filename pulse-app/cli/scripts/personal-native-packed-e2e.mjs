@@ -786,7 +786,9 @@ try {
   await assertVisibleHomeMemory({ binding, candidate: committedCard, runtime, secret });
   markFirstValueStage('visible_card');
   await packedPulse(tarball, ['home', '--host', 'codex'], {
-    cwd: workspace, env: { ...env, PULSE_OPEN_DRY_RUN: '1' }, timeout: 30_000,
+    cwd: workspace, env: {
+      ...env, PULSE_OPEN_DRY_RUN: '1', PULSE_HOME_ACCEPTANCE_STAGES: '1',
+    }, timeout: 30_000,
   });
   markFirstValueStage('home_command');
   const terminalCard = await waitForTerminalCandidate(runtime, secret, committedCard.candidate_id);
@@ -958,7 +960,9 @@ try {
   })).output;
   assert.equal(afterRestart.items.some((item) => item.id === objectID && item.summary === summary), true);
   await packedPulse(tarball, ['home', '--host', 'codex'], {
-    cwd: workspace, env: { ...env, PULSE_OPEN_DRY_RUN: '1' }, timeout: 30_000,
+    cwd: workspace, env: {
+      ...env, PULSE_OPEN_DRY_RUN: '1', PULSE_HOME_ACCEPTANCE_STAGES: '1',
+    }, timeout: 30_000,
   });
   markFirstValueStage('fail_open_and_restart');
 

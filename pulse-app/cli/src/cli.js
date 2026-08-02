@@ -1611,7 +1611,7 @@ async function runProductMcpServer(host) {
   await runMcpServer();
 }
 
-async function recoverBindingAuthority() {
+async function recoverBindingAuthority({ lockTimeoutSeconds = 30 } = {}) {
   const testAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
   const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
@@ -1622,10 +1622,11 @@ async function recoverBindingAuthority() {
     }
     await recoverWorkspaceBindingTransaction({
       registryPath, publicKeyPath, anchorPath, rootPublicKey: false, rootAnchor: false,
+			lockTimeoutSeconds,
     });
     return;
   }
-  await recoverWorkspaceBindingTransaction();
+  await recoverWorkspaceBindingTransaction({ lockTimeoutSeconds });
 }
 
 async function runCodexMcpServer() {
@@ -2149,7 +2150,7 @@ function codexDoctorProductGenerationIdentity(generation) {
 
 async function codexDoctorReport({
 	codexExecutable = 'codex', commandTimeoutMs = 30_000, versionTimeoutMs = 5000,
-	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500,
+	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500, bindingLockTimeoutSeconds = 30,
 } = {}) {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const presenceTrust = syntheticAuthority
@@ -2180,7 +2181,7 @@ async function codexDoctorReport({
   let runtime;
   let bindingError;
   try {
-	await recoverBindingAuthority();
+	await recoverBindingAuthority({ lockTimeoutSeconds: bindingLockTimeoutSeconds });
     binding = resolveCodexMcpRuntime(process.cwd()).binding;
     runtime = vaultRuntimeFromBinding(binding);
   } catch (error) {
@@ -7228,16 +7229,32 @@ function productActivationEvidenceForViewer() {
 
 const HOME_SESSION_RESPONSE_MAX_BYTES = 16 * 1024;
 const HOME_SESSION_MAX_AGE_SECONDS = 60 * 60;
-const HOME_REQUEST_TIMEOUT_MS = 90_000;
-const HOME_REQUEST_TIMEOUT_MAX_MS = 120_000;
+const HOME_REQUEST_TIMEOUT_MS = 5000;
+const HOME_REQUEST_TIMEOUT_MAX_MS = 30_000;
 const HOME_HANDOFF_TIMEOUT_MS = 60_000;
-const HOME_CODEX_PROBE_TIMEOUT_MS = 2000;
+const HOME_CODEX_PROBE_TIMEOUT_MS = 1000;
 const HOME_CODEX_PROBE_TIMEOUT_MAX_MS = 5000;
+const HOME_BINDING_LOCK_TIMEOUT_SECONDS = 2;
+const HOME_BINDING_LOCK_TIMEOUT_MAX_SECONDS = 5;
 const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS = 2000;
 const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MAX_MS = 5000;
 
 function boundedHomeTimeout(name, fallback, maximum) {
 	return Math.min(positiveEnvInt(name, fallback), maximum);
+}
+
+function homeBindingLockTimeoutSeconds() {
+	return boundedHomeTimeout(
+		'PULSE_HOME_BINDING_LOCK_TIMEOUT_SECONDS',
+		HOME_BINDING_LOCK_TIMEOUT_SECONDS,
+		HOME_BINDING_LOCK_TIMEOUT_MAX_SECONDS,
+	);
+}
+
+function homeAcceptanceStage(name) {
+	if (process.env.PULSE_HOME_ACCEPTANCE_STAGES === '1') {
+		process.stderr.write(`[pulse-home-stage] ${name}\n`);
+	}
 }
 
 function homeSessionCookie(session) {
@@ -7541,6 +7558,7 @@ async function personalDoctorForHost(host, { homeProbe = false } = {}) {
 			versionTimeoutMs: timeoutMs,
 			nativeHookTimeoutMs: timeoutMs,
 			liveProbeTimeoutMs: Math.min(timeoutMs, 1500),
+			bindingLockTimeoutSeconds: homeBindingLockTimeoutSeconds(),
 		});
 	}
 	if (host === 'cursor') return cursorProductDoctorReport();
@@ -7572,8 +7590,10 @@ async function runHome(rest) {
 	let product;
 	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
 		try {
-			await recoverBindingAuthority();
+			homeAcceptanceStage('binding_recovery_started');
+			await recoverBindingAuthority({ lockTimeoutSeconds: homeBindingLockTimeoutSeconds() });
 			product = resolveCodexMcpRuntime(process.cwd());
+			homeAcceptanceStage('binding_recovery_finished');
 		} catch (error) {
 			if (productActivationEvidenceForViewer()) {
 				throw new Error(`Pulse product activation exists, but its bound vault cannot be trusted: ${error.message}`);
@@ -7584,15 +7604,20 @@ async function runHome(rest) {
 	const dataDir = resolve(explicitDataDir ?? product?.runtime.data_dir ?? DATA_DIR);
 	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
+	homeAcceptanceStage('doctor_started');
 	const doctor = await homeDoctorReport(product, explicitHost);
+	homeAcceptanceStage('doctor_finished');
 	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness, product);
+	homeAcceptanceStage('session_received');
 	const relay = await startHomeBrowserRelay(session);
+	homeAcceptanceStage('relay_started');
 	const interrupt = () => relay.close();
 	process.once('SIGINT', interrupt);
 	process.once('SIGTERM', interrupt);
 	try {
 		await openHomeBrowserURL(relay.url, session);
 		await relay.completion;
+		homeAcceptanceStage('relay_finished');
 		console.log('[pulse] Memory Home opened.');
 	} catch (error) {
 		relay.close();
