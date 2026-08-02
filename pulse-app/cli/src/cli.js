@@ -1640,16 +1640,19 @@ async function runCursorMcpServer() {
   await runProductMcpServer('cursor');
 }
 
-function codexCommand(args, { executable = 'codex' } = {}) {
+function codexCommand(args, { executable = 'codex', timeoutMs = 30_000 } = {}) {
   if (executable !== 'codex' && (!isAbsolute(executable) || resolve(executable) !== executable)) {
     throw new Error('codex executable must be an absolute canonical path');
   }
+	if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+		throw new Error('codex command timeout must be between 1 and 30000 milliseconds');
+	}
   const command = executable !== 'codex' && executable.endsWith('.js') ? process.execPath : executable;
   const commandArgs = command === process.execPath ? [executable, ...args] : args;
   const result = spawnSync(command, commandArgs, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 30_000,
+		timeout: timeoutMs,
     killSignal: 'SIGTERM',
   });
   if (result.status !== 0) {
@@ -1659,10 +1662,10 @@ function codexCommand(args, { executable = 'codex' } = {}) {
   return `${result.stdout || ''}${result.stderr || ''}`.trim();
 }
 
-function codexMarketplaceStatus(codexExecutable = 'codex') {
+function codexMarketplaceStatus(codexExecutable = 'codex', { timeoutMs = 30_000 } = {}) {
 	try {
 		return parseCodexMarketplaceList(codexCommand(
-			['plugin', 'marketplace', 'list'], { executable: codexExecutable },
+			['plugin', 'marketplace', 'list'], { executable: codexExecutable, timeoutMs },
 		));
 	} catch (error) {
 		return { configured: false, root: undefined, error: error.message };
@@ -2034,11 +2037,11 @@ function disconnectCodexActivation() {
 		: '[pulse] Codex disconnected and the unused global plugin was removed. Existing Personal memory was preserved.');
 }
 
-function codexPluginStatus(codexExecutable = 'codex') {
+function codexPluginStatus(codexExecutable = 'codex', { timeoutMs = 30_000 } = {}) {
   try {
     return parsePulsePluginList(codexCommand(
       ['plugin', 'list', '--marketplace', 'zbs-gg'],
-      { executable: codexExecutable },
+			{ executable: codexExecutable, timeoutMs },
     ));
 	} catch (error) {
 		return { installed: false, enabled: false, path: undefined, error: error.message };
@@ -2086,9 +2089,11 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 	}
 }
 
-function inspectCodexDoctorProductGeneration({ codexReady, codexExecutable }) {
+function inspectCodexDoctorProductGeneration({
+	codexReady, codexExecutable, commandTimeoutMs = 30_000,
+}) {
 	const plugin = codexReady
-		? codexPluginStatus(codexExecutable)
+		? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
 		: { installed: false, enabled: false, path: undefined };
 	const installedRuntime = inspectCodexRuntime(DATA_DIR);
 	let productActivation;
@@ -2110,7 +2115,7 @@ function inspectCodexDoctorProductGeneration({ codexReady, codexExecutable }) {
 			installed: true, enabled: true, version: productEdge.release_version, path: cachePluginRoot,
 		}, productEdge)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
-	const marketplace = codexMarketplaceStatus(codexExecutable);
+	const marketplace = codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs });
 	const marketplaceSnapshot = productEdge
 		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
@@ -2142,17 +2147,20 @@ function codexDoctorProductGenerationIdentity(generation) {
 	})).digest('hex');
 }
 
-async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
+async function codexDoctorReport({
+	codexExecutable = 'codex', commandTimeoutMs = 30_000, versionTimeoutMs = 5000,
+	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500,
+} = {}) {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
   const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
   const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
-    ? checkCommandVersion(process.execPath, [codexExecutable, '--version'])
-    : checkCommandVersion(codexExecutable, ['--version']);
+		? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
+		: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs);
 	const productGenerationBefore = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationIdentity = codexDoctorProductGenerationIdentity(productGenerationBefore);
 	let {
@@ -2247,6 +2255,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 			marketplacePluginRoot: marketplaceSnapshot.plugin_root,
 			cachePluginRoot,
 			edge: productEdge,
+			timeoutMs: nativeHookTimeoutMs,
 		})
 		: Promise.resolve({
 			ready: false,
@@ -2257,7 +2266,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 		if (!binding || !runtime || runtimeStatus.status !== 'running') return {};
 		try {
 			const liveStatus = await boundPulseRequest({ binding, runtime }, '/memory/status', {
-				method: 'GET', timeoutMs: 1500,
+				method: 'GET', timeoutMs: liveProbeTimeoutMs,
 			});
 			return { liveStatus };
 		} catch (error) {
@@ -2269,7 +2278,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 		liveProbePromise,
 	]);
 	const productGenerationAfter = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationStable = productGenerationIdentity ===
 		codexDoctorProductGenerationIdentity(productGenerationAfter);
@@ -3479,13 +3488,13 @@ function safeReadJSON(path) {
   }
 }
 
-function checkCommandVersion(name, versionArgs = ['--version']) {
+function checkCommandVersion(name, versionArgs = ['--version'], timeoutMs = 5000) {
   if (!commandOnPath(name)) {
     return { ok: false, detail: 'missing' };
   }
   const result = spawnSync(name, versionArgs, {
     encoding: 'utf8',
-    timeout: 5000,
+		timeout: timeoutMs,
   });
   if (result.status !== 0) {
     return { ok: false, detail: 'found but did not answer' };
@@ -7222,6 +7231,8 @@ const HOME_SESSION_MAX_AGE_SECONDS = 60 * 60;
 const HOME_REQUEST_TIMEOUT_MS = 90_000;
 const HOME_REQUEST_TIMEOUT_MAX_MS = 120_000;
 const HOME_HANDOFF_TIMEOUT_MS = 60_000;
+const HOME_CODEX_PROBE_TIMEOUT_MS = 2000;
+const HOME_CODEX_PROBE_TIMEOUT_MAX_MS = 5000;
 
 function boundedHomeTimeout(name, fallback, maximum) {
 	return Math.min(positiveEnvInt(name, fallback), maximum);
@@ -7483,9 +7494,22 @@ async function openHomeBrowserURL(url, session) {
 	}
 }
 
-async function personalDoctorForHost(host) {
+async function personalDoctorForHost(host, { homeProbe = false } = {}) {
 	if (host === 'claude-code') return claudeProductDoctorReport();
-	if (host === 'codex') return codexDoctorReport();
+	if (host === 'codex') {
+		if (!homeProbe) return codexDoctorReport();
+		const timeoutMs = boundedHomeTimeout(
+			'PULSE_HOME_CODEX_PROBE_TIMEOUT_MS',
+			HOME_CODEX_PROBE_TIMEOUT_MS,
+			HOME_CODEX_PROBE_TIMEOUT_MAX_MS,
+		);
+		return codexDoctorReport({
+			commandTimeoutMs: timeoutMs,
+			versionTimeoutMs: timeoutMs,
+			nativeHookTimeoutMs: timeoutMs,
+			liveProbeTimeoutMs: Math.min(timeoutMs, 1500),
+		});
+	}
 	if (host === 'cursor') return cursorProductDoctorReport();
 	throw new Error('pulse home --host must be claude-code, codex, or cursor.');
 }
@@ -7495,7 +7519,11 @@ async function homeDoctorReport(product, requestedHost) {
 	const enabledHosts = product
 		? SUPPORTED_HOST_IDS.filter((host) => captureEnabledForHost(capture, host))
 		: ['codex'];
-	return selectHomeDoctorReport({ requestedHost, enabledHosts, doctorForHost: personalDoctorForHost });
+	return selectHomeDoctorReport({
+		requestedHost,
+		enabledHosts,
+		doctorForHost: (host) => personalDoctorForHost(host, { homeProbe: true }),
+	});
 }
 
 async function runHome(rest) {

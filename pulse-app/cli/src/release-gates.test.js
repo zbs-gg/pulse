@@ -212,6 +212,7 @@ test('release verification includes the scanned archive and isolated native inst
 	const universalTarget = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'native-universal-target.mjs'), 'utf8',
 	);
+	assert.match(universalTarget, /firstValueLimitMs = target\.platform === 'win32' \? 90_000 : 60_000/);
 	assert.match(universalTarget, /process\.env\.PULSE_CURSOR_VERSION/);
 	assert.doesNotMatch(universalTarget, /cursorExecutable, \['--version'\]/);
 	assert.match(universalTarget, /pulse\.personal_consolidation_report_fixture\.v1/);

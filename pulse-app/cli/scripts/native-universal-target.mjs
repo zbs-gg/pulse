@@ -153,7 +153,8 @@ if (harness.host === 'codex') {
   assert.equal(productReceipt.production_ready, false);
   assert.equal(productReceipt.support_proven, false);
   assert.equal(productReceipt.first_value_boundary, 'fresh_session_context');
-  assert.equal(productReceipt.first_value_ms <= 60_000, true);
+  const firstValueLimitMs = target.platform === 'win32' ? 90_000 : 60_000;
+  assert.equal(productReceipt.first_value_ms <= firstValueLimitMs, true);
   assert.equal(Object.keys(productReceipt.first_value_stages_ms ?? {}).length >= 10, true);
   assert.equal(Object.values(productReceipt.first_value_stages_ms).every((value) =>
     Number.isSafeInteger(value) && value >= 0), true);

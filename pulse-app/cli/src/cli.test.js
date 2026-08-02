@@ -1183,6 +1183,48 @@ test('home bounds an unresponsive daemon session exchange', async () => {
   }
 });
 
+test('home opens without waiting for a slow Codex inspection', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('portable hanging executable fixture uses a POSIX shebang');
+    return;
+  }
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-slow-codex-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-slow-codex-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const binDir = join(home, 'bin');
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'slow-codex-daemon-secret');
+  writeExecutable(join(binDir, 'codex'), `#!${process.execPath}\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);\n`);
+  const stub = await withPulseStub((req) => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'slow-codex-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://${req.headers.host}${testHomeRoutePath}`,
+    },
+  }));
+  const startedAt = Date.now();
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--host', 'codex', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PATH: `${binDir}:/usr/bin:/bin`,
+      PULSE_OPEN_DRY_RUN: '1',
+      PULSE_HOME_CODEX_PROBE_TIMEOUT_MS: '50',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Date.now() - startedAt < 2_000, 'Memory Home must not wait for a slow Codex inspection');
+    assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
+    assert.doesNotMatch(result.stdout + result.stderr, /slow-codex-daemon-secret|slow-codex-browser-session/);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('viewer fails closed when product activation evidence exists but binding trust is broken', () => {
 	const home = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-home.'));
 	const cwd = mkdtempSync(join(tmpdir(), 'pulse-viewer-product-cwd.'));
