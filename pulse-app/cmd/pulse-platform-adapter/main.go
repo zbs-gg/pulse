@@ -481,16 +481,12 @@ func readIntegrityFile(value request) (any, error) {
 }
 
 func inspectProcess(pid int) (any, error) {
-	identity, err := platform.ProcessIdentity(pid)
+	identity, command, running, err := platform.InspectWindowsProcess(pid)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return map[string]any{"command": "", "identity_token": nil, "pid": pid, "running": false}, nil
-		}
 		return nil, err
 	}
-	command, err := platform.WindowsProcessCommand(pid)
-	if err != nil {
-		return nil, err
+	if !running {
+		return map[string]any{"command": "", "identity_token": nil, "pid": pid, "running": false}, nil
 	}
 	return map[string]any{"command": command, "identity_token": identity, "pid": pid, "running": true}, nil
 }

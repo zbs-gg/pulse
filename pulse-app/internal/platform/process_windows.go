@@ -17,10 +17,20 @@ func ProcessIdentity(pid int) (string, error) {
 		return "", os.ErrNotExist
 	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return "", os.ErrNotExist
+	}
 	if err != nil {
 		return "", err
 	}
 	defer windows.CloseHandle(handle)
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+		return "", err
+	}
+	if exitCode != windowsStillActive {
+		return "", os.ErrNotExist
+	}
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
 		return "", err
@@ -48,26 +58,60 @@ func ProcessAlive(pid int, identity string) bool {
 	return identity == fmt.Sprintf("%08x:%08x", created.HighDateTime, created.LowDateTime)
 }
 
-// WindowsProcessCommand returns the kernel-reported executable image path.
-// The process creation time remains the separate anti-PID-reuse authority.
-func WindowsProcessCommand(pid int) (string, error) {
+// InspectWindowsProcess reads the process identity, image path, and liveness
+// from one kernel handle. Keeping one handle closes the PID-reuse race that
+// would exist if identity and image were inspected in separate calls.
+func InspectWindowsProcess(pid int) (identity string, command string, running bool, err error) {
 	if pid < 1 {
-		return "", os.ErrNotExist
+		return "", "", false, nil
 	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return "", "", false, nil
+	}
 	if err != nil {
-		return "", err
+		return "", "", false, err
 	}
 	defer windows.CloseHandle(handle)
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+		return "", "", false, err
+	}
+	if exitCode != windowsStillActive {
+		return "", "", false, nil
+	}
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
+		return "", "", false, err
+	}
 	buffer := make([]uint16, 32768)
 	size := uint32(len(buffer))
 	if err := windows.QueryFullProcessImageName(handle, 0, &buffer[0], &size); err != nil {
-		return "", err
+		// The process may have exited after the first liveness check. Report that
+		// as stopped instead of turning an ordinary shutdown race into an error.
+		if exitErr := windows.GetExitCodeProcess(handle, &exitCode); exitErr == nil && exitCode != windowsStillActive {
+			return "", "", false, nil
+		}
+		return "", "", false, err
 	}
 	if size < 1 || size > uint32(len(buffer)) {
-		return "", ErrUnsafe
+		return "", "", false, ErrUnsafe
 	}
-	return windows.UTF16ToString(buffer[:size]), nil
+	return fmt.Sprintf("%08x:%08x", created.HighDateTime, created.LowDateTime),
+		windows.UTF16ToString(buffer[:size]), true, nil
+}
+
+// WindowsProcessCommand returns the kernel-reported executable image path.
+// The process creation time remains the separate anti-PID-reuse authority.
+func WindowsProcessCommand(pid int) (string, error) {
+	_, command, running, err := InspectWindowsProcess(pid)
+	if err != nil {
+		return "", err
+	}
+	if !running {
+		return "", os.ErrNotExist
+	}
+	return command, nil
 }
 
 // TerminateWindowsProcess terminates the process only when the creation-time
