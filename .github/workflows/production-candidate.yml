@@ -52,7 +52,7 @@ jobs:
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
           test "$RELEASE_CONFIRMATION" = 'build universal production candidate'
           [[ "$UNIVERSAL_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
-          test "$RELEASE_EPOCH" = 8
+          test "$RELEASE_EPOCH" = 9
           test -z "${NODE_AUTH_TOKEN:-}"
           test -z "${NPM_TOKEN:-}"
       - name: Require successful Universal run for this commit
@@ -406,7 +406,7 @@ jobs:
           retention-days: 30
 
   catalog:
-    name: Sign immutable epoch-8 artifact set and 30-day snapshot
+    name: Sign immutable epoch-9 artifact set and 30-day snapshot
     needs: [authorize, linux-target, macos-target, windows-target, portable-model, plugin-runtime]
     environment: production-catalog
     runs-on: ubuntu-24.04

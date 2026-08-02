@@ -18,7 +18,7 @@ import {
 } from './release-manifest.js';
 
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
-const EPOCH = 8;
+const EPOCH = 9;
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -194,7 +194,7 @@ test('snapshot refresh changes only root-signed freshness while preserving immut
     trustedKeys: current.trustedKeys,
   });
   assert.deepEqual(readFileSync(built.artifactSetPath), originalArtifactSet);
-  assert.equal(refreshed.receipt.release_epoch, 8);
+  assert.equal(refreshed.receipt.release_epoch, 9);
   assert.equal(refreshed.receipt.artifact_set_digest, built.receipt.artifact_set_digest);
   assert.notEqual(refreshed.receipt.snapshot_digest, built.receipt.snapshot_digest);
   assert.equal(
@@ -215,8 +215,8 @@ test('snapshot-only publication proves the existing artifact set before replacin
     rootKeyPath: current.options.rootKey,
     trustedKeys: current.trustedKeys,
   });
-  const artifactSetKey = 'pulse/0.7.0/epoch-8/catalog/artifact-set.json';
-  const snapshotKey = 'pulse/0.7.0/catalog/snapshot.json';
+  const artifactSetKey = 'pulse/0.7.1/epoch-9/catalog/artifact-set.json';
+  const snapshotKey = 'pulse/0.7.1/catalog/snapshot.json';
   const store = new Map([[artifactSetKey, {
     bytes: readFileSync(built.artifactSetPath), cacheControl: 'public, max-age=31536000, immutable',
     contentType: 'application/json', etag: 'artifact-set',

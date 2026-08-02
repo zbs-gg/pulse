@@ -24,16 +24,16 @@ on:
         required: true
         type: string
       candidate_sha256:
-        description: Exact 0.7.0 npm tarball SHA-256
+        description: Exact 0.7.1 npm tarball SHA-256
         required: true
         type: string
       confirmation:
-        description: Type "authorize pulse 0.7.0 gold promotion"
+        description: Type "authorize pulse 0.7.1 gold promotion"
         required: true
         type: string
 
 concurrency:
-  group: pulse-authorize-gold-0.7.0
+  group: pulse-authorize-gold-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          test "$GOLD_CONFIRMATION" = 'authorize pulse 0.7.0 gold promotion'
+          test "$GOLD_CONFIRMATION" = 'authorize pulse 0.7.1 gold promotion'
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"

@@ -54,9 +54,21 @@ export function assertTruthfulWriteResponse(value: unknown): void {
   }
   if (!('receipts' in value)) {
     if (value.ok === true && Array.isArray(value.ids)) {
-      exactKeys(value, ['ok', 'ids'], 'Pulse preview remember response');
+      exactKeys(value, ['ok', 'ids', 'results'], 'Pulse preview remember response');
       if (value.ids.length === 0 || value.ids.some((id) => typeof id !== 'string' || !STABLE_ID.test(id))) {
         throw new Error('Pulse preview remember response has invalid IDs');
+      }
+      if (!Array.isArray(value.results) || value.results.length !== value.ids.length) {
+        throw new Error('Pulse preview remember response has invalid results');
+      }
+      for (let index = 0; index < value.results.length; index += 1) {
+        const result = value.results[index];
+        if (!isRecord(result)) throw new Error('Pulse preview remember response has invalid results');
+        exactKeys(result, ['id', 'result'], 'Pulse preview remember item result');
+        if (result.id !== value.ids[index] ||
+            (result.result !== 'created' && result.result !== 'deduplicated')) {
+          throw new Error('Pulse preview remember response has invalid results');
+        }
       }
       return;
     }

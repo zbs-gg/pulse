@@ -85,7 +85,7 @@ function gitRepository(root) {
 function verifiedRelease() {
   return {
     schema: 'pulse.verified_release_manifest.v2',
-    version: '0.7.0',
+    version: '0.7.1',
     epoch: 7,
     manifest_digest: 'a'.repeat(64),
     catalog_schema: 'pulse.personal_preview.release_catalog.v2',
@@ -182,7 +182,7 @@ try {
   const packedRoot = packed.packageRoot;
   const packedPackageJSON = JSON.parse(readFileSync(join(packedRoot, 'package.json'), 'utf8'));
   assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
-  assert.equal(packedPackageJSON.version, '0.7.0');
+  assert.equal(packedPackageJSON.version, '0.7.1');
   const { buildPersonalInstallPlan } = await import(pathToFileURL(join(packedRoot, 'src', 'install-plan.js')));
   const { runPersonalInstall } = await import(pathToFileURL(join(packedRoot, 'src', 'personal-install.js')));
   const { unassignedAssignmentTurnRef } = await import(

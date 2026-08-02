@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -61,6 +62,122 @@ func TestRememberCapsuleStoresStrictItemsAndRecallFindsThem(t *testing.T) {
 	}
 	if items[0].Source != "pulse" {
 		t.Fatalf("expected source pulse, got %q", items[0].Source)
+	}
+}
+
+func TestRememberCapsuleReturnsCreatedThenCrossHarnessDeduplicated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dedup.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	capsule := MemoryCapsule{
+		Schema: MemoryCapsuleSchema,
+		Source: CapsuleSource{Host: "codex", ConversationScope: "current_turn", Timestamp: "2026-08-02T10:00:00Z"},
+		Items: []MemoryCapsuleItem{{
+			Kind: "decision", RedactedSummary: "Pulse returns a durable result for every accepted memory.",
+			Confidence: 1, EvidenceHint: "user_confirmed", PrivacyTier: "normal",
+			Retention: "project", Tags: []string{"receipt"},
+		}},
+	}
+	created, err := s.RememberCapsuleWithResults(capsule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 1 || created[0].Result != MemoryRememberCreated {
+		t.Fatalf("created=%#v", created)
+	}
+	capsule.Source.Host = "claude-code"
+	capsule.Source.Timestamp = "2026-08-02T11:00:00Z"
+	repeated, err := s.RememberCapsuleWithResults(capsule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repeated) != 1 || repeated[0].Result != MemoryRememberDeduplicated || repeated[0].ID != created[0].ID {
+		t.Fatalf("created=%#v repeated=%#v", created, repeated)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestRememberCapsuleParallelRepeatCreatesOneObject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "parallel.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	capsule := MemoryCapsule{
+		Schema: MemoryCapsuleSchema,
+		Source: CapsuleSource{Host: "cursor", ConversationScope: "current_turn", Timestamp: "2026-08-02T12:00:00Z"},
+		Items: []MemoryCapsuleItem{{
+			Kind: "fact", RedactedSummary: "Parallel retries keep one canonical Pulse memory.",
+			Confidence: 0.95, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project",
+		}},
+	}
+	stores := []*Store{first, second}
+	results := make([][]MemoryRememberItemResult, len(stores))
+	errors := make([]error, len(stores))
+	var wait sync.WaitGroup
+	wait.Add(len(stores))
+	for index, current := range stores {
+		go func() {
+			defer wait.Done()
+			results[index], errors[index] = current.RememberCapsuleWithResults(capsule)
+		}()
+	}
+	wait.Wait()
+	for index := range errors {
+		if errors[index] != nil {
+			t.Fatalf("write[%d]: %v", index, errors[index])
+		}
+	}
+	if results[0][0].ID != results[1][0].ID {
+		t.Fatalf("parallel IDs differ: %#v", results)
+	}
+	created := 0
+	for _, result := range results {
+		if result[0].Result == MemoryRememberCreated {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created count=%d results=%#v", created, results)
+	}
+	var count int
+	if err := first.db.QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestRememberCapsuleRejectsWholeBatchBeforeWriting(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "atomic-reject.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	capsule := MemoryCapsule{
+		Schema: MemoryCapsuleSchema,
+		Source: CapsuleSource{Host: "codex", ConversationScope: "current_turn", Timestamp: "2026-08-02T12:00:00Z"},
+		Items: []MemoryCapsuleItem{
+			{Kind: "fact", RedactedSummary: "This clean item must not survive a rejected batch.", Confidence: 1, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project"},
+			{Kind: "fact", RedactedSummary: "token=must-never-be-written", Confidence: 1, EvidenceHint: "current_turn", PrivacyTier: "normal", Retention: "project"},
+		},
+	}
+	if _, err := s.RememberCapsuleWithResults(capsule); err == nil {
+		t.Fatal("expected unsafe batch rejection")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_capsules`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
 

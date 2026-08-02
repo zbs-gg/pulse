@@ -8,8 +8,9 @@ import {
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
   isPulseRuntimeAuthorityMutation,
-  isGuardedCodexTool,
+  isPulseProductTool,
   isTrustedPulseProductTool,
+  isUntrustedPulseMemoryWriteTool,
   normalizeCursorHook,
   renderAdditionalContext,
 } from './host-adapter.js';
@@ -185,6 +186,12 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
        isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
     return denied('Pulse deletion is user-controlled and is never agent-callable.');
   }
+  if (eventName === 'preToolUse' && isUntrustedPulseMemoryWriteTool(rawInput.tool_name)) {
+    return denied('Pulse Personal memory writes require the pulse-product server.');
+  }
+  if (eventName === 'preToolUse' && !isPulseProductTool(rawInput.tool_name)) {
+    return { permission: 'allow' };
+  }
 
   let resolved;
   try {
@@ -213,7 +220,6 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       return { continue: true };
     }
     if (eventName === 'preToolUse') {
-      if (!isGuardedCodexTool(rawInput.tool_name)) return { permission: 'allow' };
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
       if (/^mcp__pulse-product__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
@@ -251,6 +257,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
         // A missing marker triggers one bounded host-owned finalization pass.
       }
       if ((rawInput.loop_count ?? 0) === 0) {
+        await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
         return {
           followup_message: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, finish without calling a memory tool.',
         };

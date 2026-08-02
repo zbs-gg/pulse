@@ -17,7 +17,14 @@ export function inspectProductWorkspaceBinding() {
   return {status: 'unassigned', reason: ${JSON.stringify(inspectedReason)}, workspace: {canonical_path: ${JSON.stringify(workspace)}}};
 }
 export function stageUnassignedProductCandidate(host, input, idempotencyKey) {
-  return {schema: 'pulse.unassigned_stage_receipt.v1', status: 'staged', destination: 'unassigned_inbox', host, idempotency_key: idempotencyKey, item_count: input.items.length};
+  return {
+    schema: 'pulse.unassigned_stage_receipt.v1', status: 'staged', destination: 'unassigned_inbox',
+    receipts: [{
+      receipt_id: 'unassigned_receipt_${'a'.repeat(32)}', item_id: 'unassigned_${'b'.repeat(32)}',
+      content_digest: '${'c'.repeat(64)}', action: 'stage', status: 'staged',
+      destination: 'unassigned_inbox', created_at: '2026-07-17T10:00:00Z'
+    }]
+  };
 }
 `, { mode: 0o600 });
   const messages = [
@@ -60,12 +67,13 @@ for (const host of ['claude-code', 'cursor', 'codex']) {
     const tools = messages.find((message) => message.id === 2)?.result?.tools;
     assert.deepEqual(tools.map((tool: { name: string }) => tool.name), ['pulse_remember']);
     assert.deepEqual(tools[0].inputSchema.properties.source.properties.host, { type: 'string', const: host });
+    assert.deepEqual(tools[0].outputSchema.required, ['schema', 'status', 'destination', 'receipts']);
     const stagedText = messages.find((message) => message.id === 3)?.result?.content?.[0]?.text;
     assert.doesNotMatch(stagedText, /^Tool error:/);
     const staged = JSON.parse(stagedText);
     assert.equal(staged.destination, 'unassigned_inbox');
-    assert.equal(staged.host, host);
-    assert.equal(staged.item_count, 1);
+    assert.equal(staged.receipts.length, 1);
+    assert.equal(staged.receipts[0].status, 'staged');
   });
 }
 

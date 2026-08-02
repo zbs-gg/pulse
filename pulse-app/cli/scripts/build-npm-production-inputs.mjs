@@ -106,13 +106,13 @@ export async function buildNpmProductionInputs({
   const security = canonicalJSON(join(securityRoot, 'dependency-receipt.json'), 'pulse.release_dependency_receipt.v1');
   const tarball = file(tarballPath);
   const documents = await packageDocuments(tarballPath);
-  if (catalog.value.production_ready !== true || catalog.value.release_epoch !== 8 ||
+  if (catalog.value.production_ready !== true || catalog.value.release_epoch !== 9 ||
       catalog.value.host_target_count !== 18 || catalog.value.artifact_set_digest !== file(join(catalogRoot, 'personal-preview-manifest.json')).sha256 ||
       catalog.value.snapshot_digest !== file(join(catalogRoot, 'snapshot.json')).sha256 ||
       snapshot.value.payload?.artifact_set?.sha256 !== catalog.value.artifact_set_digest ||
       artifactSet.value.payload?.release?.package !== '@zbs-gg/pulse' ||
-      artifactSet.value.payload?.release?.version !== '0.7.0' || documents.manifest !== artifactSet.bytes ||
-      documents.packageJSON?.name !== '@zbs-gg/pulse' || documents.packageJSON?.version !== '0.7.0' ||
+      artifactSet.value.payload?.release?.version !== '0.7.1' || documents.manifest !== artifactSet.bytes ||
+      documents.packageJSON?.name !== '@zbs-gg/pulse' || documents.packageJSON?.version !== '0.7.1' ||
       security.value.package_sha256 !== tarball.sha256 || security.value.audit?.high !== 0 ||
       security.value.audit?.critical !== 0 || !SHA256.test(security.value.sbom_sha256 ?? '') ||
       !SHA256.test(security.value.license_inventory_sha256 ?? '')) fail('npm_production_inputs_invalid');
@@ -123,13 +123,13 @@ export async function buildNpmProductionInputs({
     package_bytes: tarball.bytes,
     package_sha256: tarball.sha256,
     production_ready: false,
-    release_epoch: 8,
+    release_epoch: 9,
     schema: 'pulse.npm_production_inputs.v1',
     snapshot_digest: catalog.value.snapshot_digest,
     support_claim: false,
     tarball: basename(tarballPath),
     universal_run_id: universalRunID,
-    version: '0.7.0',
+    version: '0.7.1',
   });
   mkdirSync(outputRoot, { mode: 0o700 });
   for (const [source, destination] of [

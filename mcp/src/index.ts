@@ -441,6 +441,176 @@ function redactStatusForMcp(value: unknown): unknown {
   return status;
 }
 
+const SAFE_PROVENANCE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    host: { type: 'string' },
+    session_id: { type: 'string' },
+    turn_id: { type: 'string' },
+    source_event_key: { type: 'string' },
+  },
+  required: ['host', 'session_id', 'turn_id', 'source_event_key'],
+  additionalProperties: false,
+};
+
+const WRITE_RECEIPT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string', const: 'pulse.write_receipt.v1' },
+    receipt_id: { type: 'string' },
+    ledger_id: { type: 'string' },
+    candidate_id: { type: 'string' },
+    candidate_version: { type: 'integer', minimum: 1 },
+    status: { type: 'string', enum: ['pending', 'created', 'updated', 'deduplicated', 'canceled', 'rejected', 'failed'] },
+    destination: { type: 'string', const: 'personal' },
+    destination_store_id: { type: 'string' },
+    safe_provenance: SAFE_PROVENANCE_OUTPUT_SCHEMA,
+    content_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    object_id: { type: 'string' },
+    reason_code: { type: 'string' },
+    policy_epoch: { type: 'integer', minimum: 0 },
+    resolver_epoch: { type: 'integer', minimum: 0 },
+    measurement_method: { type: 'string' },
+    created_at: { type: 'string', format: 'date-time' },
+    actual_input_tokens: { type: 'integer', minimum: 0 },
+    measurement: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['estimated', 'provider_actual'] },
+        source: { type: 'string' },
+      },
+      required: ['kind', 'source'],
+      additionalProperties: false,
+    },
+  },
+  required: [
+    'schema', 'receipt_id', 'ledger_id', 'status', 'destination', 'destination_store_id',
+    'safe_provenance', 'policy_epoch', 'resolver_epoch', 'measurement_method', 'created_at',
+  ],
+  additionalProperties: false,
+};
+
+const LOCAL_REMEMBER_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean', const: true },
+    ids: { type: 'array', minItems: 1, items: { type: 'string' } },
+    results: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          result: { type: 'string', enum: ['created', 'deduplicated'] },
+        },
+        required: ['id', 'result'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['ok', 'ids', 'results'],
+  additionalProperties: false,
+};
+
+const PRODUCT_REMEMBER_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ledger_id: { type: 'string' },
+    status: { type: 'string', enum: ['candidates', 'rejected'] },
+    finalize_receipt: {
+      type: 'object',
+      properties: {
+        schema: { type: 'string', const: 'pulse.turn_finalize_receipt.v1' },
+        receipt_id: { type: 'string' },
+        ledger_id: { type: 'string' },
+        status: { type: 'string', enum: ['candidates', 'rejected'] },
+        destination: { type: 'string', const: 'personal' },
+        destination_store_id: { type: 'string' },
+        safe_provenance: SAFE_PROVENANCE_OUTPUT_SCHEMA,
+        policy_epoch: { type: 'integer', minimum: 0 },
+        resolver_epoch: { type: 'integer', minimum: 0 },
+        created_at: { type: 'string', format: 'date-time' },
+      },
+      required: [
+        'schema', 'receipt_id', 'ledger_id', 'status', 'destination',
+        'destination_store_id', 'safe_provenance', 'policy_epoch', 'resolver_epoch', 'created_at',
+      ],
+      additionalProperties: false,
+    },
+    receipts: { type: 'array', minItems: 1, items: WRITE_RECEIPT_OUTPUT_SCHEMA },
+  },
+  required: ['ledger_id', 'status', 'finalize_receipt', 'receipts'],
+  additionalProperties: false,
+};
+
+const UNASSIGNED_REMEMBER_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string', const: 'pulse.unassigned_stage_receipt.v1' },
+    status: { type: 'string', enum: ['staged', 'assigned', 'deleted'] },
+    destination: { type: 'string', enum: ['unassigned_inbox', 'memory_tray', 'deleted'] },
+    receipts: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          receipt_id: { type: 'string' },
+          item_id: { type: 'string' },
+          content_digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          action: { type: 'string', enum: ['stage', 'assign', 'delete'] },
+          status: { type: 'string', enum: ['staged', 'assigned', 'deleted'] },
+          destination: { type: 'string', enum: ['unassigned_inbox', 'memory_tray', 'deleted'] },
+          created_at: { type: 'string', format: 'date-time' },
+        },
+        required: ['receipt_id', 'item_id', 'content_digest', 'action', 'status', 'destination', 'created_at'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['schema', 'status', 'destination', 'receipts'],
+  additionalProperties: false,
+};
+
+const RECALL_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          summary: { type: 'string' },
+          kind: { type: 'string' },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+          source: { type: 'string' },
+          evidence_ref: { type: 'string' },
+          privacy_tier: { type: 'string', enum: ['normal', 'sensitive', 'private'] },
+          retention: { type: 'string', enum: ['session', 'project', 'long_term'] },
+          tags: { type: 'array', items: { type: 'string' } },
+          created_at: { type: 'string', format: 'date-time' },
+        },
+        required: ['id', 'summary', 'kind', 'confidence', 'source', 'privacy_tier', 'retention', 'created_at'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['items'],
+  additionalProperties: false,
+};
+
+function outputSchemaForTool(name: string): Record<string, unknown> {
+  if (name === 'pulse_remember') {
+    if (PRODUCT_UNASSIGNED_REASON) return UNASSIGNED_REMEMBER_OUTPUT_SCHEMA;
+    if (PRODUCT_HOST_ADAPTER) return PRODUCT_REMEMBER_OUTPUT_SCHEMA;
+    return LOCAL_REMEMBER_OUTPUT_SCHEMA;
+  }
+  if (name === 'pulse_recall') return RECALL_OUTPUT_SCHEMA;
+  return { type: 'object', additionalProperties: true };
+}
+
 export function createPulseMcpServer(): Server {
   const server = new Server(
     { name: 'pulse-mcp', version: VERSION },
@@ -1007,7 +1177,7 @@ export function createPulseMcpServer(): Server {
 		}
 		productTools = productTools.map((tool) => ({
 			...tool,
-			outputSchema: { type: 'object', additionalProperties: true },
+			outputSchema: outputSchemaForTool(tool.name),
 		}));
 		return { tools: productTools };
   });

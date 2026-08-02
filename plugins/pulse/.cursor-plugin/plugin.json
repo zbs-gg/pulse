@@ -1,15 +1,15 @@
 {
   "name": "pulse",
   "displayName": "Pulse",
-  "version": "0.7.0",
-  "description": "Local-first continuity and governed team memory for Cursor.",
+  "version": "0.7.1",
+  "description": "Local-first private working memory for Cursor.",
   "author": {
     "name": "ZBS.GG"
   },
   "homepage": "https://github.com/zbs-gg/pulse",
   "repository": "https://github.com/zbs-gg/pulse",
   "license": "AGPL-3.0-only",
-  "keywords": ["memory", "continuity", "cursor", "local-first", "team"],
+  "keywords": ["memory", "continuity", "cursor", "local-first", "personal"],
   "category": "developer-tools",
   "tags": ["memory", "productivity", "local-first"],
   "hooks": "./cursor-hooks/hooks.json",

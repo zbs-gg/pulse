@@ -64,8 +64,8 @@ export function buildPublicSoakReceipt({
   if (elapsedHours < minimum || elapsedHours > maximum) fail('public_soak_checkpoint_window_invalid');
 
   const candidate = canonicalFile(candidatePath, 'pulse.npm_production_candidate.v1');
-  if (candidate.production !== true || candidate.production_ready !== true || candidate.support_claim !== false || candidate.release_epoch !== 8 ||
-      candidate.package !== '@zbs-gg/pulse' || candidate.version !== '0.7.0' ||
+  if (candidate.production !== true || candidate.production_ready !== true || candidate.support_claim !== false || candidate.release_epoch !== 9 ||
+      candidate.package !== '@zbs-gg/pulse' || candidate.version !== '0.7.1' ||
       candidate.host_target_count !== 18 || !SHA40.test(candidate.commit ?? '') ||
       !SHA256.test(candidate.sha256 ?? '') || !SHA256.test(candidate.artifact_set_digest ?? '') ||
       !SHA256.test(candidate.snapshot_digest ?? '')) fail('public_soak_candidate_invalid');

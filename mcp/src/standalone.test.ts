@@ -50,8 +50,16 @@ test('standalone store remembers, recalls, forgets, and wipes locally', () => {
     const saved = store.remember(sampleCapsule('Pulse MCP ships a standalone lite engine.'));
     assert.equal(saved.ok, true);
     assert.equal(saved.ids.length, 1);
+    assert.deepEqual(saved.results, [{ id: saved.ids[0], result: 'created' }]);
     assert.match(saved.ids[0], /^pulse:\d+:0:[0-9a-f]{16}$/);
     assert.ok(existsSync(join(dataDir, 'standalone', 'store.json')));
+
+    const fromAnotherHost = sampleCapsule('Pulse MCP ships a standalone lite engine.');
+    fromAnotherHost.source.host = 'codex';
+    fromAnotherHost.source.timestamp = '2026-06-11T11:00:00Z';
+    const repeated = store.remember(fromAnotherHost);
+    assert.deepEqual(repeated.ids, saved.ids);
+    assert.deepEqual(repeated.results, [{ id: saved.ids[0], result: 'deduplicated' }]);
 
     const recalled = store.recall({ query: 'standalone lite engine' });
     assert.equal(recalled.items.length, 1);
@@ -333,6 +341,12 @@ test('auto mode falls back to standalone store when no daemon is reachable', asy
   try {
     const client = await connectedClient(server.url);
 
+    const listed = await client.listTools();
+    const rememberTool = listed.tools.find((tool) => tool.name === 'pulse_remember');
+    const recallTool = listed.tools.find((tool) => tool.name === 'pulse_recall');
+    assert.deepEqual(rememberTool?.outputSchema?.required, ['ok', 'ids', 'results']);
+    assert.deepEqual(recallTool?.outputSchema?.required, ['items']);
+
     const status = toolJSON(await client.callTool({ name: 'pulse_status', arguments: {} }));
     assert.equal(status.engine, 'standalone_lite');
     assert.equal(status.storage, 'local_json');
@@ -348,6 +362,7 @@ test('auto mode falls back to standalone store when no daemon is reachable', asy
     );
     assert.equal(saved.ok, true);
     assert.equal(saved.ids.length, 1);
+    assert.equal(saved.results[0].result, 'created');
 
     const recalled = toolJSON(
       await client.callTool({

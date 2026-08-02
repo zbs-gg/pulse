@@ -104,6 +104,12 @@ export function validateNativeEvidenceSet(directory, {
       for (const milestone of [
         'install', 'vendor_session', 'lifecycle', 'memory_home', 'fresh_recall', 'repair', 'disconnect',
       ]) assert.equal(evidence.milestones?.[milestone], true, `${pair}:${milestone}`);
+      if (evidence.target_id === 'darwin-arm64') {
+        for (const milestone of [
+          'deduplicated', 'fail_open', 'memory_survived_restart',
+          'no_automatic_continuation', 'stop_and_goal_control_available',
+        ]) assert.equal(evidence.milestones?.[milestone], true, `${pair}:${milestone}`);
+      }
       assert.equal(evidence.first_value?.measured, true);
       assert.equal(Number.isSafeInteger(evidence.first_value?.milliseconds), true);
       assert.equal(evidence.first_value.milliseconds <= 60_000, true);

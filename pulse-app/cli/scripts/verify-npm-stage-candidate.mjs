@@ -126,7 +126,7 @@ export async function verifyNpmStageCandidate({ candidatePath, expectedCommit, e
       !SHA256.test(candidate.artifact_set_digest ?? '') || !SHA256.test(candidate.snapshot_digest ?? '') ||
       !SHA256.test(candidate.sbom_sha256 ?? '') || !SHA256.test(candidate.license_inventory_sha256 ?? '') ||
       !Number.isSafeInteger(candidate.dependency_count) || candidate.dependency_count < 1 ||
-      candidate.release_epoch !== 8 ||
+      candidate.release_epoch !== 9 ||
       candidate.host_target_count !== 18 ||
       JSON.stringify(candidate.hosts) !== JSON.stringify(['claude-code', 'codex', 'cursor']) ||
       !Number.isSafeInteger(candidate.universal_run_id) || candidate.universal_run_id < 1 ||

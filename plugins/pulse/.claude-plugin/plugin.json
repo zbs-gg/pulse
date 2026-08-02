@@ -1,14 +1,14 @@
 {
   "name": "pulse",
-  "version": "0.7.0",
-  "description": "Local-first continuity and governed team memory for Claude Code.",
+  "version": "0.7.1",
+  "description": "Local-first private working memory for Claude Code.",
   "author": {
     "name": "ZBS.GG"
   },
   "homepage": "https://github.com/zbs-gg/pulse",
   "repository": "https://github.com/zbs-gg/pulse",
   "license": "AGPL-3.0-only",
-  "keywords": ["memory", "continuity", "claude-code", "local-first", "team"],
+  "keywords": ["memory", "continuity", "claude-code", "local-first", "personal"],
   "hooks": "./claude-hooks/hooks.json",
   "mcpServers": {
     "pulse-product": {

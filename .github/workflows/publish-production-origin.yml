@@ -8,12 +8,12 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type "publish pulse 0.7.0 origin"
+        description: Type "publish pulse 0.7.1 origin"
         required: true
         type: string
 
 concurrency:
-  group: pulse-production-origin-0.7.0
+  group: pulse-production-origin-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
         run: |
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$RELEASE_CONFIRMATION" = 'publish pulse 0.7.0 origin'
+          test "$RELEASE_CONFIRMATION" = 'publish pulse 0.7.1 origin'
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           test -n "$CLOUDFLARE_ACCOUNT_ID"
           test -n "$CLOUDFLARE_R2_API_TOKEN"
@@ -71,8 +71,8 @@ jobs:
           const fs = require('fs');
           const path = process.env.RUNNER_TEMP + '/pulse-npm-production-inputs/candidate-inputs.json';
           const value = JSON.parse(fs.readFileSync(path));
-          if (value.schema !== 'pulse.npm_production_inputs.v1' || value.version !== '0.7.0' ||
-              value.release_epoch !== 8 || value.production_ready !== false || value.support_claim !== false) process.exit(1);
+          if (value.schema !== 'pulse.npm_production_inputs.v1' || value.version !== '0.7.1' ||
+              value.release_epoch !== 9 || value.production_ready !== false || value.support_claim !== false) process.exit(1);
           NODE
       - name: Mint one-hour prefix-scoped R2 credentials
         shell: bash
@@ -82,7 +82,7 @@ jobs:
           jq -n \
             --arg bucket "$R2_BUCKET" \
             --arg parent "$R2_PARENT_ACCESS_KEY_ID" \
-            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.0/"]}' \
+            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.1/"]}' \
             > "$request"
           curl --fail-with-body --silent --show-error \
             --connect-timeout 10 --max-time 30 \

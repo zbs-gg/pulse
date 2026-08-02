@@ -1,4 +1,4 @@
-# Pulse Personal 0.7.0
+# Pulse Personal 0.7.1
 
 Pulse is local working memory for Codex, Claude Code, and Cursor. The public
 package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
@@ -10,7 +10,7 @@ confirmation.
 
 Normal installation:
 
-    npx -y @zbs-gg/pulse@0.7.0 install
+    npx -y @zbs-gg/pulse@0.7.1 init codex
     pulse doctor
     pulse home
 
@@ -20,6 +20,7 @@ Per-harness preview and confirmation:
     pulse init claude-code --dry-run
     pulse init cursor --dry-run
     pulse init <harness> --yes
+    pulse init <harness> --only <harness>
 
 Trust boundaries:
 
@@ -37,7 +38,7 @@ Official 0.6.7 Personal databases upgrade in place. Databases from unpublished
 shared-memory builds are refused without modification.
 
 Pulse Team is a separate private pilot. It is not present in this repository
-or the npm package. Do not infer that publishing 0.7.0 proves a real
+or the npm package. Do not infer that publishing 0.7.1 proves a real
 three-person pilot or fresh-session acceptance.
 
 Status: developer preview, not production ready.

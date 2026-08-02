@@ -1,7 +1,7 @@
 # Pulse Personal
 
 Pulse keeps approved working memory for Codex, Claude Code, and Cursor on your
-computer. Version `0.7.0` is Personal only: it has no shared-memory server, no
+computer. Version `0.7.1` is Personal only: it has no shared-memory server, no
 cloud synchronization, and no command for publishing memory to other people.
 
 [![npm](https://img.shields.io/npm/v/@zbs-gg/pulse/latest?label=%40zbs-gg%2Fpulse&color=050505)](https://www.npmjs.com/package/@zbs-gg/pulse)
@@ -14,22 +14,25 @@ Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The normal Personal installation is:
 
 ```bash
-npx -y @zbs-gg/pulse@0.7.0 install
+npx -y @zbs-gg/pulse@0.7.1 init codex
 pulse doctor
 pulse home
 ```
 
-You can also inspect and connect one program at a time:
+The installer finds Codex, Claude Code, and Cursor, shows every file it will
+change, and offers to connect all detected programs. To inspect the same plan
+without changing anything:
 
 ```bash
 pulse init codex --dry-run
 pulse init claude-code --dry-run
 pulse init cursor --dry-run
 
-# Run only after reviewing the displayed changes:
+# Install into every detected program after reviewing the displayed changes:
 pulse init codex --yes
-pulse init claude-code --yes
-pulse init cursor --yes
+
+# Or limit installation to one program:
+pulse init codex --only codex
 ```
 
 The installer keeps one local Personal store and connects every supported AI
@@ -59,7 +62,7 @@ test is not a substitute for a fresh real session in each AI program.
 
 An official `0.6.7` Personal database is upgraded in place without losing its
 records. A database made by an unpublished shared-memory build is refused with
-a clear error and is left byte-for-byte unchanged. Test `0.7.0` with a separate
+a clear error and is left byte-for-byte unchanged. Test `0.7.1` with a separate
 data directory when you have used such a build.
 
 ## Personal and Team

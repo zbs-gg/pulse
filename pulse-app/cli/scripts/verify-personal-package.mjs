@@ -79,7 +79,7 @@ try {
     }
   }
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
-  if (manifest.name !== '@zbs-gg/pulse' || manifest.version !== '0.7.0' || !isAbsolute(archive)) {
+  if (manifest.name !== '@zbs-gg/pulse' || manifest.version !== '0.7.1' || !isAbsolute(archive)) {
     throw new Error('packed Personal identity mismatch');
   }
   process.stdout.write(`${JSON.stringify({

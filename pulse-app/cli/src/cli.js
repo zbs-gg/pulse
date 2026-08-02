@@ -22,6 +22,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createInitialPersonalWorkspaceBinding,
@@ -122,6 +123,7 @@ import {
 	productBindingRequestHeaders,
 	readProductActivation,
 	readProductActivationBundle,
+	resolveProductWorkspaceBinding,
 } from './codex-runtime.js';
 import {
   SupervisorError,
@@ -152,7 +154,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.7.0';
+const PREVIEW_VERSION = '0.7.1';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -165,7 +167,7 @@ const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores mem
 const CODEX_PRODUCT_MCP_ARGS = Object.freeze([
   '--input-type=module',
   '--eval',
-  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.1','mcp','server.mjs')).href);",
 ]);
 
 const args = process.argv.slice(2);
@@ -212,10 +214,10 @@ Usage:
   pulse cursor-hook sessionStart|beforeSubmitPrompt|preToolUse|postToolUse|preCompact|stop
   pulse connect cursor
   pulse install-plan [--json]
-  pulse install [--json]
+  pulse install [--dry-run|--yes] [--only codex|claude-code|cursor]
   pulse repair [--json]
   pulse install-plan claude-code [--json]   legacy Claude Code preview plan
-  pulse init codex|claude-code|cursor [--dry-run|--yes]
+  pulse init codex|claude-code|cursor [--dry-run|--yes] [--only codex|claude-code|cursor]
   pulse demo [--clean]
   pulse doctor
   pulse doctor codex
@@ -396,7 +398,7 @@ function currentNativePackedFixtureAttestation(workspace, release) {
   return attestation;
 }
 
-async function currentPersonalInstallPlan() {
+async function currentPersonalInstallPlan({ selectedHosts } = {}) {
   let releaseInspection;
   let releaseReasonCode;
   try {
@@ -416,11 +418,138 @@ async function currentPersonalInstallPlan() {
     release: releaseInspection?.release,
     releaseReasonCode,
     currentState: inspectPersonalPreflightState(workspace, releaseInspection?.release),
+    selectedHosts,
     detectWorkspace: () => {
       if (workspaceError) throw workspaceError;
       return workspace;
     },
   });
+}
+
+const PERSONAL_INSTALL_HOST_NAMES = Object.freeze({
+  codex: 'Codex',
+  'claude-code': 'Claude Code',
+  cursor: 'Cursor',
+});
+
+function parsePersonalInstallOptions(argv, { requestedHost } = {}) {
+  const allowedFlags = new Set(['--dry-run', '--json', '--only', '--yes']);
+  const positional = [];
+  let onlyHost;
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--only') {
+      if (onlyHost !== undefined || index + 1 >= argv.length) {
+        throw new Error('pulse install requires --only codex|claude-code|cursor');
+      }
+      onlyHost = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--')) {
+      if (!allowedFlags.has(value)) throw new Error(`unknown install option: ${value}`);
+      continue;
+    }
+    positional.push(value);
+  }
+  if (positional.length > 0) throw new Error(`unexpected install argument: ${positional[0]}`);
+  if (onlyHost !== undefined && !SUPPORTED_HOST_IDS.includes(onlyHost)) {
+    throw new Error('pulse install requires --only codex|claude-code|cursor');
+  }
+  if (requestedHost && onlyHost && requestedHost !== onlyHost) {
+    throw new Error(`pulse init ${requestedHost} cannot be combined with --only ${onlyHost}`);
+  }
+  if (argv.includes('--dry-run') && argv.includes('--yes')) {
+    throw new Error('choose either --dry-run or --yes, not both');
+  }
+  return {
+    dryRun: argv.includes('--dry-run'),
+    json: argv.includes('--json'),
+    onlyHost,
+    yes: argv.includes('--yes'),
+  };
+}
+
+function compatibleInstallHosts(plan) {
+  return (plan.detected?.hosts ?? []).filter((host) => host.compatible).map((host) => host.host);
+}
+
+async function choosePersonalInstallHosts({ input, output, plan, requestedHost }) {
+  const found = compatibleInstallHosts(plan);
+  const names = found.map((host) => PERSONAL_INSTALL_HOST_NAMES[host] ?? host);
+  output.write(`\nFound compatible AI apps: ${names.join(', ') || 'none'}.\n`);
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error('interactive installation needs a terminal; use --dry-run to inspect it or --yes to confirm all found AI apps');
+  }
+  const prompt = createInterface({ input, output });
+  try {
+    if (requestedHost) {
+      const requestedName = PERSONAL_INSTALL_HOST_NAMES[requestedHost] ?? requestedHost;
+      const answer = await prompt.question(
+        `Connect [1] all found AI apps (default), [2] only ${requestedName}, or [3] cancel? `,
+      );
+      const selected = answer.trim() || '1';
+      if (selected === '1') return undefined;
+      if (selected === '2') return [requestedHost];
+      if (selected === '3') return null;
+    } else {
+      const answer = await prompt.question('Connect [1] all found AI apps (default), or [2] cancel? ');
+      const selected = answer.trim() || '1';
+      if (selected === '1') return undefined;
+      if (selected === '2') return null;
+    }
+    throw new Error('installation choice must be one of the shown numbers');
+  } finally {
+    prompt.close();
+  }
+}
+
+async function runPersonalInstallWizard({ argv, requestedHost } = {}) {
+  const options = parsePersonalInstallOptions(argv, { requestedHost });
+  let selectedHosts = options.onlyHost ? [options.onlyHost] : undefined;
+  if (!options.onlyHost && !options.yes && !options.dryRun && !options.json) {
+    const discovery = await currentPersonalInstallPlan();
+    selectedHosts = await choosePersonalInstallHosts({
+      input: process.stdin,
+      output: process.stdout,
+      plan: discovery,
+      requestedHost,
+    });
+    if (selectedHosts === null) {
+      console.log('\nPulse installation cancelled. Nothing was changed.');
+      return;
+    }
+  }
+  const buildPlan = () => currentPersonalInstallPlan({ selectedHosts });
+  if (options.dryRun) {
+    const plan = await buildPlan();
+    printPersonalInstallPlan(plan, { json: options.json });
+    if (!options.json) console.log('\nDry run only. Nothing was written.');
+    return;
+  }
+  const executed = await executePersonalInstallCommand({
+    argv,
+    buildDependencies: personalInstallDependencies,
+    buildPlan,
+    dataDir: DATA_DIR,
+    mode: 'install',
+    showDetailedPlan: true,
+    yesApprovesInstall: true,
+  });
+  if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
+}
+
+async function connectInstalledPersonalHost(target) {
+  try {
+    await recoverBindingAuthority();
+    resolveProductWorkspaceBinding({ cwd: process.cwd() });
+    readProductActivation(DATA_DIR);
+  } catch {
+    throw new Error(`Pulse Personal is not installed for this project. First run "pulse init ${target}".`);
+  }
+  if (target === 'codex') await connectCodex();
+  else if (target === 'cursor') await connectCursor();
+  else await connectClaudeCode();
 }
 
 function privateStateFileStatus(path) {
@@ -1114,7 +1243,7 @@ function personalInstallHostRegistry(targets) {
   };
 }
 
-function personalInstallCoreHealth(core, activation) {
+async function personalInstallCoreHealth(core, activation) {
   if (core?.ready !== true) {
     return { ready: false, full_retrieval: false, outcome: 'action_required', reason_code: 'daemon_unavailable' };
   }
@@ -1126,6 +1255,30 @@ function personalInstallCoreHealth(core, activation) {
       ready: false, full_retrieval: true, outcome: 'action_required',
       reason_code: activation?.hosts?.[0]?.reason_code ?? 'supported_harness_activation_failed',
       host_status: activation,
+    };
+  }
+  try {
+    const resolved = core.context?.resolved;
+    const dataDir = resolved?.runtime?.data_dir;
+    const baseURL = resolved?.runtime?.base_url;
+    if (typeof dataDir !== 'string' || typeof baseURL !== 'string') {
+      throw new Error('memory_home_runtime_missing');
+    }
+    const readinessChecks = Object.fromEntries([
+      'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+      'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
+      'activation', 'vault', 'capture', 'retrieval', 'hooks',
+    ].map((name) => [name, { ok: true }]));
+    await requestHomeSession(
+      baseURL,
+      readSecretFromDataDir(dataDir),
+      projectPersonalLiveReadiness(readinessChecks, new Date()),
+      resolved,
+    );
+  } catch {
+    return {
+      ready: false, full_retrieval: true, outcome: 'action_required',
+      reason_code: 'memory_home_unavailable', host_status: activation,
     };
   }
   return {
@@ -9828,13 +9981,18 @@ async function main() {
     return;
   }
 
-  if (command === 'install' || command === 'repair') {
+  if (command === 'install') {
+    await runPersonalInstallWizard({ argv: args.slice(1) });
+    return;
+  }
+
+  if (command === 'repair') {
     const executed = await executePersonalInstallCommand({
       argv: args.slice(1),
       buildDependencies: personalInstallDependencies,
       buildPlan: currentPersonalInstallPlan,
       dataDir: DATA_DIR,
-      mode: command,
+      mode: 'repair',
     });
     if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
     return;
@@ -9870,7 +10028,7 @@ async function main() {
 	}
 	try {
 	  await recoverBindingAuthority();
-	  const binding = resolveWorkspaceBinding({
+	  const binding = resolveProductWorkspaceBinding({
 		cwd: getArg('--cwd') ?? process.cwd(),
 	  });
 	  if (args.includes('--json')) {
@@ -9895,12 +10053,12 @@ async function main() {
 	}
 	try {
 	  await recoverBindingAuthority();
-	  const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	  const binding = resolveProductWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
 	  const runtime = vaultRuntimeFromBinding(binding);
 	  let result;
 		if (subcommand === 'start') {
-			const daemonPath = process.env.PULSE_GO_BIN || join(DATA_DIR, 'bin', 'pulse-product-daemon');
-			result = await startVaultRuntime(runtime, { daemonPath });
+			await ensureActivatedVaultRuntime({ binding, runtime });
+			result = inspectVaultRuntime(runtime);
 		} else if (subcommand === 'stop') {
 			result = await stopVaultRuntimeAndWait(runtime);
 	  } else {
@@ -9925,31 +10083,17 @@ async function main() {
     if (!['codex', 'claude-code', 'cursor'].includes(target)) {
       throw new Error('pulse init supports: codex | claude-code | cursor');
     }
-    if (args.includes('--dry-run') || !args.includes('--yes')) {
-      printInstallPlan(target, { dryRun: true });
-      return;
-    }
-    if (target === 'codex') await connectCodex();
-    else if (target === 'cursor') await connectCursor();
-    else await connectClaudeCode();
+    await runPersonalInstallWizard({ argv: args.slice(2), requestedHost: target });
     return;
   }
 
   if (command === 'connect') {
-	    const target = args[1];
-	    if (target === 'claude-code') {
-	      await connectClaudeCode();
-	      return;
-	    }
-    if (target === 'codex') {
-      await connectCodex();
+    const target = args[1];
+    if (SUPPORTED_HOST_IDS.includes(target)) {
+      await connectInstalledPersonalHost(target);
       return;
     }
-    if (target === 'cursor') {
-      await connectCursor();
-      return;
-    }
-    throw new Error('v1 supports: pulse connect codex | claude-code | cursor');
+    throw new Error('pulse connect supports: codex | claude-code | cursor');
   }
 
   if (command === 'disconnect') {

@@ -124,6 +124,17 @@ test('Cursor preToolUse mints an exact governed lease and blocks destructive Pul
   assert.equal(leases.length, 1);
 });
 
+test('Cursor ordinary tools remain available when Pulse authority is unavailable', async () => {
+  let resolvedRuntime = false;
+  const output = await handleCursorHook('preToolUse', {
+    ...base, tool_name: 'update_plan', tool_input: { plan: [] }, tool_use_id: 'tool-goal-control',
+  }, {
+    resolveRuntime: () => { resolvedRuntime = true; throw new Error('binding unavailable'); },
+  });
+  assert.deepEqual(output, { permission: 'allow' });
+  assert.equal(resolvedRuntime, false);
+});
+
 test('Cursor postToolUse injects only a daemon-corroborated Memory Tray receipt', async () => {
   const event = stopEvent();
   const receipt = {
@@ -150,6 +161,7 @@ test('Cursor stop requests one bounded finalization pass then seals no-change', 
   const first = await handleCursorHook('stop', { ...base, status: 'completed', loop_count: 0 }, {
     resolveRuntime: () => resolved,
     readFinalizeMarker: () => { throw new Error('not finalized'); },
+    request: async () => ({ full_retrieval: true }),
   });
   assert.match(first.followup_message, /one bounded Pulse finalization pass/);
 
@@ -161,6 +173,15 @@ test('Cursor stop requests one bounded finalization pass then seals no-change', 
   assert.deepEqual(second, {});
   assert.equal(requests[0].path, '/turn/no-change');
   assert.equal(requests[0].options.body.host, 'cursor');
+});
+
+test('Cursor stop never creates a follow-up when Pulse is unavailable', async () => {
+  const output = await handleCursorHook('stop', { ...base, status: 'completed', loop_count: 0 }, {
+    resolveRuntime: () => resolved,
+    readFinalizeMarker: () => { throw new Error('not finalized'); },
+    request: async () => { throw new Error('daemon unavailable'); },
+  });
+  assert.deepEqual(output, {});
 });
 
 test('Cursor lifecycle readiness is content-free, cumulative, and requires the capability floor', () => {

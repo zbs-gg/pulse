@@ -25,14 +25,14 @@ activation changes.
 Run this inside the project:
 
 ```bash
-npx -y @zbs-gg/pulse@preview install
+npx -y @zbs-gg/pulse@0.7.1 init codex
 ```
 
 The first screen says what will be downloaded, how much disk it needs, every
 local destination, what stays off, what removal preserves, and which actions
-require the person. Consent happens once for that exact plan. `--yes` cannot
-approve disclosure, macOS presence, binding replacement, hook trust, downgrade,
-or wipe.
+require the person. Consent happens once for that exact plan. `--yes` confirms
+the displayed ordinary install plan, but it cannot approve macOS presence,
+binding replacement, hook trust, downgrade, or wipe.
 
 The install order is fixed:
 

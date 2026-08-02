@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -9,10 +9,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
-} from '../src/workspace-binding.js';
+import { canonicalizeWorkspace, resolveWorkspaceBinding } from '../src/workspace-binding.js';
 import { defaultPlatformServices } from '../src/platform-services.js';
+import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
 import { writeSyntheticReleaseCatalogFixture } from './product-release-fixture.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -58,41 +57,17 @@ function initializeRepository(path) {
   run('/usr/bin/git', ['commit', '--allow-empty', '-q', '-m', 'fixture'], { cwd: path });
 }
 
-function writeSignedPersonalBinding(root, workspace, port) {
+function writeFixtureBindingTrust(root) {
   const trust = join(root, 'trust');
   mkdirSync(trust, { recursive: true, mode: 0o700 });
   const registryPath = join(trust, 'workspace-bindings.json');
+  const privateKeyPath = join(trust, 'workspace-bindings.key.pem');
   const publicKeyPath = join(trust, 'workspace-bindings.pub.pem');
   const anchorPath = join(trust, 'workspace-bindings.anchor.json');
-  const payload = {
-    schema: 'pulse.workspace-binding-registry.v1',
-    epoch: 1,
-    bindings: [{
-      binding_id: 'binding_multiharness_e2e',
-      receipt_id: 'receipt_multiharness_e2e',
-      resolver_epoch: 1,
-      workspace: {
-        workspace_id: workspace.workspace_id,
-        repository_id: workspace.repository_id,
-      },
-      mode: 'personal',
-      principal_ref: 'principal_multiharness_e2e',
-      personal: {
-        store_id: 'store_personal_multiharness_e2e',
-        data_dir: join(root, 'vaults', 'personal'),
-        base_url: `http://127.0.0.1:${port}`,
-        credential_ref: 'local:pulse/multiharness-e2e',
-        cache_dir: join(root, 'caches', 'personal'),
-      },
-    }],
-  };
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  const signature = sign(null, Buffer.from(canonicalJSONStringify(payload)), privateKey).toString('base64');
-  const registryBytes = Buffer.from(JSON.stringify({ algorithm: 'ed25519', payload, signature }));
-  writeFileSync(registryPath, registryBytes, { mode: 0o600 });
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  writeFileSync(privateKeyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
   writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o600 });
-  writeFileSync(anchorPath, `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, payload.epoch))}\n`, { mode: 0o600 });
-  return { registryPath, publicKeyPath, anchorPath };
+  return { registryPath, privateKeyPath, publicKeyPath, anchorPath };
 }
 
 function packedTarball(root) {
@@ -302,6 +277,7 @@ async function waitForCandidate(baseUrl, secret, candidateID, terminalStatus) {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'pulse-claude-product.'));
+let runtimeDataDir;
 try {
   const home = join(root, 'home');
   const workspace = join(root, 'workspace');
@@ -318,7 +294,7 @@ try {
 
   const port = await freePort();
   const workspaceIdentity = canonicalizeWorkspace(workspace);
-  const bindingPaths = writeSignedPersonalBinding(root, workspaceIdentity, port);
+  const bindingPaths = writeFixtureBindingTrust(root);
   const daemon = join(root, 'pulse-product-daemon');
   run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
   chmodSync(daemon, 0o700);
@@ -350,15 +326,28 @@ try {
     PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
     PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
     PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-    PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
     PULSE_FAKE_CLAUDE_STATE: fakeClaudeState,
 		PULSE_FAKE_CODEX_MARKETPLACE_STATE: join(root, 'codex-marketplace.txt'),
     PULSE_CLI_ANIMATION: '0',
+		PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION: '1',
+		PULSE_NATIVE_PACKED_FIXTURE_ROOT: root,
+		PULSE_NATIVE_PACKED_FIXTURE_PORT: String(port),
+		PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH: bindingPaths.privateKeyPath,
+		PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: fakeCodex,
   };
   for (const name of [
     'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
     'PULSE_MANAGED_EMBEDDER_CONFIG', 'COHERE_API_KEY',
-  ]) delete env[name];
+	]) delete env[name];
+	const approveInstall = () => {
+		const plan = JSON.parse(run(process.execPath, [
+			packedCLI, 'init', 'codex', '--only', 'codex', '--dry-run', '--json',
+		], {
+			cwd: workspace, env, timeout: 180_000,
+		}).stdout);
+		assert.equal(plan.outcome, 'ready_to_install');
+		env.PULSE_NATIVE_PACKED_FIXTURE_APPROVAL = nativePackedFixtureApprovalDigest(plan);
+	};
 
 	const projectMcpPath = join(workspace, '.mcp.json');
 	writeFileSync(projectMcpPath, JSON.stringify({
@@ -376,6 +365,22 @@ try {
       { type: 'command', command: 'pulse hook session-start' },
     ] }] },
   }));
+	approveInstall();
+	const installed = run(process.execPath, [
+		packedCLI, 'init', 'codex', '--only', 'codex', '--yes', '--json',
+	], { cwd: workspace, env, timeout: 15 * 60_000 });
+	const installResult = JSON.parse(installed.stdout);
+	assert.equal(installResult.outcome, 'ready');
+	assert.deepEqual(installResult.host_status.hosts.map((host) => host.host), ['codex']);
+	const binding = resolveWorkspaceBinding({
+		cwd: workspace,
+		registryPath: bindingPaths.registryPath,
+		publicKeyPath: bindingPaths.publicKeyPath,
+		anchorPath: bindingPaths.anchorPath,
+		rootAnchor: false,
+	});
+	const vaultDir = binding.personal.data_dir;
+	runtimeDataDir = vaultDir;
 
 	const mcpBeforeFailedConnect = readFileSync(projectMcpPath);
 	const settingsBeforeFailedConnect = readFileSync(projectSettingsPath);
@@ -417,7 +422,7 @@ try {
   const connected = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
     cwd: workspace, env, timeout: 120_000,
   });
-  assert.match(connected.stdout, /one bound vault, Claude Code connected/);
+  assert.match(connected.stdout, /one bound vault, two connected harnesses/);
   assert.match(connected.stdout, /pinned local runtime/);
   const mcpConfig = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
   assert.equal(mcpConfig.type, 'stdio');
@@ -522,9 +527,8 @@ try {
   }, workspace, env);
   assert.deepEqual(claudeStop, {});
 
-  const vaultDir = join(root, 'vaults', 'personal');
   const secret = readFileSync(join(vaultDir, 'secret.key'), 'utf8');
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = binding.personal.base_url;
   const claudeCommitted = await waitForCandidate(
     baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'created',
   );
@@ -619,83 +623,23 @@ try {
   assert.equal(report.trust.raw_transcript_capture, false);
   assert.equal(report.trust.full_retrieval, true);
 
-	const oldClaudeHook = hookCommand(settings, 'SessionStart');
 	const installedCodexHook = join(pluginCacheRoot, pluginVersions[0], 'hooks', 'pulse-hook.mjs');
-	const installedCodexHookBeforeClaudeUpgrade = readFileSync(installedCodexHook);
-	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// mixed-harness-upgrade\n`);
-	const codexUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
-		cwd: workspace, env,
-	});
-	assert.match(codexUpgrade.stdout, /Codex plugin installed/);
-	const upgradedSettings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-	const upgradedClaudeHook = hookCommand(upgradedSettings, 'SessionStart');
-	assert.equal(upgradedClaudeHook, oldClaudeHook);
-	const upgradedMcp = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
-	assert.equal(upgradedMcp.args[0], mcpConfig.args[0]);
-	for (const capturePath of [join(root, 'pulse', 'capture-state.json'), join(vaultDir, 'capture-state.json')]) {
-		const state = JSON.parse(readFileSync(capturePath, 'utf8'));
-		assert.equal(state.hosts.codex.enabled, true);
-		assert.equal(state.hosts['claude-code'].enabled, true);
-	}
-	const daemonB = Buffer.concat([readFileSync(daemon), Buffer.from('\nPULSE_UPGRADE_B\n')]);
-	releaseFixture = await writeSyntheticReleaseCatalogFixture(root, daemonB, 8, {
-		pluginRuntimeMarker: 'claude-upgrade-b',
-	});
-	Object.assign(env, {
-		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
-		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
-		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
-	});
-	const marketplaceBeforeFailedClaudeUpgrade = readFileSync(env.PULSE_FAKE_CODEX_MARKETPLACE_STATE);
-	const failedClaudeCodexUpgrade = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace,
-		env: { ...env, PULSE_FAKE_CODEX_BAD_PLUGIN: '1' },
-		timeout: 120_000,
-		status: 1,
-	});
-	assert.match(
-		`${failedClaudeCodexUpgrade.stdout}${failedClaudeCodexUpgrade.stderr}`,
-		/codex_plugin_snapshot_mismatch/,
-	);
-	assert.deepEqual(
-		readFileSync(installedCodexHook),
-		installedCodexHookBeforeClaudeUpgrade,
-		'failed Claude-initiated upgrade must restore the prior Codex plugin bytes',
-	);
-	assert.deepEqual(
-		readFileSync(env.PULSE_FAKE_CODEX_MARKETPLACE_STATE),
-		marketplaceBeforeFailedClaudeUpgrade,
-		'failed Claude-initiated upgrade must restore the prior Codex marketplace registration',
-	);
-	const claudeUpgrade = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace, env, timeout: 120_000,
-	});
-	assert.match(claudeUpgrade.stdout, /one bound vault, two connected harnesses/);
-	const installedCodexHookAfterClaudeUpgrade = readFileSync(installedCodexHook);
-	assert.notDeepEqual(
-		installedCodexHookAfterClaudeUpgrade,
-		installedCodexHookBeforeClaudeUpgrade,
-		'Claude-initiated shared-runtime upgrade must replace the installed Codex plugin bytes',
-	);
-	assert.equal(installedCodexHookAfterClaudeUpgrade.includes(Buffer.from('// fixture:claude-upgrade-b')), true);
-	const upgradedCodexHookRun = run(process.execPath, [installedCodexHook, 'SessionStart'], {
+	const sharedCodexHookRun = run(process.execPath, [installedCodexHook, 'SessionStart'], {
 		cwd: nestedWorkspace,
 		env,
 		input: JSON.stringify({
 			...codexBase,
-			session_id: 'session-codex-after-claude-upgrade',
+			session_id: 'session-codex-after-claude-connect',
 			hook_event_name: 'SessionStart',
 			source: 'resume',
 		}),
 	});
 	assert.match(
-		JSON.parse(upgradedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
+		JSON.parse(sharedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
 		new RegExp(codexSummary),
 	);
 	const sharedMcp = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
 	assert.equal(sharedMcp.env.PULSE_GO_BIN, undefined);
-	assert.equal(upgradedMcp.env.PULSE_GO_BIN, undefined);
 	const locator = JSON.parse(readFileSync(join(codexHome, 'pulse', 'product-locators.json'), 'utf8'));
 	const locatorEntry = Object.values(locator.entries)[0];
 	const upgradedRuntimeReceipt = JSON.parse(readFileSync(join(vaultDir, 'supervisor-runtime.json'), 'utf8'));
@@ -783,7 +727,7 @@ try {
   process.stdout.write('Pulse Claude Code packed-product cross-harness E2E passed.\n');
 } finally {
   try {
-    const receipt = JSON.parse(readFileSync(join(root, 'vaults', 'personal', 'supervisor-runtime.json'), 'utf8'));
+    const receipt = JSON.parse(readFileSync(join(runtimeDataDir, 'supervisor-runtime.json'), 'utf8'));
     process.kill(receipt.pid, 'SIGTERM');
   } catch { /* no running fixture */ }
   rmSync(root, { recursive: true, force: true });

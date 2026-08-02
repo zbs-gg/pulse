@@ -22,7 +22,7 @@ import {
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
   isPulseRuntimeAuthorityMutation,
-  isGuardedCodexTool,
+  isPulseProductTool,
   isTrustedPulseProductTool,
   isUntrustedPulseMemoryWriteTool,
   normalizeCodexHook,
@@ -266,7 +266,7 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
         'Pulse Personal memory writes require the pulse-product server. Legacy or lookalike Pulse servers cannot create Personal memory.',
       ));
     }
-    if (!isGuardedCodexTool(rawInput.tool_name)) return {};
+    if (!isPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) return {};
     try {
       const resolved = resolveRuntime(rawInput);
       const stopEvent = canonicalCodexTurnEvent(rawInput);
@@ -707,7 +707,7 @@ function queryCodexNativeHooks({ codexExecutable, cwd, timeoutMs }) {
 			id: 1,
 			method: 'initialize',
 			params: {
-				clientInfo: { name: 'pulse-doctor', version: '0.7.0' },
+				clientInfo: { name: 'pulse-doctor', version: '0.7.1' },
 				capabilities: { experimentalApi: true },
 			},
 		});

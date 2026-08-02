@@ -98,6 +98,28 @@ func TestMemoryRememberRecallStatusEndpoints(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("remember status=%d", resp.StatusCode)
 	}
+	var created rememberResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode remember: %v", err)
+	}
+	if !created.OK || len(created.IDs) != 1 || len(created.Results) != 1 ||
+		created.Results[0].ID != created.IDs[0] || created.Results[0].Result != store.MemoryRememberCreated {
+		t.Fatalf("created receipt=%#v", created)
+	}
+	capsule["source"].(map[string]any)["host"] = "cursor"
+	capsule["source"].(map[string]any)["timestamp"] = "2026-06-03T09:00:00Z"
+	resp = pulseJSON(t, ts, http.MethodPost, "/memory/remember", capsule)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("repeat remember status=%d", resp.StatusCode)
+	}
+	var repeated rememberResponse
+	if err := json.NewDecoder(resp.Body).Decode(&repeated); err != nil {
+		t.Fatalf("decode repeated remember: %v", err)
+	}
+	if len(repeated.Results) != 1 || repeated.Results[0].ID != created.IDs[0] ||
+		repeated.Results[0].Result != store.MemoryRememberDeduplicated {
+		t.Fatalf("repeated receipt=%#v", repeated)
+	}
 
 	resp = pulseJSON(t, ts, http.MethodPost, "/memory/recall", map[string]any{
 		"query":           "distribution surface",

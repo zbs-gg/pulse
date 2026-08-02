@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -108,7 +109,29 @@ type MemoryStoreStatus struct {
 	LastWrite string `json:"last_write,omitempty"`
 }
 
+type MemoryRememberItemResult struct {
+	ID     string `json:"id"`
+	Result string `json:"result"`
+}
+
+const (
+	MemoryRememberCreated      = "created"
+	MemoryRememberDeduplicated = "deduplicated"
+)
+
 func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
+	results, err := s.RememberCapsuleWithResults(capsule)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(results))
+	for index, result := range results {
+		ids[index] = result.ID
+	}
+	return ids, nil
+}
+
+func (s *Store) RememberCapsuleWithResults(capsule MemoryCapsule) ([]MemoryRememberItemResult, error) {
 	if err := validateMemoryCapsule(capsule); err != nil {
 		return nil, err
 	}
@@ -116,19 +139,128 @@ func (s *Store) RememberCapsule(capsule MemoryCapsule) ([]string, error) {
 		return nil, ErrMemoryTrayRequired
 	}
 
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		results, err := s.rememberCapsuleWithResultsOnce(capsule)
+		if err == nil {
+			return results, nil
+		}
+		lastErr = err
+		if !isSQLiteBusy(err) {
+			return nil, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+func (s *Store) rememberCapsuleWithResultsOnce(capsule MemoryCapsule) ([]MemoryRememberItemResult, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	ids, err := rememberCapsuleTx(tx, capsule)
+	results, err := rememberCapsuleResultsTx(tx, capsule)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return ids, nil
+	return results, nil
+}
+
+func isSQLiteBusy(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "sqlite_busy")
+}
+
+func capsuleItemDigest(capsule MemoryCapsule, item MemoryCapsuleItem) (string, error) {
+	identity, err := json.Marshal(privateCapsuleIdentity{
+		Schema: capsule.Schema, Items: []MemoryCapsuleItem{item},
+		RawInputIncluded: capsule.RawInputIncluded,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(identity)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func rememberCapsuleResultsTx(tx *sql.Tx, capsule MemoryCapsule) ([]MemoryRememberItemResult, error) {
+	results := make([]MemoryRememberItemResult, 0, len(capsule.Items))
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	projectEvents := capsuleEventsEnabled()
+	for index, item := range capsule.Items {
+		tags, err := json.Marshal(item.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tags: %w", err)
+		}
+		digest, err := capsuleItemDigest(capsule, item)
+		if err != nil {
+			return nil, fmt.Errorf("digest memory capsule: %w", err)
+		}
+		var existingID string
+		err = tx.QueryRow(`
+			SELECT id FROM memory_capsules
+			 WHERE schema_version=? AND kind=? AND redacted_summary=? AND confidence=?
+			   AND evidence_hint=? AND privacy_tier=? AND retention=? AND tags=?
+			   AND status='active'
+			 ORDER BY created_at, id LIMIT 1`,
+			capsule.Schema, item.Kind, item.RedactedSummary, item.Confidence,
+			item.EvidenceHint, item.PrivacyTier, item.Retention, string(tags),
+		).Scan(&existingID)
+		if err == nil {
+			results = append(results, MemoryRememberItemResult{ID: existingID, Result: MemoryRememberDeduplicated})
+			continue
+		}
+		if err != sql.ErrNoRows {
+			return nil, err
+		}
+		id, err := newMemoryID(index)
+		if err != nil {
+			return nil, err
+		}
+		inserted, err := tx.Exec(`
+			INSERT OR IGNORE INTO memory_capsules
+			  (id, schema_version, source_host, conversation_scope, source_timestamp,
+			   kind, redacted_summary, confidence, evidence_hint, privacy_tier,
+			   retention, tags, created_at, content_digest)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, capsule.Schema, capsule.Source.Host, capsule.Source.ConversationScope,
+			capsule.Source.Timestamp, item.Kind, item.RedactedSummary, item.Confidence,
+			item.EvidenceHint, item.PrivacyTier, item.Retention, string(tags), createdAt, digest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert memory capsule: %w", err)
+		}
+		affected, err := inserted.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if affected == 0 {
+			if err := tx.QueryRow(`
+				SELECT id FROM memory_capsules
+				 WHERE content_digest=? AND status='active'`, digest,
+			).Scan(&existingID); err != nil {
+				return nil, err
+			}
+			results = append(results, MemoryRememberItemResult{ID: existingID, Result: MemoryRememberDeduplicated})
+			continue
+		}
+		if projectEvents && item.PrivacyTier == "normal" {
+			eventID, err := projectCapsuleEvent(tx, item.Kind, item.RedactedSummary,
+				capsule.Source.Timestamp, createdAt, append([]string(nil), item.Tags...))
+			if err != nil {
+				return nil, err
+			}
+			if _, err := tx.Exec(`UPDATE memory_capsules SET event_id=? WHERE id=?`, eventID, id); err != nil {
+				return nil, err
+			}
+		}
+		results = append(results, MemoryRememberItemResult{ID: id, Result: MemoryRememberCreated})
+	}
+	return results, nil
 }
 
 func rememberCapsuleTx(tx *sql.Tx, capsule MemoryCapsule) ([]string, error) {

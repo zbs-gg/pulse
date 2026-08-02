@@ -48,13 +48,24 @@ test('requires canonical object ID only for materialized statuses', () => {
 });
 
 test('accepts explicit Local Preview result shapes without relabeling them', () => {
-  assert.doesNotThrow(() => assertTruthfulWriteResponse({ ok: true, ids: ['pulse:01'] }));
+  assert.doesNotThrow(() => assertTruthfulWriteResponse({
+    ok: true, ids: ['pulse:01'], results: [{ id: 'pulse:01', result: 'created' }],
+  }));
+  assert.doesNotThrow(() => assertTruthfulWriteResponse({
+    ok: true, ids: ['pulse:01'], results: [{ id: 'pulse:01', result: 'deduplicated' }],
+  }));
   assert.doesNotThrow(() => assertTruthfulWriteResponse({ ok: true, events_inserted: 1 }));
 });
 
 test('rejects loose preview and malformed product receipt shapes', () => {
-  assert.throws(() => assertTruthfulWriteResponse({ ok: true, ids: [] }), /invalid IDs/);
-  assert.throws(() => assertTruthfulWriteResponse({ ok: true, ids: ['pulse:01'], saved: true }), /unexpected fields/);
+  assert.throws(() => assertTruthfulWriteResponse({ ok: true, ids: [], results: [] }), /invalid IDs/);
+  assert.throws(() => assertTruthfulWriteResponse({
+    ok: true, ids: ['pulse:01'], results: [{ id: 'pulse:01', result: 'created' }], saved: true,
+  }), /unexpected fields/);
+  assert.throws(() => assertTruthfulWriteResponse({ ok: true, ids: ['pulse:01'] }), /invalid results/);
+  assert.throws(() => assertTruthfulWriteResponse({
+    ok: true, ids: ['pulse:01'], results: [{ id: 'pulse:02', result: 'created' }],
+  }), /invalid results/);
   assert.throws(() => assertTruthfulWriteResponse({ ok: true, events_inserted: -1 }), /invalid counts/);
   assert.throws(() => assertTruthfulWriteResponse(result(receipt({ policy_epoch: -1 }))), /malformed/);
   assert.throws(() => assertTruthfulWriteResponse(result(receipt({ content_digest: 'A'.repeat(64) }))), /lacks candidate/);

@@ -1,7 +1,7 @@
 {
   "name": "pulse",
-  "version": "0.7.0",
-  "description": "Local-first, state-aware private and team memory for Codex.",
+  "version": "0.7.1",
+  "description": "Local-first private working memory for Codex.",
   "author": {
     "name": "ZBS.GG",
     "url": "https://github.com/zbs-gg/pulse"
@@ -9,12 +9,12 @@
   "homepage": "https://github.com/zbs-gg/pulse",
   "repository": "https://github.com/zbs-gg/pulse",
   "license": "AGPL-3.0-only",
-  "keywords": ["memory", "continuity", "codex", "local-first", "team"],
+  "keywords": ["memory", "continuity", "codex", "local-first", "personal"],
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Pulse",
-    "shortDescription": "Private continuity and governed team memory",
-    "longDescription": "Pulse carries inspected, receipt-backed context across Codex sessions while keeping Personal, Desk, and Team memory physically separate.",
+    "shortDescription": "Private local continuity for Codex",
+    "longDescription": "Pulse carries inspected, receipt-backed context across Codex sessions while keeping Personal memory on this computer.",
     "developerName": "ZBS.GG",
     "category": "Productivity",
     "capabilities": ["Read", "Write"],

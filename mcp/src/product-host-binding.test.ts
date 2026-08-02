@@ -66,6 +66,8 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
     const tools = messages.find((message) => message.id === 2)?.result?.tools;
     const remember = tools.find((tool: { name: string }) => tool.name === 'pulse_remember');
     assert.deepEqual(remember.inputSchema.properties.source.properties.host, { type: 'string', const: host });
+    assert.deepEqual(remember.outputSchema.required, ['ledger_id', 'status', 'finalize_receipt', 'receipts']);
+    assert.equal(remember.outputSchema.additionalProperties, false);
     assert.deepEqual(remember.inputSchema.properties.items.items.properties.tags, {
       type: 'array',
       items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' },
