@@ -2091,11 +2091,8 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 }
 
 function inspectCodexDoctorProductGeneration({
-	codexReady, codexExecutable, commandTimeoutMs = 30_000,
+	codexReady, codexExecutable, commandTimeoutMs = 30_000, inspectVendor = true,
 }) {
-	const plugin = codexReady
-		? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
-		: { installed: false, enabled: false, path: undefined };
 	const installedRuntime = inspectCodexRuntime(DATA_DIR);
 	let productActivation;
 	let productEdge;
@@ -2105,21 +2102,37 @@ function inspectCodexDoctorProductGeneration({
 		productActivation = productState.activation;
 		productEdge = committedCodexProductEdge(productState);
 	} catch (error) { productActivationError = error.message; }
-	const pluginCompatibility = productEdge
-		? inspectCodexPluginCompatibility(plugin, productEdge)
-		: { ok: false, reason: 'codex_product_edge_unavailable', detail: productActivationError ?? 'signed Codex product edge unavailable' };
 	const cachePluginRoot = productEdge ? join(
 		codexHomePath(), 'plugins', 'cache', 'zbs-gg', 'pulse', productEdge.release_version,
 	) : undefined;
+	const marketplaceSnapshot = productEdge
+		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
+		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
+	const locallyVerifiedPlugin = Boolean(productEdge && installedRuntime.ok && marketplaceSnapshot.ok);
+	const plugin = inspectVendor
+		? (codexReady
+			? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
+			: { installed: false, enabled: false, path: undefined })
+		: {
+			installed: locallyVerifiedPlugin,
+			enabled: locallyVerifiedPlugin,
+			version: locallyVerifiedPlugin ? productEdge.release_version : undefined,
+			path: locallyVerifiedPlugin ? marketplaceSnapshot.plugin_root : undefined,
+		};
+	const pluginCompatibility = productEdge
+		? inspectCodexPluginCompatibility(plugin, productEdge)
+		: { ok: false, reason: 'codex_product_edge_unavailable', detail: productActivationError ?? 'signed Codex product edge unavailable' };
 	const cachePluginCompatibility = productEdge
 		? inspectCodexPluginCompatibility({
 			installed: true, enabled: true, version: productEdge.release_version, path: cachePluginRoot,
 		}, productEdge)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
-	const marketplace = codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs });
-	const marketplaceSnapshot = productEdge
-		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
-		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
+	const marketplace = inspectVendor
+		? codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
+		: {
+			configured: marketplaceSnapshot.ok,
+			root: marketplaceSnapshot.ok ? marketplaceSnapshot.marketplace_root : undefined,
+		};
 	let marketplaceExact = false;
 	try {
 		marketplaceExact = Boolean(marketplaceSnapshot.ok && marketplace.configured && marketplace.root &&
@@ -2151,17 +2164,20 @@ function codexDoctorProductGenerationIdentity(generation) {
 async function codexDoctorReport({
 	codexExecutable = 'codex', commandTimeoutMs = 30_000, versionTimeoutMs = 5000,
 	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500, bindingLockTimeoutSeconds = 30,
+	inspectVendor = true,
 } = {}) {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
   const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
-  const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
-		? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
-		: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs);
+	const codex = inspectVendor
+		? (codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
+			? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
+			: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs))
+		: { ok: true, detail: 'Memory Home used the signed local Codex installation record' };
 	const productGenerationBefore = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs, inspectVendor,
 	});
 	const productGenerationIdentity = codexDoctorProductGenerationIdentity(productGenerationBefore);
 	let {
@@ -2250,7 +2266,20 @@ async function codexDoctorReport({
 			readiness: hookReadiness,
 		});
   }
-	const nativeHookTrustPromise = codex.ok && plugin.path
+	const nativeHookTrustPromise = !inspectVendor
+		? Promise.resolve(hookReadiness.ready
+			? {
+				ready: true,
+				reason: hookReadiness.reason,
+				detail: 'Memory Home used the signed local hook readiness record',
+				hook_set_digest: hookReadiness.hooks_digest,
+			}
+			: {
+				ready: false,
+				reason: hookReadiness.reason ?? 'codex_hook_readiness_unavailable',
+				detail: hookReadiness.detail ?? 'Signed local hook readiness is unavailable',
+			})
+		: codex.ok && plugin.path
 		? inspectCodexNativeHookTrust({
 			codexExecutable, cwd: process.cwd(), pluginRoot: plugin.path,
 			marketplacePluginRoot: marketplaceSnapshot.plugin_root,
@@ -2279,7 +2308,7 @@ async function codexDoctorReport({
 		liveProbePromise,
 	]);
 	const productGenerationAfter = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs, inspectVendor,
 	});
 	const productGenerationStable = productGenerationIdentity ===
 		codexDoctorProductGenerationIdentity(productGenerationAfter);
@@ -7232,8 +7261,6 @@ const HOME_SESSION_MAX_AGE_SECONDS = 60 * 60;
 const HOME_REQUEST_TIMEOUT_MS = 5000;
 const HOME_REQUEST_TIMEOUT_MAX_MS = 30_000;
 const HOME_HANDOFF_TIMEOUT_MS = 60_000;
-const HOME_CODEX_PROBE_TIMEOUT_MS = 1000;
-const HOME_CODEX_PROBE_TIMEOUT_MAX_MS = 5000;
 const HOME_BINDING_LOCK_TIMEOUT_SECONDS = 2;
 const HOME_BINDING_LOCK_TIMEOUT_MAX_SECONDS = 5;
 const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS = 2000;
@@ -7316,60 +7343,73 @@ function validateHomeSessionResponse(value, baseURL) {
 	};
 }
 
-async function readBoundedHomeResponse(response) {
-	if (!response.body || typeof response.body.getReader !== 'function') {
-		throw new Error('home_session_response_invalid');
-	}
-	const reader = response.body.getReader();
-	const chunks = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > HOME_SESSION_RESPONSE_MAX_BYTES) {
-				await reader.cancel();
-				throw new Error('home_session_response_oversized');
-			}
-			chunks.push(Buffer.from(value));
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	return Buffer.concat(chunks, total).toString('utf8');
-}
-
 async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 	requireLoopbackPulseIPC(baseURL);
 	const timeoutMs = boundedHomeTimeout(
 		'PULSE_HOME_REQUEST_TIMEOUT_MS', HOME_REQUEST_TIMEOUT_MS, HOME_REQUEST_TIMEOUT_MAX_MS,
 	);
-	const controller = new AbortController();
-	let timedOut = false;
-	const timer = setTimeout(() => {
-		timedOut = true;
-		controller.abort();
-	}, timeoutMs);
-	let response;
-	let responseText;
+	const requestBody = JSON.stringify({ live_readiness: liveReadiness });
+	let result;
 	try {
-		response = await fetch(`${baseURL.replace(/\/$/, '')}/home/session`, {
-			method: 'POST',
-			headers: {
-				...buildPulseRequestHeaders(baseURL, secret),
-				...(product ? productBindingRequestHeaders(product) : {}),
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({ live_readiness: liveReadiness }),
-			signal: controller.signal,
+		result = await new Promise((resolvePromise, rejectPromise) => {
+			let settled = false;
+			let response;
+			let timer;
+			const finish = (error, value) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) rejectPromise(error);
+				else resolvePromise(value);
+			};
+			const fail = (code) => {
+				if (settled) return;
+				const error = Object.assign(new Error(code), { code });
+				response?.destroy(error);
+				request.destroy(error);
+				finish(error);
+			};
+			const request = httpRequest(`${baseURL.replace(/\/$/, '')}/home/session`, {
+				method: 'POST',
+				agent: false,
+				headers: {
+					...buildPulseRequestHeaders(baseURL, secret),
+					...(product ? productBindingRequestHeaders(product) : {}),
+					'Content-Type': 'application/json',
+					'Content-Length': Buffer.byteLength(requestBody),
+					Connection: 'close',
+				},
+			}, (incoming) => {
+				response = incoming;
+				if (!Number.isInteger(incoming.statusCode) || incoming.statusCode < 200 || incoming.statusCode >= 300) {
+					incoming.resume();
+					fail('daemon_rejected_home_session');
+					return;
+				}
+				const chunks = [];
+				let total = 0;
+				incoming.on('data', (chunk) => {
+					total += chunk.length;
+					if (total > HOME_SESSION_RESPONSE_MAX_BYTES) {
+						fail('home_session_response_oversized');
+						return;
+					}
+					chunks.push(Buffer.from(chunk));
+				});
+				incoming.once('end', () => finish(undefined, {
+					statusCode: incoming.statusCode,
+					body: Buffer.concat(chunks, total).toString('utf8'),
+				}));
+				incoming.once('error', () => fail('home_session_response_invalid'));
+			});
+			request.once('error', (error) => finish(error));
+			timer = setTimeout(() => fail('home_session_request_timeout'), timeoutMs);
+			request.end(requestBody);
 		});
-		if (!response.ok) {
-			throw new Error('daemon_rejected_home_session');
-		}
-		responseText = await readBoundedHomeResponse(response);
 	} catch (error) {
-		if (timedOut) throw new Error('Memory Home session request timed out.');
+		if (error?.code === 'home_session_request_timeout') {
+			throw new Error('Memory Home session request timed out.');
+		}
 		if (error?.message === 'daemon_rejected_home_session') {
 			throw new Error('Pulse daemon rejected the Memory Home session request.');
 		}
@@ -7380,12 +7420,10 @@ async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 			throw new Error('Pulse daemon returned an invalid Memory Home session.');
 		}
 		throw new Error('Memory Home session request failed.');
-	} finally {
-		clearTimeout(timer);
 	}
 	let parsed;
 	try {
-		parsed = JSON.parse(responseText);
+		parsed = JSON.parse(result.body);
 	} catch {
 		throw new Error('Pulse daemon returned an invalid Memory Home session.');
 	}
@@ -7548,16 +7586,9 @@ async function personalDoctorForHost(host, { homeProbe = false } = {}) {
 	if (host === 'claude-code') return claudeProductDoctorReport();
 	if (host === 'codex') {
 		if (!homeProbe) return codexDoctorReport();
-		const timeoutMs = boundedHomeTimeout(
-			'PULSE_HOME_CODEX_PROBE_TIMEOUT_MS',
-			HOME_CODEX_PROBE_TIMEOUT_MS,
-			HOME_CODEX_PROBE_TIMEOUT_MAX_MS,
-		);
 		return codexDoctorReport({
-			commandTimeoutMs: timeoutMs,
-			versionTimeoutMs: timeoutMs,
-			nativeHookTimeoutMs: timeoutMs,
-			liveProbeTimeoutMs: Math.min(timeoutMs, 1500),
+			inspectVendor: false,
+			liveProbeTimeoutMs: 1500,
 			bindingLockTimeoutSeconds: homeBindingLockTimeoutSeconds(),
 		});
 	}

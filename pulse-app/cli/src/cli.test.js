@@ -1224,7 +1224,7 @@ test('home does not wait on a binding update held by another local process', asy
 	}
 });
 
-test('home opens without waiting for a slow Codex inspection', async (t) => {
+test('home opens without launching the external Codex program', async (t) => {
   if (process.platform === 'win32') {
     t.skip('portable hanging executable fixture uses a POSIX shebang');
     return;
@@ -1233,10 +1233,16 @@ test('home opens without waiting for a slow Codex inspection', async (t) => {
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-slow-codex-cwd.'));
   const dataDir = join(home, '.pulse');
   const binDir = join(home, 'bin');
+	const launchMarker = join(home, 'codex-was-launched');
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(dataDir, 'secret.key'), 'slow-codex-daemon-secret');
-  writeExecutable(join(binDir, 'codex'), `#!${process.execPath}\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);\n`);
+  writeExecutable(join(binDir, 'codex'), [
+		`#!${process.execPath}`,
+		`require('node:fs').writeFileSync(${JSON.stringify(launchMarker)}, 'launched\\n');`,
+		'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);',
+		'',
+	].join('\n'));
   const stub = await withPulseStub((req) => ({
     body: {
       cookie_name: 'pulse_home',
@@ -1254,11 +1260,11 @@ test('home opens without waiting for a slow Codex inspection', async (t) => {
     ], cwd, home, {
       PATH: `${binDir}:/usr/bin:/bin`,
       PULSE_OPEN_DRY_RUN: '1',
-      PULSE_HOME_CODEX_PROBE_TIMEOUT_MS: '50',
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.ok(Date.now() - startedAt < 2_000, 'Memory Home must not wait for a slow Codex inspection');
+		assert.ok(Date.now() - startedAt < 2_000, 'Memory Home must not launch external Codex inspection');
+		assert.equal(existsSync(launchMarker), false, 'pulse home launched the external Codex program');
     assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
     assert.doesNotMatch(result.stdout + result.stderr, /slow-codex-daemon-secret|slow-codex-browser-session/);
   } finally {
