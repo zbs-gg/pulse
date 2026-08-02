@@ -53,7 +53,9 @@ test('native packed Codex calibration path is available only under the exact iso
       PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable,
     },
   });
-  assert.equal(attested.hostCandidates().codex[0], executable);
+  assert.deepEqual(attested.hostCandidates().codex, [executable]);
+  assert.deepEqual(attested.hostCandidates().claude, []);
+  assert.deepEqual(attested.hostCandidates().cursor, []);
   const production = createPlatformServices({
     platform: 'linux', architecture: 'x64', home: '/home/pulse',
     env: { PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable },

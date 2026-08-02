@@ -110,6 +110,19 @@ function writeExecutable(path, content) {
   chmodSync(path, 0o755);
 }
 
+function runWithDetectedHost(args, host) {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-cwd.'));
+  const executable = host === 'codex'
+    ? join(home, '.local', 'bin', 'codex')
+    : process.platform === 'darwin'
+      ? join(home, 'Applications', 'Cursor.app', 'Contents', 'MacOS', 'Cursor')
+      : join(home, '.local', 'bin', 'cursor');
+  mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
+  writeExecutable(executable, '#!/bin/sh\nexit 0\n');
+  return { home, cwd, result: runInWorkspace(args, cwd, home) };
+}
+
 test('destructive CLI refuses non-interactive agent and pipe execution', () => {
   const wipe = run(['wipe', '--confirm', 'wipe pulse memory']).result;
   assert.equal(wipe.status, 1);
@@ -525,8 +538,12 @@ test('init claude-code dry run prints install plan and writes nothing', () => {
 });
 
 for (const host of ['codex', 'cursor']) {
-  test(`init ${host} --only dry run limits the plan and writes nothing`, () => {
-    const { cwd, home, result } = run(['init', host, '--only', host, '--dry-run']);
+  test(`init ${host} --only dry run limits the plan and writes nothing`, {
+    skip: process.platform === 'win32' ? 'POSIX CLI fixture; Windows detection has native adapter coverage' : false,
+  }, () => {
+    const { cwd, home, result } = runWithDetectedHost(
+      ['init', host, '--only', host, '--dry-run'], host,
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Pulse Personal install/);
