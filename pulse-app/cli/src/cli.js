@@ -2091,8 +2091,11 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 }
 
 function inspectCodexDoctorProductGeneration({
-	codexReady, codexExecutable, commandTimeoutMs = 30_000, inspectVendor = true,
+	codexReady, codexExecutable, commandTimeoutMs = 30_000,
 }) {
+	const plugin = codexReady
+		? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
+		: { installed: false, enabled: false, path: undefined };
 	const installedRuntime = inspectCodexRuntime(DATA_DIR);
 	let productActivation;
 	let productEdge;
@@ -2105,20 +2108,6 @@ function inspectCodexDoctorProductGeneration({
 	const cachePluginRoot = productEdge ? join(
 		codexHomePath(), 'plugins', 'cache', 'zbs-gg', 'pulse', productEdge.release_version,
 	) : undefined;
-	const marketplaceSnapshot = productEdge
-		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
-		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
-	const locallyVerifiedPlugin = Boolean(productEdge && installedRuntime.ok && marketplaceSnapshot.ok);
-	const plugin = inspectVendor
-		? (codexReady
-			? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
-			: { installed: false, enabled: false, path: undefined })
-		: {
-			installed: locallyVerifiedPlugin,
-			enabled: locallyVerifiedPlugin,
-			version: locallyVerifiedPlugin ? productEdge.release_version : undefined,
-			path: locallyVerifiedPlugin ? marketplaceSnapshot.plugin_root : undefined,
-		};
 	const pluginCompatibility = productEdge
 		? inspectCodexPluginCompatibility(plugin, productEdge)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: productActivationError ?? 'signed Codex product edge unavailable' };
@@ -2127,12 +2116,10 @@ function inspectCodexDoctorProductGeneration({
 			installed: true, enabled: true, version: productEdge.release_version, path: cachePluginRoot,
 		}, productEdge)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
-	const marketplace = inspectVendor
-		? codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
-		: {
-			configured: marketplaceSnapshot.ok,
-			root: marketplaceSnapshot.ok ? marketplaceSnapshot.marketplace_root : undefined,
-		};
+	const marketplace = codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs });
+	const marketplaceSnapshot = productEdge
+		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
+		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
 	let marketplaceExact = false;
 	try {
 		marketplaceExact = Boolean(marketplaceSnapshot.ok && marketplace.configured && marketplace.root &&
@@ -2164,20 +2151,17 @@ function codexDoctorProductGenerationIdentity(generation) {
 async function codexDoctorReport({
 	codexExecutable = 'codex', commandTimeoutMs = 30_000, versionTimeoutMs = 5000,
 	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500, bindingLockTimeoutSeconds = 30,
-	inspectVendor = true,
 } = {}) {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
   const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
-	const codex = inspectVendor
-		? (codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
-			? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
-			: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs))
-		: { ok: true, detail: 'Memory Home used the signed local Codex installation record' };
+	const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
+		? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
+		: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs);
 	const productGenerationBefore = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable, commandTimeoutMs, inspectVendor,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationIdentity = codexDoctorProductGenerationIdentity(productGenerationBefore);
 	let {
@@ -2266,20 +2250,7 @@ async function codexDoctorReport({
 			readiness: hookReadiness,
 		});
   }
-	const nativeHookTrustPromise = !inspectVendor
-		? Promise.resolve(hookReadiness.ready
-			? {
-				ready: true,
-				reason: hookReadiness.reason,
-				detail: 'Memory Home used the signed local hook readiness record',
-				hook_set_digest: hookReadiness.hooks_digest,
-			}
-			: {
-				ready: false,
-				reason: hookReadiness.reason ?? 'codex_hook_readiness_unavailable',
-				detail: hookReadiness.detail ?? 'Signed local hook readiness is unavailable',
-			})
-		: codex.ok && plugin.path
+	const nativeHookTrustPromise = codex.ok && plugin.path
 		? inspectCodexNativeHookTrust({
 			codexExecutable, cwd: process.cwd(), pluginRoot: plugin.path,
 			marketplacePluginRoot: marketplaceSnapshot.plugin_root,
@@ -2308,7 +2279,7 @@ async function codexDoctorReport({
 		liveProbePromise,
 	]);
 	const productGenerationAfter = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable, commandTimeoutMs, inspectVendor,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationStable = productGenerationIdentity ===
 		codexDoctorProductGenerationIdentity(productGenerationAfter);
@@ -7582,16 +7553,58 @@ async function openHomeBrowserURL(url, session) {
 	}
 }
 
-async function personalDoctorForHost(host, { homeProbe = false } = {}) {
-	if (host === 'claude-code') return claudeProductDoctorReport();
+function localHomeDoctorReport(host, product) {
+	const bound = Boolean(product?.binding && product?.runtime);
+	const capture = bound ? safeReadJSON(join(product.runtime.data_dir, 'capture-state.json')) : undefined;
+	const hostEnabled = bound && captureEnabledForHost(capture, host);
+	const available = { ok: true, detail: 'trusted local Memory Home binding' };
+	const unavailable = { ok: false, detail: 'trusted local Memory Home binding is unavailable' };
+	const adapter = hostEnabled ? available : {
+		ok: false,
+		detail: bound ? 'this AI program is not connected to the local memory' : unavailable.detail,
+	};
+	const core = {
+		presence_trust: available,
+		authority: bound ? available : unavailable,
+		binding: bound ? available : unavailable,
+		runtime: bound ? available : unavailable,
+		activation: bound ? available : unavailable,
+		vault: bound ? available : unavailable,
+		capture: adapter,
+		retrieval: bound ? available : unavailable,
+		hooks: adapter,
+	};
+	let checks;
+	let personalLiveReadiness;
 	if (host === 'codex') {
-		if (!homeProbe) return codexDoctorReport();
-		return codexDoctorReport({
-			inspectVendor: false,
-			liveProbeTimeoutMs: 1500,
-			bindingLockTimeoutSeconds: homeBindingLockTimeoutSeconds(),
-		});
+		checks = {
+			...core,
+			codex: adapter,
+			plugin: adapter,
+			marketplace: adapter,
+			plugin_mcp: adapter,
+			mcp_shadow: adapter,
+			legacy_hooks: adapter,
+			native_hook_trust: adapter,
+		};
+		personalLiveReadiness = projectPersonalLiveReadiness(checks, new Date());
+	} else {
+		checks = { ...core, local_home_adapter: adapter };
+		personalLiveReadiness = projectSupportedHostLiveReadiness(host, checks, new Date());
 	}
+	return {
+		product: 'Pulse Personal Memory Home',
+		target_host: host,
+		inspection_scope: 'trusted_local_home_binding',
+		checks,
+		personal_live_readiness: personalLiveReadiness,
+	};
+}
+
+async function personalDoctorForHost(host, { homeProbe = false, product } = {}) {
+	if (homeProbe) return localHomeDoctorReport(host, product);
+	if (host === 'claude-code') return claudeProductDoctorReport();
+	if (host === 'codex') return codexDoctorReport();
 	if (host === 'cursor') return cursorProductDoctorReport();
 	throw new Error('pulse home --host must be claude-code, codex, or cursor.');
 }
@@ -7604,7 +7617,7 @@ async function homeDoctorReport(product, requestedHost) {
 	return selectHomeDoctorReport({
 		requestedHost,
 		enabledHosts,
-		doctorForHost: (host) => personalDoctorForHost(host, { homeProbe: true }),
+		doctorForHost: (host) => personalDoctorForHost(host, { homeProbe: true, product }),
 	});
 }
 
