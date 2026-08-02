@@ -1007,6 +1007,7 @@ test('home exchanges the daemon secret internally and opens a one-shot credentia
       },
     };
   });
+	const startedAt = Date.now();
 
   try {
     const result = await runInWorkspaceAsync([
@@ -1014,9 +1015,12 @@ test('home exchanges the daemon secret internally and opens a one-shot credentia
     ], cwd, home, {
       PULSE_OPEN_DRY_RUN: '1',
       PULSE_HOME_HANDOFF_TIMEOUT_MS: '1000',
+			PULSE_HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS: '100',
     });
 
     assert.equal(result.status, 0, result.stderr);
+		assert.ok(Date.now() - startedAt < 2_000,
+			'one-shot relay replay check must finish within its own navigation bound');
     assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
     assert.equal(result.stderr, '');
     assert.equal(stub.requests.length, 1);

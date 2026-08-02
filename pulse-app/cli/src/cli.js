@@ -7233,6 +7233,8 @@ const HOME_REQUEST_TIMEOUT_MAX_MS = 120_000;
 const HOME_HANDOFF_TIMEOUT_MS = 60_000;
 const HOME_CODEX_PROBE_TIMEOUT_MS = 2000;
 const HOME_CODEX_PROBE_TIMEOUT_MAX_MS = 5000;
+const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS = 2000;
+const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MAX_MS = 5000;
 
 function boundedHomeTimeout(name, fallback, maximum) {
 	return Math.min(positiveEnvInt(name, fallback), maximum);
@@ -7460,15 +7462,33 @@ function startHomeBrowserRelay(session) {
 
 async function openHomeBrowserURL(url, session) {
 	if (process.env.PULSE_OPEN_DRY_RUN === '1') {
+		const timeoutMs = boundedHomeTimeout(
+			'PULSE_HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS',
+			HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS,
+			HOME_DRY_RUN_NAVIGATION_TIMEOUT_MAX_MS,
+		);
 		const navigate = () => new Promise((resolve, reject) => {
+			let settled = false;
+			let timer;
+			const finish = (error, response) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) reject(error);
+				else resolve(response);
+			};
 			const request = httpRequest(url, {
 				method: 'GET',
 				headers: { 'Sec-Fetch-Mode': 'navigate', Connection: 'close' },
 			}, (response) => {
 				response.resume();
-				response.once('end', () => resolve(response));
+				response.once('end', () => finish(undefined, response));
+				response.once('error', finish);
 			});
-			request.once('error', reject);
+			timer = setTimeout(() => {
+				request.destroy(new Error('Memory Home dry-run navigation timed out.'));
+			}, timeoutMs);
+			request.once('error', finish);
 			request.end();
 		});
 		const response = await navigate();
