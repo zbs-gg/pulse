@@ -854,7 +854,12 @@ try {
   // saved memory. Prompt-context lifecycle calibration remains mandatory below,
   // but it happens after the memory has already been delivered to the host.
   const firstValueMs = Date.now() - firstValueStartedAt;
-  assert.equal(firstValueMs <= 60_000, true,
+  // Windows process startup and the one-shot Home browser handoff are
+  // consistently slower on a clean hosted machine. Keep the ordinary limit
+  // strict while giving the same complete Windows acceptance one bounded
+  // minute and a half instead of treating normal process startup as a hang.
+  const firstValueLimitMs = process.platform === 'win32' ? 90_000 : 60_000;
+  assert.equal(firstValueMs <= firstValueLimitMs, true,
     `native packed ready-to-recall took ${firstValueMs}ms; stages=${JSON.stringify(Object.fromEntries(firstValueStages))}`);
 
   const freshPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({

@@ -204,6 +204,7 @@ test('release verification includes the scanned archive and isolated native inst
 		join(root, 'pulse-app', 'cli', 'scripts', 'personal-native-packed-e2e.mjs'), 'utf8',
 	);
 	assert.match(nativePacked, /process\.platform === 'win32' \? 5 \* 60_000 : 15 \* 60_000/);
+	assert.match(nativePacked, /firstValueLimitMs = process\.platform === 'win32' \? 90_000 : 60_000/);
 	assert.match(nativePacked, /taskkill\.exe/);
 	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
 	assert.match(nativePacked, /await packedPulse\(tarball, \['init', 'codex', '--yes', '--json'\]/);
