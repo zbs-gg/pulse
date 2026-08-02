@@ -7397,11 +7397,15 @@ function startHomeBrowserRelay(session) {
 		resolveCompletion = resolve;
 		rejectCompletion = reject;
 	});
+	const closeServer = () => {
+		if (server.listening) server.close();
+		server.closeAllConnections?.();
+	};
 	const failRelay = (error) => {
 		if (completed) return;
 		completed = true;
 		clearTimeout(timer);
-		if (server.listening) server.close();
+		closeServer();
 		rejectCompletion(error);
 	};
 	const server = createServer((req, res) => {
@@ -7436,7 +7440,10 @@ function startHomeBrowserRelay(session) {
 		res.setHeader('Referrer-Policy', 'no-referrer');
 		res.setHeader('Connection', 'close');
 		server.close();
-		res.end(() => resolveCompletion());
+		res.end(() => {
+			server.closeAllConnections?.();
+			resolveCompletion();
+		});
 	});
 
 	return new Promise((resolve, reject) => {
@@ -7454,7 +7461,13 @@ function startHomeBrowserRelay(session) {
 			resolve({
 				url: `http://${expectedHost}/`,
 				completion,
-				close: () => failRelay(new Error('Memory Home browser handoff interrupted.')),
+				close: () => {
+					if (!completed) {
+						failRelay(new Error('Memory Home browser handoff interrupted.'));
+						return;
+					}
+					closeServer();
+				},
 			});
 		});
 	});
