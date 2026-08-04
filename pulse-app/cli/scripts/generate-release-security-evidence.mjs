@@ -104,7 +104,7 @@ export function generateReleaseSecurityEvidence({ auditPath, installRoot, output
         hashes: [{ alg: 'SHA-256', content: tarballSHA256 }],
         name: '@zbs-gg/pulse',
         type: 'application',
-        version: '0.7.0',
+        version: '0.7.1',
       },
     },
     serialNumber: `urn:uuid:${tarballSHA256.slice(0, 8)}-${tarballSHA256.slice(8, 12)}-${tarballSHA256.slice(12, 16)}-${tarballSHA256.slice(16, 20)}-${tarballSHA256.slice(20, 32)}`,
@@ -117,7 +117,7 @@ export function generateReleaseSecurityEvidence({ auditPath, installRoot, output
     package: '@zbs-gg/pulse',
     package_license: 'AGPL-3.0-only',
     schema: 'pulse.release_license_inventory.v1',
-    version: '0.7.0',
+    version: '0.7.1',
   });
   const receipt = Object.freeze({
     audit: {
@@ -134,7 +134,7 @@ export function generateReleaseSecurityEvidence({ auditPath, installRoot, output
     package_sha256: tarballSHA256,
     sbom_sha256: createHash('sha256').update(`${canonical(sbom)}\n`).digest('hex'),
     schema: 'pulse.release_dependency_receipt.v1',
-    version: '0.7.0',
+    version: '0.7.1',
   });
   mkdirSync(outputRoot, { recursive: false, mode: 0o700 });
   for (const [name, value] of [

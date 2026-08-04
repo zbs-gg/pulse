@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Local Personal memory for Codex, Claude Code, and Cursor.",
   "license": "AGPL-3.0-only",
   "author": "ZBS GG",
@@ -73,7 +73,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "tar-stream": "3.1.7"
   },
   "scripts": {

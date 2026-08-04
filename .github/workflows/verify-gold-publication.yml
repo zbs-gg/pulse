@@ -12,16 +12,16 @@ on:
         required: true
         type: string
       candidate_sha256:
-        description: Exact 0.7.0 npm tarball SHA-256
+        description: Exact 0.7.1 npm tarball SHA-256
         required: true
         type: string
       confirmation:
-        description: Type "verify pulse 0.7.0 gold publication"
+        description: Type "verify pulse 0.7.1 gold publication"
         required: true
         type: string
 
 concurrency:
-  group: pulse-verify-gold-0.7.0
+  group: pulse-verify-gold-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          test "$GOLD_CONFIRMATION" = 'verify pulse 0.7.0 gold publication'
+          test "$GOLD_CONFIRMATION" = 'verify pulse 0.7.1 gold publication'
           [[ "$PROMOTION_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$SOAK_72_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
@@ -80,8 +80,8 @@ jobs:
       - name: Verify preview and latest resolve to unchanged bytes
         shell: bash
         run: |
-          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.0
-          test "$(npm view @zbs-gg/pulse dist-tags.latest)" = 0.7.0
+          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.1
+          test "$(npm view @zbs-gg/pulse dist-tags.latest)" = 0.7.1
           mkdir "$RUNNER_TEMP/npm-preview" "$RUNNER_TEMP/npm-latest"
           npm pack @zbs-gg/pulse@preview --pack-destination "$RUNNER_TEMP/npm-preview" --silent
           npm pack @zbs-gg/pulse@latest --pack-destination "$RUNNER_TEMP/npm-latest" --silent
@@ -98,10 +98,10 @@ jobs:
           SOURCE_COMMIT: ${{ steps.bind.outputs.commit }}
         shell: bash
         run: |
-          git fetch --force --tags origin v0.7.0
-          test "$(git rev-parse 'v0.7.0^{commit}')" = "$SOURCE_COMMIT"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.7.0" > "$RUNNER_TEMP/github-release.json"
-          test "$(jq -r .tag_name "$RUNNER_TEMP/github-release.json")" = v0.7.0
+          git fetch --force --tags origin v0.7.1
+          test "$(git rev-parse 'v0.7.1^{commit}')" = "$SOURCE_COMMIT"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.7.1" > "$RUNNER_TEMP/github-release.json"
+          test "$(jq -r .tag_name "$RUNNER_TEMP/github-release.json")" = v0.7.1
           test "$(jq -r .draft "$RUNNER_TEMP/github-release.json")" = false
           test "$(jq -r .prerelease "$RUNNER_TEMP/github-release.json")" = false
       - name: Validate signed promotion and generate ledger only from 72-hour receipts
@@ -118,7 +118,7 @@ jobs:
           jq -S -c -n \
             --arg candidate_sha256 "$CANDIDATE_SHA256" \
             --arg commit "${{ steps.bind.outputs.commit }}" \
-            '{candidate_sha256:$candidate_sha256,commit:$commit,github_release:"v0.7.0",latest:"0.7.0",preview:"0.7.0",publication_verified:true,schema:"pulse.gold_publication_verification.v1"}' \
+            '{candidate_sha256:$candidate_sha256,commit:$commit,github_release:"v0.7.1",latest:"0.7.1",preview:"0.7.1",publication_verified:true,schema:"pulse.gold_publication_verification.v1"}' \
             > "$RUNNER_TEMP/pulse-gold-publication-verification.json"
       - name: Preserve verification and generated documentation input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

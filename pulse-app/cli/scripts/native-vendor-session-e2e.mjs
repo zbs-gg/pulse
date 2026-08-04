@@ -89,24 +89,50 @@ function sessionExecutable(host) {
   return resolve(value);
 }
 
-function vendorSession(host, prompt, { cwd, env, outputPath }) {
+function vendorSession(host, prompt, { allowFileTools = false, cwd, env, outputPath, tracePath }) {
   const executable = sessionExecutable(host);
   let args;
   if (host === 'codex') {
     args = [
-      'exec', '--ephemeral', '--dangerously-bypass-hook-trust', '--sandbox', 'read-only',
+      'exec', '--ephemeral', '--dangerously-bypass-hook-trust', '--sandbox',
+      allowFileTools ? 'workspace-write' : 'read-only',
+      ...(allowFileTools ? ['--json'] : []),
       '--cd', cwd, '--output-last-message', outputPath, prompt,
     ];
   } else if (host === 'claude-code') {
     args = [
-      '--print', '--output-format', 'json', '--permission-mode', 'dontAsk',
-      '--disallowedTools', 'Bash,Edit,Write,WebFetch,WebSearch', prompt,
+      '--print', '--output-format', allowFileTools ? 'stream-json' : 'json',
+      ...(allowFileTools ? ['--verbose'] : []), '--permission-mode',
+      allowFileTools ? 'bypassPermissions' : 'dontAsk',
+      ...(allowFileTools ? [] : ['--disallowedTools', 'Bash,Edit,Write,WebFetch,WebSearch']),
+      prompt,
     ];
   } else {
-    args = ['-p', '--output-format', 'json', prompt];
+    args = [
+      '-p', '--output-format', allowFileTools ? 'stream-json' : 'json',
+      ...(allowFileTools ? ['--force', '--trust', '--workspace', cwd] : []),
+      prompt,
+    ];
   }
   const stdout = run(executable, args, { cwd, env, timeout: 10 * 60_000 });
+  if (tracePath) writeFileSync(tracePath, stdout, { mode: 0o600, flag: 'wx' });
   return existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : stdout;
+}
+
+function goalControlObserved(trace) {
+  const values = String(trace).split(/\r?\n/).filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+  const inspect = (value) => {
+    if (Array.isArray(value)) return value.some(inspect);
+    if (!value || typeof value !== 'object') return false;
+    if (['todo_list', 'plan_update', 'goal_update'].includes(value.type)) return true;
+    const toolName = value.tool_name ?? value.name ?? value.tool?.name;
+    if (typeof toolName === 'string' && /(?:todo|plan|goal)/i.test(toolName) &&
+        (value.type === 'tool_use' || value.type === 'tool_call' || value.tool_name !== undefined)) return true;
+    return Object.values(value).some(inspect);
+  };
+  return values.some(inspect);
 }
 
 async function productJSON(runtime, secret, path) {
@@ -128,6 +154,18 @@ async function waitForMemory(runtime, secret, host, marker) {
     await new Promise((accept) => setTimeout(accept, 500));
   }
   fail('native_vendor_memory_not_visible');
+}
+
+async function waitForDeduplicated(runtime, secret, marker, objectID) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const tray = await productJSON(runtime, secret, '/memory/tray?limit=100');
+    const duplicate = tray?.candidates?.find((candidate) =>
+      candidate?.candidate?.capsule?.items?.some((item) => item.redacted_summary === marker) &&
+      candidate?.canonical_object_id === objectID && candidate?.latest_receipt?.status === 'deduplicated');
+    if (duplicate) return duplicate;
+    await new Promise((accept) => setTimeout(accept, 500));
+  }
+  fail('native_vendor_deduplicated_receipt_missing');
 }
 
 function environment(root, authority, packageSHA256, sourceCommit) {
@@ -192,7 +230,7 @@ async function oneRun({ authority, host, packageInfo, sourceCommit, tarball }, i
   }), 'native_vendor_install_plan_invalid');
   assert.equal(plan.outcome, 'ready_to_install');
   approve(plan, context, authority, packageInfo.sha256, sourceCommit);
-  const installed = exactJSON(packedPulse(tarball, ['install', '--json'], {
+  const installed = exactJSON(packedPulse(tarball, ['init', host, '--yes', '--json'], {
     cwd: context.workspace, env: context.env,
   }), 'native_vendor_install_invalid');
   assert.equal(installed.outcome, 'ready');
@@ -220,6 +258,9 @@ async function oneRun({ authority, host, packageInfo, sourceCommit, tarball }, i
   const viewer = await waitForMemory(runtime, secret, host, marker);
   const objectID = viewer.next_resume.included_object_ids[0];
   if (typeof objectID !== 'string' || objectID.length < 1) fail('native_vendor_object_invalid');
+  packedPulse(tarball, ['home', '--host', host], {
+    cwd: context.workspace, env: { ...context.env, PULSE_OPEN_DRY_RUN: '1' }, timeout: 30_000,
+  });
   stage('terminal_receipt_and_home');
 
   const freshOutput = join(runRoot, 'fresh-session.out');
@@ -240,6 +281,57 @@ async function oneRun({ authority, host, packageInfo, sourceCommit, tarball }, i
   }
   stage('doctor');
 
+  let safetyAcceptance = false;
+  if (targetID === 'darwin-arm64') {
+    const duplicateOutput = join(runRoot, 'duplicate-session.out');
+    vendorSession(host, [
+      'Use the connected Pulse memory tool exactly once. Do not use shell commands or edit files.',
+      `Store the same bounded project memory again with redacted_summary exactly ${marker}.`,
+      'Use normal privacy, project retention, and user_confirmed evidence. Reply only DEDUPLICATED.',
+    ].join(' '), { cwd: context.workspace, env: context.env, outputPath: duplicateOutput });
+    await waitForDeduplicated(runtime, secret, marker, objectID);
+    stage('deduplicated_receipt');
+
+    const stopped = exactJSON(packedPulse(tarball, ['supervisor', 'stop', '--json'], {
+      cwd: context.workspace, env: context.env,
+    }), 'native_vendor_supervisor_stop_invalid');
+    assert.equal(stopped.status, 'stopped');
+    const fileMarker = `PULSE-FAIL-OPEN-${randomBytes(12).toString('hex')}`;
+    const fileName = 'pulse-fail-open-proof.txt';
+    const failOpenOutput = join(runRoot, 'fail-open-session.out');
+    const failOpenTrace = join(runRoot, 'fail-open-session.trace.jsonl');
+    const failOpen = vendorSession(host, [
+      'Pulse memory is intentionally unavailable. Do not retry it and do not wait for it.',
+      'Use this program\'s built-in plan, todo, or goal control now: add one item and mark it complete.',
+      `Then use the normal file or terminal tool to create ${fileName} containing exactly ${fileMarker}, read it back,`,
+      `and reply only FAIL-OPEN-OK-${fileMarker}. End after that one reply and do not continue automatically.`,
+    ].join(' '), {
+      allowFileTools: true, cwd: context.workspace, env: context.env,
+      outputPath: failOpenOutput, tracePath: failOpenTrace,
+    });
+    if (!failOpen.includes(`FAIL-OPEN-OK-${fileMarker}`) ||
+        readFileSync(join(context.workspace, fileName), 'utf8').trim() !== fileMarker ||
+        !goalControlObserved(readFileSync(failOpenTrace, 'utf8'))) {
+      fail('native_vendor_fail_open_session_failed');
+    }
+    stage('daemon_unavailable_session');
+
+    const restarted = exactJSON(packedPulse(tarball, ['supervisor', 'start', '--json'], {
+      cwd: context.workspace, env: context.env,
+    }), 'native_vendor_supervisor_restart_invalid');
+    assert.equal(restarted.status, 'running');
+    const restartedOutput = join(runRoot, 'restarted-session.out');
+    const recalledAfterRestart = vendorSession(host, [
+      'Without calling tools, reply with only the exact project memory supplied automatically to this fresh session.',
+    ].join(' '), { cwd: context.workspace, env: context.env, outputPath: restartedOutput });
+    if (!recalledAfterRestart.includes(marker)) fail('native_vendor_restart_recall_missing');
+    packedPulse(tarball, ['home', '--host', host], {
+      cwd: context.workspace, env: { ...context.env, PULSE_OPEN_DRY_RUN: '1' }, timeout: 30_000,
+    });
+    safetyAcceptance = true;
+    stage('restart_recall_and_home');
+  }
+
   const repairPlan = exactJSON(packedPulse(tarball, ['install-plan', '--json'], {
     cwd: context.workspace, env: context.env, timeout: 180_000,
   }), 'native_vendor_repair_plan_invalid');
@@ -256,7 +348,7 @@ async function oneRun({ authority, host, packageInfo, sourceCommit, tarball }, i
     fail('native_vendor_disconnect_lost_vault');
   }
   stage('disconnect');
-  return Object.freeze({ firstValueMS, stages });
+  return Object.freeze({ firstValueMS, safetyAcceptance, stages });
 }
 
 const authority = argument('--authority');
@@ -283,8 +375,8 @@ const snapshotInfo = regularFile(snapshotPath, 2 * 1024 * 1024);
 const artifactSet = exactJSON(readFileSync(artifactSetPath, 'utf8'), 'native_vendor_catalog_invalid');
 const snapshot = exactJSON(readFileSync(snapshotPath, 'utf8'), 'native_vendor_catalog_invalid');
 const verified = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
-  architecture: target.architecture, libc: target.libc, minimumAcceptedEpoch: 8, now: new Date(),
-  osVersion: '26.2', packageVersion: '0.7.0', platform: target.platform, trustedKeys: pinnedReleaseKeyring(),
+  architecture: target.architecture, libc: target.libc, minimumAcceptedEpoch: 9, now: new Date(),
+  osVersion: '26.2', packageVersion: '0.7.1', platform: target.platform, trustedKeys: pinnedReleaseKeyring(),
 });
 if (verified.target_id !== targetID || verified.manifest_digest !== artifactSetInfo.sha256 ||
     verified.authority.snapshot_digest !== snapshotInfo.sha256) fail('native_vendor_catalog_invalid');
@@ -329,6 +421,11 @@ try {
     milestones: {
       disconnect: true, fresh_recall: true, install: true, lifecycle: true,
       memory_home: true, repair: true, vendor_session: true,
+      deduplicated: targetID === 'darwin-arm64' ? runs.at(-1).safetyAcceptance : false,
+      fail_open: targetID === 'darwin-arm64' ? runs.at(-1).safetyAcceptance : false,
+      memory_survived_restart: targetID === 'darwin-arm64' ? runs.at(-1).safetyAcceptance : false,
+      no_automatic_continuation: targetID === 'darwin-arm64' ? runs.at(-1).safetyAcceptance : false,
+      stop_and_goal_control_available: targetID === 'darwin-arm64' ? runs.at(-1).safetyAcceptance : false,
     },
     package: packageInfo,
     privacy_defaults: { backend_llm: false, old_chat_import: false, raw_transcripts: false },

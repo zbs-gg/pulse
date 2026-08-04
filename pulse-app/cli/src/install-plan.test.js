@@ -164,7 +164,13 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
       plan.network_effects.find((entry) => entry.code === 'verified_release_downloads').destinations,
       ['https://models.zbs.gg', 'https://releases.zbs.gg'],
     );
-    assert.ok(plan.required_human_approvals.every((entry) => entry.automatable_by_yes === false));
+    assert.equal(
+      plan.required_human_approvals.find((entry) => entry.code === 'install_disclosure_consent')?.automatable_by_yes,
+      true,
+    );
+    assert.ok(plan.required_human_approvals
+      .filter((entry) => entry.code !== 'install_disclosure_consent')
+      .every((entry) => entry.automatable_by_yes === false));
     assert.equal(plan.required_human_approvals.some((entry) => entry.code === 'macos_presence_and_binding'), false);
     assert.equal(plan.required_human_approvals.some((entry) => entry.code === 'binding_replacement_if_needed'), false);
     assert.deepEqual(plan.next_action, {
@@ -185,6 +191,38 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     });
     assert.doesNotMatch(requirementClaims, /\b(?:Go|Python|go_toolchain)\b/i);
     assert.deepEqual(readdirSync(home), before, 'plan detection must not create Pulse or Codex state');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('selected host plans leave other detected AI apps untouched', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-install-plan-selected.'));
+  try {
+    const home = join(root, 'home');
+    const cwd = repository(root);
+    mkdirSync(home);
+    const plan = buildPersonalInstallPlan({
+      cwd, home, codexHome: join(home, '.codex'), platform: 'darwin', architecture: 'arm64',
+      nodeVersion: '20.18.0', detectClaude: claudeReady, detectCodex: codexReady,
+      detectCursor: cursorReady, selectedHosts: ['cursor'], release: verifiedRelease(),
+      detectResources: () => ampleResources, currentState: cleanState,
+    });
+
+    assert.equal(plan.outcome, 'ready_to_install');
+    assert.equal(plan.activation_policy, 'selected_supported_hosts');
+    assert.deepEqual(
+      plan.detected.hosts.filter((host) => host.activation_target).map((host) => host.host),
+      ['cursor'],
+    );
+    assert.deepEqual(
+      plan.network_effects.find((entry) => entry.code === 'detected_harness_activation').destinations,
+      ['cursor'],
+    );
+    assert.equal(plan.local_writes.some((entry) => entry.purpose === 'codex_managed_pulse_plugin'), false);
+    assert.equal(plan.local_writes.some((entry) => entry.purpose === 'claude_managed_pulse_plugin'), false);
+    assert.equal(plan.local_writes.some((entry) => entry.purpose === 'cursor_local_pulse_plugin'), true);
+    assert.deepEqual(plan.rollback.disconnect_commands, ['pulse disconnect cursor']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

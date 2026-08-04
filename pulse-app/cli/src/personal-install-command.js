@@ -232,19 +232,24 @@ export async function executePersonalInstallCommand({
   mode,
   output = process.stdout,
   errorOutput = process.stderr,
+  showDetailedPlan = false,
+  yesApprovesInstall = false,
 } = {}) {
   if (!['install', 'repair'].includes(mode) || !Array.isArray(argv) ||
       typeof buildDependencies !== 'function' || typeof buildPlan !== 'function' ||
       typeof consentPrompt !== 'function' ||
       typeof dataDir !== 'string' || !input ||
       typeof output?.write !== 'function' || typeof errorOutput?.write !== 'function' ||
-      typeof lock !== 'function') {
+      typeof lock !== 'function' || typeof showDetailedPlan !== 'boolean' ||
+      typeof yesApprovesInstall !== 'boolean') {
     throw new TypeError('personal_install_command_invalid');
   }
   const json = argv.includes('--json');
   const plan = await buildPlan();
   if (json) writeLine(errorOutput, formatPersonalInstallPlan(plan));
-  else writeLine(output, formatPersonalInstallIntroduction(plan));
+  else writeLine(output, showDetailedPlan
+    ? formatPersonalInstallPlan(plan)
+    : formatPersonalInstallIntroduction(plan));
 
   if (plan.outcome !== 'ready_to_install') {
     const result = await runPersonalInstall({ plan, consent: false, mode });
@@ -252,14 +257,19 @@ export async function executePersonalInstallCommand({
     return { exitCode: 1, result };
   }
   const resumeApproved = hasMatchingResumableInstallJournal({ dataDir, mode, plan });
-  if (argv.includes('--yes') && !resumeApproved) {
+  const commandLineApproved = argv.includes('--yes') && yesApprovesInstall;
+  if (argv.includes('--yes') && !resumeApproved && !commandLineApproved) {
     writeLine(json ? errorOutput : output,
       '\n[pulse] --yes cannot approve disclosure, macOS presence, binding replacement, hook trust, downgrade, or wipe.');
+  }
+  if (commandLineApproved && !json) {
+    writeLine(output,
+      '\n--yes confirmed this displayed installation plan. macOS may still ask separately for protected system changes.');
   }
   if (resumeApproved && !json) {
     writeLine(output, '\nResuming the installation already approved for this exact release.');
   }
-  const consent = resumeApproved ||
+  const consent = resumeApproved || commandLineApproved ||
     await consentPrompt({ input, output: json ? errorOutput : output, plan });
   if (!consent) {
     const result = await runPersonalInstall({ plan, consent: false, mode });

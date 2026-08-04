@@ -659,7 +659,7 @@ try {
     ...baseEnv,
     PULSE_NATIVE_PACKED_FIXTURE_APPROVAL: nativePackedFixtureApprovalDigest(plan),
   };
-  const installed = await packedPulse(tarball, ['install', '--json'], {
+  const installed = await packedPulse(tarball, ['init', 'codex', '--yes', '--json'], {
     // Windows clean-room prewarm performs native ACL and executable checks.
     // This install-only timeout does not relax the measured 60s first-value gate below.
     cwd: workspace, env, statuses: [0, 1], timeout: process.platform === 'win32' ? 5 * 60_000 : 15 * 60_000,
@@ -676,7 +676,7 @@ try {
   assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
-  assert.equal(basename(pluginRoot), '0.7.0');
+  assert.equal(basename(pluginRoot), '0.7.1');
 
   const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
     publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,
@@ -870,11 +870,103 @@ try {
   assert.equal(Number.isInteger(economy.pulse_tokens) && economy.pulse_tokens > 0, true);
   assert.equal('savings_percentage' in economy, false);
 
+  const duplicateSessionID = 'session-native-packed-duplicate';
+  const duplicateTurnID = 'turn-native-packed-duplicate';
+  const duplicateArguments = {
+    ...memoryArguments,
+    source: { ...memoryArguments.source, timestamp: new Date().toISOString() },
+  };
+  codexHook(pluginRoot, 'SessionStart', codexHookInput({
+    eventName: 'SessionStart', root, sessionID: duplicateSessionID, workspace,
+    extra: { source: 'startup' },
+  }), { cwd: workspace, env: hookEnv });
+  codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
+    eventName: 'UserPromptSubmit', root, sessionID: duplicateSessionID,
+    turnID: duplicateTurnID, workspace, extra: { prompt: 'Save the same decision once.' },
+  }), { cwd: workspace, env: hookEnv });
+  const duplicateToolID = 'tool-native-packed-duplicate';
+  assert.deepEqual(codexHook(pluginRoot, 'PreToolUse', codexHookInput({
+    eventName: 'PreToolUse', root, sessionID: duplicateSessionID,
+    turnID: duplicateTurnID, workspace,
+    extra: {
+      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: duplicateArguments,
+      tool_use_id: duplicateToolID,
+    },
+  }), { cwd: workspace, env: hookEnv }), {});
+  const duplicateCall = await installedMCP.call('pulse_remember', duplicateArguments);
+  const duplicate = duplicateCall.output;
+  assert.equal(duplicate.receipts.length, 1);
+  assert.equal(duplicate.receipts[0].status, 'deduplicated');
+  assert.equal(duplicate.receipts[0].object_id, objectID);
+  assert.deepEqual(codexHook(pluginRoot, 'PostToolUse', codexHookInput({
+    eventName: 'PostToolUse', root, sessionID: duplicateSessionID,
+    turnID: duplicateTurnID, workspace,
+    extra: {
+      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: duplicateArguments,
+      tool_use_id: duplicateToolID, tool_response: duplicateCall.callResult,
+    },
+  }), { cwd: workspace, env: hookEnv }), {});
+  assert.deepEqual(codexHook(pluginRoot, 'Stop', codexHookInput({
+    eventName: 'Stop', root, sessionID: duplicateSessionID, turnID: duplicateTurnID, workspace,
+    extra: { stop_hook_active: false, last_assistant_message: 'Saved once.' },
+  }), { cwd: workspace, env: hookEnv }), {});
+  await packedPulse(tarball, ['home', '--host', 'codex'], {
+    cwd: workspace, env: {
+      ...env, PULSE_OPEN_DRY_RUN: '1', PULSE_HOME_ACCEPTANCE_STAGES: '1',
+    }, timeout: 30_000,
+  });
+
+  await installedMCP.close();
+  installedMCP = undefined;
+  const stopped = json((await packedPulse(tarball, ['supervisor', 'stop', '--json'], {
+    cwd: workspace, env, timeout: 30_000,
+  })).stdout, 'native packed supervisor stop result is invalid');
+  assert.equal(stopped.status, 'stopped');
+  const unavailableSession = codexHook(pluginRoot, 'SessionStart', codexHookInput({
+    eventName: 'SessionStart', root, sessionID: 'session-native-packed-unavailable', workspace,
+    extra: { source: 'startup' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.equal(unavailableSession.continue === false, false);
+  const unavailableGoal = codexHook(pluginRoot, 'PreToolUse', codexHookInput({
+    eventName: 'PreToolUse', root, sessionID: 'session-native-packed-unavailable',
+    turnID: 'turn-native-packed-unavailable', workspace,
+    extra: { tool_name: 'update_plan', tool_input: { plan: [] }, tool_use_id: 'tool-goal-control' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.deepEqual(unavailableGoal, {});
+  const failOpenFile = join(workspace, 'pulse-fail-open-proof.txt');
+  run(process.execPath, ['--input-type=module', '--eval',
+    `await import('node:fs').then(({writeFileSync})=>writeFileSync(${JSON.stringify(failOpenFile)},'terminal and files stayed available\\n',{mode:0o600}))`,
+  ], { cwd: workspace, env: hookEnv });
+  assert.equal(readFileSync(failOpenFile, 'utf8'), 'terminal and files stayed available\n');
+  const unavailableStop = codexHook(pluginRoot, 'Stop', codexHookInput({
+    eventName: 'Stop', root, sessionID: 'session-native-packed-unavailable',
+    turnID: 'turn-native-packed-unavailable', workspace,
+    extra: { stop_hook_active: false, last_assistant_message: 'One response only.' },
+  }), { cwd: workspace, env: hookEnv });
+  assert.deepEqual(unavailableStop, {});
+  const restarted = json((await packedPulse(tarball, ['supervisor', 'start', '--json'], {
+    cwd: workspace, env, timeout: 60_000,
+  })).stdout, 'native packed supervisor restart result is invalid');
+  assert.equal(restarted.status, 'running');
+  installedMCP = startInstalledMCP(pluginRoot, { cwd: workspace, env: hookEnv });
+  const afterRestart = (await installedMCP.call('pulse_recall', {
+    query: summary, scope: 'project', limit: 10, privacy_ceiling: 'private',
+  })).output;
+  assert.equal(afterRestart.items.some((item) => item.id === objectID && item.summary === summary), true);
+  await packedPulse(tarball, ['home', '--host', 'codex'], {
+    cwd: workspace, env: {
+      ...env, PULSE_OPEN_DRY_RUN: '1', PULSE_HOME_ACCEPTANCE_STAGES: '1',
+    }, timeout: 30_000,
+  });
+  markFirstValueStage('fail_open_and_restart');
+
   const sourceFixtures = seedSyntheticConsolidationArtifacts(home);
   const canonicalDatabase = join(runtime.data_dir, 'pulse.db');
+  // WAL/SHM are live SQLite coordination files: ordinary read transactions
+  // can change them while leaving every durable memory byte untouched. Prove
+  // byte preservation on the canonical database and the external sources.
   const sourceSnapshots = snapshotConsolidationSources([
-    canonicalDatabase, `${canonicalDatabase}-wal`, `${canonicalDatabase}-shm`,
-    ...sourceFixtures.map((fixtureSource) => fixtureSource.path),
+    canonicalDatabase, ...sourceFixtures.map((fixtureSource) => fixtureSource.path),
   ]);
   assert.equal(sourceSnapshots.some((snapshot) => snapshot.path === canonicalDatabase), true,
     'native packed consolidation proof did not snapshot the canonical database');
@@ -980,6 +1072,15 @@ try {
     static_host_attached: true,
     visible_memory_card: true,
     first_memory_saved: true,
+    duplicate_receipt: 'deduplicated',
+    same_object_after_duplicate: true,
+    home_command_one_shot: true,
+    fail_open_when_daemon_stopped: true,
+    terminal_and_files_available: true,
+    stop_available: true,
+    goal_control_available: true,
+    automatic_continuation: false,
+    memory_survived_restart: true,
     automatic_durable_write: true,
     tray_save_proof: false,
     canonical_object_id: objectID,

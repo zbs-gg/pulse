@@ -168,7 +168,7 @@ export async function buildNpmProductionCandidate({
   );
   if (receipt.value.production_ready !== true || receipt.value.target_count !== DESKTOP_TARGET_IDS.length ||
       receipt.value.artifact_count !== 2 + DESKTOP_TARGET_IDS.length * 2 ||
-      receipt.value.host_target_count !== 18 || receipt.value.release_epoch !== 8 ||
+      receipt.value.host_target_count !== 18 || receipt.value.release_epoch !== 9 ||
       canonical(receipt.value.target_ids) !== canonical(DESKTOP_TARGET_IDS) ||
       Object.keys(manifest.value.payload?.targets ?? {}).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0') ||
       manifest.value.payload?.release?.package !== PACKAGE_NAME ||

@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       candidate_sha256:
-        description: Exact SHA-256 of @zbs-gg/pulse 0.7.0
+        description: Exact SHA-256 of @zbs-gg/pulse 0.7.1
         required: true
         type: string
       checkpoint_hours:
@@ -17,12 +17,12 @@ on:
         type: choice
         options: ['0', '24', '48', '72']
       confirmation:
-        description: Type "run pulse 0.7.0 public soak <checkpoint>"
+        description: Type "run pulse 0.7.1 public soak <checkpoint>"
         required: true
         type: string
 
 concurrency:
-  group: pulse-public-soak-${{ inputs.checkpoint_hours }}-0.7.0
+  group: pulse-public-soak-${{ inputs.checkpoint_hours }}-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          test "$SOAK_CONFIRMATION" = "run pulse 0.7.0 public soak $CHECKPOINT"
+          test "$SOAK_CONFIRMATION" = "run pulse 0.7.1 public soak $CHECKPOINT"
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]
           [[ "$CHECKPOINT" =~ ^(0|24|48|72)$ ]]
@@ -83,13 +83,13 @@ jobs:
         name: Fetch only exact npm preview bytes
         shell: bash
         run: |
-          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.0
-          test "$(npm view @zbs-gg/pulse@0.7.0 version)" = 0.7.0
-          published_at="$(npm view @zbs-gg/pulse time --json | jq -er '.["0.7.0"]')"
+          test "$(npm view @zbs-gg/pulse dist-tags.preview)" = 0.7.1
+          test "$(npm view @zbs-gg/pulse@0.7.1 version)" = 0.7.1
+          published_at="$(npm view @zbs-gg/pulse time --json | jq -er '.["0.7.1"]')"
           node -e 'if (Number.isNaN(new Date(process.argv[1]).valueOf())) process.exit(1)' "$published_at"
           echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/public-inputs/package"
-          npm pack @zbs-gg/pulse@0.7.0 --pack-destination "$RUNNER_TEMP/public-inputs/package" --silent
+          npm pack @zbs-gg/pulse@0.7.1 --pack-destination "$RUNNER_TEMP/public-inputs/package" --silent
           tarballs=("$RUNNER_TEMP"/public-inputs/package/*.tgz)
           test "${#tarballs[@]}" = 1
           test "$(sha256sum "${tarballs[0]}" | cut -d' ' -f1)" = "$CANDIDATE_SHA256"
@@ -104,10 +104,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/public-inputs/catalog"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
             --connect-timeout 10 --max-time 10 --max-filesize 2097152 \
-            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            https://releases.zbs.gg/pulse/0.7.1/catalog/snapshot.json \
             -o "$RUNNER_TEMP/public-inputs/catalog/snapshot.json"
           artifact_url="$(jq -er .payload.artifact_set.url "$RUNNER_TEMP/public-inputs/catalog/snapshot.json")"
-          test "$artifact_url" = https://releases.zbs.gg/pulse/0.7.0/epoch-8/catalog/artifact-set.json
+          test "$artifact_url" = https://releases.zbs.gg/pulse/0.7.1/epoch-9/catalog/artifact-set.json
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
             --connect-timeout 10 --max-time 30 --max-filesize 2097152 "$artifact_url" \
             -o "$RUNNER_TEMP/public-inputs/catalog/personal-preview-manifest.json"
@@ -134,7 +134,7 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/public-audit"
           (cd "$RUNNER_TEMP/public-audit" && npm init --yes >/dev/null)
-          npm install --ignore-scripts --package-lock-only --prefix "$RUNNER_TEMP/public-audit" @zbs-gg/pulse@0.7.0
+          npm install --ignore-scripts --package-lock-only --prefix "$RUNNER_TEMP/public-audit" @zbs-gg/pulse@0.7.1
           npm audit --omit=dev --audit-level=high --prefix "$RUNNER_TEMP/public-audit"
       - name: Preserve public-only matrix inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

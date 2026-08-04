@@ -16,12 +16,12 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type "seal pulse 0.7.0 production candidate"
+        description: Type "seal pulse 0.7.1 production candidate"
         required: true
         type: string
 
 concurrency:
-  group: pulse-production-candidate-seal-0.7.0
+  group: pulse-production-candidate-seal-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           test "$GITHUB_REF" = refs/heads/main
-          test "$RELEASE_CONFIRMATION" = 'seal pulse 0.7.0 production candidate'
+          test "$RELEASE_CONFIRMATION" = 'seal pulse 0.7.1 production candidate'
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$ORIGIN_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "$CANDIDATE_SHA256" =~ ^[a-f0-9]{64}$ ]]

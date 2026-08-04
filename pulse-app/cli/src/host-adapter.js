@@ -298,6 +298,12 @@ export function isGuardedCodexTool(toolName) {
   return /(?:^|__)(?:create|update|delete|remove|forget|wipe|send|post|write|merge|approve|upload|publish|execute|run|navigate)(?:_|$)/i.test(toolName);
 }
 
+export function isPulseProductTool(toolName, { codexPluginAlias = false } = {}) {
+  if (typeof toolName !== 'string') return false;
+  if (/^mcp__pulse[-_]product__pulse_[A-Za-z0-9._:-]+$/i.test(toolName)) return true;
+  return codexPluginAlias && /^mcp__pulse__pulse_[A-Za-z0-9._:-]+$/i.test(toolName);
+}
+
 export function isDestructivePulseTool(toolName) {
   return typeof toolName === 'string' &&
     /(?:^|__)pulse_(?:forget|wipe)(?:_|$)/i.test(toolName);
@@ -328,7 +334,7 @@ export function isPulseRuntimeAuthorityMutation(toolName, toolInput) {
 }
 
 export function isTrustedPulseProductTool(toolName, { codexPluginAlias = false } = {}) {
-  if (typeof toolName !== 'string') return false;
+  if (!isPulseProductTool(toolName, { codexPluginAlias })) return false;
   const productAction = 'pulse_(?:remember|graph_delta|tray|tray_status)';
   if (new RegExp(`^mcp__pulse[-_]product__${productAction}$`, 'i').test(toolName)) return true;
   return codexPluginAlias && new RegExp(`^mcp__pulse__${productAction}$`, 'i').test(toolName);

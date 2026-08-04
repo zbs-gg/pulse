@@ -17,8 +17,9 @@ import (
 )
 
 type rememberResponse struct {
-	OK  bool     `json:"ok"`
-	IDs []string `json:"ids"`
+	OK      bool                             `json:"ok"`
+	IDs     []string                         `json:"ids"`
+	Results []store.MemoryRememberItemResult `json:"results,omitempty"`
 }
 
 type recallResponse struct {
@@ -70,7 +71,7 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, result)
 		return
 	}
-	ids, err := s.cfg.Store.RememberCapsule(capsule)
+	results, err := s.cfg.Store.RememberCapsuleWithResults(capsule)
 	if err != nil {
 		http.Error(w, "invalid memory capsule: "+err.Error(), http.StatusBadRequest)
 		return
@@ -81,6 +82,10 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 	// write; engine nil / embedder off ⇒ skip silently (the events exist and
 	// stay dark until an embedder is configured).
 	if s.cfg.Retrieval != nil && s.cfg.Retrieval.EmbedderReady() {
+		ids := make([]string, len(results))
+		for index, result := range results {
+			ids[index] = result.ID
+		}
 		if docs, derr := s.cfg.Store.CapsuleEventDocs(ids); derr == nil && len(docs) > 0 {
 			indexDocs := make([]retrieve.IndexEventDoc, len(docs))
 			for i, d := range docs {
@@ -91,7 +96,11 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, rememberResponse{OK: true, IDs: ids})
+	ids := make([]string, len(results))
+	for index, result := range results {
+		ids[index] = result.ID
+	}
+	writeJSON(w, rememberResponse{OK: true, IDs: ids, Results: results})
 }
 
 func (s *Server) handleMemoryRecall(w http.ResponseWriter, r *http.Request) {

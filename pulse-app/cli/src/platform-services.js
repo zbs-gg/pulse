@@ -94,21 +94,22 @@ function windowsCandidates(home, env, pathAPI) {
   const localAppData = env.LOCALAPPDATA || pathAPI.join(home, 'AppData', 'Local');
   const appData = env.APPDATA || pathAPI.join(home, 'AppData', 'Roaming');
   const programFiles = env.ProgramFiles || 'C:\\Program Files';
+  const nativePackedCodex = nativePackedCodexCandidates(env, pathAPI);
+  const isolatedNativePacked = nativePackedCodex.length > 0;
   return {
-    claude: [
+    claude: isolatedNativePacked ? [] : [
       ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'claude.exe'),
       pathAPI.join(home, '.local', 'bin', 'claude.cmd'),
       pathAPI.join(appData, 'npm', 'claude.cmd'),
     ],
-    codex: [
+    codex: isolatedNativePacked ? nativePackedCodex : [
       ...protectedHarnessCandidates(env, pathAPI, 'CODEX_EXECUTABLE'),
-      ...nativePackedCodexCandidates(env, pathAPI),
       pathAPI.join(home, '.local', 'bin', 'codex.exe'),
       pathAPI.join(home, '.local', 'bin', 'codex.cmd'),
       pathAPI.join(appData, 'npm', 'codex.cmd'),
     ],
-    cursor: [
+    cursor: isolatedNativePacked ? [] : [
       ...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'),
       pathAPI.join(localAppData, 'Programs', 'cursor', 'Cursor.exe'),
       pathAPI.join(programFiles, 'Cursor', 'Cursor.exe'),
@@ -122,14 +123,15 @@ function windowsCandidates(home, env, pathAPI) {
 }
 
 function posixCandidates(platform, home, env, pathAPI) {
+  const nativePackedCodex = nativePackedCodexCandidates(env, pathAPI);
+  const isolatedNativePacked = nativePackedCodex.length > 0;
   const common = {
-    claude: [
+    claude: isolatedNativePacked ? [] : [
       ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude',
     ],
-    codex: [
+    codex: isolatedNativePacked ? nativePackedCodex : [
       ...protectedHarnessCandidates(env, pathAPI, 'CODEX_EXECUTABLE'),
-      ...nativePackedCodexCandidates(env, pathAPI),
       pathAPI.join(home, '.local', 'bin', 'codex'),
       ...(platform === 'darwin' ? ['/opt/homebrew/bin/codex'] : []),
       '/usr/local/bin/codex',
@@ -141,7 +143,7 @@ function posixCandidates(platform, home, env, pathAPI) {
   };
   return {
     ...common,
-    cursor: platform === 'darwin'
+    cursor: isolatedNativePacked ? [] : platform === 'darwin'
       ? [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), '/Applications/Cursor.app', pathAPI.join(home, 'Applications', 'Cursor.app')]
       : [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), pathAPI.join(home, '.local', 'bin', 'cursor'), '/usr/local/bin/cursor', '/usr/bin/cursor', '/opt/Cursor/cursor'],
   };

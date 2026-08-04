@@ -70,6 +70,18 @@ test('Windows install prewarm budget stays separate from the first-value gate', 
   assert.match(prewarm, /hook_worker_prewarm_failure\.v1/);
 });
 
+test('install health verifies a one-shot Memory Home session before reporting ready', () => {
+  const health = between(
+    'async function personalInstallCoreHealth',
+    'function personalInstallDependencies',
+  );
+  assert.match(health, /requestHomeSession\(/);
+  assert.match(health, /readSecretFromDataDir\(dataDir\)/);
+  assert.match(health, /projectPersonalLiveReadiness\(readinessChecks, new Date\(\)\)/);
+  assert.match(health, /reason_code: 'memory_home_unavailable'/);
+  assert.doesNotMatch(health, /openHomeBrowserURL\(/);
+});
+
 test('Claude adapter grants workspace access before enabling its MCP and rolls it back on failure', () => {
   const registry = between(
     'function personalInstallHostRegistry(targets)',

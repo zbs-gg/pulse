@@ -11,7 +11,8 @@ import {
   isDestructivePulseShellInvocation,
   isDestructivePulseTool,
   isPulseRuntimeAuthorityMutation,
-  isGuardedCodexTool,
+  isPulseProductTool,
+  isUntrustedPulseMemoryWriteTool,
   normalizeClaudeHook,
   renderAdditionalContext,
 } from './host-adapter.js';
@@ -186,6 +187,10 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
        isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
     return preToolDenied('Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.');
   }
+  if (eventName === 'PreToolUse' && isUntrustedPulseMemoryWriteTool(rawInput.tool_name)) {
+    return preToolDenied('Pulse Personal memory writes require the pulse-product server. Legacy or lookalike Pulse servers cannot create Personal memory.');
+  }
+  if (eventName === 'PreToolUse' && !isPulseProductTool(rawInput.tool_name)) return {};
 
   let resolved;
   try {
@@ -222,7 +227,6 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       };
     }
     if (eventName === 'PreToolUse') {
-      if (!isGuardedCodexTool(rawInput.tool_name)) return {};
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
       if (isClaudeProductRememberTool(rawInput.tool_name)) {
@@ -279,6 +283,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
         // First Stop requests one bounded model pass; recursive Stop seals no-change.
       }
       if (!event.stop_hook_active) {
+        await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
         return {
           decision: 'block',
           reason: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
@@ -299,7 +304,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
     if (eventName === 'PreToolUse') {
       return preToolDenied('pulse_authority_unavailable: restart the task after Pulse binding is restored');
     }
-    if (eventName === 'Stop' && rawInput.stop_hook_active === true) {
+    if (eventName === 'Stop') {
       let event;
       try {
         event = resolved
@@ -311,14 +316,8 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       if (event) {
         const receipt = hookFailureReceipt(event, 'finalize_failed', now);
         recordFailure(resolved, receipt);
-        return {
-          continue: true,
-          systemMessage: `Pulse finalize_failed receipt: ${receipt.receipt_id}`,
-        };
       }
-    }
-    if (eventName === 'Stop') {
-      return { decision: 'block', reason: 'Pulse did not finalize this turn. Retry finalization once before stopping.' };
+      return {};
     }
     return {
       continue: true,

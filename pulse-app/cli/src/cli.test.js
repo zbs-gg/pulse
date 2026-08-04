@@ -7,6 +7,8 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { createPlatformServices } from './platform-services.js';
+
 const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const FIRST_PROOF_MEMORY =
@@ -108,6 +110,19 @@ function runInWorkspaceAsync(args, cwd, home, env = {}, stdin = '') {
 function writeExecutable(path, content) {
   writeFileSync(path, content);
   chmodSync(path, 0o755);
+}
+
+function runWithDetectedHost(args, host) {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-cwd.'));
+  const executable = host === 'codex'
+    ? join(home, '.local', 'bin', 'codex')
+    : process.platform === 'darwin'
+      ? join(home, 'Applications', 'Cursor.app', 'Contents', 'MacOS', 'Cursor')
+      : join(home, '.local', 'bin', 'cursor');
+  mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
+  writeExecutable(executable, '#!/bin/sh\nexit 0\n');
+  return { home, cwd, result: runInWorkspace(args, cwd, home) };
 }
 
 test('destructive CLI refuses non-interactive agent and pipe execution', () => {
@@ -338,7 +353,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.7.0');
+  assert.equal(plan.version, '0.7.1');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -399,15 +414,12 @@ test('install-plan --json exposes the host-neutral Personal product contract wit
   assert.equal(existsSync(join(home, '.pulse')), false);
 });
 
-test('non-interactive Personal install explains the prerequisite before product state', () => {
+test('non-interactive Personal install asks for an explicit non-interactive choice', () => {
   const { home, result } = run(['install']);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout, /Pulse Personal/);
-  assert.match(result.stdout, /cards in Memory Home/);
-  assert.match(result.stdout, /Technical details: pulse install-plan --json/);
-  assert.doesNotMatch(result.stdout, /Current state:|Local writes:|Workspace:|Repository:/);
-  assert.match(result.stdout, /workspace_not_git/);
+  assert.match(result.stdout, /Found compatible AI apps:/);
+  assert.match(result.stderr, /use --dry-run.*or --yes/i);
   assert.equal(existsSync(join(home, '.pulse')), false);
 });
 
@@ -518,22 +530,27 @@ test('init claude-code dry run prints install plan and writes nothing', () => {
   const { cwd, home, result } = run(['init', 'claude-code', '--dry-run']);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Pulse install plan/);
-  assert.match(result.stdout, /Will install:/);
-  assert.match(result.stdout, /Will not:/);
-  assert.match(result.stdout, /Run with --yes/);
+  assert.match(result.stdout, /Pulse Personal install/);
+  assert.match(result.stdout, /Local writes:/);
+  assert.match(result.stdout, /Activation: every compatible AI app found/);
+  assert.match(result.stdout, /Dry run only\. Nothing was written\./);
   assert.equal(existsSync(join(home, '.pulse')), false);
   assert.equal(existsSync(join(cwd, '.claude')), false);
   assert.equal(existsSync(join(cwd, '.mcp.json')), false);
 });
 
 for (const host of ['codex', 'cursor']) {
-  test(`init ${host} dry run prints the host plan and writes nothing`, () => {
-    const { cwd, home, result } = run(['init', host, '--dry-run']);
+  test(`init ${host} --only dry run limits the plan and writes nothing`, {
+    skip: process.platform === 'win32' ? 'POSIX CLI fixture; Windows detection has native adapter coverage' : false,
+  }, () => {
+    const { cwd, home, result } = runWithDetectedHost(
+      ['init', host, '--only', host, '--dry-run'], host,
+    );
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Pulse install plan/);
-    assert.match(result.stdout, new RegExp(`Target host: ${host}`, 'i'));
+    assert.match(result.stdout, /Pulse Personal install/);
+    assert.match(result.stdout, /Activation: only the selected compatible AI app/);
+    assert.match(result.stdout, new RegExp(`- ${host}: will be connected`, 'i'));
     assert.match(result.stdout, /Dry run only\. Nothing was written\./);
     assert.equal(existsSync(join(home, '.pulse')), false);
     assert.equal(existsSync(join(cwd, '.cursor')), false);
@@ -546,7 +563,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.7.0');
+  assert.equal(report.version, '0.7.1');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
@@ -810,10 +827,10 @@ test('stop removes the preview daemon pid file when process is absent', () => {
 });
 
 test('product init fails closed before writing config when Claude Code is unavailable', () => {
-  const { cwd, result } = run(['init', 'claude-code', '--yes']);
+  const { cwd, result } = run(['init', 'claude-code', '--only', 'claude-code', '--yes']);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /automatic lifecycle unavailable: missing/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /supported_harness_missing/);
 
   const list = spawnSync('find', [cwd, '-maxdepth', '1', '-name', '.mcp.json'], {
     encoding: 'utf8',
@@ -821,29 +838,22 @@ test('product init fails closed before writing config when Claude Code is unavai
   assert.equal(list.stdout.trim(), '');
 });
 
-test('connect claude-code dry run exposes the pinned secret-free product lifecycle', () => {
+test('connect before installation explains that init must run first', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run']);
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
-  for (const event of [
-    'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact',
-    'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop',
-  ]) assert.match(result.stdout, new RegExp(`claude-hook ${event}`));
-  assert.match(result.stdout, /startup\|resume\|clear\|compact/);
-  assert.match(result.stdout, /PULSE_DATA_DIR=/);
-  assert.doesNotMatch(result.stdout, /PULSE_CLAUDE_HOOKS_DIGEST=/);
-  assert.doesNotMatch(result.stdout, /PULSE_API_KEY|\bnpx\b|@zbs-gg\/pulse@preview/);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /First run "pulse init claude-code"/);
+  assert.doesNotMatch(result.stderr, /ENOENT|workspace-bindings\.json/);
 });
 
-test('connect claude-code never falls back to mutable preview npm registration', () => {
+test('connect before installation never falls back to mutable preview npm registration', () => {
   const { result } = run(['connect', 'claude-code', '--dry-run'], {
     PULSE_MCP_ENTRYPOINT: '/tmp/pulse-mcp-missing/dist/index.js',
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /runtime\/codex\/current\/src\/cli\.js claude-mcp/);
-  assert.doesNotMatch(result.stdout, /\bnpx\b|@zbs-gg\/pulse@preview/);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /First run "pulse init claude-code"/);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /\bnpx\b|@zbs-gg\/pulse@preview/);
 });
 
 test('pulse mcp serves stdio MCP tools with the standalone store', () => {
@@ -886,15 +896,11 @@ test('pulse mcp serves stdio MCP tools with the standalone store', () => {
   assert.equal(existsSync(join(home, '.pulse', 'standalone', 'store.json')), true);
 });
 
-test('connect claude-code remote-control dry run prints mobile start path', () => {
+test('connect remote-control also requires an existing installation', () => {
   const { result } = run(['connect', 'claude-code', '--remote-control', '--dry-run']);
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Claude Code connect dry run/);
-  assert.match(result.stdout, /Remote Control/);
-  assert.match(result.stdout, /claude --remote-control "Pulse Memory"/);
-  assert.match(result.stdout, /Claude mobile/);
-  assert.match(result.stdout, /pulse_graph_delta/);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /First run "pulse init claude-code"/);
 });
 
 test('disconnect claude-code removes Pulse hooks and project MCP fallback', () => {
@@ -1003,6 +1009,7 @@ test('home exchanges the daemon secret internally and opens a one-shot credentia
       },
     };
   });
+	const startedAt = Date.now();
 
   try {
     const result = await runInWorkspaceAsync([
@@ -1010,9 +1017,12 @@ test('home exchanges the daemon secret internally and opens a one-shot credentia
     ], cwd, home, {
       PULSE_OPEN_DRY_RUN: '1',
       PULSE_HOME_HANDOFF_TIMEOUT_MS: '1000',
+			PULSE_HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS: '100',
     });
 
     assert.equal(result.status, 0, result.stderr);
+		assert.ok(Date.now() - startedAt < 2_000,
+			'one-shot relay replay check must finish within its own navigation bound');
     assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
     assert.equal(result.stderr, '');
     assert.equal(stub.requests.length, 1);
@@ -1176,6 +1186,89 @@ test('home bounds an unresponsive daemon session exchange', async () => {
   } finally {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('home does not wait on a binding update held by another local process', async () => {
+	const home = mkdtempSync(join(tmpdir(), 'pulse-home-binding-lock-home.'));
+	const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-binding-lock-cwd.'));
+	const trust = join(home, 'trust');
+	const registryPath = join(trust, 'bindings.json');
+	const publicKeyPath = join(trust, 'bindings.pub');
+	const anchorPath = join(trust, 'bindings.anchor');
+	mkdirSync(trust, { recursive: true, mode: 0o700 });
+	writeFileSync(publicKeyPath, 'synthetic public key\n', { mode: 0o600 });
+	writeFileSync(anchorPath, '{}\n', { mode: 0o600 });
+	const release = createPlatformServices().acquirePrivateLock(`${registryPath}.lock`, {
+		staleAfterMs: 0, timeoutMs: 0,
+	});
+	const startedAt = Date.now();
+
+	try {
+		const result = await runInWorkspaceAsync(['home'], cwd, home, {
+			PULSE_OPEN_DRY_RUN: '1',
+			PULSE_TRUST_MODE: 'test',
+			PULSE_BINDING_REGISTRY_PATH: registryPath,
+			PULSE_BINDING_PUBLIC_KEY_PATH: publicKeyPath,
+			PULSE_BINDING_ANCHOR_PATH: anchorPath,
+			PULSE_HOME_BINDING_LOCK_TIMEOUT_SECONDS: '1',
+			PULSE_HOME_REQUEST_TIMEOUT_MS: '50',
+		});
+
+		assert.equal(result.status, 1);
+		assert.ok(Date.now() - startedAt < 4_000,
+			'Memory Home must not inherit the ordinary 30 second binding recovery wait');
+		assert.doesNotMatch(result.stdout + result.stderr, /synthetic public key|bindings\.json|bindings\.anchor/);
+	} finally {
+		release();
+	}
+});
+
+test('home opens without launching the external Codex program', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('portable hanging executable fixture uses a POSIX shebang');
+    return;
+  }
+  const home = mkdtempSync(join(tmpdir(), 'pulse-home-slow-codex-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-home-slow-codex-cwd.'));
+  const dataDir = join(home, '.pulse');
+  const binDir = join(home, 'bin');
+	const launchMarker = join(home, 'codex-was-launched');
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(dataDir, 'secret.key'), 'slow-codex-daemon-secret');
+  writeExecutable(join(binDir, 'codex'), [
+		`#!${process.execPath}`,
+		`require('node:fs').writeFileSync(${JSON.stringify(launchMarker)}, 'launched\\n');`,
+		'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);',
+		'',
+	].join('\n'));
+  const stub = await withPulseStub((req) => ({
+    body: {
+      cookie_name: 'pulse_home',
+      cookie_value: 'slow-codex-browser-session',
+      cookie_path: testHomeRoutePath,
+      max_age_seconds: 30,
+      target_url: `http://${req.headers.host}${testHomeRoutePath}`,
+    },
+  }));
+  const startedAt = Date.now();
+
+  try {
+    const result = await runInWorkspaceAsync([
+      'home', '--host', 'codex', '--base', stub.baseUrl, '--data-dir', dataDir,
+    ], cwd, home, {
+      PATH: `${binDir}:/usr/bin:/bin`,
+      PULSE_OPEN_DRY_RUN: '1',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+		assert.ok(Date.now() - startedAt < 2_000, 'Memory Home must not launch external Codex inspection');
+		assert.equal(existsSync(launchMarker), false, 'pulse home launched the external Codex program');
+    assert.equal(result.stdout, '[pulse] Memory Home opened.\n');
+    assert.doesNotMatch(result.stdout + result.stderr, /slow-codex-daemon-secret|slow-codex-browser-session/);
+  } finally {
+    await stub.close();
   }
 });
 

@@ -52,7 +52,7 @@ test('public package audit rejects repository archives, personal paths, emails, 
   try {
     mkdirSync(join(packageRoot, 'src'), { recursive: true });
     mkdirSync(join(packageRoot, 'release'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.0"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.1"}\n');
     writeFileSync(join(packageRoot, 'src', 'cli.js'), 'export const ready = true;\n');
     writeFileSync(join(packageRoot, 'release', 'pulse-release-root.pem'), [
       '-----BEGIN PUBLIC KEY-----',
@@ -119,7 +119,7 @@ test('vendored MCP manifest advertises only scripts present in the public packag
   try {
     const nestedRoot = join(packageRoot, 'vendor', 'pulse-preview-source', 'mcp');
     mkdirSync(join(nestedRoot, 'src'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.0"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.1"}\n');
     const sourcePackageJSON = JSON.parse(readFileSync(join(root, 'mcp', 'package.json'), 'utf8'));
     const publicPackageJSON = publicMcpPackageManifest(sourcePackageJSON);
     writeFileSync(join(nestedRoot, 'package.json'), `${JSON.stringify(publicPackageJSON, null, 2)}\n`);
@@ -141,11 +141,12 @@ test('vendored MCP manifest advertises only scripts present in the public packag
   }
 });
 
-test('release verification is reproducible and includes only the packed Personal gate', () => {
+test('release verification includes the scanned archive and isolated native install', () => {
   const makefile = readFileSync(join(root, 'Makefile'), 'utf8');
 	assert.match(makefile, /verify:[\s\S]*test:personal-clean-room[\s\S]*test:personal-interruption[\s\S]*test:personal-multiharness[\s\S]*test:personal-consolidation-report[\s\S]*test:codex-product/);
   assert.match(makefile, /^personal-package-verify:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent verify:personal-package/m);
-  assert.match(makefile, /^release-verify: verify personal-package-verify/m);
+  assert.match(makefile, /^personal-native-packed-e2e:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent test:personal-native-packed/m);
+  assert.match(makefile, /^release-verify: verify personal-package-verify personal-native-packed-e2e/m);
 
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
   assert.equal(
@@ -203,13 +204,17 @@ test('release verification is reproducible and includes only the packed Personal
 		join(root, 'pulse-app', 'cli', 'scripts', 'personal-native-packed-e2e.mjs'), 'utf8',
 	);
 	assert.match(nativePacked, /process\.platform === 'win32' \? 5 \* 60_000 : 15 \* 60_000/);
+	assert.match(nativePacked, /firstValueMs <= 60_000/);
+	assert.doesNotMatch(nativePacked, /firstValueLimitMs/);
 	assert.match(nativePacked, /taskkill\.exe/);
 	assert.match(nativePacked, /\['\/PID', String\(child\.pid\), '\/T', '\/F'\]/);
-	assert.match(nativePacked, /await packedPulse\(tarball, \['install', '--json'\]/);
+	assert.match(nativePacked, /await packedPulse\(tarball, \['init', 'codex', '--yes', '--json'\]/);
 	assert.match(nativePacked, /PULSE_PERSONAL_PACKED_TARBALL/);
 	const universalTarget = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'native-universal-target.mjs'), 'utf8',
 	);
+	assert.match(universalTarget, /productReceipt\.first_value_ms <= 60_000/);
+	assert.doesNotMatch(universalTarget, /firstValueLimitMs/);
 	assert.match(universalTarget, /process\.env\.PULSE_CURSOR_VERSION/);
 	assert.doesNotMatch(universalTarget, /cursorExecutable, \['--version'\]/);
 	assert.match(universalTarget, /pulse\.personal_consolidation_report_fixture\.v1/);
@@ -220,6 +225,7 @@ test('release verification is reproducible and includes only the packed Personal
 	assert.equal((universalWorkflow.match(/PULSE_CURSOR_VERSION=/g) ?? []).length, 3);
 	assert.match(universalWorkflow, /name: Packed npm input/);
 	assert.match(universalWorkflow, /needs: \[contract, package\]/);
+	assert.match(universalWorkflow, /timeout-minutes: \$\{\{ matrix\.job_timeout_minutes \}\}/);
 	assert.match(universalWorkflow, /PULSE_PERSONAL_PACKED_TARBALL/);
 	const runtimeInstaller = readFileSync(
 		join(root, 'pulse-app', 'cli', 'src', 'personal-runtime-installer.js'), 'utf8',
@@ -285,7 +291,7 @@ test('release verification is reproducible and includes only the packed Personal
 		'docs/PERSONAL_PULSE_ONBOARDING.md', 'pulse-app/cli/README.md',
 	]) {
 		const document = readFileSync(join(root, relative), 'utf8');
-		assert.match(document, /npx (?:-y )?@zbs-gg\/pulse@(?:preview|0\.7\.0) install/,
+		assert.match(document, /npx (?:-y )?@zbs-gg\/pulse@(?:preview|0\.7\.1) init codex/,
 			`${relative} must lead with the one-command Personal install`);
 		assert.match(document, /Codex/);
 		assert.match(document, /Memory Home/);
@@ -444,8 +450,8 @@ test('scheduled snapshot refresh is inactive before Gold and fail-closed after a
   const workflow = readFileSync(
     join(root, '.github', 'workflows', 'refresh-production-snapshot.yml'), 'utf8',
   );
-  assert.match(workflow, /releases\/tags\/v0\.7\.0/);
-  assert.match(workflow, /git\/ref\/tags\/v0\.7\.0/);
+  assert.match(workflow, /releases\/tags\/v0\.7\.1/);
+  assert.match(workflow, /git\/ref\/tags\/v0\.7\.1/);
   assert.match(workflow, /test "\$status" = 200/);
   assert.match(workflow, /test "\$status" = 404 && test "\$tag_status" = 404/);
   assert.match(workflow, /test "\$GITHUB_EVENT_NAME" = schedule/);
@@ -464,8 +470,8 @@ test('public soak requires four timed 18-pair registry runs and Gold remains hum
   assert.match(soak, /^name: Public registry soak$/m);
   assert.match(soak, /options: \['0', '24', '48', '72'\]/);
   assert.match(soak, /dist-tags\.preview/);
-  assert.match(soak, /npm pack @zbs-gg\/pulse@0\.7\.0/);
-  assert.match(soak, /https:\/\/releases\.zbs\.gg\/pulse\/0\.7\.0\/catalog\/snapshot\.json/);
+  assert.match(soak, /npm pack @zbs-gg\/pulse@0\.7\.1/);
+  assert.match(soak, /https:\/\/releases\.zbs\.gg\/pulse\/0\.7\.1\/catalog\/snapshot\.json/);
   assert.match(soak, /--max-redirs 0/);
   assert.match(soak, /--range 0-1023/);
   assert.match(soak, /npm audit --omit=dev --audit-level=high/);
@@ -490,7 +496,7 @@ test('public soak requires four timed 18-pair registry runs and Gold remains hum
   assert.match(verify, /dist-tags\.preview/);
   assert.match(verify, /dist-tags\.latest/);
   assert.match(verify, /cmp "\$\{preview\[0\]\}" "\$\{latest\[0\]\}"/);
-  assert.match(verify, /v0\.7\.0\^\{commit\}/);
+  assert.match(verify, /v0\.7\.1\^\{commit\}/);
   assert.match(verify, /generate:native-support-ledger/);
   assert.doesNotMatch(verify, /npm publish|npm stage publish|npm dist-tag|gh release create|git tag/);
 

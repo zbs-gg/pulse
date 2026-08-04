@@ -22,6 +22,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createInitialPersonalWorkspaceBinding,
@@ -122,6 +123,7 @@ import {
 	productBindingRequestHeaders,
 	readProductActivation,
 	readProductActivationBundle,
+	resolveProductWorkspaceBinding,
 } from './codex-runtime.js';
 import {
   SupervisorError,
@@ -152,7 +154,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.7.0';
+const PREVIEW_VERSION = '0.7.1';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -165,7 +167,7 @@ const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores mem
 const CODEX_PRODUCT_MCP_ARGS = Object.freeze([
   '--input-type=module',
   '--eval',
-  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.1','mcp','server.mjs')).href);",
 ]);
 
 const args = process.argv.slice(2);
@@ -212,10 +214,10 @@ Usage:
   pulse cursor-hook sessionStart|beforeSubmitPrompt|preToolUse|postToolUse|preCompact|stop
   pulse connect cursor
   pulse install-plan [--json]
-  pulse install [--json]
+  pulse install [--dry-run|--yes] [--only codex|claude-code|cursor]
   pulse repair [--json]
   pulse install-plan claude-code [--json]   legacy Claude Code preview plan
-  pulse init codex|claude-code|cursor [--dry-run|--yes]
+  pulse init codex|claude-code|cursor [--dry-run|--yes] [--only codex|claude-code|cursor]
   pulse demo [--clean]
   pulse doctor
   pulse doctor codex
@@ -396,7 +398,7 @@ function currentNativePackedFixtureAttestation(workspace, release) {
   return attestation;
 }
 
-async function currentPersonalInstallPlan() {
+async function currentPersonalInstallPlan({ selectedHosts } = {}) {
   let releaseInspection;
   let releaseReasonCode;
   try {
@@ -416,11 +418,138 @@ async function currentPersonalInstallPlan() {
     release: releaseInspection?.release,
     releaseReasonCode,
     currentState: inspectPersonalPreflightState(workspace, releaseInspection?.release),
+    selectedHosts,
     detectWorkspace: () => {
       if (workspaceError) throw workspaceError;
       return workspace;
     },
   });
+}
+
+const PERSONAL_INSTALL_HOST_NAMES = Object.freeze({
+  codex: 'Codex',
+  'claude-code': 'Claude Code',
+  cursor: 'Cursor',
+});
+
+function parsePersonalInstallOptions(argv, { requestedHost } = {}) {
+  const allowedFlags = new Set(['--dry-run', '--json', '--only', '--yes']);
+  const positional = [];
+  let onlyHost;
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--only') {
+      if (onlyHost !== undefined || index + 1 >= argv.length) {
+        throw new Error('pulse install requires --only codex|claude-code|cursor');
+      }
+      onlyHost = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--')) {
+      if (!allowedFlags.has(value)) throw new Error(`unknown install option: ${value}`);
+      continue;
+    }
+    positional.push(value);
+  }
+  if (positional.length > 0) throw new Error(`unexpected install argument: ${positional[0]}`);
+  if (onlyHost !== undefined && !SUPPORTED_HOST_IDS.includes(onlyHost)) {
+    throw new Error('pulse install requires --only codex|claude-code|cursor');
+  }
+  if (requestedHost && onlyHost && requestedHost !== onlyHost) {
+    throw new Error(`pulse init ${requestedHost} cannot be combined with --only ${onlyHost}`);
+  }
+  if (argv.includes('--dry-run') && argv.includes('--yes')) {
+    throw new Error('choose either --dry-run or --yes, not both');
+  }
+  return {
+    dryRun: argv.includes('--dry-run'),
+    json: argv.includes('--json'),
+    onlyHost,
+    yes: argv.includes('--yes'),
+  };
+}
+
+function compatibleInstallHosts(plan) {
+  return (plan.detected?.hosts ?? []).filter((host) => host.compatible).map((host) => host.host);
+}
+
+async function choosePersonalInstallHosts({ input, output, plan, requestedHost }) {
+  const found = compatibleInstallHosts(plan);
+  const names = found.map((host) => PERSONAL_INSTALL_HOST_NAMES[host] ?? host);
+  output.write(`\nFound compatible AI apps: ${names.join(', ') || 'none'}.\n`);
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error('interactive installation needs a terminal; use --dry-run to inspect it or --yes to confirm all found AI apps');
+  }
+  const prompt = createInterface({ input, output });
+  try {
+    if (requestedHost) {
+      const requestedName = PERSONAL_INSTALL_HOST_NAMES[requestedHost] ?? requestedHost;
+      const answer = await prompt.question(
+        `Connect [1] all found AI apps (default), [2] only ${requestedName}, or [3] cancel? `,
+      );
+      const selected = answer.trim() || '1';
+      if (selected === '1') return undefined;
+      if (selected === '2') return [requestedHost];
+      if (selected === '3') return null;
+    } else {
+      const answer = await prompt.question('Connect [1] all found AI apps (default), or [2] cancel? ');
+      const selected = answer.trim() || '1';
+      if (selected === '1') return undefined;
+      if (selected === '2') return null;
+    }
+    throw new Error('installation choice must be one of the shown numbers');
+  } finally {
+    prompt.close();
+  }
+}
+
+async function runPersonalInstallWizard({ argv, requestedHost } = {}) {
+  const options = parsePersonalInstallOptions(argv, { requestedHost });
+  let selectedHosts = options.onlyHost ? [options.onlyHost] : undefined;
+  if (!options.onlyHost && !options.yes && !options.dryRun && !options.json) {
+    const discovery = await currentPersonalInstallPlan();
+    selectedHosts = await choosePersonalInstallHosts({
+      input: process.stdin,
+      output: process.stdout,
+      plan: discovery,
+      requestedHost,
+    });
+    if (selectedHosts === null) {
+      console.log('\nPulse installation cancelled. Nothing was changed.');
+      return;
+    }
+  }
+  const buildPlan = () => currentPersonalInstallPlan({ selectedHosts });
+  if (options.dryRun) {
+    const plan = await buildPlan();
+    printPersonalInstallPlan(plan, { json: options.json });
+    if (!options.json) console.log('\nDry run only. Nothing was written.');
+    return;
+  }
+  const executed = await executePersonalInstallCommand({
+    argv,
+    buildDependencies: personalInstallDependencies,
+    buildPlan,
+    dataDir: DATA_DIR,
+    mode: 'install',
+    showDetailedPlan: true,
+    yesApprovesInstall: true,
+  });
+  if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
+}
+
+async function connectInstalledPersonalHost(target) {
+  try {
+    await recoverBindingAuthority();
+    resolveProductWorkspaceBinding({ cwd: process.cwd() });
+    readProductActivation(DATA_DIR);
+  } catch {
+    throw new Error(`Pulse Personal is not installed for this project. First run "pulse init ${target}".`);
+  }
+  if (target === 'codex') await connectCodex();
+  else if (target === 'cursor') await connectCursor();
+  else await connectClaudeCode();
 }
 
 function privateStateFileStatus(path) {
@@ -1114,7 +1243,7 @@ function personalInstallHostRegistry(targets) {
   };
 }
 
-function personalInstallCoreHealth(core, activation) {
+async function personalInstallCoreHealth(core, activation) {
   if (core?.ready !== true) {
     return { ready: false, full_retrieval: false, outcome: 'action_required', reason_code: 'daemon_unavailable' };
   }
@@ -1126,6 +1255,30 @@ function personalInstallCoreHealth(core, activation) {
       ready: false, full_retrieval: true, outcome: 'action_required',
       reason_code: activation?.hosts?.[0]?.reason_code ?? 'supported_harness_activation_failed',
       host_status: activation,
+    };
+  }
+  try {
+    const resolved = core.context?.resolved;
+    const dataDir = resolved?.runtime?.data_dir;
+    const baseURL = resolved?.runtime?.base_url;
+    if (typeof dataDir !== 'string' || typeof baseURL !== 'string') {
+      throw new Error('memory_home_runtime_missing');
+    }
+    const readinessChecks = Object.fromEntries([
+      'presence_trust', 'authority', 'codex', 'plugin', 'marketplace', 'plugin_mcp',
+      'mcp_shadow', 'legacy_hooks', 'native_hook_trust', 'binding', 'runtime',
+      'activation', 'vault', 'capture', 'retrieval', 'hooks',
+    ].map((name) => [name, { ok: true }]));
+    await requestHomeSession(
+      baseURL,
+      readSecretFromDataDir(dataDir),
+      projectPersonalLiveReadiness(readinessChecks, new Date()),
+      resolved,
+    );
+  } catch {
+    return {
+      ready: false, full_retrieval: true, outcome: 'action_required',
+      reason_code: 'memory_home_unavailable', host_status: activation,
     };
   }
   return {
@@ -1458,7 +1611,7 @@ async function runProductMcpServer(host) {
   await runMcpServer();
 }
 
-async function recoverBindingAuthority() {
+async function recoverBindingAuthority({ lockTimeoutSeconds = 30 } = {}) {
   const testAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const registryPath = process.env.PULSE_BINDING_REGISTRY_PATH;
   const publicKeyPath = process.env.PULSE_BINDING_PUBLIC_KEY_PATH;
@@ -1469,10 +1622,11 @@ async function recoverBindingAuthority() {
     }
     await recoverWorkspaceBindingTransaction({
       registryPath, publicKeyPath, anchorPath, rootPublicKey: false, rootAnchor: false,
+			lockTimeoutSeconds,
     });
     return;
   }
-  await recoverWorkspaceBindingTransaction();
+  await recoverWorkspaceBindingTransaction({ lockTimeoutSeconds });
 }
 
 async function runCodexMcpServer() {
@@ -1487,16 +1641,19 @@ async function runCursorMcpServer() {
   await runProductMcpServer('cursor');
 }
 
-function codexCommand(args, { executable = 'codex' } = {}) {
+function codexCommand(args, { executable = 'codex', timeoutMs = 30_000 } = {}) {
   if (executable !== 'codex' && (!isAbsolute(executable) || resolve(executable) !== executable)) {
     throw new Error('codex executable must be an absolute canonical path');
   }
+	if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+		throw new Error('codex command timeout must be between 1 and 30000 milliseconds');
+	}
   const command = executable !== 'codex' && executable.endsWith('.js') ? process.execPath : executable;
   const commandArgs = command === process.execPath ? [executable, ...args] : args;
   const result = spawnSync(command, commandArgs, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 30_000,
+		timeout: timeoutMs,
     killSignal: 'SIGTERM',
   });
   if (result.status !== 0) {
@@ -1506,10 +1663,10 @@ function codexCommand(args, { executable = 'codex' } = {}) {
   return `${result.stdout || ''}${result.stderr || ''}`.trim();
 }
 
-function codexMarketplaceStatus(codexExecutable = 'codex') {
+function codexMarketplaceStatus(codexExecutable = 'codex', { timeoutMs = 30_000 } = {}) {
 	try {
 		return parseCodexMarketplaceList(codexCommand(
-			['plugin', 'marketplace', 'list'], { executable: codexExecutable },
+			['plugin', 'marketplace', 'list'], { executable: codexExecutable, timeoutMs },
 		));
 	} catch (error) {
 		return { configured: false, root: undefined, error: error.message };
@@ -1881,11 +2038,11 @@ function disconnectCodexActivation() {
 		: '[pulse] Codex disconnected and the unused global plugin was removed. Existing Personal memory was preserved.');
 }
 
-function codexPluginStatus(codexExecutable = 'codex') {
+function codexPluginStatus(codexExecutable = 'codex', { timeoutMs = 30_000 } = {}) {
   try {
     return parsePulsePluginList(codexCommand(
       ['plugin', 'list', '--marketplace', 'zbs-gg'],
-      { executable: codexExecutable },
+			{ executable: codexExecutable, timeoutMs },
     ));
 	} catch (error) {
 		return { installed: false, enabled: false, path: undefined, error: error.message };
@@ -1933,9 +2090,11 @@ function codexProductConnectedForWorkspace(captureState, binding) {
 	}
 }
 
-function inspectCodexDoctorProductGeneration({ codexReady, codexExecutable }) {
+function inspectCodexDoctorProductGeneration({
+	codexReady, codexExecutable, commandTimeoutMs = 30_000,
+}) {
 	const plugin = codexReady
-		? codexPluginStatus(codexExecutable)
+		? codexPluginStatus(codexExecutable, { timeoutMs: commandTimeoutMs })
 		: { installed: false, enabled: false, path: undefined };
 	const installedRuntime = inspectCodexRuntime(DATA_DIR);
 	let productActivation;
@@ -1946,18 +2105,18 @@ function inspectCodexDoctorProductGeneration({ codexReady, codexExecutable }) {
 		productActivation = productState.activation;
 		productEdge = committedCodexProductEdge(productState);
 	} catch (error) { productActivationError = error.message; }
-	const pluginCompatibility = productEdge
-		? inspectCodexPluginCompatibility(plugin, productEdge)
-		: { ok: false, reason: 'codex_product_edge_unavailable', detail: productActivationError ?? 'signed Codex product edge unavailable' };
 	const cachePluginRoot = productEdge ? join(
 		codexHomePath(), 'plugins', 'cache', 'zbs-gg', 'pulse', productEdge.release_version,
 	) : undefined;
+	const pluginCompatibility = productEdge
+		? inspectCodexPluginCompatibility(plugin, productEdge)
+		: { ok: false, reason: 'codex_product_edge_unavailable', detail: productActivationError ?? 'signed Codex product edge unavailable' };
 	const cachePluginCompatibility = productEdge
 		? inspectCodexPluginCompatibility({
 			installed: true, enabled: true, version: productEdge.release_version, path: cachePluginRoot,
 		}, productEdge)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
-	const marketplace = codexMarketplaceStatus(codexExecutable);
+	const marketplace = codexMarketplaceStatus(codexExecutable, { timeoutMs: commandTimeoutMs });
 	const marketplaceSnapshot = productEdge
 		? inspectCodexMarketplaceSnapshot(productEdge, DATA_DIR)
 		: { ok: false, reason: 'codex_product_edge_unavailable', detail: 'signed Codex product edge unavailable' };
@@ -1989,17 +2148,20 @@ function codexDoctorProductGenerationIdentity(generation) {
 	})).digest('hex');
 }
 
-async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
+async function codexDoctorReport({
+	codexExecutable = 'codex', commandTimeoutMs = 30_000, versionTimeoutMs = 5000,
+	nativeHookTimeoutMs = 5000, liveProbeTimeoutMs = 1500, bindingLockTimeoutSeconds = 30,
+} = {}) {
 	const syntheticAuthority = process.env.PULSE_TRUST_MODE === 'test';
   const presenceTrust = syntheticAuthority
     ? { ready: true, status: 'synthetic_test_authority', issues: [] }
     : inspectPresenceTrust({ probePublicKey: true });
   const authorityProfile = personalAuthorityProfileForDoctor(presenceTrust, { syntheticAuthority });
-  const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
-    ? checkCommandVersion(process.execPath, [codexExecutable, '--version'])
-    : checkCommandVersion(codexExecutable, ['--version']);
+	const codex = codexExecutable !== 'codex' && codexExecutable.endsWith('.js')
+		? checkCommandVersion(process.execPath, [codexExecutable, '--version'], versionTimeoutMs)
+		: checkCommandVersion(codexExecutable, ['--version'], versionTimeoutMs);
 	const productGenerationBefore = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationIdentity = codexDoctorProductGenerationIdentity(productGenerationBefore);
 	let {
@@ -2019,7 +2181,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
   let runtime;
   let bindingError;
   try {
-	await recoverBindingAuthority();
+	await recoverBindingAuthority({ lockTimeoutSeconds: bindingLockTimeoutSeconds });
     binding = resolveCodexMcpRuntime(process.cwd()).binding;
     runtime = vaultRuntimeFromBinding(binding);
   } catch (error) {
@@ -2094,6 +2256,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 			marketplacePluginRoot: marketplaceSnapshot.plugin_root,
 			cachePluginRoot,
 			edge: productEdge,
+			timeoutMs: nativeHookTimeoutMs,
 		})
 		: Promise.resolve({
 			ready: false,
@@ -2104,7 +2267,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 		if (!binding || !runtime || runtimeStatus.status !== 'running') return {};
 		try {
 			const liveStatus = await boundPulseRequest({ binding, runtime }, '/memory/status', {
-				method: 'GET', timeoutMs: 1500,
+				method: 'GET', timeoutMs: liveProbeTimeoutMs,
 			});
 			return { liveStatus };
 		} catch (error) {
@@ -2116,7 +2279,7 @@ async function codexDoctorReport({ codexExecutable = 'codex' } = {}) {
 		liveProbePromise,
 	]);
 	const productGenerationAfter = inspectCodexDoctorProductGeneration({
-		codexReady: codex.ok, codexExecutable,
+		codexReady: codex.ok, codexExecutable, commandTimeoutMs,
 	});
 	const productGenerationStable = productGenerationIdentity ===
 		codexDoctorProductGenerationIdentity(productGenerationAfter);
@@ -3326,13 +3489,13 @@ function safeReadJSON(path) {
   }
 }
 
-function checkCommandVersion(name, versionArgs = ['--version']) {
+function checkCommandVersion(name, versionArgs = ['--version'], timeoutMs = 5000) {
   if (!commandOnPath(name)) {
     return { ok: false, detail: 'missing' };
   }
   const result = spawnSync(name, versionArgs, {
     encoding: 'utf8',
-    timeout: 5000,
+		timeout: timeoutMs,
   });
   if (result.status !== 0) {
     return { ok: false, detail: 'found but did not answer' };
@@ -7066,12 +7229,30 @@ function productActivationEvidenceForViewer() {
 
 const HOME_SESSION_RESPONSE_MAX_BYTES = 16 * 1024;
 const HOME_SESSION_MAX_AGE_SECONDS = 60 * 60;
-const HOME_REQUEST_TIMEOUT_MS = 90_000;
-const HOME_REQUEST_TIMEOUT_MAX_MS = 120_000;
+const HOME_REQUEST_TIMEOUT_MS = 5000;
+const HOME_REQUEST_TIMEOUT_MAX_MS = 30_000;
 const HOME_HANDOFF_TIMEOUT_MS = 60_000;
+const HOME_BINDING_LOCK_TIMEOUT_SECONDS = 2;
+const HOME_BINDING_LOCK_TIMEOUT_MAX_SECONDS = 5;
+const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS = 2000;
+const HOME_DRY_RUN_NAVIGATION_TIMEOUT_MAX_MS = 5000;
 
 function boundedHomeTimeout(name, fallback, maximum) {
 	return Math.min(positiveEnvInt(name, fallback), maximum);
+}
+
+function homeBindingLockTimeoutSeconds() {
+	return boundedHomeTimeout(
+		'PULSE_HOME_BINDING_LOCK_TIMEOUT_SECONDS',
+		HOME_BINDING_LOCK_TIMEOUT_SECONDS,
+		HOME_BINDING_LOCK_TIMEOUT_MAX_SECONDS,
+	);
+}
+
+function homeAcceptanceStage(name) {
+	if (process.env.PULSE_HOME_ACCEPTANCE_STAGES === '1') {
+		process.stderr.write(`[pulse-home-stage] ${name}\n`);
+	}
 }
 
 function homeSessionCookie(session) {
@@ -7133,60 +7314,73 @@ function validateHomeSessionResponse(value, baseURL) {
 	};
 }
 
-async function readBoundedHomeResponse(response) {
-	if (!response.body || typeof response.body.getReader !== 'function') {
-		throw new Error('home_session_response_invalid');
-	}
-	const reader = response.body.getReader();
-	const chunks = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > HOME_SESSION_RESPONSE_MAX_BYTES) {
-				await reader.cancel();
-				throw new Error('home_session_response_oversized');
-			}
-			chunks.push(Buffer.from(value));
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	return Buffer.concat(chunks, total).toString('utf8');
-}
-
 async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 	requireLoopbackPulseIPC(baseURL);
 	const timeoutMs = boundedHomeTimeout(
 		'PULSE_HOME_REQUEST_TIMEOUT_MS', HOME_REQUEST_TIMEOUT_MS, HOME_REQUEST_TIMEOUT_MAX_MS,
 	);
-	const controller = new AbortController();
-	let timedOut = false;
-	const timer = setTimeout(() => {
-		timedOut = true;
-		controller.abort();
-	}, timeoutMs);
-	let response;
-	let responseText;
+	const requestBody = JSON.stringify({ live_readiness: liveReadiness });
+	let result;
 	try {
-		response = await fetch(`${baseURL.replace(/\/$/, '')}/home/session`, {
-			method: 'POST',
-			headers: {
-				...buildPulseRequestHeaders(baseURL, secret),
-				...(product ? productBindingRequestHeaders(product) : {}),
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({ live_readiness: liveReadiness }),
-			signal: controller.signal,
+		result = await new Promise((resolvePromise, rejectPromise) => {
+			let settled = false;
+			let response;
+			let timer;
+			const finish = (error, value) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) rejectPromise(error);
+				else resolvePromise(value);
+			};
+			const fail = (code) => {
+				if (settled) return;
+				const error = Object.assign(new Error(code), { code });
+				response?.destroy(error);
+				request.destroy(error);
+				finish(error);
+			};
+			const request = httpRequest(`${baseURL.replace(/\/$/, '')}/home/session`, {
+				method: 'POST',
+				agent: false,
+				headers: {
+					...buildPulseRequestHeaders(baseURL, secret),
+					...(product ? productBindingRequestHeaders(product) : {}),
+					'Content-Type': 'application/json',
+					'Content-Length': Buffer.byteLength(requestBody),
+					Connection: 'close',
+				},
+			}, (incoming) => {
+				response = incoming;
+				if (!Number.isInteger(incoming.statusCode) || incoming.statusCode < 200 || incoming.statusCode >= 300) {
+					incoming.resume();
+					fail('daemon_rejected_home_session');
+					return;
+				}
+				const chunks = [];
+				let total = 0;
+				incoming.on('data', (chunk) => {
+					total += chunk.length;
+					if (total > HOME_SESSION_RESPONSE_MAX_BYTES) {
+						fail('home_session_response_oversized');
+						return;
+					}
+					chunks.push(Buffer.from(chunk));
+				});
+				incoming.once('end', () => finish(undefined, {
+					statusCode: incoming.statusCode,
+					body: Buffer.concat(chunks, total).toString('utf8'),
+				}));
+				incoming.once('error', () => fail('home_session_response_invalid'));
+			});
+			request.once('error', (error) => finish(error));
+			timer = setTimeout(() => fail('home_session_request_timeout'), timeoutMs);
+			request.end(requestBody);
 		});
-		if (!response.ok) {
-			throw new Error('daemon_rejected_home_session');
-		}
-		responseText = await readBoundedHomeResponse(response);
 	} catch (error) {
-		if (timedOut) throw new Error('Memory Home session request timed out.');
+		if (error?.code === 'home_session_request_timeout') {
+			throw new Error('Memory Home session request timed out.');
+		}
 		if (error?.message === 'daemon_rejected_home_session') {
 			throw new Error('Pulse daemon rejected the Memory Home session request.');
 		}
@@ -7197,12 +7391,10 @@ async function requestHomeSession(baseURL, secret, liveReadiness, product) {
 			throw new Error('Pulse daemon returned an invalid Memory Home session.');
 		}
 		throw new Error('Memory Home session request failed.');
-	} finally {
-		clearTimeout(timer);
 	}
 	let parsed;
 	try {
-		parsed = JSON.parse(responseText);
+		parsed = JSON.parse(result.body);
 	} catch {
 		throw new Error('Pulse daemon returned an invalid Memory Home session.');
 	}
@@ -7231,11 +7423,15 @@ function startHomeBrowserRelay(session) {
 		resolveCompletion = resolve;
 		rejectCompletion = reject;
 	});
+	const closeServer = () => {
+		if (server.listening) server.close();
+		server.closeAllConnections?.();
+	};
 	const failRelay = (error) => {
 		if (completed) return;
 		completed = true;
 		clearTimeout(timer);
-		if (server.listening) server.close();
+		closeServer();
 		rejectCompletion(error);
 	};
 	const server = createServer((req, res) => {
@@ -7270,7 +7466,10 @@ function startHomeBrowserRelay(session) {
 		res.setHeader('Referrer-Policy', 'no-referrer');
 		res.setHeader('Connection', 'close');
 		server.close();
-		res.end(() => resolveCompletion());
+		res.end(() => {
+			server.closeAllConnections?.();
+			resolveCompletion();
+		});
 	});
 
 	return new Promise((resolve, reject) => {
@@ -7288,7 +7487,13 @@ function startHomeBrowserRelay(session) {
 			resolve({
 				url: `http://${expectedHost}/`,
 				completion,
-				close: () => failRelay(new Error('Memory Home browser handoff interrupted.')),
+				close: () => {
+					if (!completed) {
+						failRelay(new Error('Memory Home browser handoff interrupted.'));
+						return;
+					}
+					closeServer();
+				},
 			});
 		});
 	});
@@ -7296,15 +7501,33 @@ function startHomeBrowserRelay(session) {
 
 async function openHomeBrowserURL(url, session) {
 	if (process.env.PULSE_OPEN_DRY_RUN === '1') {
+		const timeoutMs = boundedHomeTimeout(
+			'PULSE_HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS',
+			HOME_DRY_RUN_NAVIGATION_TIMEOUT_MS,
+			HOME_DRY_RUN_NAVIGATION_TIMEOUT_MAX_MS,
+		);
 		const navigate = () => new Promise((resolve, reject) => {
+			let settled = false;
+			let timer;
+			const finish = (error, response) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) reject(error);
+				else resolve(response);
+			};
 			const request = httpRequest(url, {
 				method: 'GET',
 				headers: { 'Sec-Fetch-Mode': 'navigate', Connection: 'close' },
 			}, (response) => {
 				response.resume();
-				response.once('end', () => resolve(response));
+				response.once('end', () => finish(undefined, response));
+				response.once('error', finish);
 			});
-			request.once('error', reject);
+			timer = setTimeout(() => {
+				request.destroy(new Error('Memory Home dry-run navigation timed out.'));
+			}, timeoutMs);
+			request.once('error', finish);
 			request.end();
 		});
 		const response = await navigate();
@@ -7330,7 +7553,56 @@ async function openHomeBrowserURL(url, session) {
 	}
 }
 
-async function personalDoctorForHost(host) {
+function localHomeDoctorReport(host, product) {
+	const bound = Boolean(product?.binding && product?.runtime);
+	const capture = bound ? safeReadJSON(join(product.runtime.data_dir, 'capture-state.json')) : undefined;
+	const hostEnabled = bound && captureEnabledForHost(capture, host);
+	const available = { ok: true, detail: 'trusted local Memory Home binding' };
+	const unavailable = { ok: false, detail: 'trusted local Memory Home binding is unavailable' };
+	const adapter = hostEnabled ? available : {
+		ok: false,
+		detail: bound ? 'this AI program is not connected to the local memory' : unavailable.detail,
+	};
+	const core = {
+		presence_trust: available,
+		authority: bound ? available : unavailable,
+		binding: bound ? available : unavailable,
+		runtime: bound ? available : unavailable,
+		activation: bound ? available : unavailable,
+		vault: bound ? available : unavailable,
+		capture: adapter,
+		retrieval: bound ? available : unavailable,
+		hooks: adapter,
+	};
+	let checks;
+	let personalLiveReadiness;
+	if (host === 'codex') {
+		checks = {
+			...core,
+			codex: adapter,
+			plugin: adapter,
+			marketplace: adapter,
+			plugin_mcp: adapter,
+			mcp_shadow: adapter,
+			legacy_hooks: adapter,
+			native_hook_trust: adapter,
+		};
+		personalLiveReadiness = projectPersonalLiveReadiness(checks, new Date());
+	} else {
+		checks = { ...core, local_home_adapter: adapter };
+		personalLiveReadiness = projectSupportedHostLiveReadiness(host, checks, new Date());
+	}
+	return {
+		product: 'Pulse Personal Memory Home',
+		target_host: host,
+		inspection_scope: 'trusted_local_home_binding',
+		checks,
+		personal_live_readiness: personalLiveReadiness,
+	};
+}
+
+async function personalDoctorForHost(host, { homeProbe = false, product } = {}) {
+	if (homeProbe) return localHomeDoctorReport(host, product);
 	if (host === 'claude-code') return claudeProductDoctorReport();
 	if (host === 'codex') return codexDoctorReport();
 	if (host === 'cursor') return cursorProductDoctorReport();
@@ -7342,7 +7614,11 @@ async function homeDoctorReport(product, requestedHost) {
 	const enabledHosts = product
 		? SUPPORTED_HOST_IDS.filter((host) => captureEnabledForHost(capture, host))
 		: ['codex'];
-	return selectHomeDoctorReport({ requestedHost, enabledHosts, doctorForHost: personalDoctorForHost });
+	return selectHomeDoctorReport({
+		requestedHost,
+		enabledHosts,
+		doctorForHost: (host) => personalDoctorForHost(host, { homeProbe: true, product }),
+	});
 }
 
 async function runHome(rest) {
@@ -7358,8 +7634,10 @@ async function runHome(rest) {
 	let product;
 	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
 		try {
-			await recoverBindingAuthority();
+			homeAcceptanceStage('binding_recovery_started');
+			await recoverBindingAuthority({ lockTimeoutSeconds: homeBindingLockTimeoutSeconds() });
 			product = resolveCodexMcpRuntime(process.cwd());
+			homeAcceptanceStage('binding_recovery_finished');
 		} catch (error) {
 			if (productActivationEvidenceForViewer()) {
 				throw new Error(`Pulse product activation exists, but its bound vault cannot be trusted: ${error.message}`);
@@ -7370,15 +7648,20 @@ async function runHome(rest) {
 	const dataDir = resolve(explicitDataDir ?? product?.runtime.data_dir ?? DATA_DIR);
 	const baseURL = (explicitBaseURL ?? product?.runtime.base_url ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 	const secret = readSecretFromDataDir(dataDir, { create: product === undefined });
+	homeAcceptanceStage('doctor_started');
 	const doctor = await homeDoctorReport(product, explicitHost);
+	homeAcceptanceStage('doctor_finished');
 	const session = await requestHomeSession(baseURL, secret, doctor.personal_live_readiness, product);
+	homeAcceptanceStage('session_received');
 	const relay = await startHomeBrowserRelay(session);
+	homeAcceptanceStage('relay_started');
 	const interrupt = () => relay.close();
 	process.once('SIGINT', interrupt);
 	process.once('SIGTERM', interrupt);
 	try {
 		await openHomeBrowserURL(relay.url, session);
 		await relay.completion;
+		homeAcceptanceStage('relay_finished');
 		console.log('[pulse] Memory Home opened.');
 	} catch (error) {
 		relay.close();
@@ -9828,13 +10111,18 @@ async function main() {
     return;
   }
 
-  if (command === 'install' || command === 'repair') {
+  if (command === 'install') {
+    await runPersonalInstallWizard({ argv: args.slice(1) });
+    return;
+  }
+
+  if (command === 'repair') {
     const executed = await executePersonalInstallCommand({
       argv: args.slice(1),
       buildDependencies: personalInstallDependencies,
       buildPlan: currentPersonalInstallPlan,
       dataDir: DATA_DIR,
-      mode: command,
+      mode: 'repair',
     });
     if (executed.exitCode !== 0) process.exitCode = executed.exitCode;
     return;
@@ -9870,7 +10158,7 @@ async function main() {
 	}
 	try {
 	  await recoverBindingAuthority();
-	  const binding = resolveWorkspaceBinding({
+	  const binding = resolveProductWorkspaceBinding({
 		cwd: getArg('--cwd') ?? process.cwd(),
 	  });
 	  if (args.includes('--json')) {
@@ -9895,12 +10183,12 @@ async function main() {
 	}
 	try {
 	  await recoverBindingAuthority();
-	  const binding = resolveWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
+	  const binding = resolveProductWorkspaceBinding({ cwd: getArg('--cwd') ?? process.cwd() });
 	  const runtime = vaultRuntimeFromBinding(binding);
 	  let result;
 		if (subcommand === 'start') {
-			const daemonPath = process.env.PULSE_GO_BIN || join(DATA_DIR, 'bin', 'pulse-product-daemon');
-			result = await startVaultRuntime(runtime, { daemonPath });
+			await ensureActivatedVaultRuntime({ binding, runtime });
+			result = inspectVaultRuntime(runtime);
 		} else if (subcommand === 'stop') {
 			result = await stopVaultRuntimeAndWait(runtime);
 	  } else {
@@ -9925,31 +10213,17 @@ async function main() {
     if (!['codex', 'claude-code', 'cursor'].includes(target)) {
       throw new Error('pulse init supports: codex | claude-code | cursor');
     }
-    if (args.includes('--dry-run') || !args.includes('--yes')) {
-      printInstallPlan(target, { dryRun: true });
-      return;
-    }
-    if (target === 'codex') await connectCodex();
-    else if (target === 'cursor') await connectCursor();
-    else await connectClaudeCode();
+    await runPersonalInstallWizard({ argv: args.slice(2), requestedHost: target });
     return;
   }
 
   if (command === 'connect') {
-	    const target = args[1];
-	    if (target === 'claude-code') {
-	      await connectClaudeCode();
-	      return;
-	    }
-    if (target === 'codex') {
-      await connectCodex();
+    const target = args[1];
+    if (SUPPORTED_HOST_IDS.includes(target)) {
+      await connectInstalledPersonalHost(target);
       return;
     }
-    if (target === 'cursor') {
-      await connectCursor();
-      return;
-    }
-    throw new Error('v1 supports: pulse connect codex | claude-code | cursor');
+    throw new Error('pulse connect supports: codex | claude-code | cursor');
   }
 
   if (command === 'disconnect') {

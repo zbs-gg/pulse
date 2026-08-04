@@ -20,7 +20,7 @@ function fixture(t) {
   t.after(() => rmSync(root, { force: true, recursive: true }));
   const evidenceRoot = resolve(root, 'evidence');
   mkdirSync(evidenceRoot, { mode: 0o700 });
-  const tarballPath = resolve(root, 'zbs-gg-pulse-0.7.0.tgz');
+  const tarballPath = resolve(root, 'zbs-gg-pulse-0.7.1.tgz');
   const tarball = Buffer.from('exact-registry-package');
   writeFileSync(tarballPath, tarball, { mode: 0o600 });
   const packageSHA256 = createHash('sha256').update(tarball).digest('hex');
@@ -54,6 +54,8 @@ function fixture(t) {
         milestones: {
           disconnect: true, fresh_recall: true, install: true, lifecycle: true,
           memory_home: true, repair: true, vendor_session: true,
+          deduplicated: true, fail_open: true, memory_survived_restart: true,
+          no_automatic_continuation: true, stop_and_goal_control_available: true,
         },
         package: { bytes: tarball.length, sha256: packageSHA256 },
         privacy_defaults: { backend_llm: false, old_chat_import: false, raw_transcripts: false },
@@ -83,16 +85,16 @@ function fixture(t) {
     package: '@zbs-gg/pulse',
     production: true,
     production_ready: true,
-    release_epoch: 8,
+    release_epoch: 9,
     sbom_sha256: 'e'.repeat(64),
     schema: 'pulse.npm_production_candidate.v1',
     sha256: packageSHA256,
     snapshot_digest: SNAPSHOT,
     support_claim: false,
     targets: matrix.targets.map((target) => target.target_id).sort(),
-    tarball: 'zbs-gg-pulse-0.7.0.tgz',
+    tarball: 'zbs-gg-pulse-0.7.1.tgz',
     universal_run_id: 123,
-    version: '0.7.0',
+    version: '0.7.1',
   };
   const candidatePath = resolve(root, 'candidate.json');
   writeFileSync(candidatePath, `${canonicalReleaseJSON(candidate)}\n`, { mode: 0o600 });

@@ -331,7 +331,7 @@ export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoc
         gatekeeper: false, identifier: null, notarized: false,
         scheme: 'release-manifest', stapled: false, team_id: null,
       }),
-      url: `https://releases.zbs.gg/pulse/0.7.0/${filename}`, version: '0.7.0',
+      url: `https://releases.zbs.gg/pulse/0.7.1/${filename}`, version: '0.7.1',
     };
   }
   const now = Date.now();
@@ -341,7 +341,7 @@ export function writeSyntheticReleaseFixture(root, releaseKey, daemonBytes, epoc
       channel: 'preview', epoch,
       expires_at: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
       issued_at: new Date(now - 60 * 1000).toISOString(),
-      key_id: releaseKey.keyID, package: '@zbs-gg/pulse', version: '0.7.0',
+      key_id: releaseKey.keyID, package: '@zbs-gg/pulse', version: '0.7.1',
     },
     schema: 'pulse.personal_preview.release_manifest.v1',
   };

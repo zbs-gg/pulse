@@ -53,7 +53,10 @@ test('required universal matrix has eighteen exact host-target pairs with no all
   const windowsArmCodex = github.include.find((target) =>
     target.host === 'codex' && target.target_id === 'win32-arm64');
   assert.equal(windowsArmCodex.stability_runs, 5);
+  assert.equal(windowsArmCodex.job_timeout_minutes, 75);
   assert.equal(github.include.filter((target) => target.stability_runs === 5).length, 1);
+  assert.equal(github.include.filter((target) => target.job_timeout_minutes === 75).length, 1);
+  assert.equal(github.include.filter((target) => target.job_timeout_minutes === 45).length, 17);
   assert.throws(() => githubNativeUniversalMatrix(matrix, 'freebsd'), /platform is unsupported/);
   assert.throws(() => githubNativeUniversalMatrix(matrix, undefined, 'unknown'), /host is unsupported/);
 });

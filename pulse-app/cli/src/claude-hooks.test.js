@@ -242,8 +242,8 @@ test('all Claude turn hooks bind to one canonical Stop identity at the trusted r
     agent_id: 'subagent-1',
     cwd: '/workspace/pulse/another-subdir',
     hook_event_name: 'PreToolUse',
-    tool_name: 'Bash',
-    tool_input: { command: 'git status' },
+    tool_name: 'mcp__pulse-product__pulse_status',
+    tool_input: {},
     tool_use_id: 'tool-status',
   }, {
     resolveRuntime: () => resolved,
@@ -307,6 +307,21 @@ test('Claude PreToolUse uses official deny output and mints an exact Pulse lease
   assert.equal(leases.length, 1);
 });
 
+test('Claude ordinary tools remain available when Pulse authority is unavailable', async () => {
+  let resolvedRuntime = false;
+  const output = await handleClaudeHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'update_plan',
+    tool_input: { plan: [] },
+    tool_use_id: 'tool-goal-control',
+  }, {
+    resolveRuntime: () => { resolvedRuntime = true; throw new Error('binding unavailable'); },
+  });
+  assert.deepEqual(output, {});
+  assert.equal(resolvedRuntime, false);
+});
+
 test('Claude PostToolUse announces only daemon-corroborated same-turn receipts', async () => {
   const expected = stopEvent();
   const output = await handleClaudeHook('PostToolUse', {
@@ -357,6 +372,7 @@ test('Claude Stop blocks once, closes no-change on recursion, and accepts a mark
   }, {
     resolveRuntime: () => resolved,
     readFinalizeMarker: () => { throw new Error('missing'); },
+    request: async () => ({ full_retrieval: true }),
   });
   assert.equal(first.decision, 'block');
 
@@ -484,7 +500,7 @@ test('Claude recursive finalize failure creates a durable content-free receipt',
     recordFailure: (_runtime, receipt) => receipts.push(receipt),
     now: () => new Date('2026-07-14T10:00:00Z'),
   });
-  assert.match(output.systemMessage, /finalize_failed/);
+  assert.deepEqual(output, {});
   assert.equal(receipts[0].host, 'claude-code');
   assert.equal(receipts[0].turn_id, base.prompt_id);
   assert.doesNotMatch(JSON.stringify(receipts), /daemon unavailable|transcript/);

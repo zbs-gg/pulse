@@ -322,6 +322,43 @@ test('one-command orchestration carries the immutable plan into a healthy instal
   assert.equal(JSON.parse(stdout.value()).outcome, 'ready');
 });
 
+test('--yes confirms the displayed ordinary install plan without bypassing later system checks', async () => {
+  const stdout = sink();
+  const stderr = sink();
+  const principal = { principal_id: 'principal_0123456789abcdef0123456789abcdef' };
+  const binding = { binding_id: 'binding_test', principal_ref: principal.principal_id };
+  let prompted = false;
+  const executed = await executePersonalInstallCommand({
+    argv: ['--yes'],
+    buildDependencies: () => ({
+      inspectRuntime: async () => ({ ready: true }), provisionRuntime: async () => {},
+      inspectPresence: async () => ({ ready: true }), installPresence: async () => {},
+      inspectPrincipal: async () => principal, createPrincipal: async () => principal,
+      inspectBinding: async () => ({ ready: true, binding }), createBinding: async () => binding,
+      inspectCore: async () => ({ ready: true, full_retrieval: true, context: {} }), activateCore: async () => {},
+      inspectActivation: async () => readyActivation(), activateHosts: async () => readyActivation(),
+      inspectHealth: async () => ({ ready: true, full_retrieval: true }),
+      writeReceipt: async () => 'receipt_command_ready',
+    }),
+    buildPlan: () => plan(),
+    consentPrompt: async () => { prompted = true; return false; },
+    dataDir: '/tmp/pulse-personal-command',
+    errorOutput: stderr,
+    input: { isTTY: false },
+    lock: () => () => {},
+    mode: 'install',
+    output: stdout,
+    showDetailedPlan: true,
+    yesApprovesInstall: true,
+  });
+
+  assert.equal(executed.exitCode, 0);
+  assert.equal(prompted, false);
+  assert.match(stdout.value(), /Local writes:/);
+  assert.match(stdout.value(), /--yes confirmed this displayed installation plan/);
+  assert.match(stdout.value(), /macOS may still ask separately/);
+});
+
 test('same-release repair resumes without prompting for disclosure again', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'pulse-personal-command-resume.'));
   const stdout = sink();

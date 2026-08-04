@@ -521,7 +521,7 @@ export async function runPersonalInstall({
         'presence_required', 'binding_repair_required', 'codex_activation_incomplete',
         'codex_plugin_unavailable', 'codex_hook_lifecycle_required', 'codex_hook_trust_required',
         'codex_native_lifecycle_attestation_unavailable', 'daemon_unavailable',
-        'full_retrieval_unavailable', 'local_embedder_warming', 'model_warming',
+        'full_retrieval_unavailable', 'local_embedder_warming', 'memory_home_unavailable', 'model_warming',
       ].includes(reasonCode) && !/^(?:claude|codex|cursor|supported_harness)_[a-z0-9_]{1,96}$/.test(reasonCode)) {
         fail('health_status_invalid');
       }

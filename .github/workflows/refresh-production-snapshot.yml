@@ -6,16 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       candidate_run_id:
-        description: Optional successful Production candidate run for Pulse 0.7.0
+        description: Optional successful Production candidate run for Pulse 0.7.1
         required: false
         type: string
       confirmation:
-        description: Type "refresh pulse 0.7.0 snapshot"
+        description: Type "refresh pulse 0.7.1 snapshot"
         required: false
         type: string
 
 concurrency:
-  group: pulse-production-snapshot-0.7.0
+  group: pulse-production-snapshot-0.7.1
   cancel-in-progress: false
 
 permissions:
@@ -41,7 +41,7 @@ jobs:
         run: |
           test "$GITHUB_REF" = refs/heads/main
           if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
-            test "$RELEASE_CONFIRMATION" = 'refresh pulse 0.7.0 snapshot'
+            test "$RELEASE_CONFIRMATION" = 'refresh pulse 0.7.1 snapshot'
           else
             test "$GITHUB_EVENT_NAME" = schedule
           fi
@@ -57,9 +57,9 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             -o "$RUNNER_TEMP/gold-release.json" -w '%{http_code}' \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.7.0")"
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.7.1")"
           if test "$status" = 200; then
-            test "$(jq -r .tag_name "$RUNNER_TEMP/gold-release.json")" = v0.7.0
+            test "$(jq -r .tag_name "$RUNNER_TEMP/gold-release.json")" = v0.7.1
             test "$(jq -r .draft "$RUNNER_TEMP/gold-release.json")" = false
             test "$(jq -r .prerelease "$RUNNER_TEMP/gold-release.json")" = false
             echo 'gold_active=true' >> "$GITHUB_OUTPUT"
@@ -70,11 +70,11 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
               -o "$RUNNER_TEMP/gold-tag.json" -w '%{http_code}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/v0.7.0")"
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/v0.7.1")"
             if test "$status" = 404 && test "$tag_status" = 404 && \
                 test "$GITHUB_EVENT_NAME" = schedule; then
               echo 'gold_active=false' >> "$GITHUB_OUTPUT"
-              echo 'Pulse 0.7.0 Gold is not published; scheduled snapshot refresh is inactive.' \
+              echo 'Pulse 0.7.1 Gold is not published; scheduled snapshot refresh is inactive.' \
                 >> "$GITHUB_STEP_SUMMARY"
             else
               echo "Gold activation check failed: release status $status, tag status $tag_status." >&2
@@ -89,15 +89,15 @@ jobs:
           curl --fail-with-body --silent --show-error \
             --connect-timeout 10 --max-time 20 --max-redirs 0 --max-filesize 2097152 \
             -H 'Accept: application/json' \
-            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            https://releases.zbs.gg/pulse/0.7.1/catalog/snapshot.json \
             -o "$RUNNER_TEMP/current-snapshot.json"
           node - <<'NODE'
           const fs = require('fs');
           const value = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/current-snapshot.json', 'utf8'));
           if (value.schema !== 'pulse.release_snapshot_envelope.v1' ||
               value.payload?.schema !== 'pulse.release_snapshot.v1' ||
-              value.payload?.package !== '@zbs-gg/pulse' || value.payload?.version !== '0.7.0' ||
-              value.payload?.release_epoch !== 8) process.exit(1);
+              value.payload?.package !== '@zbs-gg/pulse' || value.payload?.version !== '0.7.1' ||
+              value.payload?.release_epoch !== 9) process.exit(1);
           const issued = Date.parse(value.payload.issued_at);
           const expires = Date.parse(value.payload.expires_at);
           const now = Date.now();
@@ -112,7 +112,7 @@ jobs:
             (remaining <= 7 * day ? 'WARNING: snapshot expires within seven days.\n' : ''));
           NODE
       - id: release
-        name: Resolve the immutable 0.7.0 production candidate
+        name: Resolve the immutable 0.7.1 production candidate
         if: steps.freshness.outputs.refresh_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -161,7 +161,7 @@ jobs:
             --name pulse-production-release-catalog --dir "$RUNNER_TEMP/pulse-production-release-catalog"
           curl --fail-with-body --silent --show-error \
             --connect-timeout 10 --max-time 20 --max-redirs 0 --max-filesize 2097152 \
-            https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json \
+            https://releases.zbs.gg/pulse/0.7.1/catalog/snapshot.json \
             -o "$RUNNER_TEMP/current-snapshot.json"
       - name: Materialize and verify the root authority
         shell: bash
@@ -176,7 +176,7 @@ jobs:
         shell: bash
         run: >-
           node scripts/refresh-release-snapshot.mjs
-          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.0/epoch-8/catalog/artifact-set.json"
+          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.1/epoch-9/catalog/artifact-set.json"
           --current-snapshot "$RUNNER_TEMP/current-snapshot.json"
           --output "$RUNNER_TEMP/pulse-snapshot-refresh"
           --root-key "$RUNNER_TEMP/root.pem"
@@ -228,7 +228,7 @@ jobs:
         shell: bash
         run: |
           jq -n --arg bucket "$R2_BUCKET" --arg parent "$R2_PARENT_ACCESS_KEY_ID" \
-            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.0/"]}' \
+            '{bucket:$bucket,parentAccessKeyId:$parent,permission:"object-read-write",ttlSeconds:3600,prefixes:["pulse/0.7.1/"]}' \
             > "$RUNNER_TEMP/r2-temp-request.json"
           curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 30 \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $CLOUDFLARE_R2_API_TOKEN" \
@@ -254,7 +254,7 @@ jobs:
         shell: bash
         run: >-
           node scripts/publish-r2-snapshot-refresh.mjs
-          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.0/epoch-8/catalog/artifact-set.json"
+          --artifact-set "$RUNNER_TEMP/pulse-production-release-catalog/pulse/0.7.1/epoch-9/catalog/artifact-set.json"
           --bucket "$R2_BUCKET"
           --endpoint "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
           --out "$RUNNER_TEMP/pulse-r2-snapshot-publication.json"

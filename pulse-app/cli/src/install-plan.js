@@ -360,9 +360,13 @@ Project: ${workspace?.canonical_path ?? 'unavailable'}
 Workspace: ${workspace?.workspace_id ?? 'unavailable'}
 Repository: ${workspace?.repository_id ?? 'unavailable'}
 Supported harnesses: Claude Code, Codex, Cursor
-Activation: every compatible harness detected on this desktop
+Activation: ${plan.activation_policy === 'selected_supported_hosts'
+    ? 'only the selected compatible AI app'
+    : 'every compatible AI app found on this computer'}
 Detected harnesses:
-${detectedHosts.map((host) => `  - ${host.host}: ${host.compatible ? 'compatible' : host.detected ? `incompatible (${host.reason_code ?? 'unknown'})` : 'not installed'}`).join('\n')}
+${detectedHosts.map((host) => `  - ${host.host}: ${host.compatible
+    ? host.activation_target ? 'will be connected' : 'found, left unchanged'
+    : host.detected ? `incompatible (${host.reason_code ?? 'unknown'})` : 'not installed'}`).join('\n')}
 Preflight: ${plan.outcome}
 
 Current state:
@@ -437,6 +441,7 @@ export function buildPersonalInstallPlan({
   release,
   releaseReasonCode,
   currentState,
+  selectedHosts,
 } = {}) {
   const pulseRoot = dataDir ?? join(resolve(home), '.pulse');
   if (![cwd, home, codexHome, pulseRoot].every((value) => typeof value === 'string' && isAbsolute(value)) ||
@@ -445,12 +450,23 @@ export function buildPersonalInstallPlan({
   }
   const workspaceDetector = detectWorkspace ?? ((path) => canonicalizeWorkspace(path, { platformServices }));
   const workspace = workspaceStatus(cwd, workspaceDetector);
-  const hosts = detectSupportedHosts({
+  if (selectedHosts !== undefined &&
+      (!Array.isArray(selectedHosts) || selectedHosts.length < 1 ||
+       selectedHosts.length !== new Set(selectedHosts).size ||
+       selectedHosts.some((host) => !SUPPORTED_HOST_IDS.includes(host)))) {
+    throw new TypeError('install_plan_selected_hosts_invalid');
+  }
+  const selected = selectedHosts === undefined ? null : new Set(selectedHosts);
+  const detectedHosts = detectSupportedHosts({
     home, platformServices,
     ...(detectClaude ? { detectClaude } : {}),
     ...(detectCodex ? { detectCodex } : {}),
     ...(detectCursor ? { detectCursor } : {}),
   });
+  const hosts = detectedHosts.map((host) => Object.freeze({
+    ...host,
+    activation_target: host.compatible && (selected === null || selected.has(host.host)),
+  }));
   const codex = hosts.find((host) => host.host === 'codex');
   const node = nodeStatus(nodeVersion);
   const verifiedRelease = releaseStatus(release);
@@ -472,9 +488,10 @@ export function buildPersonalInstallPlan({
   if (!target) reasons.push('release_target_unavailable');
   if (!node.ok) reasons.push('node_unsupported');
   if (workspace.reason_code) reasons.push(workspace.reason_code);
-  const compatibleHosts = hosts.filter((host) => host.compatible);
+  const compatibleHosts = hosts.filter((host) => host.activation_target);
   if (compatibleHosts.length === 0) {
-    reasons.push(hosts.some((host) => host.detected)
+    const requestedHosts = selected === null ? hosts : hosts.filter((host) => selected.has(host.host));
+    reasons.push(requestedHosts.some((host) => host.detected)
       ? 'supported_harness_incompatible'
       : 'supported_harness_missing');
   }
@@ -498,7 +515,7 @@ export function buildPersonalInstallPlan({
     product: 'Pulse Personal',
     stage: 'personal_stage_1',
     supported_hosts: [...SUPPORTED_HOST_IDS],
-    activation_policy: 'all_detected_supported_hosts',
+    activation_policy: selected === null ? 'all_detected_supported_hosts' : 'selected_supported_hosts',
     outcome,
     reason_codes: reasons,
     next_action: planNextAction(outcome, reasons),
@@ -571,7 +588,7 @@ export function buildPersonalInstallPlan({
         : null,
     },
     required_human_approvals: [
-      { code: 'install_disclosure_consent', automatable_by_yes: false },
+      { code: 'install_disclosure_consent', automatable_by_yes: true },
       ...(detectedCurrentState.binding !== 'ready'
         ? [{ code: 'binding_trust_bootstrap', automatable_by_yes: false }]
         : []),

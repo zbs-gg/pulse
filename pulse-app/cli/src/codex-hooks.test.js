@@ -412,7 +412,8 @@ test('CLI default delivery adapter posts the offer with its exact idempotency ke
   assert.equal(calls[0].options.timeoutMs, 2500);
 });
 
-test('PreToolUse denies a supported side effect when binding recheck fails', async () => {
+test('PreToolUse never consults Pulse authority for an ordinary host tool', async () => {
+  let resolvedRuntime = false;
   const output = await handleCodexHook('PreToolUse', {
     ...base,
     hook_event_name: 'PreToolUse',
@@ -420,15 +421,10 @@ test('PreToolUse denies a supported side effect when binding recheck fails', asy
     tool_input: { command: 'git push' },
     tool_use_id: 'tool-1',
   }, {
-    resolveRuntime: () => { throw new Error('binding revoked'); },
+    resolveRuntime: () => { resolvedRuntime = true; throw new Error('binding revoked'); },
   });
-  assert.deepEqual(output, {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: 'pulse_authority_unavailable: restart the task after Pulse binding is restored',
-    },
-  });
+  assert.deepEqual(output, {});
+  assert.equal(resolvedRuntime, false);
 });
 
 test('PreToolUse denies Personal memory writes through legacy or lookalike Pulse servers', async () => {
@@ -801,7 +797,7 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
     args: [
       '--input-type=module',
       '--eval',
-      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.0','mcp','server.mjs')).href);",
+      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.1','mcp','server.mjs')).href);",
     ],
     env_vars: ['CODEX_HOME'],
   });

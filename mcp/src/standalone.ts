@@ -7,7 +7,7 @@
  * use the same shape as the daemon's /memory/export items, so upgrading to
  * the full engine later can import them without conversion.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -121,6 +121,36 @@ function emptyStore(): StoreFile {
 function newMemoryID(index: number): string {
   const nanos = BigInt(Date.now()) * 1_000_000n;
   return `pulse:${nanos}:${index}:${randomBytes(8).toString('hex')}`;
+}
+
+type RememberResult = { id: string; result: 'created' | 'deduplicated' };
+
+function itemIdentity(item: {
+  kind: string;
+  redacted_summary: string;
+  confidence: number;
+  evidence_hint: string;
+  privacy_tier: string;
+  retention: string;
+  tags: string[];
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    schema: CAPSULE_SCHEMA,
+    items: [item],
+    raw_input_included: false,
+  })).digest('hex');
+}
+
+function storedItemIdentity(item: StoredItem): string {
+  return itemIdentity({
+    kind: item.kind,
+    redacted_summary: item.redacted_summary,
+    confidence: item.confidence,
+    evidence_hint: item.evidence_hint,
+    privacy_tier: item.privacy_tier,
+    retention: item.retention,
+    tags: item.tags,
+  });
 }
 
 function asRecord(value: unknown, what: string): Record<string, unknown> {
@@ -253,7 +283,7 @@ export class StandaloneStore {
     renameSync(tmpPath, this.storePath);
   }
 
-  remember(input: unknown): { ok: true; ids: string[] } {
+  remember(input: unknown): { ok: true; ids: string[]; results: RememberResult[] } {
     // Full content-contract validation (enums, limits, secret/path/transcript
     // rejection) BEFORE anything is persisted. See validation.ts — the JSON
     // Schema in tools/list is advisory; this is the real gate. Mirrors the Go
@@ -264,7 +294,16 @@ export class StandaloneStore {
       const store = this.loadUnlocked();
       const now = new Date().toISOString();
       const ids: string[] = [];
+      const results: RememberResult[] = [];
+      let created = false;
       capsule.items.forEach((item, index) => {
+        const digest = itemIdentity(item);
+        const existing = store.items.find((candidate) => storedItemIdentity(candidate) === digest);
+        if (existing) {
+          ids.push(existing.id);
+          results.push({ id: existing.id, result: 'deduplicated' });
+          return;
+        }
         const id = newMemoryID(index);
         store.items.push({
           id,
@@ -281,10 +320,14 @@ export class StandaloneStore {
           raw_input_included: false,
         });
         ids.push(id);
+        results.push({ id, result: 'created' });
+        created = true;
       });
-      store.last_write = now;
-      this.persist(store);
-      return { ok: true, ids };
+      if (created) {
+        store.last_write = now;
+        this.persist(store);
+      }
+      return { ok: true, ids, results };
     });
   }
 

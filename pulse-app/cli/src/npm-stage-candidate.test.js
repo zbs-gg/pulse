@@ -42,11 +42,11 @@ async function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'pulse-npm-stage-candidate-'));
   const tarball = await packageTarball({
     name: '@zbs-gg/pulse',
-    version: '0.7.0',
+    version: '0.7.1',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
   });
   const sha256 = createHash('sha256').update(tarball).digest('hex');
-  writeFileSync(join(root, 'pulse-0.7.0.tgz'), tarball);
+  writeFileSync(join(root, 'pulse-0.7.1.tgz'), tarball);
   const candidate = {
     artifact_set_digest: 'b'.repeat(64),
     commit: COMMIT,
@@ -57,16 +57,16 @@ async function fixture() {
     package: '@zbs-gg/pulse',
     production: true,
     production_ready: true,
-    release_epoch: 8,
+    release_epoch: 9,
     sbom_sha256: 'd'.repeat(64),
     schema: 'pulse.npm_production_candidate.v1',
     sha256,
     snapshot_digest: 'e'.repeat(64),
     support_claim: false,
     targets: TARGETS,
-    tarball: 'pulse-0.7.0.tgz',
+    tarball: 'pulse-0.7.1.tgz',
     universal_run_id: 123,
-    version: '0.7.0',
+    version: '0.7.1',
   };
   const candidatePath = resolve(root, 'candidate.json');
   writeFileSync(candidatePath, `${canonical(candidate)}\n`);
@@ -102,7 +102,7 @@ test('npm stage verifier rejects PR fixtures and package identity drift', async 
 
   const tarball = await packageTarball({
     name: '@someone-else/pulse',
-    version: '0.7.0',
+    version: '0.7.1',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
   });
   current.candidate.production = true;

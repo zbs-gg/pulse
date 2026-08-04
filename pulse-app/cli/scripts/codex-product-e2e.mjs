@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync,
 	  closeSync,
@@ -24,10 +24,9 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  bindingRegistryAnchor, canonicalJSONStringify, canonicalizeWorkspace,
-} from '../src/workspace-binding.js';
+import { resolveWorkspaceBinding } from '../src/workspace-binding.js';
 import { materializeVerifiedDmg, readCommittedArtifactSet } from '../src/artifact-installer.js';
+import { nativePackedFixtureApprovalDigest } from '../src/personal-install-command.js';
 import {
 	inspectCodexMarketplaceSnapshot,
 	parseCodexMarketplaceList,
@@ -85,47 +84,19 @@ async function freePort() {
   return port;
 }
 
-function personalPrincipalID(suffix) {
-  return `principal_${createHash('sha256').update(`pulse-codex-e2e:${suffix}`).digest('hex').slice(0, 32)}`;
-}
-
-function writeSignedPersonalBindings(root, fixtures) {
+function writeFixtureBindingTrust(root) {
   const supervisor = join(root, 'trust');
   mkdirSync(supervisor, { recursive: true, mode: 0o700 });
   const registryPath = join(supervisor, 'workspace-bindings.json');
+  const privateKeyPath = join(supervisor, 'workspace-bindings.key.pem');
   const publicKeyPath = join(supervisor, 'workspace-bindings.pub.pem');
   const anchorPath = join(supervisor, 'workspace-bindings.anchor.json');
-  const payload = {
-    schema: 'pulse.workspace-binding-registry.v1',
-    epoch: 1,
-		bindings: fixtures.map(({ workspace, port, suffix }) => ({
-			binding_id: `binding_codex_e2e_${suffix}`,
-			receipt_id: `receipt_codex_e2e_${suffix}`,
-      resolver_epoch: 1,
-      workspace: {
-        workspace_id: workspace.workspace_id,
-        repository_id: workspace.repository_id,
-      },
-      mode: 'personal',
-			principal_ref: personalPrincipalID(suffix),
-			personal: {
-				store_id: `store_personal_codex_e2e_${suffix}`,
-				data_dir: join(root, 'vaults', `personal-${suffix}`),
-				base_url: `http://127.0.0.1:${port}`,
-				credential_ref: `local:pulse/codex-e2e-${suffix}`,
-				cache_dir: join(root, 'caches', `personal-${suffix}`),
-			},
-		})),
-  };
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  const signature = sign(null, Buffer.from(canonicalJSONStringify(payload)), privateKey).toString('base64');
-  const registryBytes = Buffer.from(JSON.stringify({ algorithm: 'ed25519', payload, signature }));
-  writeFileSync(registryPath, registryBytes, { mode: 0o600 });
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  writeFileSync(privateKeyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
   writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o600 });
-  writeFileSync(anchorPath, `${canonicalJSONStringify(bindingRegistryAnchor(registryBytes, payload.epoch))}\n`, { mode: 0o600 });
-  chmodSync(registryPath, 0o600);
+  chmodSync(privateKeyPath, 0o600);
   chmodSync(publicKeyPath, 0o600);
-  return { registryPath, publicKeyPath, anchorPath };
+  return { registryPath, privateKeyPath, publicKeyPath, anchorPath };
 }
 
 function initializeRepository(path) {
@@ -134,6 +105,30 @@ function initializeRepository(path) {
   run('/usr/bin/git', ['config', 'user.email', 'pulse-e2e@example.test'], { cwd: path });
   run('/usr/bin/git', ['config', 'user.name', 'Pulse E2E'], { cwd: path });
   run('/usr/bin/git', ['commit', '--allow-empty', '-q', '-m', 'fixture'], { cwd: path });
+}
+
+function nativeCodexExecutable(executable) {
+	const resolved = realpathSync(executable);
+	if (!resolved.endsWith('.js')) return resolved;
+	const optionalPackages = join(resolve(dirname(resolved), '..'), 'node_modules', '@openai');
+	if (!existsSync(optionalPackages)) throw new Error('Codex native executable is unavailable');
+	const candidates = [];
+	const visit = (directory, depth = 0) => {
+		if (depth > 6) return;
+		for (const name of readdirSync(directory).sort()) {
+			const path = join(directory, name);
+			const info = lstatSync(path);
+			if (info.isSymbolicLink()) continue;
+			if (info.isDirectory()) visit(path, depth + 1);
+			else if (info.isFile() && name === 'codex' && path.includes(`${join('vendor', '')}`) &&
+				path.includes(`${join('bin', '')}`)) candidates.push(path);
+		}
+	};
+	visit(optionalPackages);
+	if (candidates.length !== 1) {
+		throw new Error(`Codex native executable selection is ambiguous: ${candidates.length}`);
+	}
+	return realpathSync(candidates[0]);
 }
 
 function packedTarball(root) {
@@ -221,7 +216,7 @@ async function prepareRealMLXInputs(root) {
 	const osVersion = run('/usr/bin/sw_vers', ['-productVersion']).stdout.trim();
 	const release = verifyReleaseManifestEnvelope(envelope, {
 		architecture: 'arm64', minimumAcceptedEpoch: envelope.payload.release.epoch,
-		now: new Date(), osVersion, packageVersion: '0.7.0', platform: 'darwin',
+		now: new Date(), osVersion, packageVersion: '0.7.1', platform: 'darwin',
 		trustedKeys: pinnedReleaseKeyring(realReleaseRoot),
 	});
 	const runtimeDescriptor = release.artifacts['embedder-runtime'];
@@ -254,6 +249,7 @@ async function prepareRealMLXInputs(root) {
 
 const root = mkdtempSync(join(tmpdir(), 'pulse-codex-product.'));
 let runtimeStopped = false;
+let runtimeDataDir;
 try {
   const home = join(root, 'home');
   const codexHome = join(root, 'codex');
@@ -269,12 +265,7 @@ try {
 	initializeRepository(workspaceB);
 
   const port = await freePort();
-	const portB = await freePort();
-	const bindingPaths = {
-		registryPath: join(root, 'trust', 'workspace-bindings.json'),
-		publicKeyPath: join(root, 'trust', 'workspace-bindings.pub.pem'),
-		anchorPath: join(root, 'trust', 'workspace-bindings.anchor.json'),
-	};
+	const bindingPaths = writeFixtureBindingTrust(root);
 	const daemon = join(root, 'pulse-product-daemon');
 	run('go', ['build', '-o', daemon, './cmd/pulse'], { cwd: pulseAppRoot, timeout: 120_000 });
 	chmodSync(daemon, 0o700);
@@ -333,7 +324,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const packedPackageRoot = resolve(packedCLI, '..', '..');
 	const packedPackageJSON = JSON.parse(readFileSync(join(packedPackageRoot, 'package.json'), 'utf8'));
 	assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
-	assert.equal(packedPackageJSON.version, '0.7.0');
+	assert.equal(packedPackageJSON.version, '0.7.1');
 	const publicPackageAudit = auditPublicPackageRoot(packedPackageRoot);
 	assert.equal(publicPackageAudit.content_free, true);
 	Object.assign(productEvidence, {
@@ -355,7 +346,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	symlinkSync('/usr/bin/git', join(tools, 'git'));
 	const isolatedBin = join(home, '.local', 'bin');
 	mkdirSync(isolatedBin, { recursive: true, mode: 0o700 });
-	copyFileSync(realpathSync(codexExecutable), join(isolatedBin, 'codex'));
+	copyFileSync(nativeCodexExecutable(codexExecutable), join(isolatedBin, 'codex'));
 	chmodSync(join(isolatedBin, 'codex'), 0o700);
   const env = {
     ...process.env,
@@ -403,12 +394,24 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(existsSync(pulseDataDir), false, 'synthetic public install rejection must not create product state');
 	assert.equal(existsSync(join(home, '.pulse')), false, 'synthetic public install rejection must not create identity state');
 	assert.deepEqual(readdirSync(codexHome), [], 'synthetic public install rejection must not mutate Codex');
-	assert.deepEqual(writeSignedPersonalBindings(root, [
-		{ workspace: canonicalizeWorkspace(workspace), port, suffix: 'a' },
-		{ workspace: canonicalizeWorkspace(workspaceB), port: portB, suffix: 'b' },
-	]), bindingPaths);
-
-	const failedConnect = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+	delete env.PULSE_RELEASE_TEST_MATERIALIZER_SPEC;
+	Object.assign(env, {
+		PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION: '1',
+		PULSE_NATIVE_PACKED_FIXTURE_ROOT: root,
+		PULSE_NATIVE_PACKED_FIXTURE_PORT: String(port),
+		PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH: bindingPaths.privateKeyPath,
+		PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: realpathSync(join(isolatedBin, 'codex')),
+	});
+	const approveInstall = (cwd) => {
+		const plan = JSON.parse(run(process.execPath, [packedCLI, 'install-plan', '--json'], {
+			cwd, env, timeout: 180_000,
+		}).stdout);
+		assert.equal(plan.outcome, 'ready_to_install');
+		env.PULSE_NATIVE_PACKED_FIXTURE_APPROVAL = nativePackedFixtureApprovalDigest(plan);
+		return plan;
+	};
+	approveInstall(workspace);
+	const failedConnect = run(process.execPath, [packedCLI, 'init', 'codex', '--yes', '--json'], {
 		cwd: workspace, env, status: 1, timeout: 120_000,
 	});
 	assert.match(`${failedConnect.stdout}${failedConnect.stderr}`, /managed full-retrieval smoke|did not become ready/);
@@ -423,13 +426,23 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
-
-	const connected = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+	approveInstall(workspace);
+	const connected = run(process.execPath, [packedCLI, 'init', 'codex', '--yes', '--json'], {
 		cwd: workspace, env, timeout: 120_000,
 	});
-	assert.match(connected.stdout, /pulse@|Codex plugin installed/);
+	const connectedResult = JSON.parse(connected.stdout);
+	assert.equal(connectedResult.outcome, 'ready');
+	assert.equal(connectedResult.host_status.hosts[0].installed, true);
+	const bindingA = resolveWorkspaceBinding({
+		cwd: workspace,
+		registryPath: bindingPaths.registryPath,
+		publicKeyPath: bindingPaths.publicKeyPath,
+		anchorPath: bindingPaths.anchorPath,
+		rootAnchor: false,
+	});
+	const runtimeA = bindingA.personal;
+	runtimeDataDir = runtimeA.data_dir;
 
   const nativeMcp = run('codex', ['mcp', 'get', 'pulse-product', '--json'], { cwd: workspace, env });
   const nativeMcpConfig = JSON.parse(nativeMcp.stdout);
@@ -824,7 +837,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	writeFileSync(cacheHookConfigPath, cacheHookConfigBytes);
 
 	const receiptBeforeHelperCrash = JSON.parse(readFileSync(
-		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+		join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8',
 	));
 	const helperChildren = run('/usr/bin/pgrep', ['-P', String(receiptBeforeHelperCrash.pid)]).stdout
 		.trim().split(/\s+/).filter(Boolean).map(Number);
@@ -835,7 +848,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	});
 	assert.match(healedAfterHelperCrash.stdout, /"serverInfo"/);
 	const receiptAfterHelperCrash = JSON.parse(readFileSync(
-		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+		join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8',
 	));
 	assert.notEqual(receiptAfterHelperCrash.pid, receiptBeforeHelperCrash.pid,
 		'helper death must restart the exact managed daemon generation once');
@@ -846,7 +859,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	);
 
 	const receiptBeforeFailedManagedUpgrade = JSON.parse(readFileSync(
-		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+		join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8',
 	));
 	const activationBeforeFailedManagedUpgrade = readFileSync(
 		join(root, 'pulse', 'runtime', 'product-daemon.json'),
@@ -862,9 +875,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
-	const failedManagedUpgrade = run(process.execPath, [packedCLI, 'connect', 'codex'], {
+	approveInstall(workspace);
+	const failedManagedUpgrade = run(process.execPath, [packedCLI, 'repair', '--json'], {
 		cwd: workspace, env, status: 1, timeout: 120_000,
 	});
 	assert.match(
@@ -872,7 +885,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		/managed full-retrieval smoke|did not become ready/,
 	);
 	const receiptAfterFailedManagedUpgrade = JSON.parse(readFileSync(
-		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8',
+		join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8',
 	));
 	for (const field of [
 		'executable', 'executable_digest', 'managed_embedder_config_path', 'managed_embedder_config_digest',
@@ -903,11 +916,21 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
-
-	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspaceB, env, timeout: 120_000 });
-	const receiptBv1 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
+	approveInstall(workspaceB);
+	run(process.execPath, [packedCLI, 'init', 'codex', '--yes', '--json'], {
+		cwd: workspaceB, env, timeout: 120_000,
+	});
+	const bindingB = resolveWorkspaceBinding({
+		cwd: workspaceB,
+		registryPath: bindingPaths.registryPath,
+		publicKeyPath: bindingPaths.publicKeyPath,
+		anchorPath: bindingPaths.anchorPath,
+		rootAnchor: false,
+	});
+	assert.equal(bindingB.personal.store_id, runtimeA.store_id);
+	assert.equal(bindingB.personal.data_dir, runtimeA.data_dir);
+	const receiptBv1 = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
 	writeFileSync(packedCLI, `${readFileSync(packedCLI, 'utf8')}\n// multi-workspace-runtime-v2\n`);
 	const daemonV2Bytes = Buffer.concat([healthyDaemonBytes, Buffer.from('\nPULSE_MULTI_WORKSPACE_V2\n')]);
 	releaseFixture = await productReleaseFixture(daemonV2Bytes, 8);
@@ -915,12 +938,14 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
 		PULSE_RELEASE_TEST_ASSET_ROOT: releaseFixture.assetsRoot,
-		PULSE_RELEASE_TEST_MATERIALIZER_SPEC: releaseFixture.materializerPath,
 	});
-	run(process.execPath, [packedCLI, 'connect', 'codex'], { cwd: workspace, env, timeout: 120_000 });
+	approveInstall(workspace);
+	run(process.execPath, [packedCLI, 'repair', '--json'], {
+		cwd: workspace, env, timeout: 120_000,
+	});
 	const activationV4 = JSON.parse(readFileSync(join(root, 'pulse', 'runtime', 'product-daemon.json'), 'utf8'));
 	const activeReleaseV2 = readCommittedArtifactSet({ installRoot: join(root, 'pulse', 'artifacts') });
-	const receiptAv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
+	const receiptAv2 = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
 	assert.equal(activationV4.schema, 'pulse.product_activation.v4');
 	assert.equal(activationV4.release_manifest_digest, activeReleaseV2.record.manifest_digest);
 	assert.equal(activationV4.release_version, activeReleaseV2.record.version);
@@ -944,13 +969,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		timeout: 30_000,
 	});
 	assert.match(JSON.parse(workspaceBResume.stdout).hookSpecificOutput.additionalContext, /pulse.context.v1/);
-	const receiptBv2 = JSON.parse(readFileSync(join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'), 'utf8'));
+	const receiptBv2 = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
 	assert.equal(receiptBv2.executable_digest, activationV4.daemon_digest,
-		'first hook in another workspace must reconcile its vault before reading memory');
-	assert.notEqual(receiptBv2.managed_embedder_config_path, receiptAv2.managed_embedder_config_path,
-		'each project vault must keep its own private managed embedder config');
+		'another bound workspace must read through the upgraded Personal runtime');
+	assert.equal(receiptBv2.managed_embedder_config_path, receiptAv2.managed_embedder_config_path,
+		'one Personal installation must reuse one private local store across bound workspaces');
 
-  const runtimeReceipt = JSON.parse(readFileSync(join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'), 'utf8'));
+  const runtimeReceipt = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
   process.kill(runtimeReceipt.pid, 'SIGSTOP');
   try {
     const hungDoctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
@@ -976,12 +1001,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	process.stdout.write(requireRealMLX
 		? 'Pulse Codex packed-product synthetic-authority lifecycle with real MLX passed; this is not a production install proof.\n'
 		: 'Pulse Codex packed-product synthetic-authority lifecycle passed; this is not a production install proof.\n');
-} finally {
-  if (!runtimeStopped) {
-    const receiptPaths = [
-		join(root, 'vaults', 'personal-a', 'supervisor-runtime.json'),
-		join(root, 'vaults', 'personal-b', 'supervisor-runtime.json'),
-    ];
+	} finally {
+	  if (!runtimeStopped) {
+	    const receiptPaths = runtimeDataDir ? [join(runtimeDataDir, 'supervisor-runtime.json')] : [];
     for (const path of receiptPaths) {
       try {
         const receipt = JSON.parse(readFileSync(path, 'utf8'));

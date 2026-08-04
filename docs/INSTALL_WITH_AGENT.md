@@ -14,7 +14,7 @@ memory across fresh tasks in a verified host. The maintained agent procedure is
 From the Git project that should receive Personal memory:
 
 ```bash
-npx -y @zbs-gg/pulse@preview install
+npx -y @zbs-gg/pulse@0.7.1 init codex
 ```
 
 The Personal installer verifies a signed release, provisions one shared Core,
@@ -82,12 +82,12 @@ Please audit and install Pulse Personal for this project.
 
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check `npm view @zbs-gg/pulse dist-tags --json`. Host-neutral Personal
-   requires preview 0.7.0 or newer, `pulse.personal_install_plan.v2`, and its
+   requires 0.7.1 or newer, `pulse.personal_install_plan.v2`, and its
    signed manifest plus exact release assets.
 3. Explain every local write, privacy default, repair step, and removal step.
 4. Ask me before installing.
 5. After I approve, run:
-     npx -y @zbs-gg/pulse@preview install
+     npx -y @zbs-gg/pulse@0.7.1 init codex
 6. For every host returned in `host_status.hosts`, run its exact doctor command:
    `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`.
    Then run `pulse home`.
