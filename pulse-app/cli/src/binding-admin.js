@@ -459,6 +459,10 @@ export async function recoverWorkspaceBindingTransaction({
     fail('request_invalid');
   }
   secureTrustFile(publicKeyPath, { root: rootPublicKey, platformServices });
+  // Normal product startup has no interrupted binding transaction to repair.
+  // Avoid making every MCP server and SessionStart hook queue on the same
+  // registry lock just to discover that there is no journal.
+  if (!existsSync(transactionPath(registryPath))) return { status: 'none' };
   return withRegistryLock(registryPath, () => recoverBindingTransactionLocked({
     registryPath, publicKeyPath, anchorPath, rootPublicKey, rootAnchor, platformServices,
   }), { platformServices, timeoutSeconds: lockTimeoutSeconds });

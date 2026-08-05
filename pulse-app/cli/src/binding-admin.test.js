@@ -21,6 +21,7 @@ import {
   resolveWorkspaceBinding,
   verifyBindingRegistry,
 } from './workspace-binding.js';
+import { createPlatformServices } from './platform-services.js';
 
 function git(cwd, ...args) {
   const result = spawnSync('/usr/bin/git', args, { cwd, encoding: 'utf8' });
@@ -398,6 +399,29 @@ test('parallel onboarding is serialized by the portable private lock without a l
     cwd: secondRepository, registryPath: setup.registryPath, publicKeyPath: setup.publicKeyPath,
     anchorPath: setup.anchorPath, rootAnchor: false,
   }).resolver_epoch, 2);
+});
+
+test('ordinary binding recovery does not take the registry lock when there is no journal', async () => {
+  const setup = fixture();
+  const repository = makeRepository(setup.home, 'no-recovery-needed');
+  await createWorkspaceBinding({
+    ...setup.options, cwd: repository, mode: 'personal', principalID: 'principal_nik', port: 18801,
+  });
+  const base = createPlatformServices();
+  let lockAttempts = 0;
+  const platformServices = {
+    ...base,
+    acquirePrivateLock(...args) {
+      lockAttempts += 1;
+      return base.acquirePrivateLock(...args);
+    },
+  };
+
+  assert.deepEqual(await recoverWorkspaceBindingTransaction({
+    ...setup.options,
+    platformServices,
+  }), { status: 'none' });
+  assert.equal(lockAttempts, 0);
 });
 
 test('binding transaction recovery closes every kill point under the registry lock', async () => {
