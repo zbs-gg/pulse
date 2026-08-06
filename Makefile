@@ -115,6 +115,7 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	     fi ) \
 	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
 	       cd $(CLI_DIR) \
+	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
 	       && $(NPM) test --silent \
 	       && $(NPM) run --silent test:personal-clean-room \
 	       && $(NPM) run --silent test:personal-interruption \
