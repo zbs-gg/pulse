@@ -26,6 +26,7 @@ jobs:
     env:
       EXPECTED_PACKAGE: '@zbs-gg/pulse'
       EXPECTED_VERSION: '0.7.2'
+      EXPECTED_ARCHIVE_SHA256: 9a9e687df1c01e06e352e7d2a41e5147bdc77fda5e3ed9d592d8c199da0d2d4f
       EXPECTED_TREE_SHA256: 97557d8af16106583ead0f86fdb8f00b1e4c278f57efa6a0124775a78169832a
       EXPECTED_ARTIFACT_SET_SHA256: 4023182649ca46cf4548351a74ab46defc32207c9eaab54c70c8856d1fa722f3
       EXPECTED_SNAPSHOT_SHA256: 51ff82ed9e9cbcb1c3ec2aff1ba522b26a34121e758b6083253489391a3f7793
@@ -78,23 +79,27 @@ jobs:
             exit 1
           fi
 
-          npm ci --ignore-scripts
+          expected_manifest="$RUNNER_TEMP/personal-preview-manifest.json"
+          expected_snapshot="$RUNNER_TEMP/personal-release-snapshot.json"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output release/personal-preview-manifest.json \
+            --output "$expected_manifest" \
             https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/epoch-9/catalog/artifact-set.json
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output release/personal-release-snapshot.json \
+            --output "$expected_snapshot" \
             https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/catalog/snapshot.json
-          test "$(shasum -a 256 release/personal-preview-manifest.json | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
-          test "$(shasum -a 256 release/personal-release-snapshot.json | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
+          test "$(shasum -a 256 "$expected_manifest" | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
+          test "$(shasum -a 256 "$expected_snapshot" | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
           package_dir="$RUNNER_TEMP/pulse-package"
           unpack_dir="$RUNNER_TEMP/pulse-unpacked"
           mkdir -p "$package_dir" "$unpack_dir"
-          npm pack --json --silent --pack-destination "$package_dir" > "$RUNNER_TEMP/npm-pack.json"
-          archive_name="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1]))[0].filename" "$RUNNER_TEMP/npm-pack.json")"
-          archive="$package_dir/$archive_name"
-          test -f "$archive"
+          archive="$package_dir/zbs-gg-pulse-0.7.2.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/npm/zbs-gg-pulse-0.7.2.tgz
+          test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$unpack_dir"
+          cmp "$expected_manifest" "$unpack_dir/package/release/personal-preview-manifest.json"
+          cmp "$expected_snapshot" "$unpack_dir/package/release/personal-release-snapshot.json"
           node scripts/public-package-audit.mjs "$unpack_dir/package"
 
           tree_sha256="$(node --input-type=module - "$unpack_dir/package" <<'NODE'
