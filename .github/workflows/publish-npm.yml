@@ -29,16 +29,29 @@ jobs:
       EXPECTED_TREE_SHA256: 97557d8af16106583ead0f86fdb8f00b1e4c278f57efa6a0124775a78169832a
       EXPECTED_ARTIFACT_SET_SHA256: 4023182649ca46cf4548351a74ab46defc32207c9eaab54c70c8856d1fa722f3
       EXPECTED_SNAPSHOT_SHA256: 51ff82ed9e9cbcb1c3ec2aff1ba522b26a34121e758b6083253489391a3f7793
+      EXPECTED_NODE_SHA256: 55a772a600b7bdafb4b35945b3935090e27aff9934b4c11b281220fcd99139d7
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
+      - name: Check out the exact commit without helper actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.4.1
-          package-manager-cache: false
-          registry-url: https://registry.npmjs.org
+      - name: Install the pinned Node runtime without helper actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/node-v24.4.1-darwin-arm64.tar.gz"
+          runtime="$RUNNER_TEMP/node-v24.4.1-darwin-arm64"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            https://nodejs.org/dist/v24.4.1/node-v24.4.1-darwin-arm64.tar.gz
+          test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_NODE_SHA256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$runtime/bin" >> "$GITHUB_PATH"
 
       - name: Use an npm version that supports trusted publishing
         shell: bash
