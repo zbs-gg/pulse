@@ -139,6 +139,7 @@ import {
 	commitPersonalRuntimeRelease,
   inspectPersonalRelease,
 	inspectPersonalRuntime,
+	packagedPersonalReleaseInspectionOptions,
 	packagedPersonalRuntimeOptions,
 	provisionPersonalRuntime,
   refreshPackagedPersonalRelease,
@@ -154,7 +155,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.7.1';
+const PREVIEW_VERSION = '0.7.2';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -167,7 +168,7 @@ const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores mem
 const CODEX_PRODUCT_MCP_ARGS = Object.freeze([
   '--input-type=module',
   '--eval',
-  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.1','mcp','server.mjs')).href);",
+  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.2','mcp','server.mjs')).href);",
 ]);
 
 const args = process.argv.slice(2);
@@ -402,7 +403,7 @@ async function currentPersonalInstallPlan({ selectedHosts } = {}) {
   let releaseInspection;
   let releaseReasonCode;
   try {
-    const releaseOptions = await refreshPackagedPersonalRelease(DATA_DIR);
+    const releaseOptions = packagedPersonalReleaseInspectionOptions(DATA_DIR);
     releaseInspection = inspectPersonalRelease(releaseOptions);
   } catch (error) {
     releaseReasonCode = typeof error?.code === 'string' ? error.code : 'release_manifest_unavailable';
@@ -1387,7 +1388,7 @@ function personalInstallDependencies(plan) {
       verifyExactCLIHosts();
       const activationSetStatus = privateStateFileStatus(join(DATA_DIR, 'artifacts', 'active-release.json'));
       try {
-        const inspection = inspectPersonalRuntime(packagedPersonalRuntimeOptions(DATA_DIR));
+        const inspection = inspectPersonalRuntime(packagedPersonalReleaseInspectionOptions(DATA_DIR));
         if (inspection.ready) return inspection;
         if (activationSetStatus === 'missing') return inspection;
         throw new PersonalInstallError('runtime_repair_required');
@@ -1398,7 +1399,10 @@ function personalInstallDependencies(plan) {
         );
       }
     },
-    provisionRuntime: async () => provisionPersonalRuntime(packagedPersonalRuntimeOptions(DATA_DIR)),
+    provisionRuntime: async () => {
+      const releaseOptions = await refreshPackagedPersonalRelease(DATA_DIR);
+      return provisionPersonalRuntime(releaseOptions);
+    },
     inspectPresence: async () => process.env.PULSE_TRUST_MODE === 'test'
       ? { ready: true, status: 'synthetic_test_authority' }
       : inspectPresenceTrust({ probePublicKey: true }),

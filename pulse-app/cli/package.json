@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Local Personal memory for Codex, Claude Code, and Cursor.",
   "license": "AGPL-3.0-only",
   "author": "ZBS GG",
@@ -65,6 +65,7 @@
     "vendor/pulse-presence-helper",
     "release/README.md",
     "release/personal-preview-manifest.json",
+    "release/personal-release-snapshot.json",
     "release/personal-preview-manifest.schema.json",
     "release/personal-release-artifact-set.schema.json",
     "release/release-snapshot.schema.json",

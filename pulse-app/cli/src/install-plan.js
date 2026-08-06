@@ -372,7 +372,7 @@ Preflight: ${plan.outcome}
 Current state:
 ${currentState.join('\n')}
 
-Verified downloads (${formatBytes(release?.total_download_bytes)} total):
+Downloads after approval (${formatBytes(release?.total_download_bytes)} total):
 ${artifacts.join('\n')}
 
 Local writes:

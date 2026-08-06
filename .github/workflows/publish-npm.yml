@@ -2,6 +2,12 @@ name: Publish Pulse Personal to npm
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested package to npm after the Mac install succeeds
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: publish-pulse-personal-to-npm
@@ -14,13 +20,15 @@ permissions:
 jobs:
   publish:
     name: Publish the reviewed Personal package
-    if: github.repository == 'zbs-gg/pulse' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    if: github.repository == 'zbs-gg/pulse'
+    runs-on: macos-15
+    timeout-minutes: 35
     env:
       EXPECTED_PACKAGE: '@zbs-gg/pulse'
-      EXPECTED_VERSION: '0.7.1'
-      EXPECTED_TREE_SHA256: bed960913530ad9a9da991f058dff20e375d0472751d43089e574d905db7e32b
+      EXPECTED_VERSION: '0.7.2'
+      EXPECTED_TREE_SHA256: 97557d8af16106583ead0f86fdb8f00b1e4c278f57efa6a0124775a78169832a
+      EXPECTED_ARTIFACT_SET_SHA256: 4023182649ca46cf4548351a74ab46defc32207c9eaab54c70c8856d1fa722f3
+      EXPECTED_SNAPSHOT_SHA256: 51ff82ed9e9cbcb1c3ec2aff1ba522b26a34121e758b6083253489391a3f7793
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -44,8 +52,12 @@ jobs:
       - name: Build and inspect the package
         working-directory: pulse-app/cli
         shell: bash
+        env:
+          PULSE_REQUIRE_RELEASE_MANIFEST: '1'
         run: |
           set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
           test "$(node -p "require('./package.json').name")" = "$EXPECTED_PACKAGE"
           test "$(node -p "require('./package.json').version")" = "$EXPECTED_VERSION"
           if npm view "$EXPECTED_PACKAGE@$EXPECTED_VERSION" version >/dev/null 2>&1; then
@@ -54,6 +66,14 @@ jobs:
           fi
 
           npm ci --ignore-scripts
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output release/personal-preview-manifest.json \
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/epoch-9/catalog/artifact-set.json
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output release/personal-release-snapshot.json \
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/catalog/snapshot.json
+          test "$(shasum -a 256 release/personal-preview-manifest.json | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
+          test "$(shasum -a 256 release/personal-release-snapshot.json | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
           package_dir="$RUNNER_TEMP/pulse-package"
           unpack_dir="$RUNNER_TEMP/pulse-unpacked"
           mkdir -p "$package_dir" "$unpack_dir"
@@ -95,10 +115,10 @@ jobs:
           )"
           test "$tree_sha256" = "$EXPECTED_TREE_SHA256"
           echo "Package content SHA-256: $tree_sha256"
-          sha256sum "$archive"
+          shasum -a 256 "$archive"
           echo "PULSE_NPM_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
-      - name: Install the exact archive in an empty home folder
+      - name: Install the exact archive on a clean Mac
         shell: bash
         run: |
           set -euo pipefail
@@ -108,12 +128,17 @@ jobs:
           mkdir -p "$home" "$install" "$workspace"
           git -C "$workspace" init -q
           npm install --ignore-scripts --no-audit --no-fund --prefix "$install" "$PULSE_NPM_ARCHIVE"
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$install" @openai/codex@0.146.1
           cli="$install/node_modules/@zbs-gg/pulse/src/cli.js"
+          export PATH="$install/node_modules/.bin:$PATH"
           HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" --help >/dev/null
-          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" init codex --dry-run \
-            | grep -F 'Dry run only. Nothing was written.' >/dev/null
+          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" init codex --only codex --yes --json \
+            > "$RUNNER_TEMP/pulse-install.json"
+          node -e 'const r=require(process.argv[1]); if (r.outcome!=="ready" || r.reason_code!=="installed" || r.host_status?.hosts?.[0]?.installed!==true) process.exit(1)' \
+            "$RUNNER_TEMP/pulse-install.json"
 
       - name: Publish through GitHub trusted publishing
+        if: github.ref == 'refs/heads/main' && inputs.publish
         working-directory: pulse-app/cli
         shell: bash
         run: npm publish "$PULSE_NPM_ARCHIVE" --ignore-scripts --access public --tag latest --provenance

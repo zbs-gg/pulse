@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { pinnedReleaseKeyring, verifyPersonalReleaseArtifactSet } from '../src/release-manifest.js';
 
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 const EPOCH = 9;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
@@ -47,6 +47,14 @@ function fileReceipt(path) {
   });
 }
 
+function catalogTargetIDs(artifactSet) {
+  const targetIDs = Object.keys(artifactSet?.payload?.targets ?? {}).sort();
+  if (targetIDs.length < 1 || targetIDs.some((targetID) => !TARGETS.includes(targetID))) {
+    fail('r2_release_catalog_invalid');
+  }
+  return targetIDs;
+}
+
 function verifyReleaseCatalog(artifactSetPath, snapshotPath, artifactSetDigest, snapshotDigest, trustedKeys) {
   let artifactSet;
   let snapshot;
@@ -54,7 +62,7 @@ function verifyReleaseCatalog(artifactSetPath, snapshotPath, artifactSetDigest, 
     artifactSet = JSON.parse(readFileSync(artifactSetPath, 'utf8'));
     snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
   } catch { fail('r2_release_catalog_invalid'); }
-  for (const targetID of TARGETS) {
+  for (const targetID of catalogTargetIDs(artifactSet)) {
     const [platform, architecture, libc] = targetID.split('-');
     let verified;
     try {
@@ -75,10 +83,14 @@ export function releasePublicationObjects(catalogRoot, {
   if (typeof catalogRoot !== 'string' || !isAbsolute(catalogRoot) || resolve(catalogRoot) !== catalogRoot) {
     fail('r2_release_arguments_invalid');
   }
+  const artifactSetPath = resolve(catalogRoot, `pulse/${VERSION}/epoch-${EPOCH}/catalog/artifact-set.json`);
+  let artifactSet;
+  try { artifactSet = JSON.parse(readFileSync(artifactSetPath, 'utf8')); } catch { fail('r2_release_catalog_invalid'); }
+  const targetIDs = catalogTargetIDs(artifactSet);
   const immutable = [
     ['common/model.tar.gz', 'application/gzip'],
     ['common/plugin-runtime.tar.gz', 'application/gzip'],
-    ...TARGETS.flatMap((target) => [
+    ...targetIDs.flatMap((target) => [
       [`${target}/daemon.tar.gz`, 'application/gzip'],
       [`${target}/embedder-runtime.tar.gz`, 'application/gzip'],
     ]),
@@ -101,11 +113,14 @@ export function releasePublicationObjects(catalogRoot, {
     path: snapshotPath,
     ...fileReceipt(snapshotPath),
   });
-  assert.equal(immutable.length, 15);
+  assert.equal(immutable.length, 3 + targetIDs.length * 2);
   const receiptPath = join(catalogRoot, 'catalog-build-receipt.json');
   const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
   if (receipt.schema !== 'pulse.personal_release_catalog_build.v3' || receipt.release_epoch !== EPOCH ||
-      receipt.artifact_count !== 14 || receipt.artifact_set_digest !== immutable.at(-1).sha256 ||
+      receipt.production_ready !== true || receipt.target_count !== targetIDs.length ||
+      JSON.stringify(receipt.target_ids) !== JSON.stringify(targetIDs) ||
+      receipt.artifact_count !== 2 + targetIDs.length * 2 ||
+      receipt.artifact_set_digest !== immutable.at(-1).sha256 ||
       receipt.snapshot_digest !== snapshot.sha256) fail('r2_release_catalog_invalid');
   if (typeof verifyCatalog !== 'function') fail('r2_release_arguments_invalid');
   verifyCatalog(immutable.at(-1).path, snapshot.path, immutable.at(-1).sha256, snapshot.sha256, trustedKeys);

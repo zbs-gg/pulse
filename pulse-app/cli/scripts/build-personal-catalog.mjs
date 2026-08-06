@@ -73,8 +73,9 @@ function parseCLI(argv) {
     pluginRoot: values.plugin ? resolve(values.plugin) : null,
     rootKey: values['root-key'] ? resolve(values['root-key']) : null,
   };
+  const targetIDs = DESKTOP_TARGET_IDS.filter((targetID) => Object.hasOwn(targetRoots, targetID));
   if (Object.values(paths).some((value) => !value || !isAbsolute(value)) ||
-      Object.keys(targetRoots).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0') ||
+      targetIDs.length < 1 || Object.keys(targetRoots).some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID)) ||
       !Number.isSafeInteger(epoch) || epoch < 1 || typeof values.origin !== 'string') {
     fail('release_catalog_arguments_invalid');
   }
@@ -210,9 +211,10 @@ function compatibleTargetFragment(fragment, targetID) {
 }
 
 function exactTargetRoots(targetRoots) {
-  if (!targetRoots || Array.isArray(targetRoots) || typeof targetRoots !== 'object' ||
-      Object.keys(targetRoots).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0')) return false;
-  return DESKTOP_TARGET_IDS.every((targetID) => {
+  if (!targetRoots || Array.isArray(targetRoots) || typeof targetRoots !== 'object') return false;
+  const targetIDs = DESKTOP_TARGET_IDS.filter((targetID) => Object.hasOwn(targetRoots, targetID));
+  if (targetIDs.length < 1 || Object.keys(targetRoots).some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) return false;
+  return targetIDs.every((targetID) => {
     const value = targetRoots[targetID];
     return typeof value === 'string' && isAbsolute(value) && resolve(value) === value;
   });
@@ -291,7 +293,8 @@ export function buildPersonalCatalog({
   if (pinned.length !== 1 || pinned[0].key_id !== rootAuthority.keyID || rootAuthority.keyID === channelAuthority.keyID) {
     fail('release_catalog_authority_invalid');
   }
-  const targetInputs = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
+  const targetIDs = DESKTOP_TARGET_IDS.filter((targetID) => Object.hasOwn(targetRoots, targetID));
+  const targetInputs = Object.fromEntries(targetIDs.map((targetID) => {
     const fragment = canonicalFile(
       join(targetRoots[targetID], 'target-release-fragment.json'),
       'pulse.target_release_build.v2',
@@ -319,7 +322,7 @@ export function buildPersonalCatalog({
   try {
     const assetRoot = join(outputRoot, 'pulse', PACKAGE_VERSION, `epoch-${epoch}`);
     const commonAssets = join(assetRoot, 'common');
-    for (const targetID of DESKTOP_TARGET_IDS) {
+    for (const targetID of targetIDs) {
       const input = targetInputs[targetID];
       const targetAssets = join(assetRoot, targetID);
       for (const kind of TARGET_ARTIFACT_KINDS) {
@@ -360,7 +363,7 @@ export function buildPersonalCatalog({
         url: `${prefix}/common/plugin-runtime.tar.gz`,
       }),
     };
-    const catalogTargets = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
+    const catalogTargets = Object.fromEntries(targetIDs.map((targetID) => {
       const input = targetInputs[targetID];
       const artifacts = Object.fromEntries(TARGET_ARTIFACT_KINDS.map((kind) => [kind, descriptor({
         artifact: input.fragment.artifacts[kind],
@@ -441,7 +444,7 @@ export function buildPersonalCatalog({
     });
     const snapshotBytes = `${canonicalReleaseJSON(snapshot)}\n`;
     const snapshotDigest = createHash('sha256').update(snapshotBytes).digest('hex');
-    const releases = DESKTOP_TARGET_IDS.map((targetID) => {
+    const releases = targetIDs.map((targetID) => {
       const release = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
         ...verificationHost(targetInputs[targetID].definition),
         minimumAcceptedEpoch: epoch,
@@ -465,11 +468,11 @@ export function buildPersonalCatalog({
     writeFileSync(manifestPath, artifactSetBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     writeFileSync(join(outputRoot, 'snapshot.json'), snapshotBytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     const receipt = Object.freeze({
-      artifact_count: 2 + DESKTOP_TARGET_IDS.length * TARGET_ARTIFACT_KINDS.length,
+      artifact_count: 2 + targetIDs.length * TARGET_ARTIFACT_KINDS.length,
       artifact_set_digest: artifactSetDigest,
       artifact_set_url: snapshotPayload.artifact_set.url,
       channel_key_id: channelAuthority.keyID,
-      host_target_count: matrix.harnesses.length * DESKTOP_TARGET_IDS.length,
+      host_target_count: matrix.harnesses.length * targetIDs.length,
       hosts: matrix.harnesses.map((harness) => harness.host).sort(),
       manifest_digest: artifactSetDigest,
       production_ready: testMode !== true,
@@ -479,8 +482,8 @@ export function buildPersonalCatalog({
       snapshot_digest: snapshotDigest,
       snapshot_expires_at: snapshotPayload.expires_at,
       snapshot_url: snapshotURL,
-      target_count: DESKTOP_TARGET_IDS.length,
-      target_ids: [...DESKTOP_TARGET_IDS],
+      target_count: targetIDs.length,
+      target_ids: [...targetIDs],
     });
     writeFileSync(join(outputRoot, 'catalog-build-receipt.json'), `${canonicalReleaseJSON(receipt)}\n`, {
       encoding: 'utf8', flag: 'wx', mode: 0o600,

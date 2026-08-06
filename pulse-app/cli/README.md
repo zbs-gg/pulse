@@ -1,10 +1,13 @@
 # @zbs-gg/pulse
 
-The npm package for Pulse Personal 0.7.1. It installs one local memory engine,
+The npm package for Pulse Personal 0.7.2. It installs one local memory engine,
 Memory Home, and local connections for Codex, Claude Code, and Cursor.
 
+This release is for Macs with Apple Silicon. Other platforms are intentionally
+left unchanged until the Mac install has passed a clean real-world test.
+
 ```bash
-npx -y @zbs-gg/pulse@0.7.1 init codex
+npx -y @zbs-gg/pulse@0.7.2 init codex
 pulse doctor
 pulse home
 ```

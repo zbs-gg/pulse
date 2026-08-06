@@ -28,6 +28,7 @@ import { detectDesktopLibc } from './desktop-target.js';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(PACKAGE_ROOT, 'release', 'personal-preview-manifest.json');
+const DEFAULT_PACKAGED_SNAPSHOT_PATH = join(PACKAGE_ROOT, 'release', 'personal-release-snapshot.json');
 const PACKAGE_JSON_PATH = join(PACKAGE_ROOT, 'package.json');
 const ARTIFACT_SET_SCHEMA = 'pulse.personal_release_artifact_set.v1';
 const SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
@@ -572,6 +573,17 @@ export function packagedPersonalRuntimeOptions(dataDir) {
     options.materializers = loadReleaseTestMaterializers(process.env.PULSE_RELEASE_TEST_MATERIALIZER_SPEC);
   }
   return options;
+}
+
+// Installation disclosure must remain read-only. It verifies the snapshot
+// shipped in the npm package and leaves the network refresh for the approved
+// installation transaction.
+export function packagedPersonalReleaseInspectionOptions(dataDir) {
+  const options = packagedPersonalRuntimeOptions(dataDir);
+  return {
+    ...options,
+    snapshotPath: process.env.PULSE_RELEASE_SNAPSHOT_PATH ?? DEFAULT_PACKAGED_SNAPSHOT_PATH,
+  };
 }
 
 export async function refreshPackagedPersonalRelease(dataDir) {

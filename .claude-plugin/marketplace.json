@@ -8,7 +8,7 @@
     {
       "name": "pulse",
       "source": "./plugins/pulse",
-      "description": "Local-first continuity and governed team memory"
+      "description": "Private local continuity for one person"
     }
   ]
 }

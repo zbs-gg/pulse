@@ -20,7 +20,7 @@ function fixture(t) {
   t.after(() => rmSync(root, { force: true, recursive: true }));
   const evidenceRoot = resolve(root, 'evidence');
   mkdirSync(evidenceRoot, { mode: 0o700 });
-  const tarballPath = resolve(root, 'zbs-gg-pulse-0.7.1.tgz');
+  const tarballPath = resolve(root, 'zbs-gg-pulse-0.7.2.tgz');
   const tarball = Buffer.from('exact-registry-package');
   writeFileSync(tarballPath, tarball, { mode: 0o600 });
   const packageSHA256 = createHash('sha256').update(tarball).digest('hex');
@@ -92,9 +92,9 @@ function fixture(t) {
     snapshot_digest: SNAPSHOT,
     support_claim: false,
     targets: matrix.targets.map((target) => target.target_id).sort(),
-    tarball: 'zbs-gg-pulse-0.7.1.tgz',
+    tarball: 'zbs-gg-pulse-0.7.2.tgz',
     universal_run_id: 123,
-    version: '0.7.1',
+    version: '0.7.2',
   };
   const candidatePath = resolve(root, 'candidate.json');
   writeFileSync(candidatePath, `${canonicalReleaseJSON(candidate)}\n`, { mode: 0o600 });

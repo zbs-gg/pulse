@@ -180,6 +180,27 @@ test('personal catalog builder emits one signed exact six-target release', (t) =
   assert.equal(manifestDigests[0], receipt.manifest_digest);
 });
 
+test('personal catalog builder can emit a signed Mac Apple Silicon release first', (t) => {
+  const current = fixture(t);
+  current.options.targetRoots = {
+    'darwin-arm64': current.options.targetRoots['darwin-arm64'],
+  };
+  const result = buildPersonalCatalog(current.options);
+  const envelope = JSON.parse(readFileSync(result.manifestPath, 'utf8'));
+  const snapshot = JSON.parse(readFileSync(result.snapshotPath, 'utf8'));
+  const receipt = JSON.parse(readFileSync(join(current.options.outputRoot, 'catalog-build-receipt.json'), 'utf8'));
+
+  assert.deepEqual(Object.keys(envelope.payload.targets), ['darwin-arm64']);
+  assert.equal(receipt.target_count, 1);
+  assert.equal(receipt.artifact_count, 4);
+  assert.equal(receipt.host_target_count, 3);
+  const release = verifyPersonalReleaseArtifactSet(envelope, snapshot, {
+    architecture: 'arm64', minimumAcceptedEpoch: EPOCH, now: new Date(), osVersion: '26.2',
+    packageVersion: PACKAGE_VERSION, platform: 'darwin', trustedKeys: current.trustedKeys,
+  });
+  assert.equal(release.target_id, 'darwin-arm64');
+});
+
 test('snapshot refresh changes only root-signed freshness while preserving immutable artifact bytes', (t) => {
   const current = fixture(t);
   const built = buildPersonalCatalog(current.options);
@@ -215,8 +236,8 @@ test('snapshot-only publication proves the existing artifact set before replacin
     rootKeyPath: current.options.rootKey,
     trustedKeys: current.trustedKeys,
   });
-  const artifactSetKey = 'pulse/0.7.1/epoch-9/catalog/artifact-set.json';
-  const snapshotKey = 'pulse/0.7.1/catalog/snapshot.json';
+  const artifactSetKey = 'pulse/0.7.2/epoch-9/catalog/artifact-set.json';
+  const snapshotKey = 'pulse/0.7.2/catalog/snapshot.json';
   const store = new Map([[artifactSetKey, {
     bytes: readFileSync(built.artifactSetPath), cacheControl: 'public, max-age=31536000, immutable',
     contentType: 'application/json', etag: 'artifact-set',
@@ -254,12 +275,10 @@ test('snapshot-only publication proves the existing artifact set before replacin
   assert.deepEqual(store.get(snapshotKey).bytes, readFileSync(refreshed.snapshotPath));
 });
 
-test('personal catalog builder blocks a missing target before creating output', (t) => {
+test('personal catalog builder blocks an empty target set before creating output', (t) => {
   const current = fixture(t);
-  const targetRoots = { ...current.options.targetRoots };
-  delete targetRoots['win32-arm64'];
   assert.throws(
-    () => buildPersonalCatalog({ ...current.options, targetRoots }),
+    () => buildPersonalCatalog({ ...current.options, targetRoots: {} }),
     /release_catalog_arguments_invalid/,
   );
   assert.equal(existsSync(current.options.outputRoot), false);

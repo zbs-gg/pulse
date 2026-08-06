@@ -376,7 +376,7 @@ const artifactSet = exactJSON(readFileSync(artifactSetPath, 'utf8'), 'native_ven
 const snapshot = exactJSON(readFileSync(snapshotPath, 'utf8'), 'native_vendor_catalog_invalid');
 const verified = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
   architecture: target.architecture, libc: target.libc, minimumAcceptedEpoch: 9, now: new Date(),
-  osVersion: '26.2', packageVersion: '0.7.1', platform: target.platform, trustedKeys: pinnedReleaseKeyring(),
+  osVersion: '26.2', packageVersion: '0.7.2', platform: target.platform, trustedKeys: pinnedReleaseKeyring(),
 });
 if (verified.target_id !== targetID || verified.manifest_digest !== artifactSetInfo.sha256 ||
     verified.authority.snapshot_digest !== snapshotInfo.sha256) fail('native_vendor_catalog_invalid');
