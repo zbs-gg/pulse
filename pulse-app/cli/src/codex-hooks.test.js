@@ -1128,7 +1128,10 @@ test('native hook query hard-stops an app-server child that ignores SIGTERM', as
 			cwd: realpathSync(repoRoot),
 			pluginRoot,
 			edge: { release_version: '0.7.0', plugin_tree_digest: testTreeDigest(pluginRoot) },
-			timeoutMs: 150,
+			// Give a cold Node process time to execute its first line on a busy
+			// runner. The product default remains five seconds; this fixture only
+			// needs to prove that an initialized child ignoring SIGTERM is killed.
+			timeoutMs: 1000,
 		});
 		assert.equal(result.ready, false);
 		assert.equal(result.reason, 'codex_native_hook_query_unavailable');
