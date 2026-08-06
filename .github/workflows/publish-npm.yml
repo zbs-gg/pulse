@@ -1,0 +1,119 @@
+name: Publish Pulse Personal to npm
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-pulse-personal-to-npm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish the reviewed Personal package
+    if: github.repository == 'zbs-gg/pulse' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_PACKAGE: '@zbs-gg/pulse'
+      EXPECTED_VERSION: '0.7.1'
+      EXPECTED_TREE_SHA256: bed960913530ad9a9da991f058dff20e375d0472751d43089e574d905db7e32b
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.4.1
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: Use an npm version that supports trusted publishing
+        shell: bash
+        run: |
+          npm install --global npm@11.18.0
+          test "$(node --version)" = v24.4.1
+          test "$(npm --version)" = 11.18.0
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+
+      - name: Build and inspect the package
+        working-directory: pulse-app/cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').name")" = "$EXPECTED_PACKAGE"
+          test "$(node -p "require('./package.json').version")" = "$EXPECTED_VERSION"
+          if npm view "$EXPECTED_PACKAGE@$EXPECTED_VERSION" version >/dev/null 2>&1; then
+            echo "$EXPECTED_PACKAGE@$EXPECTED_VERSION is already published"
+            exit 1
+          fi
+
+          npm ci --ignore-scripts
+          package_dir="$RUNNER_TEMP/pulse-package"
+          unpack_dir="$RUNNER_TEMP/pulse-unpacked"
+          mkdir -p "$package_dir" "$unpack_dir"
+          npm pack --json --silent --pack-destination "$package_dir" > "$RUNNER_TEMP/npm-pack.json"
+          archive_name="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1]))[0].filename" "$RUNNER_TEMP/npm-pack.json")"
+          archive="$package_dir/$archive_name"
+          test -f "$archive"
+          tar -xzf "$archive" -C "$unpack_dir"
+          node scripts/public-package-audit.mjs "$unpack_dir/package"
+
+          tree_sha256="$(node --input-type=module - "$unpack_dir/package" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+          import { join, relative } from 'node:path';
+
+          const root = process.argv[2];
+          const files = [];
+          const walk = (directory) => {
+            for (const name of readdirSync(directory).sort()) {
+              const path = join(directory, name);
+              const stat = lstatSync(path);
+              if (stat.isDirectory()) walk(path);
+              else files.push(path);
+            }
+          };
+          walk(root);
+          const hash = createHash('sha256');
+          for (const path of files) {
+            const stat = lstatSync(path);
+            hash.update(relative(root, path).split('\\').join('/'));
+            hash.update('\0');
+            hash.update((stat.mode & 0o777).toString(8));
+            hash.update('\0');
+            hash.update(readFileSync(path));
+            hash.update('\0');
+          }
+          process.stdout.write(hash.digest('hex'));
+          NODE
+          )"
+          test "$tree_sha256" = "$EXPECTED_TREE_SHA256"
+          echo "Package content SHA-256: $tree_sha256"
+          sha256sum "$archive"
+          echo "PULSE_NPM_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Install the exact archive in an empty home folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/pulse-home"
+          install="$RUNNER_TEMP/pulse-install"
+          workspace="$RUNNER_TEMP/pulse-workspace"
+          mkdir -p "$home" "$install" "$workspace"
+          git -C "$workspace" init -q
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$install" "$PULSE_NPM_ARCHIVE"
+          cli="$install/node_modules/@zbs-gg/pulse/src/cli.js"
+          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" --help >/dev/null
+          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" init codex --dry-run \
+            | grep -F 'Dry run only. Nothing was written.' >/dev/null
+
+      - name: Publish through GitHub trusted publishing
+        working-directory: pulse-app/cli
+        shell: bash
+        run: npm publish "$PULSE_NPM_ARCHIVE" --ignore-scripts --access public --tag latest --provenance
