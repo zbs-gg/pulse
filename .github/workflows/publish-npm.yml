@@ -146,9 +146,11 @@ jobs:
           mkdir -p "$home" "$install" "$workspace"
           git -C "$workspace" init -q
           npm install --ignore-scripts --no-audit --no-fund --prefix "$install" "$PULSE_NPM_ARCHIVE"
-          npm install --ignore-scripts --no-audit --no-fund --prefix "$install" @openai/codex@0.146.1
+          npm install --global --ignore-scripts --no-audit --no-fund --prefix "$home/.local" @openai/codex@0.146.1
           cli="$install/node_modules/@zbs-gg/pulse/src/cli.js"
-          export PATH="$install/node_modules/.bin:$PATH"
+          test -x "$home/.local/bin/codex"
+          export PATH="$home/.local/bin:$install/node_modules/.bin:$PATH"
+          test "$(codex --version)" = "codex-cli 0.146.1"
           HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" --help >/dev/null
           HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" init codex --only codex --yes --json \
             > "$RUNNER_TEMP/pulse-install.json"
