@@ -1,33 +1,37 @@
-# Product
+# Pulse Personal
 
-## Register
+## Current product
 
-product
+Pulse Personal keeps approved working memory for Codex, Claude Code, and Cursor
+in a local project-bound vault. It restores relevant memories in later work and
+lets the owner inspect, correct, or delete them in Memory Home.
+
+The current public release is 0.7.2 for Apple Silicon Macs. It has no Team
+server, cloud synchronization, or shared-memory command. Ordinary ChatGPT chat
+is not connected to Pulse. Emotional memory and local-store migration are
+unfinished Personal 0.8 work in a separate draft and are not part of 0.7.2.
 
 ## Users
 
-Pulse is for AI-heavy operators, founders, engineers, and researchers who move between Claude, Claude Code, Codex, ChatGPT, and local agent harnesses. They are trying to keep project and personal continuity without re-explaining context, and they need to inspect memory before trusting it.
+Pulse Personal is for people who work across coding AI programs and do not want
+to explain the same project decisions, constraints, and open questions again in
+every new session.
 
-## Product Purpose
+## Product principles
 
-Pulse keeps the thread across AI chats. The migration workbench guides a user to request host archives, previews existing chat history locally, extracts structured people, memories, emotions, relationships, and fun facts, then writes graph memory only after explicit review and confirmation.
+- Keep memory local, inspectable, correctable, and removable.
+- Show what installation changes before asking for confirmation.
+- Store compact structured memories, not raw conversations.
+- Reject secrets and local paths before writing them.
+- Keep optional memory fail-open: its failure must not block the AI program or
+  create a new turn by itself.
+- Treat Team as a separate private product boundary.
+- Do not claim support for a program or operating system without a real install.
 
-## Brand Personality
+## Interface
 
-Clear, exacting, calm. Pulse should feel like a trustworthy local operator console, not a marketing page or another memory app demanding attention.
+Memory Home should feel like a trustworthy local operator console: readable,
+keyboard-accessible, responsive, and clear about what is stored and why. Avoid
+decorative AI-dashboard styling, hidden import state, and transcript dumps.
 
-## Anti-References
-
-Do not look like parchment, fake editorial notebooks, generic AI purple glass, beige dashboard cards, decorative grid paper, or over-designed AI surfaces. Avoid hiding import state behind terminal logs or dumping raw transcripts.
-
-## Design Principles
-
-- Make consent and trust visible before import.
-- Show the graph as inspectable objects: people, memories, emotions, relationships, and fun facts.
-- Keep host archive steps human-simple: open the right page, click one host button, let Pulse wait.
-- Prefer task clarity and dense readable product surfaces over decorative personality.
-- Never imply evaluated paper claims from product migration UX.
-
-## Accessibility
-
-Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
+Status: developer preview, not production ready.

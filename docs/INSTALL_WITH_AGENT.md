@@ -3,9 +3,8 @@
 Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Do not
 attempt to install this version on Intel Mac, Windows, or Linux.
 
-The host-neutral flow below becomes a public install path only after the
-matching signed preview is published. Before then, use it to audit this branch,
-not to claim the current npm preview already contains the feature.
+The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
+and was published to npm on 7 August 2026.
 
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real
@@ -104,5 +103,6 @@ Do not import old chats, store raw transcripts, print secrets, push Personal
 memory to Git, or call fallback/synthetic evidence the product.
 ```
 
-Unsupported hosts may run `npx -y @zbs-gg/pulse@preview mcp`, but the agent
-must call it Safe Mode and say that full state-aware retrieval is not enabled.
+Do not install 0.7.2 on an unsupported operating system or architecture. Wait
+for a separately proven native release instead of presenting a fallback as the
+product.

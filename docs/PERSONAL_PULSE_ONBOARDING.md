@@ -3,9 +3,8 @@
 Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
 platforms follow after the Mac installation has been tested end to end.
 
-Publication status: this host-neutral flow is branch-ready but is not a claim
-about the current npm `preview` tag until the matching signed artifacts and
-physical clean-machine attestation are published.
+Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
+published on 7 August 2026 after a clean remote Mac installation.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
@@ -17,7 +16,7 @@ project, and at least one of Claude Code, Cursor, or Codex. Personal Pulse
 does not require Go, Python, Make, Docker, or a model API key. It also requires no
 manual host config editing.
 
-The published `preview` package must contain a canonical signed release
+The published 0.7.2 package contains a canonical signed release
 manifest plus the exact notarized daemon, managed local embedding runtime,
 data-only model, native plugin runtime, and presence helper. If any one is
 missing or invalid, installation stops before identity, binding, or host
@@ -129,15 +128,14 @@ pulse disconnect codex
 Whole-vault wipe is separately protected by fresh macOS presence. Disconnect,
 repair, and ordinary uninstall never imply permission to delete memory.
 
-## What blocks publication
+## Release boundary
 
 The deterministic gates run from `npm pack` and cover host-neutral orchestration,
 interrupted-download resume, repair, Personal-only package contents, and no external
 publication. They expose no Go or Python and are intentionally labeled
 synthetic; they are not physical product-install or cross-host recall proof.
 
-Before publishing the preview, a clean physical Apple Silicon Mac must also
-pass the content-free release attestation against production authority, real
-signed/notarized artifacts, native host lifecycle trust, one saved memory, a fresh
-continuity task, Memory Home, and honest token evidence. Without that receipt,
-`make release-verify` and `npm publish` fail closed.
+Personal 0.7.2 passed the clean Apple Silicon Mac release installation before
+publication. That proves the packaged installation path, not long-term use by
+another person or support for Intel Mac, Windows, or Linux. Those remain
+separate future boundaries.
