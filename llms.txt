@@ -1,11 +1,12 @@
-# Pulse Personal 0.7.2
+# Pulse Personal 0.8.0
+
+This is an unfinished development branch. Do not claim that 0.8.0 is published
+or installable from npm. The current published install remains 0.7.2 until a
+separate live acceptance and release.
 
 Pulse is local working memory for Codex, Claude Code, and Cursor. The public
 package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
 synchronization, team command, device key, or shared database is shipped.
-
-Version 0.7.2 supports only Macs with Apple Silicon. On other systems the
-installer must stop without changing files.
 
 Before installation, inspect README.md, AGENTS.md, and
 docs/SECURITY_INSTALL_CHECKLIST.md. Explain what will be written and ask for
@@ -36,12 +37,27 @@ Trust boundaries:
   continuation;
 - disconnect preserves data; whole-vault wipe requires a separate explicit
   confirmation.
+- emotional memory describes one moment, never a personality trait;
+- emotional influence halves every 24 hours and stops shaping current context
+  after seven days, while the event remains in history;
+- raw user quotes and full conversations are not stored with emotional marks;
+- one unanswered cause question may appear only in a later ordinary response
+  and never creates an automatic continuation.
 
 Official 0.6.7 Personal databases upgrade in place. Databases from unpublished
 shared-memory builds are refused without modification.
 
-Pulse Team is a separate private pilot. It is not present in this repository
-or the npm package. Do not infer that publishing 0.7.2 proves a real
-three-person pilot or fresh-session acceptance.
+To merge fragmented local stores without altering them, first run
+`pulse migrate local-stores --out local-memory-preview.json --open`. Only real
+contradictions need a human choice; commit uses the exact confirmation printed
+by Pulse.
 
-Status: developer preview, not production ready.
+The local MCP server uses stdio, supports protocol `2026-07-28` and older
+clients, and keeps persistent data in SQLite independently of the connection.
+
+Pulse Team is a separate private pilot. It is not present in this repository
+or the npm package. Do not infer that the presence of 0.8 code proves a real
+three-person pilot, fresh-session acceptance, or a published emotional-memory
+feature.
+
+Status: unfinished development branch, not published or production ready.

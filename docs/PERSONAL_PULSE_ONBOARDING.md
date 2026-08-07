@@ -1,10 +1,9 @@
 # Personal Pulse onboarding
 
-Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
-platforms follow after the Mac installation has been tested end to end.
-
-Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
-published on 7 August 2026 after a clean remote Mac installation.
+Publication status: Personal 0.8 is unfinished and not present in npm. This
+document describes the intended flow; ordinary installation still uses the
+published 0.7.2 package for Apple Silicon Macs until 0.8 passes a separate live
+acceptance.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
