@@ -74,6 +74,13 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
       maxItems: 20,
       description: 'Optional ASCII safe slugs. Omit tags when a concept needs spaces.',
     });
+    const graph = tools.find((tool: { name: string }) => tool.name === 'pulse_graph_delta');
+    assert.ok(graph, `${host} must expose private emotional events`);
+    assert.deepEqual(graph.inputSchema.properties.source.properties.host, { type: 'string', const: host });
+    assert.ok(graph.inputSchema.properties.events.items.properties.emotions);
+    assert.ok(graph.inputSchema.properties.emotion_answers);
+    assert.ok(graph.outputSchema.properties.event_results);
+    assert.ok(graph.outputSchema.properties.emotion_question);
     const consolidation = tools.find((tool: { name: string }) => tool.name === 'pulse_consolidation_report');
     assert.ok(consolidation, `${host} must expose the same consolidation report tool`);
     assert.deepEqual(consolidation.inputSchema.required, ['action']);

@@ -56,6 +56,7 @@ const CODEX_PRODUCT_TOOL = Object.freeze({ codexPluginAlias: true });
 const PERSONAL_AUTO_CAPTURE_CONTEXT = `
 Pulse Personal automatic capture (local, private, and silent):
 - During this same normal turn, before the single final user-facing response, call the installed pulse-product pulse_remember tool once only when the work produced a compact durable decision, correction, preference, open loop, or project-state change.
+- Use pulse_graph_delta instead when a momentary emotion is worth remembering or the user answers an emotion_question. Save only a short event description and emotion metadata, never the exact user wording. Mark an inferred emotion as inferred. If the result contains one emotion_question, ask it inside the current ordinary reply; never start another turn.
 - Omit tags unless every tag is an ASCII safe slug matching ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$; never use display labels or tags containing spaces.
 - Do not announce routine capture, narrate the tool call, or add a save status, receipt, or second user-facing response. A routine capture failure must not alter the user-facing answer; if the user explicitly asks whether saving succeeded, answer truthfully. If nothing durable changed, do not call a memory tool.
 - The user's current tool-use instruction wins. If this turn forbids tools, do not capture memory.
@@ -707,7 +708,7 @@ function queryCodexNativeHooks({ codexExecutable, cwd, timeoutMs }) {
 			id: 1,
 			method: 'initialize',
 			params: {
-				clientInfo: { name: 'pulse-doctor', version: '0.7.2' },
+				clientInfo: { name: 'pulse-doctor', version: '0.8.0' },
 				capabilities: { experimentalApi: true },
 			},
 		});

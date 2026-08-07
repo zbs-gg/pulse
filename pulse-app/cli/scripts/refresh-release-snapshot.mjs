@@ -75,7 +75,7 @@ export function refreshReleaseSnapshot({
     platform: 'darwin',
     trustedKeys,
   });
-  if (verified.epoch !== 9 || verified.version !== '0.7.2' ||
+  if (verified.epoch !== 9 || verified.version !== '0.8.0' ||
       current.value.payload.artifact_set.sha256 !== createHash('sha256').update(artifactSet.bytes).digest('hex')) {
     fail('release_snapshot_refresh_release_invalid');
   }
@@ -93,7 +93,7 @@ export function refreshReleaseSnapshot({
   });
   const refreshed = verifyPersonalReleaseArtifactSet(artifactSet.value, snapshot, {
     architecture: 'arm64', minimumAcceptedEpoch: 9, now, osVersion: '26.2',
-    packageVersion: '0.7.2', platform: 'darwin', trustedKeys,
+    packageVersion: '0.8.0', platform: 'darwin', trustedKeys,
   });
   mkdirSync(outputRoot, { mode: 0o700 });
   const snapshotBytes = `${canonicalReleaseJSON(snapshot)}\n`;

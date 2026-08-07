@@ -222,7 +222,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
     if (eventName === 'preToolUse') {
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (/^mcp__pulse-product__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
+      if (isTrustedPulseProductTool(rawInput.tool_name)) {
         (dependencies.writeToolLease ?? writeHostToolLease)(
           resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -259,7 +259,7 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       if ((rawInput.loop_count ?? 0) === 0) {
         await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
         return {
-          followup_message: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, finish without calling a memory tool.',
+          followup_message: 'Perform one bounded Pulse finalization pass for this turn. Use pulse_remember for durable decisions, corrections, open loops, preferences, or project-state changes. Use pulse_graph_delta instead for one short emotional event or an answer to emotion_question; never store the exact user wording. If its result contains emotion_question, ask it only inside the current ordinary reply. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, finish without calling a memory tool.',
         };
       }
       try {

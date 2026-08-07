@@ -203,15 +203,22 @@ process.exit(2);
   chmodSync(path, 0o700);
 }
 
-function hookCommand(settings, event) {
-  const handlers = settings.hooks[event].flatMap((entry) => entry.hooks)
+function hookCommand(settings, event, payload) {
+  const entries = settings.hooks[event].filter((entry) => {
+    if (!entry.matcher || entry.matcher === '*') return true;
+    if (event === 'PostToolUse' || event === 'PreToolUse') {
+      return entry.matcher.split('|').includes(payload.tool_name);
+    }
+    return true;
+  });
+  const handlers = entries.flatMap((entry) => entry.hooks)
     .filter((handler) => /claude-hook\s/.test(handler.command));
   assert.equal(handlers.length, 1, `${event} must have exactly one Pulse handler`);
   return handlers[0].command;
 }
 
 function runHook(settings, event, payload, workspace, env) {
-  const result = run('/bin/sh', ['-c', hookCommand(settings, event)], {
+  const result = run('/bin/sh', ['-c', hookCommand(settings, event, payload)], {
     cwd: workspace,
     env,
     input: JSON.stringify(payload),

@@ -676,7 +676,7 @@ try {
   assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
-  assert.equal(basename(pluginRoot), '0.7.2');
+  assert.equal(basename(pluginRoot), '0.8.0');
 
   const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
     publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,
