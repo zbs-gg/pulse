@@ -6,10 +6,11 @@ Pulse Personal keeps approved working memory for Codex, Claude Code, and Cursor
 in a local project-bound vault. It restores relevant memories in later work and
 lets the owner inspect, correct, or delete them in Memory Home.
 
-The current public release is 0.7.2 for Apple Silicon Macs. It has no Team
-server, cloud synchronization, or shared-memory command. Ordinary ChatGPT chat
-is not connected to Pulse. Emotional memory and local-store migration are
-unfinished Personal 0.8 work in a separate draft and are not part of 0.7.2.
+The current public release is 0.7.2 for Apple Silicon Macs. The published npm
+tags `latest` and `preview` both point to this version. It has no Team server,
+cloud synchronization, or shared-memory command. Ordinary ChatGPT chat is not
+connected to Pulse. Emotional memory and local-store migration are unfinished
+Personal 0.8 work in a separate draft and are not part of 0.7.2.
 
 ## Users
 

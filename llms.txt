@@ -4,7 +4,9 @@ Pulse is local working memory for Codex, Claude Code, and Cursor. The public
 package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
 synchronization, team command, device key, or shared database is shipped.
 
-Version 0.7.2 supports only Macs with Apple Silicon. On other systems the
+Version 0.7.2 is published and supports only Macs with Apple Silicon. The exact
+npm package passed a clean installation on a separate Mac before publication.
+Both npm tags, `latest` and `preview`, resolve to 0.7.2. On other systems the
 installer must stop without changing files.
 
 Before installation, inspect README.md, AGENTS.md, and
