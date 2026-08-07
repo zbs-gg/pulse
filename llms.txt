@@ -1,8 +1,11 @@
-# Pulse Personal 0.7.1
+# Pulse Personal 0.7.2
 
 Pulse is local working memory for Codex, Claude Code, and Cursor. The public
 package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
 synchronization, team command, device key, or shared database is shipped.
+
+Version 0.7.2 supports only Macs with Apple Silicon. On other systems the
+installer must stop without changing files.
 
 Before installation, inspect README.md, AGENTS.md, and
 docs/SECURITY_INSTALL_CHECKLIST.md. Explain what will be written and ask for
@@ -10,7 +13,7 @@ confirmation.
 
 Normal installation:
 
-    npx -y @zbs-gg/pulse@0.7.1 init codex
+    npx -y @zbs-gg/pulse@0.7.2 init codex
     pulse doctor
     pulse home
 
@@ -38,7 +41,7 @@ Official 0.6.7 Personal databases upgrade in place. Databases from unpublished
 shared-memory builds are refused without modification.
 
 Pulse Team is a separate private pilot. It is not present in this repository
-or the npm package. Do not infer that publishing 0.7.1 proves a real
+or the npm package. Do not infer that publishing 0.7.2 proves a real
 three-person pilot or fresh-session acceptance.
 
 Status: developer preview, not production ready.

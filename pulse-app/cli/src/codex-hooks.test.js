@@ -797,7 +797,7 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
     args: [
       '--input-type=module',
       '--eval',
-      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.1','mcp','server.mjs')).href);",
+      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.2','mcp','server.mjs')).href);",
     ],
     env_vars: ['CODEX_HOME'],
   });

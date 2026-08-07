@@ -655,6 +655,7 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   for (const path of [
     'release/README.md',
     'release/personal-preview-manifest.json',
+    'release/personal-release-snapshot.json',
     'release/personal-preview-manifest.schema.json',
     'release/pulse-release-root.pem',
   ]) {
@@ -676,8 +677,9 @@ test('audited package pins Node 20, the release verifier, schema, and root key',
   assert.match(keys[0].key_id, /^[a-f0-9]{64}$/);
   const packager = readFileSync(new URL('../scripts/prepare-preview-vendor.mjs', import.meta.url), 'utf8');
   assert.match(packager, /refusing production packaging: canonical signed Personal release manifest is missing/);
-  assert.match(packager, /DESKTOP_TARGET_IDS\.map/);
-  assert.match(packager, /universal catalog digest mismatch/);
+  assert.match(packager, /targetIDs\.length < 1/);
+  assert.match(packager, /DESKTOP_TARGET_IDS\.includes/);
+  assert.match(packager, /release catalog digest mismatch/);
   const builder = readFileSync(new URL('../scripts/build-presence-helper.mjs', import.meta.url), 'utf8');
   assert.match(builder, /PULSE_PRODUCTION_RELEASE/);
   assert.match(builder, /notarytool[^\n]+submit/);

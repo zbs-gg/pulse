@@ -33,9 +33,9 @@ npm run build:portable-model -- \
 npm run build:plugin-runtime -- --output /absolute/plugin-output
 ```
 
-`npm run build:personal-catalog` combines exactly one compatible production
-fragment for every supported desktop target, plus the model and plugin
-runtime, with the protected root and delegated channel keys:
+`npm run build:personal-catalog` combines one or more compatible production
+targets, plus the model and plugin runtime, with the protected root and
+delegated channel keys. Mac Apple Silicon can be released first:
 
 ```sh
 npm run build:personal-catalog -- \
@@ -46,21 +46,16 @@ npm run build:personal-catalog -- \
   --model /absolute/build/model \
   --plugin /absolute/build/plugin \
   --target darwin-arm64=/absolute/build/darwin-arm64 \
-  --target darwin-x64=/absolute/build/darwin-x64 \
-  --target linux-arm64-gnu=/absolute/build/linux-arm64-gnu \
-  --target linux-x64-gnu=/absolute/build/linux-x64-gnu \
-  --target win32-arm64=/absolute/build/win32-arm64 \
-  --target win32-x64=/absolute/build/win32-x64 \
   --output /absolute/build/catalog
 ```
 
 All native carriers in this catalog are normalized `tar.gz` archives. A
-missing, duplicate, mismatched, unsigned, or corrupt target fails the complete
-catalog build and removes partial output; there is no one-platform production
-catalog mode. The successful build emits one signed preview manifest, all six
-content-addressed target asset sets, and a content-free receipt. Private key
-material is read only from explicit absolute paths with private file
-permissions and is never copied into output.
+duplicate, mismatched, unsigned, or corrupt selected target fails the complete
+catalog build and removes partial output. The successful build emits one
+signed preview manifest, the selected content-addressed target assets, and a
+content-free receipt. Other platforms are added only after their own native
+build and installation run. Private key material is read only from explicit
+absolute paths with private file permissions and is never copied into output.
 
 These builders are release primitives, not publication authority.
 `.github/workflows/production-candidate.yml` is the protected orchestrator. It
@@ -81,5 +76,5 @@ upload release assets, change an npm tag, publish, or approve a staged package.
 
 The npm `preview` tag must remain unchanged until that exact production
 candidate is separately accepted by `stage-npm-preview.yml` and then approved
-with npm 2FA. A local one-platform build, a DMG, or the PR fixture matrix can
-never cross this boundary.
+with npm 2FA. A local unsigned build, a DMG by itself, or the PR fixture matrix
+can never cross this boundary.

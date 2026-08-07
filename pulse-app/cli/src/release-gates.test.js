@@ -52,7 +52,7 @@ test('public package audit rejects repository archives, personal paths, emails, 
   try {
     mkdirSync(join(packageRoot, 'src'), { recursive: true });
     mkdirSync(join(packageRoot, 'release'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.1"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.2"}\n');
     writeFileSync(join(packageRoot, 'src', 'cli.js'), 'export const ready = true;\n');
     writeFileSync(join(packageRoot, 'release', 'pulse-release-root.pem'), [
       '-----BEGIN PUBLIC KEY-----',
@@ -119,7 +119,7 @@ test('vendored MCP manifest advertises only scripts present in the public packag
   try {
     const nestedRoot = join(packageRoot, 'vendor', 'pulse-preview-source', 'mcp');
     mkdirSync(join(nestedRoot, 'src'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.1"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.7.2"}\n');
     const sourcePackageJSON = JSON.parse(readFileSync(join(root, 'mcp', 'package.json'), 'utf8'));
     const publicPackageJSON = publicMcpPackageManifest(sourcePackageJSON);
     writeFileSync(join(nestedRoot, 'package.json'), `${JSON.stringify(publicPackageJSON, null, 2)}\n`);
@@ -291,7 +291,7 @@ test('release verification includes the scanned archive and isolated native inst
 		'docs/PERSONAL_PULSE_ONBOARDING.md', 'pulse-app/cli/README.md',
 	]) {
 		const document = readFileSync(join(root, relative), 'utf8');
-		assert.match(document, /npx (?:-y )?@zbs-gg\/pulse@(?:preview|0\.7\.1) init codex/,
+		assert.match(document, /npx (?:-y )?@zbs-gg\/pulse@(?:preview|0\.7\.2) init codex/,
 			`${relative} must lead with the one-command Personal install`);
 		assert.match(document, /Codex/);
 		assert.match(document, /Memory Home/);
@@ -326,6 +326,17 @@ test('npm publication runs the repository release gate before preparing package 
     'cd ../.. && make release-verify && cd pulse-app/cli && node scripts/prepare-preview-vendor.mjs',
   );
   assert.ok(prepublish.indexOf('make release-verify') < prepublish.indexOf('prepare-preview-vendor.mjs'));
+
+  const workflow = readFileSync(join(root, '.github', 'workflows', 'publish-npm.yml'), 'utf8');
+  assert.match(workflow, /runs-on: macos-15/);
+  assert.match(workflow, /EXPECTED_VERSION: '0\.7\.2'/);
+  assert.match(workflow, /default: false/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.7\.2\/epoch-9\/catalog\/artifact-set\.json/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.7\.2\/catalog\/snapshot\.json/);
+  assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
+  assert.match(workflow, /init codex --only codex --yes --json/);
+  assert.match(workflow, /r\.outcome!=="ready"/);
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish/);
 
 });
 
@@ -508,7 +519,7 @@ test('public soak requires four timed 18-pair registry runs and Gold remains hum
   assert.match(ledger, /All Gold columns are intentionally pending/);
 });
 
-test('optional macOS presence carrier stays exact-tree while npm packaging requires the universal catalog', () => {
+test('optional macOS presence carrier stays exact-tree while npm packaging accepts a signed target subset', () => {
 	const builder = readFileSync(
 		join(root, 'pulse-app', 'cli', 'scripts', 'build-presence-helper.mjs'), 'utf8',
 	);
@@ -524,7 +535,8 @@ test('optional macOS presence carrier stays exact-tree while npm packaging requi
 		join(root, 'pulse-app', 'cli', 'scripts', 'prepare-preview-vendor.mjs'), 'utf8',
 	);
 	assert.match(packager, /'--check-notarization'/);
-	assert.match(packager, /DESKTOP_TARGET_IDS\.map/);
+	assert.match(packager, /targetIDs\.length < 1/);
+	assert.match(packager, /DESKTOP_TARGET_IDS\.includes/);
 	assert.match(packager, /verified\.target_id !== targetID/);
 	assert.match(packager, /artifact\.format !== 'tar\.gz'/);
 	assert.match(packager, /verifyHelperProtocol\(nativeHelper\)/);
@@ -561,17 +573,14 @@ test('target release builder emits native artifacts and production stays explici
 		join(root, 'pulse-app', 'cli', 'scripts', 'build-personal-catalog.mjs'), 'utf8',
 	);
 	assert.match(catalogBuilder, /DESKTOP_TARGET_IDS/);
-	assert.match(catalogBuilder, /Object\.keys\(targetRoots\)\.sort\(\)\.join\('\\0'\) !== DESKTOP_TARGET_IDS\.join\('\\0'\)/);
-	assert.match(catalogBuilder, /target_count: DESKTOP_TARGET_IDS\.length/);
-	assert.match(catalogBuilder, /artifact_count: 2 \+ DESKTOP_TARGET_IDS\.length \* TARGET_ARTIFACT_KINDS\.length/);
+	assert.match(catalogBuilder, /targetIDs\.length < 1/);
+	assert.match(catalogBuilder, /target_count: targetIDs\.length/);
+	assert.match(catalogBuilder, /artifact_count: 2 \+ targetIDs\.length \* TARGET_ARTIFACT_KINDS\.length/);
 	assert.doesNotMatch(catalogBuilder, /target\.target\?\.target_id !== 'darwin-arm64'/);
 
 	const releaseReadme = readFileSync(
 		join(root, 'pulse-app', 'cli', 'release', 'README.md'), 'utf8',
 	);
-	for (const targetID of [
-		'darwin-arm64', 'darwin-x64', 'linux-arm64-gnu',
-		'linux-x64-gnu', 'win32-arm64', 'win32-x64',
-	]) assert.match(releaseReadme, new RegExp(`--target ${targetID}=`));
-	assert.match(releaseReadme, /there is no one-platform production\s+catalog mode/i);
+	assert.match(releaseReadme, /--target darwin-arm64=/);
+	assert.match(releaseReadme, /Mac Apple Silicon can be released first/i);
 });

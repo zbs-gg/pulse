@@ -111,8 +111,8 @@ export async function buildNpmProductionInputs({
       catalog.value.snapshot_digest !== file(join(catalogRoot, 'snapshot.json')).sha256 ||
       snapshot.value.payload?.artifact_set?.sha256 !== catalog.value.artifact_set_digest ||
       artifactSet.value.payload?.release?.package !== '@zbs-gg/pulse' ||
-      artifactSet.value.payload?.release?.version !== '0.7.1' || documents.manifest !== artifactSet.bytes ||
-      documents.packageJSON?.name !== '@zbs-gg/pulse' || documents.packageJSON?.version !== '0.7.1' ||
+      artifactSet.value.payload?.release?.version !== '0.7.2' || documents.manifest !== artifactSet.bytes ||
+      documents.packageJSON?.name !== '@zbs-gg/pulse' || documents.packageJSON?.version !== '0.7.2' ||
       security.value.package_sha256 !== tarball.sha256 || security.value.audit?.high !== 0 ||
       security.value.audit?.critical !== 0 || !SHA256.test(security.value.sbom_sha256 ?? '') ||
       !SHA256.test(security.value.license_inventory_sha256 ?? '')) fail('npm_production_inputs_invalid');
@@ -129,7 +129,7 @@ export async function buildNpmProductionInputs({
     support_claim: false,
     tarball: basename(tarballPath),
     universal_run_id: universalRunID,
-    version: '0.7.1',
+    version: '0.7.2',
   });
   mkdirSync(outputRoot, { mode: 0o700 });
   for (const [source, destination] of [

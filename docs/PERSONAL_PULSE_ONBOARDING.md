@@ -1,5 +1,8 @@
 # Personal Pulse onboarding
 
+Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
+platforms follow after the Mac installation has been tested end to end.
+
 Publication status: this host-neutral flow is branch-ready but is not a claim
 about the current npm `preview` tag until the matching signed artifacts and
 physical clean-machine attestation are published.
@@ -25,7 +28,7 @@ activation changes.
 Run this inside the project:
 
 ```bash
-npx -y @zbs-gg/pulse@0.7.1 init codex
+npx -y @zbs-gg/pulse@0.7.2 init codex
 ```
 
 The first screen says what will be downloaded, how much disk it needs, every

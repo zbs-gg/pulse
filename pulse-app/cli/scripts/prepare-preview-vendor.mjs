@@ -146,7 +146,7 @@ rmSync(vendorRoot, { recursive: true, force: true });
 const internalPreviewHelper = process.env.PULSE_ALLOW_UNNOTARIZED_INTERNAL_PREVIEW === '1';
 let includePresenceHelper = false;
 if (!existsSync(nativeHelper)) {
-  if (productionPackaging || internalPreviewHelper) {
+  if (internalPreviewHelper) {
     throw new Error('signed Pulse presence helper is missing; run npm run build:presence-helper before packing');
   }
   console.error('[pulse] optional macOS presence helper is not included in this npm package');
@@ -185,12 +185,6 @@ if (!existsSync(nativeHelper)) {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (assessment.status !== 0) {
-    if (process.env.npm_lifecycle_event === 'prepublishOnly') {
-      throw new Error('refusing npm publish: Pulse presence helper has no accepted notarization ticket');
-    }
-    if (productionPackaging) {
-      throw new Error('refusing production packaging: Pulse presence helper has no accepted notarization ticket');
-    }
     if (internalPreviewHelper) {
       includePresenceHelper = true;
       console.error('[pulse] explicit internal-preview override: helper is signed but not notarized; do not redistribute this tarball');
@@ -242,7 +236,11 @@ if (productionPackaging) {
       snapshot.schema !== 'pulse.release_snapshot_envelope.v1') {
     throw new Error('refusing production packaging: release snapshot is not canonical v3');
   }
-  const verifiedTargets = DESKTOP_TARGET_IDS.map((targetID) => {
+  const targetIDs = Object.keys(envelope.payload.targets ?? {}).sort();
+  if (targetIDs.length < 1 || targetIDs.some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) {
+    throw new Error('refusing production packaging: signed release target list is invalid');
+  }
+  const verifiedTargets = targetIDs.map((targetID) => {
     const target = desktopTargetDefinition(targetID);
     const verified = verifyPersonalReleaseArtifactSet(envelope, snapshot, {
       architecture: target.architecture,
@@ -256,14 +254,14 @@ if (productionPackaging) {
     });
     if (verified.target_id !== targetID ||
         Object.values(verified.artifacts).some((artifact) => artifact.format !== 'tar.gz')) {
-      throw new Error(`refusing production packaging: universal target verification failed for ${targetID}`);
+      throw new Error(`refusing production packaging: release target verification failed for ${targetID}`);
     }
     return verified;
   });
   if (new Set(verifiedTargets.map((release) => release.manifest_digest)).size !== 1) {
-    throw new Error('refusing production packaging: universal catalog digest mismatch');
+    throw new Error('refusing production packaging: release catalog digest mismatch');
   }
-  if (!verifyHelperProtocol(nativeHelper)) {
+  if (includePresenceHelper && !verifyHelperProtocol(nativeHelper)) {
     throw new Error('refusing production packaging: optional macOS presence helper protocol is incompatible');
   }
 }

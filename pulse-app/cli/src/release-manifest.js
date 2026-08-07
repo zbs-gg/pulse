@@ -493,7 +493,13 @@ function validateArtifactSetPayload(payload, options) {
   for (const name of COMMON_ARTIFACTS) validateCatalogArtifact(name, payload.common_artifacts[name], release, allowedOrigins, {
     platform: 'all', architecture: 'all',
   });
-  exactKeys(payload.targets, DESKTOP_TARGET_IDS, 'release_target_catalog_incomplete');
+  if (!payload.targets || Array.isArray(payload.targets) || typeof payload.targets !== 'object') {
+    fail('release_target_catalog_invalid');
+  }
+  const targetIDs = Object.keys(payload.targets).sort();
+  if (targetIDs.length < 1 || targetIDs.some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID))) {
+    fail('release_target_catalog_invalid');
+  }
   for (const [targetID, target] of Object.entries(payload.targets)) {
     validateCatalogTarget(targetID, target, release, allowedOrigins, options);
   }
