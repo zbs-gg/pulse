@@ -10,9 +10,11 @@ cloud synchronization, and no command for publishing memory to other people.
 
 ## Install
 
-Version `0.7.2` installs on Macs with Apple Silicon. Intel Mac, Windows, and
-Linux builds will follow only after the Mac package passes a clean real-world
-install. On those systems the installer stops without changing files.
+Version `0.7.2` is published and installs on Macs with Apple Silicon. The exact
+npm package passed a clean installation on a separate Mac before publication.
+Intel Mac, Windows, and Linux builds are not released yet; on those systems the
+installer stops without changing files. Both npm tags, `latest` and `preview`,
+point to `0.7.2`.
 
 Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The normal Personal installation is:
