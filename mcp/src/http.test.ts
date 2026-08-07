@@ -4,8 +4,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingMessage } from 'node:http';
 import { test } from 'node:test';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const ENTRYPOINT = new URL('./index.ts', import.meta.url);
 const DEFAULT_BEARER = 'dev-token';
@@ -137,6 +136,27 @@ test('http mode exposes Pulse tools over Streamable HTTP', async () => {
     const names = tools.tools.map((tool) => tool.name);
     assert.ok(names.includes('pulse_graph_delta'), names.join(', '));
     assert.ok(names.includes('pulse_resume'), names.join(', '));
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test('http mode speaks the stateless 2026-07-28 protocol when the client requests it', async () => {
+  const server = await startHttpServer();
+  try {
+    const client = new Client(
+      { name: 'pulse-modern-test', version: '0.0.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { Authorization: `Bearer ${DEFAULT_BEARER}` } },
+    });
+    await client.connect(transport);
+    assert.equal(client.getProtocolEra(), 'modern');
+    assert.equal(client.getNegotiatedProtocolVersion(), '2026-07-28');
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((tool) => tool.name === 'pulse_resume'));
     await client.close();
   } finally {
     await server.stop();

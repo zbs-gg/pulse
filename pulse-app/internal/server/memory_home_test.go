@@ -57,6 +57,33 @@ func TestRenderMemoryHomeShowsConsolidationSeparatelyFromCanonicalCount(t *testi
 	}
 }
 
+func TestRenderMemoryHomeEmotionCorrectionStartsFromSavedMark(t *testing.T) {
+	html, err := renderMemoryHomeHTML(memoryHomePage{
+		Data: store.MemoryHomeData{
+			Schema:   store.MemoryHomeDataSchema,
+			Boundary: store.MemoryHomeBoundary{StoreKind: "personal", StoreID: "store_personal_home", RepositoryID: "repository_home"},
+			EmotionalMemory: []store.EmotionHistoryItem{{
+				EventID: 7, Summary: "A tense release moment.", OccurredAt: "2026-08-06T08:00:00Z",
+				Labels:         []store.EmotionHistoryLabel{{Emotion: "fear", Intensity: 0.9, CurrentInfluence: 0.72}},
+				PrimaryEmotion: "fear", PrimaryIntensity: 0.9, Confidence: 0.8,
+			}},
+		},
+		CSRFToken: "csrf-home",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`<option selected>fear</option>`, `name="intensity" type="number" min="0" max="1" step="0.01" value="0.90"`,
+		`name="confidence" type="number" min="0" max="1" step="0.01" value="0.80"`,
+		"The event itself is not changed.",
+	} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("Home emotion correction missing %q", expected)
+		}
+	}
+}
+
 func TestBuildMemoryHomeUsesServerSideProductBoundaryAndSafeNextTaskPreview(t *testing.T) {
 	t.Parallel()
 	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal.db"), store.StoreKindPersonal, "store_personal_server_home")

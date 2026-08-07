@@ -78,8 +78,8 @@ export function assertTruthfulWriteResponse(value: unknown): void {
     )) {
       exactKeys(value, [
         'ok', 'nodes_upserted', 'edges_upserted', 'facts_upserted', 'events_inserted',
-        'event_ids', 'checkpoint_saved', 'claims_inserted', 'claims_superseded',
-        'claims_skipped', 'claims_corroborated',
+        'event_ids', 'event_results', 'emotion_question', 'checkpoint_saved', 'claims_inserted', 'claims_superseded',
+        'claims_skipped', 'claims_corroborated', 'events_indexed',
       ], 'Pulse preview graph response');
       for (const key of ['nodes_upserted', 'edges_upserted', 'facts_upserted', 'events_inserted',
         'claims_inserted', 'claims_superseded', 'claims_skipped', 'claims_corroborated']) {
@@ -92,6 +92,11 @@ export function assertTruthfulWriteResponse(value: unknown): void {
           value.event_ids.some((id) => !Number.isInteger(id) || Number(id) < 1))) {
         throw new Error('Pulse preview graph response has invalid event IDs');
       }
+      validateEventResults(value.event_results, value.event_ids);
+      validateEmotionQuestion(value.emotion_question);
+		if (value.events_indexed !== undefined && typeof value.events_indexed !== 'boolean') {
+			throw new Error('Pulse preview graph response has invalid index status');
+		}
       return;
     }
     throw new Error('Pulse write response has no durable receipt or explicit preview result');
@@ -100,7 +105,10 @@ export function assertTruthfulWriteResponse(value: unknown): void {
       !Array.isArray(value.receipts) || value.receipts.length === 0) {
     throw new Error('Pulse write receipt result is incomplete');
   }
-  exactKeys(value, ['ledger_id', 'status', 'finalize_receipt', 'receipts'], 'Pulse product write response');
+  exactKeys(value, [
+		'ledger_id', 'status', 'finalize_receipt', 'receipts',
+		'event_ids', 'event_results', 'emotion_question',
+	], 'Pulse product write response');
   if (!STABLE_ID.test(value.ledger_id) ||
       (value.status !== 'candidates' && value.status !== 'rejected') ||
       !isRecord(value.finalize_receipt)) {
@@ -113,6 +121,38 @@ export function assertTruthfulWriteResponse(value: unknown): void {
       throw new Error('Pulse item receipt is not bound to its finalize ledger');
     }
   }
+	validateEventResults(value.event_results, value.event_ids);
+	validateEmotionQuestion(value.emotion_question);
+}
+
+function validateEventResults(results: unknown, ids: unknown): void {
+	if (results === undefined) return;
+	if (!Array.isArray(results) || !Array.isArray(ids) || results.length !== ids.length) {
+		throw new Error('Pulse graph response has invalid event results');
+	}
+	for (let index = 0; index < results.length; index += 1) {
+		const result = results[index];
+		if (!isRecord(result)) throw new Error('Pulse graph response has invalid event results');
+		exactKeys(result, ['client_id', 'id', 'result'], 'Pulse graph event result');
+		if (typeof result.client_id !== 'string' || !STABLE_ID.test(result.client_id) ||
+			result.id !== ids[index] || !Number.isInteger(result.id) || Number(result.id) < 1 ||
+			(result.result !== 'created' && result.result !== 'deduplicated')) {
+			throw new Error('Pulse graph response has invalid event results');
+		}
+	}
+}
+
+function validateEmotionQuestion(question: unknown): void {
+	if (question === undefined) return;
+	if (!isRecord(question)) throw new Error('Pulse graph response has invalid emotion question');
+	exactKeys(question, ['question_id', 'event_id', 'event_client_id', 'question', 'expires_at'], 'Pulse emotion question');
+	if (typeof question.question_id !== 'string' || !/^emotion_question:[a-f0-9]{32}$/.test(question.question_id) ||
+		!Number.isInteger(question.event_id) || Number(question.event_id) < 1 ||
+		(question.event_client_id !== undefined && (typeof question.event_client_id !== 'string' || !STABLE_ID.test(question.event_client_id))) ||
+		typeof question.question !== 'string' || question.question.length === 0 || question.question.length > 240 ||
+		typeof question.expires_at !== 'string' || !RFC3339.test(question.expires_at) || Number.isNaN(Date.parse(question.expires_at))) {
+		throw new Error('Pulse graph response has invalid emotion question');
+	}
 }
 
 export function assertTruthfulDeletionReceipt(value: unknown, expectedObjectID?: string): void {

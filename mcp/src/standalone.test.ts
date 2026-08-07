@@ -6,8 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 import { StandaloneStore } from './standalone.js';
 
@@ -222,6 +221,55 @@ test('standalone graph delta saves checkpoints that resume can replay', () => {
       resume.sections.suggested_next_step[0],
       'Continue with: Publish 0.4.0 to npm under the preview dist-tag.',
     );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('standalone emotional event is canonical, deduplicated, and can receive one confirmed cause', () => {
+  const dataDir = tempDataDir();
+  try {
+    const store = new StandaloneStore(dataDir);
+    const now = new Date().toISOString();
+    const delta = {
+      schema: 'pulse.semantic_delta.v1',
+      source: { host: 'codex', conversation_scope: 'current_turn', timestamp: now },
+      events: [{
+        client_id: 'event:emotion',
+        title: 'A joyful product moment',
+        summary: 'The first complete local flow worked.',
+        emotions: { 'радость': 0.8 },
+        emotion_derivation: 'explicit',
+        emotion_confidence: 0.9,
+        observed_label: 'радость',
+        confidence: 0.9,
+        privacy_tier: 'private',
+      }],
+      raw_input_included: false,
+    };
+    const first = store.graphDelta(delta) as Record<string, any>;
+    assert.equal(first.event_results[0].result, 'created');
+    assert.equal(first.emotion_question.question, 'Что именно сейчас вызвало эту эмоцию?');
+    const second = store.graphDelta(delta) as Record<string, any>;
+    assert.equal(second.event_results[0].result, 'deduplicated');
+    assert.equal(second.event_results[0].id, first.event_results[0].id);
+
+    store.graphDelta({
+      schema: 'pulse.semantic_delta.v1',
+      source: { host: 'codex', conversation_scope: 'current_turn', timestamp: new Date(Date.now() + 1000).toISOString() },
+      emotion_answers: [{
+        question_id: first.emotion_question.question_id,
+        trigger: {
+          summary: 'The end-to-end local flow finally worked.',
+          derivation: 'user_confirmed',
+          confidence: 1,
+        },
+      }],
+      raw_input_included: false,
+    });
+    const resume = store.resume({}) as Record<string, any>;
+    assert.equal(resume.current_emotional_context.items[0].emotion, 'joy');
+    assert.equal(resume.current_emotional_context.items[0].trigger_confirmed, true);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

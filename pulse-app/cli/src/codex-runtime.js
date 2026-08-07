@@ -348,6 +348,7 @@ function hostSlug(host) {
 
 const LOCAL_PRODUCT_TOOL_ACTIONS = new Set([
   'pulse_remember',
+  'pulse_graph_delta',
 ]);
 
 function productToolAction(toolName) {

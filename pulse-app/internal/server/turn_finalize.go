@@ -452,6 +452,15 @@ func (s *Server) commitTurnResultNowForAuthority(
 ) store.TurnFinalizeResult {
 	for index, receipt := range result.Receipts {
 		result.Receipts[index] = s.commitReceiptNowForAuthority(receipt, authority)
+		committed := result.Receipts[index]
+		ids, eventResults, question, err := s.cfg.Store.SemanticWriteOutcome(committed, time.Now().UTC())
+		if err == nil && len(eventResults) > 0 {
+			result.EventIDs = append(result.EventIDs, ids...)
+			result.EventResults = append(result.EventResults, eventResults...)
+			if result.EmotionQuestion == nil {
+				result.EmotionQuestion = question
+			}
+		}
 	}
 	return result
 }

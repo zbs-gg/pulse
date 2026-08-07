@@ -34,8 +34,8 @@ import {
 const MAX_HOOK_INPUT = 1 << 20;
 const HOST = 'claude-code';
 
-function isClaudeProductRememberTool(toolName) {
-  return typeof toolName === 'string' && /^mcp__pulse-product__pulse_remember$/i.test(toolName);
+function isClaudeProductMemoryTool(toolName) {
+  return typeof toolName === 'string' && /^mcp__pulse-product__pulse_(?:remember|graph_delta)$/i.test(toolName);
 }
 
 export function claudeHookContractDigest(runtimeDigest) {
@@ -229,7 +229,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
     if (eventName === 'PreToolUse') {
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
       await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (isClaudeProductRememberTool(rawInput.tool_name)) {
+      if (isClaudeProductMemoryTool(rawInput.tool_name)) {
         (dependencies.writeToolLease ?? writeHostToolLease)(
           resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
         );
@@ -237,7 +237,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       return {};
     }
     if (eventName === 'PostToolUse') {
-      if (!isClaudeProductRememberTool(rawInput.tool_name)) return {};
+      if (!isClaudeProductMemoryTool(rawInput.tool_name)) return {};
       const refs = extractPulseReceiptRefs(rawInput.tool_response);
       if (refs.length === 0) return {};
       const marker = (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
@@ -286,7 +286,7 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
         await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
         return {
           decision: 'block',
-          reason: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
+          reason: 'Perform one bounded Pulse finalization pass for this turn. Use pulse_remember for durable decisions, corrections, open loops, preferences, or project-state changes. Use pulse_graph_delta instead for one short emotional event or an answer to emotion_question; never store the exact user wording. If its result contains emotion_question, ask it only inside the current ordinary reply. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
         };
       }
       try {
@@ -395,7 +395,7 @@ export function claudeWorkspaceDigest(canonicalPath) {
 function readinessMilestone(eventName, options) {
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
-  if (eventName === 'PostToolUse' && isClaudeProductRememberTool(options.input?.tool_name) &&
+  if (eventName === 'PostToolUse' && isClaudeProductMemoryTool(options.input?.tool_name) &&
       /^Pulse Memory Tray receipt:/.test(options.output?.systemMessage ?? '')) return 'write_receipt';
   if (eventName === 'Stop' && options.output?.decision !== 'block' &&
       options.output?.continue !== true) return 'turn_finalize';

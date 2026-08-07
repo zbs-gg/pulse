@@ -427,6 +427,22 @@ test('Claude MCP server name does not become part of the governed product action
   assert.equal(consumed.tool_name, 'pulse_remember');
 });
 
+test('emotional graph writes use the same exact single-use product lease', () => {
+  const { resolved, event } = fixture();
+  const now = new Date('2026-07-14T10:00:00Z');
+  const toolName = 'mcp__pulse-product__pulse_graph_delta';
+  const input = {
+    schema: 'pulse.semantic_delta.v1',
+    source: { host: 'codex', conversation_scope: 'current_turn', timestamp: now.toISOString() },
+    events: [{ client_id: 'event:emotion', title: 'A moment', summary: 'A short event.', emotions: { fear: 0.8 }, confidence: 0.9, privacy_tier: 'private' }],
+    raw_input_included: false,
+  };
+  writeHostToolLease(resolved, event, 'codex', toolName, input, 'tool-graph', now);
+  const consumed = consumeHostToolLease(resolved, 'codex', toolName, input, now);
+  assert.equal(consumed.tool_name, 'pulse_graph_delta');
+  assert.throws(() => consumeHostToolLease(resolved, 'codex', toolName, input, now), /unavailable/);
+});
+
 test('Codex tool lease rejects argument changes and expires after 30 seconds', () => {
   const { resolved, event } = fixture();
   const now = new Date('2026-07-14T10:00:00Z');
