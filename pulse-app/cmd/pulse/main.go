@@ -46,6 +46,13 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "local-migrate" {
+		if err := runLocalMigrateCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	var (
 		dataDir = flag.String("data-dir", filepath.Join(os.Getenv("HOME"), ".pulse"), "data directory")
 		addr    = flag.String("addr", defaultAddr, "listen address")
@@ -58,6 +65,82 @@ func main() {
 	if err := run(*dataDir, *addr); err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
+	}
+}
+
+func runLocalMigrateCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("local-migrate requires preview, status, commit, or rollback")
+	}
+	switch args[0] {
+	case "preview":
+		flags := flag.NewFlagSet("local-migrate preview", flag.ContinueOnError)
+		home := flags.String("home", "", "home directory")
+		canonical := flags.String("canonical", "", "current Personal database")
+		storeID := flags.String("store-id", "", "Personal store id")
+		out := flags.String("out", "", "preview JSON output")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if !filepath.IsAbs(*home) || !filepath.IsAbs(*canonical) || !filepath.IsAbs(*out) {
+			return errors.New("local-migrate preview requires absolute --home, --canonical, and --out")
+		}
+		preview, err := store.BuildLocalMergePreview(*home, *canonical, *storeID, time.Now())
+		if err != nil {
+			return err
+		}
+		if err := store.WriteLocalMergePreview(*out, preview); err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(preview)
+	case "status":
+		flags := flag.NewFlagSet("local-migrate status", flag.ContinueOnError)
+		home := flags.String("home", "", "home directory")
+		canonical := flags.String("canonical", "", "current Personal database")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if !filepath.IsAbs(*home) || !filepath.IsAbs(*canonical) {
+			return errors.New("local-migrate status requires absolute --home and --canonical")
+		}
+		status, err := store.InspectLocalMergeStatus(*home, *canonical)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(status)
+	case "commit":
+		flags := flag.NewFlagSet("local-migrate commit", flag.ContinueOnError)
+		previewPath := flags.String("preview", "", "reviewed preview JSON")
+		confirmation := flags.String("confirm", "", "exact human confirmation")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if !filepath.IsAbs(*previewPath) {
+			return errors.New("local-migrate commit requires absolute --preview")
+		}
+		archivePath, err := store.CommitLocalMergePreview(*previewPath, *confirmation, time.Now())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"ok": true, "archive_path": archivePath,
+		})
+	case "rollback":
+		flags := flag.NewFlagSet("local-migrate rollback", flag.ContinueOnError)
+		previewPath := flags.String("preview", "", "reviewed preview JSON")
+		archivePath := flags.String("archive", "", "rollback database")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if !filepath.IsAbs(*previewPath) || !filepath.IsAbs(*archivePath) {
+			return errors.New("local-migrate rollback requires absolute --preview and --archive")
+		}
+		if err := store.RestoreLocalMergeArchive(*previewPath, *archivePath); err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true})
+	default:
+		return errors.New("local-migrate supports preview, status, commit, or rollback")
 	}
 }
 
@@ -189,8 +272,9 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	var contextQuery server.ContextQueryAPI
 	if retrievalEngine != nil {
 		contextQuery = contextquery.New(contextquery.ServiceConfig{
-			DB:        s.DB(),
-			Retrieval: retrievalEngine,
+			DB:            s.DB(),
+			Retrieval:     retrievalEngine,
+			EmotionMemory: s,
 			// Temporal entity-graph retrieval on the LIVE recall path. "anchored"
 			// is the validated control-safe win (entity-centric recall ↑, no
 			// control regression). Override per-request via graph_mode; set ""

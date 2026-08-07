@@ -31,7 +31,7 @@ type migrationPolicy struct {
 
 const (
 	firstPersonalMigrationVersion = 33
-	latestSchemaVersion           = 42
+	latestSchemaVersion           = 43
 )
 
 var postFoundationMigrationPolicies = map[int]migrationPolicy{
@@ -58,6 +58,14 @@ var postFoundationMigrationPolicies = map[int]migrationPolicy{
 		},
 		MinReaderVersion: 42,
 		MinWriterVersion: 42,
+	},
+	43: {
+		StoreKinds: map[StoreKind]bool{
+			StoreKindLocalPreview: true,
+			StoreKindPersonal:     true,
+		},
+		MinReaderVersion: 43,
+		MinWriterVersion: 43,
 	},
 }
 

@@ -104,10 +104,13 @@ type TurnNoChangeRequest struct {
 }
 
 type TurnFinalizeResult struct {
-	LedgerID        string               `json:"ledger_id"`
-	Status          string               `json:"status"`
-	FinalizeReceipt TurnFinalizeReceipt  `json:"finalize_receipt"`
-	Receipts        []MemoryWriteReceipt `json:"receipts"`
+	LedgerID        string                     `json:"ledger_id"`
+	Status          string                     `json:"status"`
+	FinalizeReceipt TurnFinalizeReceipt        `json:"finalize_receipt"`
+	Receipts        []MemoryWriteReceipt       `json:"receipts"`
+	EventIDs        []int64                    `json:"event_ids,omitempty"`
+	EventResults    []SemanticEventWriteResult `json:"event_results,omitempty"`
+	EmotionQuestion *EmotionQuestion           `json:"emotion_question,omitempty"`
 }
 
 type MemoryWriteReceipt struct {
@@ -223,13 +226,14 @@ type privateCapsuleIdentity struct {
 }
 
 type privateSemanticIdentity struct {
-	Schema           string              `json:"schema"`
-	Nodes            []SemanticNode      `json:"nodes,omitempty"`
-	Edges            []SemanticEdge      `json:"edges,omitempty"`
-	Facts            []SemanticFact      `json:"facts,omitempty"`
-	Events           []SemanticEvent     `json:"events,omitempty"`
-	Continuity       *SemanticContinuity `json:"continuity,omitempty"`
-	RawInputIncluded bool                `json:"raw_input_included"`
+	Schema           string                  `json:"schema"`
+	Nodes            []SemanticNode          `json:"nodes,omitempty"`
+	Edges            []SemanticEdge          `json:"edges,omitempty"`
+	Facts            []SemanticFact          `json:"facts,omitempty"`
+	Events           []SemanticEvent         `json:"events,omitempty"`
+	EmotionAnswers   []SemanticEmotionAnswer `json:"emotion_answers,omitempty"`
+	Continuity       *SemanticContinuity     `json:"continuity,omitempty"`
+	RawInputIncluded bool                    `json:"raw_input_included"`
 }
 
 type trayCandidateRow struct {
@@ -314,6 +318,7 @@ func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateC
 			Schema: candidate.SemanticDelta.Schema, Nodes: candidate.SemanticDelta.Nodes,
 			Edges: candidate.SemanticDelta.Edges, Facts: candidate.SemanticDelta.Facts,
 			Events: candidate.SemanticDelta.Events, Continuity: candidate.SemanticDelta.Continuity,
+			EmotionAnswers:   candidate.SemanticDelta.EmotionAnswers,
 			RawInputIncluded: candidate.SemanticDelta.RawInputIncluded,
 		}
 	default:
@@ -1588,12 +1593,33 @@ func projectPrivateSemanticObjectTx(tx *sql.Tx, objectID string, delta SemanticD
 		}
 	}
 	for _, event := range delta.Events {
-		rowID, err := insertSemanticEvent(tx, entityIDs, event, now)
+		rowID, _, _, err := insertSemanticEvent(tx, entityIDs, event, now, false)
 		if err != nil {
 			return fmt.Errorf("insert private event %q: %w", event.ClientID, err)
 		}
 		if err := insertPrivateSemanticProjectionRefTx(tx, objectID, "event", strconv.FormatInt(rowID, 10)); err != nil {
 			return fmt.Errorf("record private event %q lineage: %w", event.ClientID, err)
+		}
+	}
+	for _, answer := range delta.EmotionAnswers {
+		rowID, err := answerEmotionQuestionTx(tx, answer, now)
+		if errors.Is(err, sql.ErrNoRows) {
+			var deliveredBefore int
+			if historyErr := tx.QueryRow(`
+				SELECT COUNT(*) FROM emotion_question_delivery
+				 WHERE question_id=? AND (delivered_at IS NOT NULL OR answered_at IS NOT NULL)`,
+				answer.QuestionID).Scan(&deliveredBefore); historyErr != nil {
+				return historyErr
+			}
+			if deliveredBefore == 1 {
+				continue
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("answer private emotion question %q: %w", answer.QuestionID, err)
+		}
+		if err := insertPrivateSemanticProjectionRefTx(tx, objectID, "event", strconv.FormatInt(rowID, 10)); err != nil {
+			return fmt.Errorf("record private emotion answer %q lineage: %w", answer.QuestionID, err)
 		}
 	}
 	if delta.Continuity != nil {
@@ -3315,6 +3341,9 @@ func (s *Store) applyProductMemoryWipeTx(tx *sql.Tx, now time.Time) error {
 		DELETE FROM memory_tray_candidates;
 		DELETE FROM turn_ledgers;
 		DELETE FROM memory_capsules;
+		DELETE FROM emotion_overrides;
+		DELETE FROM emotion_questions;
+		DELETE FROM emotion_question_delivery;
 		DELETE FROM continuity_observations;
 		DELETE FROM continuity_checkpoints;
 		DELETE FROM continuity_sessions;
