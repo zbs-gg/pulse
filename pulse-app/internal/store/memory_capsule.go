@@ -829,6 +829,9 @@ func (s *Store) WipeMemory() error {
 	if _, err := tx.Exec(`DELETE FROM memory_capsules`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM emotion_overrides; DELETE FROM emotion_questions;`); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
 		DELETE FROM continuity_observations;
 		DELETE FROM continuity_checkpoints;
