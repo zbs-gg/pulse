@@ -169,18 +169,20 @@ type MemoryHomeNextTaskPreview struct {
 }
 
 type MemoryHomeData struct {
-	Schema          string                      `json:"schema"`
-	GeneratedAt     string                      `json:"generated_at"`
-	Boundary        MemoryHomeBoundary          `json:"boundary"`
-	Readiness       MemoryHomeReadinessSnapshot `json:"readiness"`
-	Memories        MemoryHomeMemories          `json:"memories"`
-	Filter          MemoryHomeFilter            `json:"filter"`
-	Facets          MemoryHomeFacets            `json:"facets"`
-	Receipts        MemoryHomeReceipts          `json:"receipts"`
-	Context         MemoryHomeContext           `json:"context"`
-	Economy         MemoryHomeEconomy           `json:"economy"`
-	NextTaskPreview *MemoryHomeNextTaskPreview  `json:"next_task_preview,omitempty"`
-	Consolidation   *consolidation.Report       `json:"consolidation,omitempty"`
+	Schema            string                      `json:"schema"`
+	GeneratedAt       string                      `json:"generated_at"`
+	Boundary          MemoryHomeBoundary          `json:"boundary"`
+	Readiness         MemoryHomeReadinessSnapshot `json:"readiness"`
+	Memories          MemoryHomeMemories          `json:"memories"`
+	Filter            MemoryHomeFilter            `json:"filter"`
+	Facets            MemoryHomeFacets            `json:"facets"`
+	Receipts          MemoryHomeReceipts          `json:"receipts"`
+	Context           MemoryHomeContext           `json:"context"`
+	Economy           MemoryHomeEconomy           `json:"economy"`
+	NextTaskPreview   *MemoryHomeNextTaskPreview  `json:"next_task_preview,omitempty"`
+	Consolidation     *consolidation.Report       `json:"consolidation,omitempty"`
+	EmotionalMemory   []EmotionHistoryItem        `json:"emotional_memory"`
+	EmotionalPatterns []EmotionPattern            `json:"emotional_patterns"`
 }
 
 type MemoryHomeProjectionInput struct {
@@ -288,7 +290,7 @@ func (s *Store) buildMemoryHomeDataForScope(
 	if err != nil {
 		return MemoryHomeData{}, err
 	}
-	return ProjectMemoryHomeData(MemoryHomeProjectionInput{
+	result := ProjectMemoryHomeData(MemoryHomeProjectionInput{
 		GeneratedAt: query.GeneratedAt.UTC().Format(time.RFC3339Nano),
 		Boundary: MemoryHomeBoundary{
 			StoreID: s.storeID, StoreKind: string(s.storeKind), RepositoryID: query.RepositoryID,
@@ -298,7 +300,16 @@ func (s *Store) buildMemoryHomeDataForScope(
 		ReadinessMemories: readinessMemories,
 		Attempts:          attempts, Deliveries: deliveryFacts, CurrentSessionRef: query.CurrentSessionRef,
 		NextTaskPreview: query.NextTaskPreview, Filter: query.Filter, Facets: facets,
-	}), nil
+	})
+	result.EmotionalMemory, err = s.EmotionHistory(100, query.GeneratedAt)
+	if err != nil {
+		return MemoryHomeData{}, err
+	}
+	result.EmotionalPatterns, err = s.ConfirmedEmotionPatterns()
+	if err != nil {
+		return MemoryHomeData{}, err
+	}
+	return result, nil
 }
 
 func ProjectMemoryHomeData(input MemoryHomeProjectionInput) MemoryHomeData {
@@ -312,9 +323,11 @@ func ProjectMemoryHomeData(input MemoryHomeProjectionInput) MemoryHomeData {
 		Memories: MemoryHomeMemories{LatestActive: []MemoryHomeActiveMemory{}},
 		Receipts: MemoryHomeReceipts{LatestTerminal: []MemoryHomeActiveMemory{}, Attempts: []MemoryHomeAttempt{}},
 		Context:  MemoryHomeContext{Selection: "none"}, Economy: ProjectMemoryHomeEconomy(input.Deliveries),
-		NextTaskPreview: projectMemoryHomeNextTaskPreview(input.NextTaskPreview),
-		Filter:          input.Filter,
-		Facets:          input.Facets,
+		NextTaskPreview:   projectMemoryHomeNextTaskPreview(input.NextTaskPreview),
+		Filter:            input.Filter,
+		Facets:            input.Facets,
+		EmotionalMemory:   []EmotionHistoryItem{},
+		EmotionalPatterns: []EmotionPattern{},
 	}
 	activeCount := input.ActiveCount
 	if activeCount < len(input.ActiveMemories) {

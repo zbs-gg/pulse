@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/nkkmnk/pulse/internal/store"
 )
@@ -34,6 +35,7 @@ func (s *Server) handleContinuityResume(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		attachEmotionQuestion(s.cfg.Store, &resume)
 		writeJSON(w, resume)
 		return
 	}
@@ -43,6 +45,7 @@ func (s *Server) handleContinuityResume(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "continuity resume error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		attachEmotionQuestion(s.cfg.Store, &resume)
 		writeJSON(w, resume)
 		return
 	}
@@ -73,11 +76,22 @@ func (s *Server) handleContinuityResume(w http.ResponseWriter, r *http.Request) 
 			authority.BindingDigest, authority.RepositoryID,
 		)
 		if err == nil && latest.EligibilityRevision == scope.EligibilityRevision {
+			attachEmotionQuestion(s.cfg.Store, &resume)
 			writeJSON(w, resume)
 			return
 		}
 	}
 	http.Error(w, "continuity eligibility changed; retry", http.StatusConflict)
+}
+
+func attachEmotionQuestion(vault *store.Store, resume *store.ResumeBlock) {
+	if vault == nil || resume == nil {
+		return
+	}
+	question, err := vault.TakePendingEmotionQuestion(time.Now().UTC())
+	if err == nil {
+		resume.EmotionQuestion = question
+	}
 }
 
 func (s *Server) handleContinuityCheckpoint(w http.ResponseWriter, r *http.Request) {

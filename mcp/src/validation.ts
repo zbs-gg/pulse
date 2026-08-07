@@ -40,6 +40,19 @@ const ASSERTION_VISIBILITY = new Set(['private']);
 const PLUTCHIK = new Set([
   'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt',
 ]);
+const EMOTION_DERIVATIONS = new Set(['explicit', 'inferred', 'user_confirmed']);
+const EMOTION_ALIASES = new Map<string, string>([
+  ['joy', 'joy'], ['радость', 'joy'], ['радостно', 'joy'],
+  ['sadness', 'sadness'], ['грусть', 'sadness'], ['печаль', 'sadness'], ['грустно', 'sadness'],
+  ['anger', 'anger'], ['злость', 'anger'], ['гнев', 'anger'], ['раздражение', 'anger'],
+  ['fear', 'fear'], ['страх', 'fear'], ['тревога', 'fear'], ['тревожно', 'fear'],
+  ['trust', 'trust'], ['доверие', 'trust'], ['спокойствие', 'trust'],
+  ['disgust', 'disgust'], ['отвращение', 'disgust'], ['неприятие', 'disgust'],
+  ['anticipation', 'anticipation'], ['ожидание', 'anticipation'], ['предвкушение', 'anticipation'],
+  ['surprise', 'surprise'], ['удивление', 'surprise'], ['неожиданность', 'surprise'],
+  ['shame', 'shame'], ['стыд', 'shame'], ['стыдно', 'shame'],
+  ['guilt', 'guilt'], ['вина', 'guilt'], ['виноват', 'guilt'], ['виновата', 'guilt'],
+]);
 
 const AUTHORITY_FIELDS = new Set([
 	'audience', 'principal', 'role', 'scope', 'vault', 'visibility', 'workspace',
@@ -240,6 +253,20 @@ export interface CleanEvent {
   domain: string;
   occurred_at: string;
   emotions: Record<string, number>;
+  emotion_derivation: string;
+  emotion_confidence: number;
+  observed_label: string;
+  trigger?: CleanEmotionTrigger;
+}
+export interface CleanEmotionTrigger {
+  summary: string;
+  derivation: string;
+  confidence: number;
+  confirmed: boolean;
+}
+export interface CleanEmotionAnswer {
+  question_id: string;
+  trigger: CleanEmotionTrigger;
 }
 export interface CleanContinuity {
   summary: string;
@@ -264,6 +291,7 @@ export interface CleanDelta {
   edges: CleanEdge[];
   facts: CleanFact[];
   events: CleanEvent[];
+  emotion_answers: CleanEmotionAnswer[];
   continuity?: CleanContinuity;
 }
 
@@ -304,14 +332,16 @@ export function validateDelta(input: unknown): CleanDelta {
   const edgesIn = Array.isArray(delta.edges) ? delta.edges : [];
   const factsIn = Array.isArray(delta.facts) ? delta.facts : [];
   const eventsIn = Array.isArray(delta.events) ? delta.events : [];
+  const emotionAnswersIn = Array.isArray(delta.emotion_answers) ? delta.emotion_answers : [];
   const hasContinuity = delta.continuity !== undefined && delta.continuity !== null;
-  if (nodesIn.length === 0 && edgesIn.length === 0 && factsIn.length === 0 && eventsIn.length === 0 && !hasContinuity) {
+  if (nodesIn.length === 0 && edgesIn.length === 0 && factsIn.length === 0 && eventsIn.length === 0 && emotionAnswersIn.length === 0 && !hasContinuity) {
     fail('semantic delta must include graph content or continuity');
   }
   if (nodesIn.length > 30) fail('nodes has too many items: max 30');
   if (edgesIn.length > 50) fail('edges has too many items: max 50');
   if (factsIn.length > 50) fail('facts has too many items: max 50');
   if (eventsIn.length > 20) fail('events has too many items: max 20');
+  if (emotionAnswersIn.length > 20) fail('emotion_answers has too many items: max 20');
 
   const refs = new Set<string>();
   const nodes: CleanNode[] = nodesIn.map((entry, i) => {
@@ -445,9 +475,29 @@ export function validateDelta(input: unknown): CleanDelta {
       const keys = Object.keys(emo);
       if (keys.length > 10) fail(`events[${i}].emotions has too many keys`);
       for (const key of keys) {
-        if (!PLUTCHIK.has(key)) fail(`events[${i}].emotions key "${key}" is not a Plutchik-10 emotion`);
-        emotions[key] = num01(`events[${i}].emotions["${key}"]`, emo[key], 0);
+        const canonical = EMOTION_ALIASES.get(key.trim().toLowerCase());
+        if (!canonical || !PLUTCHIK.has(canonical)) fail(`events[${i}].emotions key "${key}" is not a supported emotion`);
+        emotions[canonical] = Math.max(emotions[canonical] ?? 0, num01(`events[${i}].emotions["${key}"]`, emo[key], 0));
       }
+    }
+    const emotion_derivation = Object.keys(emotions).length === 0
+      ? ''
+      : (event.emotion_derivation === undefined || event.emotion_derivation === null || event.emotion_derivation === ''
+        ? 'inferred'
+        : inEnum(`events[${i}].emotion_derivation`, event.emotion_derivation, EMOTION_DERIVATIONS));
+    const emotion_confidence = Object.keys(emotions).length === 0
+      ? 0
+      : num01(`events[${i}].emotion_confidence`, event.emotion_confidence, confidence);
+    const observed_label = safeText(`events[${i}].observed_label`, event.observed_label, 120, false);
+    let trigger: CleanEmotionTrigger | undefined;
+    if (event.trigger !== undefined && event.trigger !== null) {
+      const rawTrigger = asRecord(event.trigger, `events[${i}].trigger`);
+      trigger = {
+        summary: safeText(`events[${i}].trigger.summary`, rawTrigger.summary, 360, true),
+        derivation: inEnum(`events[${i}].trigger.derivation`, rawTrigger.derivation, EMOTION_DERIVATIONS),
+        confidence: num01(`events[${i}].trigger.confidence`, rawTrigger.confidence, 0.5),
+        confirmed: rawTrigger.confirmed === true,
+      };
     }
     return {
       client_id: (event.client_id as string).trim(),
@@ -461,6 +511,27 @@ export function validateDelta(input: unknown): CleanDelta {
       domain,
       occurred_at,
       emotions,
+      emotion_derivation,
+      emotion_confidence,
+      observed_label,
+      ...(trigger ? { trigger } : {}),
+    };
+  });
+
+  const emotion_answers: CleanEmotionAnswer[] = emotionAnswersIn.map((entry, i) => {
+    const answer = asRecord(entry, `emotion_answers[${i}]`);
+    if (typeof answer.question_id !== 'string' || !answer.question_id.startsWith('emotion_question:') || !validRef(answer.question_id)) {
+      fail(`emotion_answers[${i}].question_id is invalid`);
+    }
+    const rawTrigger = asRecord(answer.trigger, `emotion_answers[${i}].trigger`);
+    return {
+      question_id: answer.question_id.trim(),
+      trigger: {
+        summary: safeText(`emotion_answers[${i}].trigger.summary`, rawTrigger.summary, 360, true),
+        derivation: inEnum(`emotion_answers[${i}].trigger.derivation`, rawTrigger.derivation ?? 'user_confirmed', EMOTION_DERIVATIONS),
+        confidence: num01(`emotion_answers[${i}].trigger.confidence`, rawTrigger.confidence, 1),
+        confirmed: true,
+      },
     };
   });
 
@@ -490,5 +561,5 @@ export function validateDelta(input: unknown): CleanDelta {
     cleanSource.project_id = source.project_id.trim();
   }
 
-  return { source: cleanSource, nodes, edges, facts, events, continuity };
+  return { source: cleanSource, nodes, edges, facts, events, emotion_answers, continuity };
 }

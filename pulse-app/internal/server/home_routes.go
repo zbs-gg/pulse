@@ -87,6 +87,9 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/memory/{id}/edit", s.handleHomeMemoryEdit)
 		r.Post("/memory/{id}/move", s.handleHomeMemoryMove)
 		r.Post("/memory/{id}/delete", s.handleHomeMemoryDelete)
+		r.Post("/emotion/{id}/confirm", s.handleHomeEmotionConfirm)
+		r.Post("/emotion/{id}/edit", s.handleHomeEmotionEdit)
+		r.Post("/emotion/{id}/delete", s.handleHomeEmotionDelete)
 		r.Post("/unassigned/{id}/assign", s.handleHomeUnassignedAssign)
 		r.Post("/unassigned/{id}/delete", s.handleHomeUnassignedDelete)
 		r.Post("/consolidation/start", s.handleHomeConsolidationStart)
@@ -104,6 +107,89 @@ func (s *Server) homeHandler() http.Handler {
 		r.Post("/protected/wipe/complete", s.handleHomeProtectedWipeComplete)
 	})
 	return r
+}
+
+func homeEmotionEventID(r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	return id, err == nil && id > 0
+}
+
+func (s *Server) reloadEmotionMemory() {
+	if s.cfg.Retrieval != nil {
+		_ = s.cfg.Retrieval.Reload(context.Background())
+	}
+}
+
+func (s *Server) handleHomeEmotionConfirm(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	eventID, ok := homeEmotionEventID(r)
+	if !ok || s.cfg.Store.ConfirmEventEmotion(eventID, s.homeNow()) != nil {
+		http.Error(w, "Emotion could not be confirmed", http.StatusBadRequest)
+		return
+	}
+	s.reloadEmotionMemory()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeEmotionDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	eventID, ok := homeEmotionEventID(r)
+	if !ok || s.cfg.Store.DeleteEventEmotion(eventID, s.homeNow()) != nil {
+		http.Error(w, "Emotion could not be deleted", http.StatusBadRequest)
+		return
+	}
+	s.reloadEmotionMemory()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleHomeEmotionEdit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHomeMutation(w, r); !ok {
+		return
+	}
+	if !exactHomeFormFields(r, viewerSessionCSRFFormField, "emotion", "intensity", "confidence",
+		"derivation", "observed_label", "trigger_summary", "trigger_derivation", "trigger_confidence") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	eventID, ok := homeEmotionEventID(r)
+	intensity, intensityErr := strconv.ParseFloat(r.PostForm.Get("intensity"), 64)
+	confidence, confidenceErr := strconv.ParseFloat(r.PostForm.Get("confidence"), 64)
+	triggerConfidence, triggerConfidenceErr := strconv.ParseFloat(r.PostForm.Get("trigger_confidence"), 64)
+	if !ok || intensityErr != nil || confidenceErr != nil || triggerConfidenceErr != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var trigger *store.SemanticEmotionTrigger
+	if summary := strings.TrimSpace(r.PostForm.Get("trigger_summary")); summary != "" {
+		trigger = &store.SemanticEmotionTrigger{
+			Summary: summary, Derivation: r.PostForm.Get("trigger_derivation"),
+			Confidence: triggerConfidence,
+			Confirmed:  r.PostForm.Get("trigger_derivation") == "explicit" || r.PostForm.Get("trigger_derivation") == "user_confirmed",
+		}
+	}
+	err := s.cfg.Store.EditEventEmotion(eventID, store.EmotionEdit{
+		Emotions:   map[string]float64{r.PostForm.Get("emotion"): intensity},
+		Derivation: r.PostForm.Get("derivation"), Confidence: confidence,
+		ObservedLabel: r.PostForm.Get("observed_label"), Trigger: trigger,
+	}, s.homeNow())
+	if err != nil {
+		http.Error(w, "Emotion could not be updated", http.StatusBadRequest)
+		return
+	}
+	s.reloadEmotionMemory()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleHomeConsolidationStart(w http.ResponseWriter, r *http.Request) {

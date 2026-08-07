@@ -6,6 +6,10 @@ Use this checklist before installing Pulse Personal 0.7.2 for a user.
 
 - [ ] No backend OpenAI, Anthropic, or Cohere key is required by default.
 - [ ] Raw transcript capture is off by default.
+- [ ] Emotional marks contain a short event description and metadata, not the
+      exact user quote or full conversation.
+- [ ] Emotional marks remain in Personal SQLite and cannot be published to
+      Pulse Team.
 - [ ] Old chat import is not run by default.
 - [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2`, or the user
       explicitly provided an exact source bundle, tarball, or local checkout.
@@ -42,6 +46,7 @@ The plan should say Pulse will not:
 
 - import old chats;
 - store raw transcripts by default;
+- publish emotional marks or their causes to another person;
 - call backend OpenAI/Anthropic/Cohere model APIs by default;
 - print secrets;
 - claim production readiness.
@@ -54,6 +59,7 @@ Stop and explain if:
 - npm returns 404 for `@zbs-gg/pulse@0.7.2` and no source bundle/local
   checkout was provided;
 - a command tries to import archives before the first proof;
+- a command offers to send an emotional mark to Team or another user;
 - a command prints a real secret;
 - a command writes project `.mcp.json` without explicit user approval;
 - the user has not confirmed installation.

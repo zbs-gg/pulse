@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 type Retrieval interface {
@@ -14,8 +16,9 @@ type Retrieval interface {
 }
 
 type ServiceConfig struct {
-	DB        *sql.DB
-	Retrieval Retrieval
+	DB            *sql.DB
+	Retrieval     Retrieval
+	EmotionMemory *store.Store
 	// GraphMode wires temporal entity-graph retrieval into the LIVE recall path
 	// ("" = off, "anchored", "walk"). Set in cmd wiring. Per-request override via
 	// ContextQueryRequest.GraphMode. "anchored" is the validated control-safe win
@@ -32,11 +35,12 @@ type Service struct {
 	retrieval      Retrieval
 	graphMode      string
 	defaultDomains []string
+	emotionMemory  *store.Store
 }
 
 func New(cfg ServiceConfig) *Service {
 	return &Service{db: cfg.DB, retrieval: cfg.Retrieval, graphMode: cfg.GraphMode,
-		defaultDomains: cfg.DefaultDomains}
+		defaultDomains: cfg.DefaultDomains, emotionMemory: cfg.EmotionMemory}
 }
 
 func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextResult, error) {
@@ -63,11 +67,35 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 	if req.GraphMode != "" {
 		graphMode = req.GraphMode // per-request override
 	}
+	effectiveState := req.UserState
+	emotionContext := store.CurrentEmotionContext{Items: []store.EmotionContextItem{}}
+	emotionSource := "explicit"
+	if effectiveState == nil {
+		emotionSource = "none"
+		if s.emotionMemory != nil {
+			var contextErr error
+			emotionContext, contextErr = s.emotionMemory.CurrentEmotionContext(time.Now().UTC())
+			if contextErr == nil {
+				mood := make(map[string]float64)
+				for _, item := range emotionContext.Items {
+					if item.Influence > mood[item.Emotion] {
+						mood[item.Emotion] = item.Influence
+					}
+				}
+				if len(mood) > 0 {
+					effectiveState = &retrieve.UserState{MoodVector: mood}
+					emotionSource = "memory"
+				}
+			} else {
+				emotionContext = store.CurrentEmotionContext{Items: []store.EmotionContextItem{}}
+			}
+		}
+	}
 	ret, err := s.retrieval.Retrieve(ctx, retrieve.RetrieveRequest{
 		Query:     query,
 		Mode:      retrieve.QueryMode(req.Mode),
 		TopK:      topK,
-		UserState: req.UserState,
+		UserState: effectiveState,
 		GraphMode: graphMode,
 	})
 	if err != nil {
@@ -75,10 +103,25 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 	}
 
 	out := &ContextResult{
-		SchemaVersion: SchemaVersion,
-		Query:         query,
-		ModeUsed:      string(ret.ModeUsed),
-		Scope:         scope,
+		SchemaVersion:           SchemaVersion,
+		Query:                   query,
+		ModeUsed:                string(ret.ModeUsed),
+		Scope:                   scope,
+		Facts:                   []ContextFact{},
+		EmotionalAnchors:        []ContextEmotionalAnchor{},
+		Events:                  []ContextEvent{},
+		Entities:                []ContextEntity{},
+		Relations:               []ContextRelation{},
+		Forbidden:               []ContextRedaction{},
+		Private:                 []ContextRedaction{},
+		Uncertainty:             []ContextUncertainty{},
+		ImportanceQuestions:     []ContextImportanceQuestion{},
+		CurrentEmotionalContext: emotionContext,
+		EmotionalStateSource:    emotionSource,
+		EffectiveMoodVector:     map[string]float64{},
+	}
+	if effectiveState != nil {
+		out.EffectiveMoodVector = effectiveState.MoodVector
 	}
 	allowedDomains := normalizeDomains(req.DomainsAllowed)
 	if allowedDomains == nil {

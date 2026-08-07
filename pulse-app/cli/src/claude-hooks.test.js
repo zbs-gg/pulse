@@ -295,6 +295,21 @@ test('Claude PreToolUse uses official deny output and mints an exact Pulse lease
   await handleClaudeHook('PreToolUse', {
     ...base,
     hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__pulse-product__pulse_graph_delta',
+    tool_input: { schema: 'pulse.semantic_delta.v1', events: [], raw_input_included: false },
+    tool_use_id: 'tool-graph',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...args) => leases.push(args),
+  });
+  assert.equal(leases.length, 2);
+  assert.equal(leases[1][3], 'mcp__pulse-product__pulse_graph_delta');
+
+  await handleClaudeHook('PreToolUse', {
+    ...base,
+    hook_event_name: 'PreToolUse',
     tool_name: 'mcp__pulse__pulse_remember',
     tool_input: toolInput,
     tool_use_id: 'tool-legacy-memory',
@@ -304,7 +319,7 @@ test('Claude PreToolUse uses official deny output and mints an exact Pulse lease
     request: async () => ({ capture_enabled: true }),
     writeToolLease: (...args) => leases.push(args),
   });
-  assert.equal(leases.length, 1);
+  assert.equal(leases.length, 2);
 });
 
 test('Claude ordinary tools remain available when Pulse authority is unavailable', async () => {

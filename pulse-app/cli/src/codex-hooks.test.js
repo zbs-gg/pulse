@@ -505,6 +505,24 @@ test('PreToolUse mints one content-free exact-argument lease for pulse_remember'
   assert.equal(leases[0][4], 'tool-memory-lease');
 });
 
+test('PreToolUse mints the same governed lease for pulse_graph_delta', async () => {
+  const leases = [];
+  const toolInput = { schema: 'pulse.semantic_delta.v1', events: [], raw_input_included: false };
+  const output = await handleCodexHook('PreToolUse', {
+    ...base, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_graph_delta',
+    tool_input: toolInput, tool_use_id: 'tool-graph-lease',
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => ({ binding_digest: resolved.binding.binding_digest }),
+    request: async () => ({ capture_enabled: true }),
+    writeToolLease: (...values) => leases.push(values),
+  });
+  assert.deepEqual(output, {});
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0][2], 'mcp__pulse-product__pulse_graph_delta');
+  assert.deepEqual(leases[0][3], toolInput);
+});
+
 test('PreToolUse trusts the Pulse namespace emitted for the installed Codex plugin', async () => {
   const leases = [];
   const toolInput = {
@@ -797,7 +815,7 @@ test('Codex plugin exposes one collision-resistant stdio MCP and native bundled 
     args: [
       '--input-type=module',
       '--eval',
-      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.2','mcp','server.mjs')).href);",
+      "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.8.0','mcp','server.mjs')).href);",
     ],
     env_vars: ['CODEX_HOME'],
   });

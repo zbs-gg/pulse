@@ -257,7 +257,7 @@ test('signed Codex product edge accepts only the exact release-owned plugin and 
 			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
 		}, edge).reason, 'codex_plugin_snapshot_mismatch');
 
-		const wrongVersion = writeSignedProductEdgeFixture(join(root, 'wrong'), { pluginVersion: '0.7.1' });
+		const wrongVersion = writeSignedProductEdgeFixture(join(root, 'wrong'), { pluginVersion: '0.8.0' });
 		assert.throws(
 			() => resolveSignedCodexProductEdge({ release: wrongVersion.release, activation: wrongVersion.activation }),
 			/codex_plugin_version_mismatch/,
