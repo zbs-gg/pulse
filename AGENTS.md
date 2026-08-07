@@ -94,3 +94,18 @@ RAM). Be explicit with the user: this is the fallback, not the product.
 - memory local and inspectable (viewer on the full engine, plain JSON in
   Safe Mode);
 - destructive wipe requires the exact confirmation phrase.
+
+## Product documentation
+
+After changing capabilities, installation, user flow, limitations, privacy,
+readiness, or positioning, review and update the related product documents in
+the same work. If no documentation change is needed, say so explicitly.
+
+The required Pulse Personal documents are:
+
+- `README.md`
+- `llms.txt`
+- `pulse-app/PRODUCT.md`
+- `docs/INSTALL_WITH_AGENT.md`
+- `docs/PERSONAL_PULSE_ONBOARDING.md`
+- `docs/SECURITY_INSTALL_CHECKLIST.md`

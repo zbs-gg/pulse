@@ -6,11 +6,17 @@ product
 
 ## Users
 
-Pulse is for AI-heavy operators, founders, engineers, and researchers who move between Claude, Claude Code, Codex, ChatGPT, and local agent harnesses. They are trying to keep project and personal continuity without re-explaining context, and they need to inspect memory before trusting it.
+Pulse Personal is for people who work across Codex, Claude Code, and Cursor and
+do not want to explain the same project decisions again in every new session.
+Ordinary ChatGPT chat is not a supported Pulse connection yet.
 
 ## Product Purpose
 
-Pulse keeps the thread across AI chats. The migration workbench guides a user to request host archives, previews existing chat history locally, extracts structured people, memories, emotions, relationships, and fun facts, then writes graph memory only after explicit review and confirmation.
+Pulse stores small approved memories in a local SQLite database, restores the
+relevant ones in later work, and lets the owner inspect, correct, or delete them
+in Memory Home. Personal 0.8 adds momentary emotional observations and a safe
+preview for combining old local stores without changing their source files.
+The 0.8 work is not released yet.
 
 ## Brand Personality
 
@@ -22,9 +28,11 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 ## Design Principles
 
-- Make consent and trust visible before import.
-- Show the graph as inspectable objects: people, memories, emotions, relationships, and fun facts.
-- Keep host archive steps human-simple: open the right page, click one host button, let Pulse wait.
+- Make consent and trust visible before installation, migration, or deletion.
+- Show memories and emotional observations as inspectable, editable objects.
+- Distinguish what the person said from what Pulse inferred.
+- Never turn repeated emotions into a personality trait without confirmation.
+- Keep Personal memory local; Team is a separate private pilot.
 - Prefer task clarity and dense readable product surfaces over decorative personality.
 - Never imply evaluated paper claims from product migration UX.
 

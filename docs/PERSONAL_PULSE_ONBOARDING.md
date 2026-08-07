@@ -1,11 +1,8 @@
 # Personal Pulse onboarding
 
-Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
-platforms follow after the Mac installation has been tested end to end.
-
-Publication status: this host-neutral flow is branch-ready but is not a claim
-about the current npm `preview` tag until the matching signed artifacts and
-physical clean-machine attestation are published.
+Publication status: Personal 0.8 is unfinished and not present in npm. This
+document describes the intended flow; ordinary installation still uses the
+published 0.7.2 package until 0.8 passes a separate live acceptance.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
