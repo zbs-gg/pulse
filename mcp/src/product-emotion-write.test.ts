@@ -17,7 +17,7 @@ async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 	return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
 }
 
-test('bound product graph writes one private emotional event through the governed turn', async () => {
+test('bound pulse_memory writes one scoped emotional moment through the governed turn', async () => {
 	const root = mkdtempSync(join(tmpdir(), 'pulse-product-emotion-'));
 	const workspace = realpathSync(join(process.cwd()));
 	const requests: Record<string, unknown>[] = [];
@@ -65,8 +65,8 @@ export function resolveProductWorkspaceBinding() {
   return {binding_digest:'${'a'.repeat(64)}',resolver_epoch:7,workspace:{canonical_path:${JSON.stringify(workspace)},repository_id:'repository_test'}};
 }
 export function consumeHostToolLease(_resolved, host, toolName) {
-  if (host !== 'codex' || toolName !== 'pulse_graph_delta') throw new Error('wrong governed tool');
-  return {host:'codex',session_id:'session-real',turn_id:'turn-real',source_event_key:'event_${'d'.repeat(64)}',idempotency_key:'lifecycle:${'e'.repeat(64)}',binding_digest:'${'a'.repeat(64)}',policy_epoch:0,resolver_epoch:7};
+  if (host !== 'codex' || toolName !== 'pulse_memory') throw new Error('wrong governed tool');
+  throw new Error('host_tool_lease_unavailable');
 }
 export function writeHostFinalizeMarker() {}
 `, { mode: 0o600 });
@@ -88,29 +88,32 @@ export function writeHostFinalizeMarker() {}
 	try {
 		await client.connect(transport);
 		const tools = await client.listTools();
-		assert.ok(tools.tools.some((tool) => tool.name === 'pulse_graph_delta'));
+		assert.deepEqual(tools.tools.map((tool) => tool.name), ['pulse_memory']);
 		const result = await client.callTool({
-			name: 'pulse_graph_delta',
+			name: 'pulse_memory',
 			arguments: {
-				schema: 'pulse.semantic_delta.v1',
-				source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-08-06T10:00:00Z' },
-				events: [{
-					client_id: 'moment:1', title: 'A tense moment', summary: 'A short description without a quote.',
-					emotions: { fear: 0.8 }, emotion_derivation: 'inferred', emotion_confidence: 0.9,
-					confidence: 0.9, privacy_tier: 'private',
+				items: [{
+					kind: 'emotion', scope: 'personal', summary: 'A tense moment during the release decision.',
+					emotion: { label: 'fear', intensity: 0.8, source: 'inferred', cause: 'Release uncertainty' },
 				}],
-				raw_input_included: false,
 			},
 		});
-		assert.equal(result.structuredContent?.event_results?.[0]?.result, 'created');
-		assert.equal(result.structuredContent?.emotion_question?.event_id, 41);
+		assert.equal(result.structuredContent, undefined);
+		assert.deepEqual(JSON.parse(result.content[0].text as string), {
+			status: 'stored', ids: ['semantic_emotion_01'],
+		});
 		assert.equal(requests.length, 1);
 		const candidate = (requests[0].candidates as Array<Record<string, unknown>>)[0];
 		assert.equal(candidate.kind, 'semantic_delta');
+		assert.equal(candidate.memory_scope, 'personal_global');
 		const delta = candidate.semantic_delta as Record<string, unknown>;
 		assert.equal((delta.source as Record<string, unknown>).host, 'codex');
-		assert.equal((delta.source as Record<string, unknown>).session_id, 'session-real');
+		assert.match(String((delta.source as Record<string, unknown>).session_id), /^mcp_[a-f0-9]{64}$/);
 		assert.equal(delta.raw_input_included, false);
+		assert.match(String(requests[0].idempotency_key), /^lifecycle:[a-f0-9]{64}$/);
+		const event = (delta.events as Array<Record<string, unknown>>)[0];
+		assert.equal(event.emotion_derivation, 'inferred');
+		assert.deepEqual(event.emotions, { fear: 0.8 });
 	} finally {
 		await client.close().catch(() => {});
 		await new Promise<void>((resolve) => backend.close(() => resolve()));

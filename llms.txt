@@ -1,8 +1,14 @@
 # Pulse Personal 0.8.0
 
 This is an unfinished development branch. Do not claim that 0.8.0 is published
-or installable from npm. The current published install remains 0.7.2 until a
-separate live acceptance and release.
+or installable from npm. The owner-machine migration passed on 2026-08-09, but
+the invisible-memory dogfood did not. A local epoch-17 candidate fixed the tool
+schema, and Claude Code automatically recalled an old criterion and stored a
+decision plus emotional moment in one call without retrying. Codex retrieved
+the new capsule for one semantic wording but did not apply the exact rule
+reliably across two fresh questions. Local 0.8 connections were therefore
+disabled before Cursor and the live project boundary were accepted. The current
+published install remains 0.7.2.
 
 Pulse is local working memory for Codex, Claude Code, and Cursor. The public
 package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
@@ -44,6 +50,16 @@ Trust boundaries:
 - one unanswered cause question may appear only in a later ordinary response
   and never creates an automatic continuation.
 
+Unfinished 0.8 host contract:
+
+- expose only `pulse_memory`; keep `pulse_remember` and `pulse_graph_delta` as
+  hidden compatibility aliases;
+- write at most three compact durable items during the ordinary working turn;
+- do not run a separate finalizing model turn or block Stop;
+- retrieve temporarily on each user question, save neither the question nor a
+  session-start context package, and offer at most four memories / 600 tokens;
+- omit memory context when relevance is weak.
+
 Official 0.6.7 Personal databases upgrade in place. Databases from unpublished
 shared-memory builds are refused without modification.
 
@@ -60,4 +76,6 @@ or the npm package. Do not infer that the presence of 0.8 code proves a real
 three-person pilot, fresh-session acceptance, or a published emotional-memory
 feature.
 
-Status: unfinished development branch, not published or production ready.
+Status: unfinished development branch; migration and corrected Claude write
+accepted, cross-host invisible recall still unstable, dogfood disabled, not
+published or production ready.

@@ -140,6 +140,12 @@ func DiscoverLocalMergeSources(home, canonicalPath string) ([]string, error) {
 	}
 	root := filepath.Join(filepath.Clean(home), ".pulse")
 	candidates := []string{filepath.Join(root, "pulse.db")}
+	claudeMem := filepath.Join(filepath.Clean(home), ".claude-mem", "claude-mem.db")
+	if _, err := os.Lstat(claudeMem); err == nil {
+		candidates = append(candidates, claudeMem)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	vaults, err := filepath.Glob(filepath.Join(root, "vaults", "personal", "*", "pulse.db"))
 	if err != nil {
 		return nil, err
@@ -271,6 +277,34 @@ func BuildLocalMergePreview(home, canonicalPath, storeID string, now time.Time) 
 		_ = target.Close()
 		return LocalMergePreview{}, err
 	}
+	claudeMemCoverage := newClaudeMemCoverage()
+	if err := collectClaudeMemCoverage(canonicalDB, claudeMemCoverage); err != nil {
+		_ = target.Close()
+		return LocalMergePreview{}, err
+	}
+	for _, sourcePath := range sources {
+		if strings.HasSuffix(sourcePath, ".json") {
+			continue
+		}
+		sourceDB, openErr := openLocalMergeReadOnly(sourcePath)
+		if openErr != nil {
+			_ = target.Close()
+			return LocalMergePreview{}, openErr
+		}
+		claudeMem, detectErr := isClaudeMemSource(sourceDB)
+		if detectErr == nil && !claudeMem {
+			detectErr = collectClaudeMemCoverage(sourceDB, claudeMemCoverage)
+		}
+		closeErr := sourceDB.Close()
+		if detectErr != nil {
+			_ = target.Close()
+			return LocalMergePreview{}, detectErr
+		}
+		if closeErr != nil {
+			_ = target.Close()
+			return LocalMergePreview{}, closeErr
+		}
+	}
 	if convertedCanonical {
 		source, mergeErr := mergeSQLiteSource(target.db, canonicalDB, canonicalPath, digests, capsules, assertions, &preview)
 		if mergeErr != nil {
@@ -301,7 +335,19 @@ func BuildLocalMergePreview(home, canonicalPath, storeID string, now time.Time) 
 			_ = target.Close()
 			return LocalMergePreview{}, err
 		}
-		source, mergeErr := mergeSQLiteSource(target.db, sourceDB, sourcePath, digests, capsules, assertions, &preview)
+		claudeMem, detectErr := isClaudeMemSource(sourceDB)
+		if detectErr != nil {
+			_ = sourceDB.Close()
+			_ = target.Close()
+			return LocalMergePreview{}, detectErr
+		}
+		var source LocalMergeSource
+		var mergeErr error
+		if claudeMem {
+			source, mergeErr = mergeClaudeMemSource(target.db, sourceDB, sourcePath, claudeMemCoverage, digests, capsules, &preview)
+		} else {
+			source, mergeErr = mergeSQLiteSource(target.db, sourceDB, sourcePath, digests, capsules, assertions, &preview)
+		}
 		closeErr := sourceDB.Close()
 		if mergeErr != nil {
 			_ = target.Close()
@@ -313,9 +359,13 @@ func BuildLocalMergePreview(home, canonicalPath, storeID string, now time.Time) 
 		}
 		preview.Sources = append(preview.Sources, source)
 	}
-	if err := adoptMergedCapsules(target.db); err != nil {
+	archiveCreated, err := adoptMergedCapsules(target.db, preview.GeneratedAt)
+	if err != nil {
 		_ = target.Close()
 		return LocalMergePreview{}, err
+	}
+	if archiveCreated {
+		preview.Totals.CapsulesCreated++
 	}
 	if err := validateLocalMergeDB(target.db); err != nil {
 		_ = target.Close()
@@ -620,13 +670,15 @@ func mergeSQLiteSource(target, source *sql.DB, sourcePath string, digests map[st
 		return LocalMergeSource{}, err
 	}
 	result := LocalMergeSource{Path: sourcePath, Kind: "local_sqlite", SHA256: fingerprint, Size: info.Size(), Counts: counts}
+	eventIDs := map[int64]int64{}
 	if counts["events"] > 0 {
-		if err := mergeEvents(target, source, digests, preview); err != nil {
+		eventIDs, err = mergeEvents(target, source, digests, preview)
+		if err != nil {
 			return LocalMergeSource{}, fmt.Errorf("merge events from %s: %w", sourcePath, err)
 		}
 	}
 	if counts["memory_capsules"] > 0 {
-		if err := mergeCapsules(target, source, capsules, preview); err != nil {
+		if err := mergeCapsules(target, source, eventIDs, capsules, preview); err != nil {
 			return LocalMergeSource{}, fmt.Errorf("merge memories from %s: %w", sourcePath, err)
 		}
 	}
@@ -694,10 +746,10 @@ func mergeAssertions(target, source *sql.DB, existing map[string][]mergeAssertio
 	return tx.Commit()
 }
 
-func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *LocalMergePreview) error {
+func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *LocalMergePreview) (map[int64]int64, error) {
 	columns, err := localMergeColumns(source, "events")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	expr := func(name, fallback string) string {
 		if columns[name] {
@@ -716,12 +768,12 @@ func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *Loca
 		sentimentLabel + `,` + expr("biometric_json", "NULL") + `,` + expr("tags", "NULL") + `,` +
 		expr("access_count", "0") + `,` + expr("last_accessed_at", "NULL") + ` FROM events ORDER BY id`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 	tx, err := target.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	insert, err := tx.Prepare(`INSERT INTO events(
@@ -729,7 +781,7 @@ func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *Loca
 		archivable,provenance,domain,user_flag,sentiment_label,biometric_json,tags,access_count,last_accessed_at,semantic_digest
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer insert.Close()
 	idMap := map[int64]int64{}
@@ -739,7 +791,7 @@ func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *Loca
 			&event.EmotionalWeight, &event.ScorerVersion, &event.OccurredAt, &event.BeliefClass,
 			&event.ConfidenceFloor, &event.Archivable, &event.Provenance, &event.Domain, &event.UserFlag,
 			&event.SentimentLabel, &event.BiometricJSON, &event.Tags, &event.AccessCount, &event.LastAccessedAt); err != nil {
-			return err
+			return nil, err
 		}
 		sanitizeMergeEvent(&event)
 		digest := localMergeEventDigest(event)
@@ -754,29 +806,32 @@ func mergeEvents(target, source *sql.DB, digests map[string]int64, preview *Loca
 			nullableValue(event.SentimentLabel), nullableValue(event.BiometricJSON), nullableValue(event.Tags),
 			event.AccessCount, nullableValue(event.LastAccessedAt), digest)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		digests[digest] = id
 		idMap[event.ID] = id
 		preview.Totals.EventsCreated++
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := mergeEventEmotionsTx(tx, source, idMap, preview); err != nil {
-		return err
+		return nil, err
 	}
 	if err := mergeEventChainsTx(tx, source, idMap, preview); err != nil {
-		return err
+		return nil, err
 	}
 	if err := mergeEventEmbeddingsTx(tx, source, idMap, preview); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return idMap, nil
 }
 
 func mergeEventEmotionsTx(tx *sql.Tx, source *sql.DB, idMap map[int64]int64, preview *LocalMergePreview) error {
@@ -891,6 +946,12 @@ func mergeEventEmbeddingsTx(tx *sql.Tx, source *sql.DB, idMap map[int64]int64, p
 		if err := rows.Scan(&sourceID, &model, &dim, &vector, &textSource, &updatedAt); err != nil {
 			return err
 		}
+		// Keep only the current managed vectors and the explicitly supported
+		// bge-m3 migration bridge. Retrieval can use the legacy rows immediately,
+		// while model-aware backfill replaces them with managed bge-m3 vectors.
+		if (model != "bge-m3" && model != "bge-m3-mlx-fp16") || dim != 1024 {
+			continue
+		}
 		targetID, ok := idMap[sourceID]
 		if !ok {
 			continue
@@ -906,7 +967,7 @@ func mergeEventEmbeddingsTx(tx *sql.Tx, source *sql.DB, idMap map[int64]int64, p
 	return rows.Err()
 }
 
-func mergeCapsules(target, source *sql.DB, capsules map[string]string, preview *LocalMergePreview) error {
+func mergeCapsules(target, source *sql.DB, eventIDs map[int64]int64, capsules map[string]string, preview *LocalMergePreview) error {
 	columns, err := localMergeColumns(source, "memory_capsules")
 	if err != nil {
 		return err
@@ -918,7 +979,7 @@ func mergeCapsules(target, source *sql.DB, capsules map[string]string, preview *
 		return fallback
 	}
 	rows, err := source.Query(`SELECT id,schema_version,source_host,conversation_scope,source_timestamp,kind,redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,created_at,` +
-		expr("status", "'active'") + `,` + expr("merged_into", "NULL") + `,` + expr("merged_at", "NULL") + ` FROM memory_capsules ORDER BY created_at,id`)
+		expr("status", "'active'") + `,` + expr("merged_into", "NULL") + `,` + expr("merged_at", "NULL") + `,` + expr("event_id", "NULL") + ` FROM memory_capsules ORDER BY created_at,id`)
 	if err != nil {
 		return err
 	}
@@ -932,7 +993,8 @@ func mergeCapsules(target, source *sql.DB, capsules map[string]string, preview *
 		var id, schema, host, scope, timestamp, kind, summary, hint, privacy, retention, tags, createdAt, status string
 		var confidence float64
 		var mergedInto, mergedAt sql.NullString
-		if err := rows.Scan(&id, &schema, &host, &scope, &timestamp, &kind, &summary, &confidence, &hint, &privacy, &retention, &tags, &createdAt, &status, &mergedInto, &mergedAt); err != nil {
+		var sourceEventID sql.NullInt64
+		if err := rows.Scan(&id, &schema, &host, &scope, &timestamp, &kind, &summary, &confidence, &hint, &privacy, &retention, &tags, &createdAt, &status, &mergedInto, &mergedAt, &sourceEventID); err != nil {
 			return err
 		}
 		digest := localMergeCapsuleDigest(schema, kind, summary, confidence, hint, privacy, retention, tags)
@@ -951,8 +1013,14 @@ func mergeCapsules(target, source *sql.DB, capsules map[string]string, preview *
 		if status == "" {
 			status = "active"
 		}
-		_, err := tx.Exec(`INSERT INTO memory_capsules(id,schema_version,source_host,conversation_scope,source_timestamp,kind,redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,created_at,status,merged_into,merged_at,event_id,content_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`,
-			newID, schema, host, scope, timestamp, kind, summary, confidence, hint, privacy, retention, tags, createdAt, status, nullableValue(mergedInto), nullableValue(mergedAt), digest)
+		var targetEventID any
+		if sourceEventID.Valid {
+			if mapped, ok := eventIDs[sourceEventID.Int64]; ok {
+				targetEventID = mapped
+			}
+		}
+		_, err := tx.Exec(`INSERT INTO memory_capsules(id,schema_version,source_host,conversation_scope,source_timestamp,kind,redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,created_at,status,merged_into,merged_at,event_id,content_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			newID, schema, host, scope, timestamp, kind, summary, confidence, hint, privacy, retention, tags, createdAt, status, nullableValue(mergedInto), nullableValue(mergedAt), targetEventID, digest)
 		if err != nil {
 			return err
 		}
@@ -1056,19 +1124,399 @@ func mergeStandaloneSource(target *sql.DB, sourcePath string, digests map[string
 	return source, nil
 }
 
-func adoptMergedCapsules(db *sql.DB) error {
-	tx, err := db.Begin()
+type claudeMemCoverage struct {
+	Observations map[int64]bool
+	Summaries    map[int64]bool
+}
+
+func newClaudeMemCoverage() *claudeMemCoverage {
+	return &claudeMemCoverage{Observations: map[int64]bool{}, Summaries: map[int64]bool{}}
+}
+
+func isClaudeMemSource(db *sql.DB) (bool, error) {
+	observations, err := localMergeTableExists(db, "observations")
+	if err != nil || !observations {
+		return false, err
+	}
+	summaries, err := localMergeTableExists(db, "session_summaries")
+	if err != nil || !summaries {
+		return false, err
+	}
+	events, err := localMergeTableExists(db, "events")
+	return summaries && !events, err
+}
+
+func collectClaudeMemCoverage(db *sql.DB, coverage *claudeMemCoverage) error {
+	exists, err := localMergeTableExists(db, "observations")
+	if err != nil || !exists {
+		return err
+	}
+	columns, err := localMergeColumns(db, "observations")
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if err := backfillPublishedPersonalCapsulesTx(tx); err != nil {
+	if !columns["source_kind"] || !columns["source_id"] {
+		return nil
+	}
+	rows, err := db.Query(`SELECT source_kind,source_id FROM observations WHERE source_kind IN ('claude-mem','claude-mem.summary') ORDER BY id`)
+	if err != nil {
 		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, sourceID string
+		if err := rows.Scan(&kind, &sourceID); err != nil {
+			return err
+		}
+		prefix := "claude-mem:obs:"
+		target := coverage.Observations
+		if kind == "claude-mem.summary" {
+			prefix = "claude-mem:summary:"
+			target = coverage.Summaries
+		}
+		id, parseErr := strconv.ParseInt(strings.TrimPrefix(sourceID, prefix), 10, 64)
+		if parseErr == nil && strings.HasPrefix(sourceID, prefix) && id > 0 {
+			target[id] = true
+		}
+	}
+	return rows.Err()
+}
+
+func mergeClaudeMemSource(target, source *sql.DB, sourcePath string, coverage *claudeMemCoverage, digests map[string]int64, capsules map[string]string, preview *LocalMergePreview) (LocalMergeSource, error) {
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return LocalMergeSource{}, err
+	}
+	fingerprint, err := localMergeFileSHA256(sourcePath)
+	if err != nil {
+		return LocalMergeSource{}, err
+	}
+	counts := map[string]int64{}
+	for _, table := range []string{"observations", "session_summaries", "user_prompts"} {
+		exists, tableErr := localMergeTableExists(source, table)
+		if tableErr != nil {
+			return LocalMergeSource{}, tableErr
+		}
+		if exists {
+			var count int64
+			if err := source.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+				return LocalMergeSource{}, err
+			}
+			counts[table] = count
+		}
+	}
+	result := LocalMergeSource{Path: sourcePath, Kind: "claude_mem", SHA256: fingerprint, Size: info.Size(), Counts: counts}
+	tx, err := target.Begin()
+	if err != nil {
+		return LocalMergeSource{}, err
+	}
+	defer tx.Rollback()
+
+	rows, err := source.Query(`SELECT id,type,title,subtitle,facts,narrative,concepts,created_at FROM observations ORDER BY id`)
+	if err != nil {
+		return LocalMergeSource{}, err
+	}
+	for rows.Next() {
+		var id int64
+		var kind, createdAt string
+		var title, subtitle, facts, narrative, concepts sql.NullString
+		if err := rows.Scan(&id, &kind, &title, &subtitle, &facts, &narrative, &concepts, &createdAt); err != nil {
+			rows.Close()
+			return LocalMergeSource{}, err
+		}
+		if coverage.Observations[id] {
+			counts["observations_skipped_existing"]++
+			continue
+		}
+		eventTitle := claudeMemSafeFragment(title.String, 240)
+		if eventTitle == "" {
+			eventTitle = claudeMemSafeFragment(subtitle.String, 240)
+		}
+		if eventTitle == "" {
+			eventTitle = "Claude Mem " + claudeMemSafeKind(kind)
+		}
+		parts := []string{}
+		for _, raw := range []string{subtitle.String, narrative.String} {
+			if value := claudeMemSafeFragment(raw, 1600); value != "" && value != eventTitle {
+				parts = append(parts, value)
+			}
+		}
+		parts = append(parts, claudeMemSafeJSONStrings(facts.String, 1600)...)
+		parts = append(parts, claudeMemSafeJSONStrings(concepts.String, 800)...)
+		description := claudeMemJoin(parts, 4000)
+		if description == "" && strings.HasPrefix(eventTitle, "Claude Mem ") {
+			counts["observations_skipped_unsafe"]++
+			continue
+		}
+		tags := claudeMemTags("observation", id)
+		_, created, insertErr := insertClaudeMemEventTx(tx, eventTitle, description, createdAt, tags, digests)
+		if insertErr != nil {
+			rows.Close()
+			return LocalMergeSource{}, insertErr
+		}
+		if created {
+			counts["observations_created"]++
+			preview.Totals.EventsCreated++
+		} else {
+			counts["observations_deduplicated"]++
+			preview.Totals.EventsDeduplicated++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return LocalMergeSource{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return LocalMergeSource{}, err
+	}
+
+	summaries, err := source.Query(`SELECT id,investigated,learned,completed,next_steps,notes,created_at FROM session_summaries ORDER BY id`)
+	if err != nil {
+		return LocalMergeSource{}, err
+	}
+	for summaries.Next() {
+		var id int64
+		var createdAt string
+		var investigated, learned, completed, nextSteps, notes sql.NullString
+		if err := summaries.Scan(&id, &investigated, &learned, &completed, &nextSteps, &notes, &createdAt); err != nil {
+			summaries.Close()
+			return LocalMergeSource{}, err
+		}
+		if coverage.Summaries[id] {
+			counts["session_summaries_skipped_existing"]++
+			continue
+		}
+		parts := []string{}
+		for _, field := range []struct{ label, value string }{
+			{"Investigated", investigated.String}, {"Learned", learned.String}, {"Completed", completed.String},
+			{"Next", nextSteps.String}, {"Notes", notes.String},
+		} {
+			if value := claudeMemSafeFragment(field.value, 1400); value != "" {
+				parts = append(parts, field.label+": "+value)
+			}
+		}
+		description := claudeMemJoin(parts, 4000)
+		if description == "" {
+			counts["session_summaries_skipped_unsafe"]++
+			continue
+		}
+		tags := claudeMemTags("summary", id)
+		eventID, created, insertErr := insertClaudeMemEventTx(tx, "Claude Code session summary", description, createdAt, tags, digests)
+		if insertErr != nil {
+			summaries.Close()
+			return LocalMergeSource{}, insertErr
+		}
+		if created {
+			counts["session_summaries_created"]++
+			preview.Totals.EventsCreated++
+		} else {
+			counts["session_summaries_deduplicated"]++
+			preview.Totals.EventsDeduplicated++
+		}
+		capsuleSummary := claudeMemSafeFragment(description, 1200)
+		if capsuleSummary == "" {
+			continue
+		}
+		capsuleCreated, capsuleErr := insertClaudeMemCapsuleTx(tx, id, eventID, capsuleSummary, createdAt, tags, capsules)
+		if capsuleErr != nil {
+			summaries.Close()
+			return LocalMergeSource{}, capsuleErr
+		}
+		if capsuleCreated {
+			counts["session_summary_capsules_created"]++
+			preview.Totals.CapsulesCreated++
+		} else {
+			counts["session_summary_capsules_deduplicated"]++
+			preview.Totals.CapsulesDeduplicated++
+		}
+	}
+	if err := summaries.Err(); err != nil {
+		summaries.Close()
+		return LocalMergeSource{}, err
+	}
+	if err := summaries.Close(); err != nil {
+		return LocalMergeSource{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LocalMergeSource{}, err
+	}
+	return result, nil
+}
+
+func insertClaudeMemEventTx(tx *sql.Tx, title, description, occurredAt, tags string, digests map[string]int64) (int64, bool, error) {
+	event := mergeEvent{
+		Title: title, Description: sql.NullString{String: description, Valid: description != ""},
+		ScorerVersion: sql.NullString{String: "host-extracted", Valid: true}, OccurredAt: occurredAt,
+		BeliefClass: "operational", ConfidenceFloor: 0.75, Archivable: 1,
+		Provenance: sql.NullString{String: "interactive_memory", Valid: true}, Domain: "real",
+		Tags: sql.NullString{String: tags, Valid: true},
+	}
+	sanitizeMergeEvent(&event)
+	digest := localMergeEventDigest(event)
+	if existing, ok := digests[digest]; ok {
+		return existing, false, nil
+	}
+	result, err := tx.Exec(`INSERT INTO events(
+		title,description,emotional_weight,scorer_version,ts,belief_class,confidence_floor,
+		archivable,provenance,domain,user_flag,tags,access_count,semantic_digest
+	) VALUES(?,?,0,'host-extracted',?,'operational',0.75,1,'interactive_memory','real',0,?,0,?)`,
+		event.Title, nullableValue(event.Description), event.OccurredAt, tags, digest)
+	if err != nil {
+		return 0, false, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, false, err
+	}
+	digests[digest] = id
+	return id, true, nil
+}
+
+func insertClaudeMemCapsuleTx(tx *sql.Tx, sourceID, eventID int64, summary, createdAt, tags string, capsules map[string]string) (bool, error) {
+	const schema = MemoryCapsuleSchema
+	const kind = "project_state"
+	const hint = "assistant_inferred"
+	const privacy = "private"
+	const retention = "long_term"
+	digest := localMergeCapsuleDigest(schema, kind, summary, 0.75, hint, privacy, retention, tags)
+	if _, ok := capsules[digest]; ok {
+		return false, nil
+	}
+	id := fmt.Sprintf("pulse:claude-mem:summary:%d", sourceID)
+	var occupied int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_capsules WHERE id=?`, id).Scan(&occupied); err != nil {
+		return false, err
+	}
+	if occupied > 0 {
+		id = "pulse:claude-mem:" + digest[:32]
+	}
+	_, err := tx.Exec(`INSERT INTO memory_capsules(
+		id,schema_version,source_host,conversation_scope,source_timestamp,kind,redacted_summary,
+		confidence,evidence_hint,privacy_tier,retention,tags,created_at,status,event_id,content_digest
+	) VALUES(?,?,'claude-code','project_context',?,?,?,0.75,?,?,?,? ,?,'active',?,?)`,
+		id, schema, createdAt, kind, summary, hint, privacy, retention, tags, createdAt, eventID, digest)
+	if err != nil {
+		return false, err
+	}
+	capsules[digest] = id
+	return true, nil
+}
+
+func claudeMemSafeKind(kind string) string {
+	value := strings.ToLower(strings.TrimSpace(kind))
+	if !map[string]bool{"discovery": true, "bugfix": true, "feature": true, "decision": true, "change": true, "refactor": true, "security_alert": true, "security_note": true}[value] {
+		return "observation"
+	}
+	return strings.ReplaceAll(value, "_", " ")
+}
+
+func claudeMemSafeJSONStrings(raw string, maxRunes int) []string {
+	var values []string
+	if json.Unmarshal([]byte(raw), &values) != nil {
+		if value := claudeMemSafeFragment(raw, maxRunes); value != "" {
+			return []string{value}
+		}
+		return nil
+	}
+	out := []string{}
+	for _, value := range values {
+		if safe := claudeMemSafeFragment(value, maxRunes); safe != "" {
+			out = append(out, safe)
+		}
+	}
+	return out
+}
+
+func claudeMemSafeFragment(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(norm.NFC.String(strings.ToValidUTF8(value, ""))), " ")
+	if value == "" || looksLikeTranscript(value) || looksSensitiveOrPathLike(value) || looksLikeEphemeralControl(value) {
+		return ""
+	}
+	return clipMergeRunes(value, maxRunes)
+}
+
+func claudeMemJoin(values []string, maxRunes int) string {
+	unique := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		key := normalizeMergeText(value)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, value)
+	}
+	return clipMergeRunes(strings.Join(unique, " "), maxRunes)
+}
+
+func clipMergeRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit]))
+}
+
+func claudeMemTags(kind string, id int64) string {
+	body, _ := json.Marshal([]string{"claude-mem", "legacy", fmt.Sprintf("%s:%d", kind, id)})
+	return string(body)
+}
+
+const localMergeArchiveCapsuleID = "pulse:local-merge:personal-archive-v1"
+
+func adoptMergedCapsules(db *sql.DB, createdAt string) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var eventCount, archiveCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil {
+		return false, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_capsules WHERE id=?`, localMergeArchiveCapsuleID).Scan(&archiveCount); err != nil {
+		return false, err
+	}
+	archiveCreated := false
+	if eventCount > 0 && archiveCount == 0 {
+		tags := `["legacy","local-merge","personal-archive"]`
+		digest := localMergeCapsuleDigest(
+			"pulse.memory_capsule.v1", "project_state", "Imported personal memory archive",
+			1, "verified_local_merge", "private", "forever", tags,
+		)
+		if _, err := tx.Exec(`
+			INSERT INTO memory_capsules(
+			  id,schema_version,source_host,conversation_scope,source_timestamp,kind,
+			  redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,
+			  created_at,status,event_id,content_digest)
+			VALUES(?, 'pulse.memory_capsule.v1', 'pulse-cli', 'personal_global', ?,
+			       'project_state', 'Imported personal memory archive', 1,
+			       'verified_local_merge', 'private', 'forever', ?, ?, 'active', NULL, ?)`,
+			localMergeArchiveCapsuleID, createdAt, tags, createdAt, digest); err != nil {
+			return false, err
+		}
+		archiveCreated = true
+	}
+	if err := backfillPublishedPersonalCapsulesTx(tx); err != nil {
+		return false, err
+	}
+	if eventCount > 0 {
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO private_semantic_projection_rows(object_id,row_kind,row_ref)
+			SELECT ?, 'event', CAST(id AS TEXT) FROM events`, localMergeArchiveCapsuleID); err != nil {
+			return false, err
+		}
 	}
 	if _, err := tx.Exec(`UPDATE personal_memory_scope_state SET eligibility_revision=eligibility_revision+1, updated_at=? WHERE singleton=1`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return archiveCreated, nil
 }
 
 func loadTargetEventDigests(db *sql.DB) (map[string]int64, error) {

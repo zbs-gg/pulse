@@ -84,6 +84,26 @@ async function freePort() {
   return port;
 }
 
+async function productJSON(runtime, binding, path, body) {
+	const secret = readFileSync(join(runtime.data_dir, 'secret.key'), 'utf8');
+	const response = await fetch(`${runtime.base_url}${path}`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			'X-Pulse-Key': secret,
+			'X-Pulse-Product-Workspace': Buffer.from(binding.workspace.canonical_path, 'utf8').toString('base64url'),
+			'X-Pulse-Product-Binding': binding.binding_digest,
+			'X-Pulse-Product-Repository': binding.workspace.repository_id,
+			'X-Pulse-Product-Resolver-Epoch': String(binding.resolver_epoch),
+		},
+		body: JSON.stringify(body),
+		signal: AbortSignal.timeout(2500),
+	});
+	const text = await response.text();
+	if (!response.ok) throw new Error(`product request ${path} returned ${response.status}: ${text}`);
+	return JSON.parse(text);
+}
+
 function writeFixtureBindingTrust(root) {
   const supervisor = join(root, 'trust');
   mkdirSync(supervisor, { recursive: true, mode: 0o700 });
@@ -587,7 +607,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   const sessionOutput = JSON.parse(sessionStart.stdout);
   assert.equal(sessionOutput.continue, true);
-  assert.match(sessionOutput.hookSpecificOutput.additionalContext, /pulse.context.v1/);
+  assert.equal(sessionOutput.hookSpecificOutput, undefined);
 
   const prompt = run(process.execPath, [hook, 'UserPromptSubmit'], {
     cwd: workspace,
@@ -605,22 +625,20 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   const promptOutput = JSON.parse(prompt.stdout);
   assert.equal(promptOutput.continue, true);
-  assert.match(promptOutput.hookSpecificOutput.additionalContext, /before the single final user-facing response/);
-  assert.match(promptOutput.hookSpecificOutput.additionalContext, /ASCII safe slug/);
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Call pulse_memory once/);
+  assert.doesNotMatch(promptOutput.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
 
   const memoryArguments = {
-    schema: 'pulse.memory_capsule.v1',
-    source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-14T10:00:00Z' },
     items: [{
       kind: 'decision',
-      redacted_summary: 'Use one trusted local runtime for Codex lifecycle memory.',
-      confidence: 0.98,
-      evidence_hint: 'current_turn',
-      privacy_tier: 'normal',
-      retention: 'project',
+      scope: 'project',
+      summary: 'Use one trusted local runtime for Codex lifecycle memory.',
     }],
-    raw_input_included: false,
   };
+  // The packed-product fixture uses a deterministic one-hot protocol embedder,
+  // so this gate proves live indexing and request scoping with an exact query.
+  // Semantic paraphrase quality is exercised separately with the real model.
+  const immediateRecallPrompt = memoryArguments.items[0].summary;
   const preTool = run(process.execPath, [hook, 'PreToolUse'], {
     cwd: workspace,
     env: hookEnv,
@@ -632,9 +650,9 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
       hook_event_name: 'PreToolUse',
       model: 'gpt-5',
       permission_mode: 'default',
-      tool_name: 'mcp__pulse-product__pulse_remember',
+      tool_name: 'mcp__pulse-product__pulse_memory',
       tool_input: memoryArguments,
-      tool_use_id: 'tool-codex-e2e-remember',
+      tool_use_id: 'tool-codex-e2e-memory',
     }),
   });
   assert.deepEqual(JSON.parse(preTool.stdout), {});
@@ -646,7 +664,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
     { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: 'pulse_remember',
+      name: 'pulse_memory',
       arguments: memoryArguments,
     } },
   ].map((message) => JSON.stringify(message)).join('\n') + '\n';
@@ -660,43 +678,11 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   assert.equal(mcpMessages.find((message) => message.id === 1)?.result?.serverInfo?.name, 'pulse-mcp');
   assert.equal(Array.isArray(mcpMessages.find((message) => message.id === 2)?.result?.tools), true);
   const toolNames = mcpMessages.find((message) => message.id === 2).result.tools.map((tool) => tool.name);
-  assert.equal(toolNames.includes('pulse_wipe'), false);
-  assert.equal(toolNames.includes('pulse_forget'), false);
-  assert.equal(toolNames.includes('pulse_tray'), true);
-	  const remembered = JSON.parse(mcpMessages.find((message) => message.id === 3).result.content[0].text);
-	  assert.equal(remembered.status, 'candidates');
-	  assert.equal(remembered.receipts[0].status, 'created');
-	  assert.match(remembered.receipts[0].object_id, /^pulse:/);
-	  assert.equal(remembered.receipts[0].safe_provenance.host, 'codex');
-  assert.match(remembered.receipts[0].safe_provenance.session_id, /^session:[a-f0-9]{64}$/);
-  assert.match(remembered.receipts[0].safe_provenance.turn_id, /^turn:[a-f0-9]{64}$/);
-
-	  // A separate MCP round trip proves ordinary Personal memory did not leave
-	  // a review card behind after the durable write succeeded.
-  const trayInput = [
-    { jsonrpc: '2.0', id: 4, method: 'initialize', params: {
-      protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pulse-e2e', version: '1' },
-    } },
-    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
-    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: {
-      name: 'pulse_tray', arguments: { limit: 10 },
-    } },
-  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
-  const trayMCP = run(process.execPath, [join(pluginRoot, 'mcp', 'server.mjs')], {
-    cwd: workspace,
-    env: hookEnv,
-    input: trayInput,
-    timeout: 20_000,
-  });
-  const trayMessages = trayMCP.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-  const tray = JSON.parse(trayMessages.find((message) => message.id === 5).result.content[0].text);
-	  const committedCard = tray.candidates.find((candidate) =>
-	    candidate.candidate_id === remembered.receipts[0].candidate_id);
-	  assert.equal(committedCard.state, 'committed');
-	  assert.equal(committedCard.current, true);
-	  assert.equal(committedCard.canonical_object_id, remembered.receipts[0].object_id);
-	  assert.equal(committedCard.latest_receipt.status, 'created');
-	  assert.equal(committedCard.projection_status, 'complete');
+  assert.deepEqual(toolNames, ['pulse_memory']);
+	const remembered = JSON.parse(mcpMessages.find((message) => message.id === 3).result.content[0].text);
+	assert.equal(remembered.status, 'stored');
+	assert.equal(remembered.ids.length, 1);
+	assert.match(remembered.ids[0], /^pulse:/);
 
   const postTool = run(process.execPath, [hook, 'PostToolUse'], {
     cwd: workspace,
@@ -709,14 +695,37 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
       hook_event_name: 'PostToolUse',
       model: 'gpt-5',
       permission_mode: 'default',
-      tool_name: 'mcp__pulse-product__pulse_remember',
+      tool_name: 'mcp__pulse-product__pulse_memory',
       tool_input: memoryArguments,
-      tool_use_id: 'tool-codex-e2e-remember',
+      tool_use_id: 'tool-codex-e2e-memory',
       tool_response: mcpMessages.find((message) => message.id === 3).result,
     }),
   });
   const postToolOutput = JSON.parse(postTool.stdout);
   assert.deepEqual(postToolOutput, {});
+	const immediateTrace = await productJSON(runtimeA, bindingA, '/context/query', {
+		query: immediateRecallPrompt,
+		mode: 'auto', top_k: 12, scope: 'user', include_trace: true,
+	});
+	assert.equal(immediateTrace.events.some((event) =>
+		/trusted local runtime for Codex lifecycle memory/i.test(event.summary ?? event.title ?? '')), true,
+		JSON.stringify(immediateTrace));
+
+  const immediateRecall = run(process.execPath, [hook, 'UserPromptSubmit'], {
+    cwd: workspace,
+    env: hookEnv,
+    input: JSON.stringify({
+      session_id: sessionID,
+      turn_id: 'turn-codex-e2e-recall',
+      cwd: workspace,
+      hook_event_name: 'UserPromptSubmit',
+      model: 'gpt-5',
+      permission_mode: 'default',
+      prompt: immediateRecallPrompt,
+    }),
+  });
+  const immediateContext = JSON.parse(immediateRecall.stdout).hookSpecificOutput.additionalContext;
+  assert.match(immediateContext, /trusted local runtime for Codex lifecycle memory/i, JSON.stringify(immediateTrace.trace));
 
   const stop = run(process.execPath, [hook, 'Stop'], {
     cwd: workspace,
@@ -959,16 +968,19 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	assert.equal('managed_embedder_config_path' in activationV4, false,
 		'global activation must not pin one project vault config');
 	assert.notEqual(receiptBv1.executable_digest, activationV4.daemon_digest);
-	const workspaceBResume = run(process.execPath, [hook, 'SessionStart'], {
+	const workspaceBRecall = run(process.execPath, [hook, 'UserPromptSubmit'], {
 		cwd: workspaceB,
 		env: hookEnv,
 		input: JSON.stringify({
-			session_id: 'session-workspace-b-after-upgrade', cwd: workspaceB,
-			hook_event_name: 'SessionStart', source: 'resume', model: 'gpt-5', permission_mode: 'default',
+			session_id: 'session-workspace-b-after-upgrade', turn_id: 'turn-workspace-b-after-upgrade',
+			cwd: workspaceB, hook_event_name: 'UserPromptSubmit', model: 'gpt-5',
+			permission_mode: 'default', prompt: immediateRecallPrompt,
 		}),
 		timeout: 30_000,
 	});
-	assert.match(JSON.parse(workspaceBResume.stdout).hookSpecificOutput.additionalContext, /pulse.context.v1/);
+	const workspaceBContext = JSON.parse(workspaceBRecall.stdout).hookSpecificOutput.additionalContext;
+	assert.doesNotMatch(workspaceBContext, /trusted local runtime for Codex lifecycle memory/i);
+	assert.match(workspaceBContext, /Call pulse_memory once/);
 	const receiptBv2 = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
 	assert.equal(receiptBv2.executable_digest, activationV4.daemon_digest,
 		'another bound workspace must read through the upgraded Personal runtime');

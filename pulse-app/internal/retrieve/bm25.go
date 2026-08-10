@@ -215,6 +215,90 @@ func buildFTSMatch(q string) string {
 	return strings.Join(tokens, " OR ")
 }
 
+var corroborationStopwords = map[string]struct{}{
+	"about": {}, "could": {}, "does": {}, "from": {}, "have": {}, "should": {}, "that": {},
+	"what": {}, "when": {}, "where": {}, "which": {}, "with": {}, "would": {},
+	"будет": {}, "были": {}, "должен": {}, "должна": {}, "должны": {}, "какая": {},
+	"какие": {}, "какой": {}, "когда": {}, "после": {}, "почему": {}, "чтобы": {},
+}
+
+// buildFTSCorroborationMatch keeps only distinctive prompt words. It is used
+// to prove that a dense archive candidate also contains a literal textual
+// anchor, without letting high-frequency question words crowd rare names out
+// of the global BM25 window.
+func buildFTSCorroborationMatch(q string) string {
+	var tokens []string
+	seen := map[string]struct{}{}
+	field := strings.Builder{}
+	flush := func() {
+		token := strings.ToLower(strings.TrimSpace(field.String()))
+		field.Reset()
+		if len([]rune(token)) < 4 {
+			return
+		}
+		if _, stopped := corroborationStopwords[token]; stopped {
+			return
+		}
+		if _, duplicate := seen[token]; duplicate {
+			return
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, fmt.Sprintf(`"%s"*`, strings.ReplaceAll(token, `"`, ``)))
+	}
+	for _, r := range q {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			field.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return strings.Join(tokens, " OR ")
+}
+
+// FTSCorroborateCandidates returns only candidate IDs whose own event text
+// matches at least one distinctive prompt token. Candidate IDs already came
+// from the scope-fenced dense index, so this cannot broaden project access.
+func FTSCorroborateCandidates(
+	ctx context.Context,
+	db *sql.DB,
+	query string,
+	candidateIDs []int64,
+) ([]int64, error) {
+	if db == nil || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	matchExpr := buildFTSCorroborationMatch(query)
+	if matchExpr == "" {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(candidateIDs)), ",")
+	args := make([]any, 0, len(candidateIDs)+1)
+	args = append(args, matchExpr)
+	for _, id := range candidateIDs {
+		args = append(args, id)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT rowid
+  FROM events_fts
+ WHERE events_fts MATCH ?
+   AND rowid IN (`+placeholders+`)
+ ORDER BY rowid`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("FTS candidate corroboration: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // RRFFuse combines several ranked ID lists using Reciprocal Rank Fusion.
 // k=60 is the canonical default (Cormack et al. 2009). Higher k softens
 // rank differences; lower k amplifies the top-1 effect.

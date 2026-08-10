@@ -70,6 +70,7 @@ func validTrayIdentifier(value string) bool {
 
 type PrivateMemoryCandidate struct {
 	Kind          string         `json:"kind"`
+	MemoryScope   string         `json:"memory_scope,omitempty"`
 	Capsule       *MemoryCapsule `json:"capsule,omitempty"`
 	SemanticDelta *SemanticDelta `json:"semantic_delta,omitempty"`
 }
@@ -289,6 +290,10 @@ func validateTrayGrace(grace time.Duration) error {
 }
 
 func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateCandidate, error) {
+	if candidate.MemoryScope != "" && candidate.MemoryScope != MemoryScopeProject &&
+		candidate.MemoryScope != MemoryScopePersonalGlobal {
+		return preparedPrivateCandidate{}, errors.New("candidate memory_scope is unsupported")
+	}
 	var identity any
 	switch candidate.Kind {
 	case PrivateMemoryCandidateCapsule:
@@ -1288,6 +1293,9 @@ func (s *Store) commitMemoryTrayCandidateForAuthority(
 	if err := backfillPersonalScopeForBindingTx(tx, row.bindingDigest, scope); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
+	if candidate.MemoryScope != "" {
+		scope.Scope = candidate.MemoryScope
+	}
 	changed, err := tx.Exec(`
 		UPDATE memory_tray_candidates SET state='committing', updated_at=?
 		 WHERE candidate_id=? AND version=? AND state='pending'`,
@@ -1377,12 +1385,22 @@ func (s *Store) commitMemoryTrayCandidateForAuthority(
 			}
 		}
 	} else {
-		err = tx.QueryRow(`
-			SELECT object_id FROM private_memory_objects
-			 WHERE project_namespace_id=? AND memory_scope=?
-			   AND candidate_kind=? AND content_digest=? AND lifecycle='active'`,
-			scope.ProjectNamespaceID, scope.Scope, row.kind, row.digest,
-		).Scan(&objectID)
+		var duplicateQuery string
+		var duplicateArgs []any
+		if scope.Scope == MemoryScopePersonalGlobal {
+			duplicateQuery = `
+				SELECT object_id FROM private_memory_objects
+				 WHERE memory_scope=? AND candidate_kind=?
+				   AND content_digest=? AND lifecycle='active'`
+			duplicateArgs = []any{scope.Scope, row.kind, row.digest}
+		} else {
+			duplicateQuery = `
+				SELECT object_id FROM private_memory_objects
+				 WHERE project_namespace_id=? AND memory_scope=?
+				   AND candidate_kind=? AND content_digest=? AND lifecycle='active'`
+			duplicateArgs = []any{scope.ProjectNamespaceID, scope.Scope, row.kind, row.digest}
+		}
+		err = tx.QueryRow(duplicateQuery, duplicateArgs...).Scan(&objectID)
 		if err == nil {
 			status = MemoryWriteDeduplicated
 		} else if err != sql.ErrNoRows {
@@ -1782,7 +1800,10 @@ func rebuildPrivateSemanticProjectionTx(tx *sql.Tx) error {
 func clearPrivateSemanticProjectionTx(tx *sql.Tx) error {
 	deleteNumeric := func(table, kind string) error {
 		_, err := tx.Exec(`DELETE FROM `+table+` WHERE id IN (
-			SELECT CAST(row_ref AS INTEGER) FROM private_semantic_projection_rows WHERE row_kind=?
+			SELECT CAST(projection.row_ref AS INTEGER)
+			  FROM private_semantic_projection_rows projection
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE projection.row_kind=? AND object.candidate_kind='semantic_delta'
 		)`, kind)
 		return err
 	}
@@ -1797,19 +1818,25 @@ func clearPrivateSemanticProjectionTx(tx *sql.Tx) error {
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM continuity_sessions WHERE session_id IN (
-		SELECT row_ref FROM private_semantic_projection_rows WHERE row_kind='session'
+		SELECT projection.row_ref FROM private_semantic_projection_rows projection
+		JOIN private_memory_objects object ON object.object_id=projection.object_id
+		WHERE projection.row_kind='session' AND object.candidate_kind='semantic_delta'
 	)`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM continuity_threads WHERE thread_id IN (
-		SELECT row_ref FROM private_semantic_projection_rows WHERE row_kind='thread'
+		SELECT projection.row_ref FROM private_semantic_projection_rows projection
+		JOIN private_memory_objects object ON object.object_id=projection.object_id
+		WHERE projection.row_kind='thread' AND object.candidate_kind='semantic_delta'
 	)`); err != nil {
 		return err
 	}
 	if err := deleteNumeric("entities", "entity"); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`DELETE FROM private_semantic_projection_rows`)
+	_, err := tx.Exec(`DELETE FROM private_semantic_projection_rows WHERE object_id IN (
+		SELECT object_id FROM private_memory_objects WHERE candidate_kind='semantic_delta'
+	)`)
 	return err
 }
 

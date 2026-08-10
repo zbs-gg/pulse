@@ -19,7 +19,7 @@ test('Cursor plugin is a native thin adapter over the shared Pulse runtime', () 
   const hooks = JSON.parse(readFileSync(join(pluginRoot, 'cursor-hooks', 'hooks.json'), 'utf8'));
   assert.equal(hooks.version, 1);
   assert.deepEqual(Object.keys(hooks.hooks).sort(), [
-    'beforeSubmitPrompt', 'postToolUse', 'preCompact', 'preToolUse', 'sessionStart', 'stop',
+    'beforeSubmitPrompt', 'postToolUse', 'preToolUse',
   ]);
   for (const [event, entries] of Object.entries(hooks.hooks)) {
     assert.equal(entries.length, 1);

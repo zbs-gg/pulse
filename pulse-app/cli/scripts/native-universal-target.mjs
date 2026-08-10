@@ -147,12 +147,12 @@ if (harness.host === 'codex') {
   assert.equal(productReceipt?.host, harness.host);
   for (const field of [
     'exact_public_install_command', 'native_daemon', 'native_fixture_embedder', 'visible_memory_card',
-    'first_memory_saved', 'fresh_session_context', 'host_observation', 'lifecycle_ready', 'repair_ready',
+    'first_memory_saved', 'prompt_recall_context', 'hook_readiness', 'lifecycle_ready', 'repair_ready',
     'same_object_recalled',
   ]) assert.equal(productReceipt[field], true, field);
   assert.equal(productReceipt.production_ready, false);
   assert.equal(productReceipt.support_proven, false);
-  assert.equal(productReceipt.first_value_boundary, 'fresh_session_context');
+  assert.equal(productReceipt.first_value_boundary, 'fresh_prompt_context');
   assert.equal(productReceipt.first_value_ms <= 60_000, true);
   assert.equal(Object.keys(productReceipt.first_value_stages_ms ?? {}).length >= 10, true);
   assert.equal(Object.values(productReceipt.first_value_stages_ms).every((value) =>
@@ -173,9 +173,10 @@ if (harness.host === 'codex') {
   assert.equal(consolidationReceipt?.package_sha256, productReceipt.packed_tarball_sha256);
   assert.equal(consolidationReceipt?.phase, 'report_ready');
   assert.deepEqual(consolidationReceipt?.source_classifications, ['backup', 'canonical_vault', 'release_artifact']);
-  for (const proof of ['cli_parity', 'mcp_parity', 'memory_home_visible', 'sources_byte_preserved']) {
+  for (const proof of ['cli_parity', 'mcp_hidden', 'memory_home_visible', 'sources_byte_preserved']) {
     assert.equal(consolidationReceipt?.[proof], true, proof);
   }
+  assert.equal(consolidationReceipt?.mcp_parity, false);
   for (const mutation of ['imported', 'merged', 'deleted', 'published']) {
     assert.equal(consolidationReceipt?.[mutation], false, mutation);
   }

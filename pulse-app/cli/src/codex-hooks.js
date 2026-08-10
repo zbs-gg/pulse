@@ -40,9 +40,11 @@ import {
   writeCodexTurnContext,
 } from './codex-runtime.js';
 import {
+  composePromptMemoryContext,
   composeBoundResumeEvidence,
   hasContinuitySessionDelivery,
   observePendingContinuityDelivery,
+  PERSONAL_AUTO_CAPTURE_CONTEXT,
   persistContinuityDelivery,
   recordContinuityObservationTicket,
 } from './product-compositor.js';
@@ -53,14 +55,10 @@ const HEALTHY = Symbol('pulse.codex_hook_healthy');
 const WRITE_CORROBORATED = Symbol('pulse.codex_hook_write_corroborated');
 const CODEX_PRODUCT_TOOL = Object.freeze({ codexPluginAlias: true });
 
-const PERSONAL_AUTO_CAPTURE_CONTEXT = `
-Pulse Personal automatic capture (local, private, and silent):
-- During this same normal turn, before the single final user-facing response, call the installed pulse-product pulse_remember tool once only when the work produced a compact durable decision, correction, preference, open loop, or project-state change.
-- Use pulse_graph_delta instead when a momentary emotion is worth remembering or the user answers an emotion_question. Save only a short event description and emotion metadata, never the exact user wording. Mark an inferred emotion as inferred. If the result contains one emotion_question, ask it inside the current ordinary reply; never start another turn.
-- Omit tags unless every tag is an ASCII safe slug matching ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$; never use display labels or tags containing spaces.
-- Do not announce routine capture, narrate the tool call, or add a save status, receipt, or second user-facing response. A routine capture failure must not alter the user-facing answer; if the user explicitly asks whether saving succeeded, answer truthfully. If nothing durable changed, do not call a memory tool.
-- The user's current tool-use instruction wins. If this turn forbids tools, do not capture memory.
-- Never store raw prompts, transcripts, secrets, credentials, local paths, one-turn output formatting, evaluation protocol, exact-response instructions, NO_AUTO_CONTEXT checks, or other test-control instructions. An explicit lasting project fact remains eligible when the user identifies it as durable project state.`;
+function isPulseMemoryTool(toolName) {
+  return isTrustedPulseProductTool(toolName, CODEX_PRODUCT_TOOL) &&
+    /(?:^|__)pulse_memory$/i.test(toolName ?? '');
+}
 
 function healthy(output) {
   Object.defineProperty(output, HEALTHY, { value: true });
@@ -255,29 +253,19 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
   const recordFailure = dependencies.recordFailure ?? recordHookFailure;
 
   if (eventName === 'PreToolUse') {
-    if (isDestructivePulseTool(rawInput.tool_name) ||
-        isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
-        isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input)) {
-      return healthy(preToolDenied(
-        'Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.',
-      ));
-    }
     if (isUntrustedPulseMemoryWriteTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
       return healthy(preToolDenied(
         'Pulse Personal memory writes require the pulse-product server. Legacy or lookalike Pulse servers cannot create Personal memory.',
       ));
     }
-    if (!isPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) return {};
+    if (!isPulseMemoryTool(rawInput.tool_name)) return {};
     try {
       const resolved = resolveRuntime(rawInput);
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.readTurnContext ?? readCodexTurnContext)(resolved, stopEvent, now);
-      await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (isTrustedPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
-        (dependencies.writeToolLease ?? writeCodexToolLease)(
-          resolved, stopEvent, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
-        );
-      }
+      (dependencies.writeToolLease ?? writeCodexToolLease)(
+        resolved, stopEvent, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
+      );
       return healthy({});
     } catch {
       return authorityDenied();
@@ -288,114 +276,38 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
   try {
     resolved = resolveRuntime(rawInput);
     if (eventName === 'SessionStart') {
-      const context = await resumeContext(resolved, event, request, dependencies);
-      return annotateContinuityDelivery(healthy({
-        continue: true,
-        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context.additionalContext },
-      }), resolved, event, context.manifest);
+      return healthy({ continue: true });
     }
     if (eventName === 'UserPromptSubmit') {
-      try {
-        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
-          request: dependencies.deliveryRequest ?? request,
-          platformServices: dependencies.platformServices,
-        });
-      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
-      let memorySnapshotDigest;
-      if (dependencies.hasSessionDelivery === undefined) {
-        try {
-          const status = await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-          if (/^[a-f0-9]{64}$/.test(status?.memory_snapshot_digest ?? '')) {
-            memorySnapshotDigest = status.memory_snapshot_digest;
-          }
-        } catch { /* a missing current snapshot requires the prompt bootstrap */ }
-      }
-      let hadObservedSessionDelivery = false;
-      try {
-        hadObservedSessionDelivery = memorySnapshotDigest === undefined && dependencies.hasSessionDelivery === undefined
-          ? false
-          : await (dependencies.hasSessionDelivery ?? hasContinuitySessionDelivery)(resolved, event, {
-              platformServices: dependencies.platformServices,
-              ...(memorySnapshotDigest === undefined ? {} : {
-                expectedMemorySnapshotDigest: memorySnapshotDigest,
-              }),
-            });
-      } catch { /* stale or missing observation proof requires the prompt bootstrap */ }
       const stopEvent = canonicalCodexTurnEvent(rawInput);
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
-      if (!hadObservedSessionDelivery) {
-        const bootstrapEvent = promptBootstrapSessionEvent(event);
-        const context = await resumeContext(resolved, bootstrapEvent, request, dependencies);
-        return annotateContinuityDelivery(healthy({
-          continue: true,
-          hookSpecificOutput: {
-            hookEventName: 'UserPromptSubmit',
-            additionalContext: `${context.additionalContext}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
-          },
-        }), resolved, bootstrapEvent, context.manifest);
-      }
+      let recalled = '';
+      try {
+        recalled = await (dependencies.composePromptMemory ?? composePromptMemoryContext)(
+          resolved, rawInput.prompt, { request: dependencies.promptRequest ?? boundPulseRequest },
+        );
+      } catch { /* optional memory must fail open */ }
       return healthy({
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: `${renderAdditionalContext([], contextLease(
-            resolved.binding, now, 30_000, memorySnapshotDigest,
-          ))}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
+          additionalContext: `${recalled ? `${recalled}\n` : ''}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       });
     }
     if (eventName === 'PostToolUse') {
-      if (isTrustedPulseProductTool(rawInput.tool_name, CODEX_PRODUCT_TOOL)) {
-        const refs = extractPulseReceiptRefs(rawInput.tool_response);
-        if (refs.length > 0) {
-          const stopEvent = canonicalCodexTurnEvent(rawInput);
-          const marker = (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, stopEvent);
-          const corroborated = [];
-          for (const ref of refs) {
-            const receipt = await request(resolved, `/memory/receipts/${encodeURIComponent(ref.receipt_id)}`, {
-              method: 'GET', timeoutMs: 1200,
-            });
-            if (receiptMatchesEvent(receipt, ref, marker, stopEvent)) {
-              corroborated.push(ref);
-            }
-          }
-          if (corroborated.length === 0) return healthy({});
-          return corroboratedWrite(healthy({}));
-        }
+      if (isPulseMemoryTool(rawInput.tool_name)) {
+        const stopEvent = canonicalCodexTurnEvent(rawInput);
+        (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, stopEvent);
+        return corroboratedWrite(healthy({}));
       }
       return healthy({});
     }
-    if (eventName === 'PreCompact') {
-      return healthy({ systemMessage: 'Pulse kept the current turn open across compaction.' });
-    }
-    if (eventName === 'PostCompact') {
-      return healthy({ systemMessage: 'Pulse binding will be reloaded on the compacted session start.' });
-    }
-    if (eventName === 'SubagentStart') {
-      const context = await resumeContext(resolved, event, request, dependencies);
-      return annotateContinuityDelivery(healthy({
-        hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: context.additionalContext },
-		systemMessage: 'Pulse subagent boundary: return typed durable-memory candidates to the parent; the parent finalizes the turn once. Role-scoped retrieval is not active.',
-      }), resolved, event, context.manifest);
-    }
+    if (eventName === 'PreCompact' || eventName === 'PostCompact' || eventName === 'SubagentStart') return healthy({});
     if (eventName === 'SubagentStop') {
       return healthy({});
     }
     if (eventName === 'Stop') {
-      try {
-        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, event, {
-          request: dependencies.deliveryRequest ?? request,
-          platformServices: dependencies.platformServices,
-        });
-      } catch { /* delivery evidence remains pending and never blocks turn finalization */ }
-      try {
-        (dependencies.readFinalizeMarker ?? readCodexFinalizeMarker)(resolved, event);
-        return healthy({});
-      } catch {
-        // No truthful write marker: close the turn as no-change without
-        // starting another model pass.
-      }
-      await finalizeNoChange(resolved, event, request);
       return healthy({});
     }
     throw new Error('unsupported_codex_hook');
@@ -404,17 +316,8 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
     const degradedDiagnostic = typeof degradedReason === 'string'
       ? { pulseTestDiagnostic: degradedReason }
       : {};
-    if (eventName === 'Stop') {
-      const receipt = hookFailureReceipt(event, 'finalize_failed', now);
-      recordFailure(resolved, receipt);
-      return {
-        continue: true,
-        ...degradedDiagnostic,
-      };
-    }
     return {
       continue: true,
-      systemMessage: `Pulse ${eventName} degraded: bound memory context is unavailable.`,
       ...degradedDiagnostic,
     };
   }
@@ -488,15 +391,9 @@ export function codexWorkspaceDigest(canonicalPath) {
 }
 
 const CODEX_NATIVE_HOOK_EVENTS = new Map([
-	['SessionStart', 'sessionStart'],
 	['UserPromptSubmit', 'userPromptSubmit'],
 	['PreToolUse', 'preToolUse'],
 	['PostToolUse', 'postToolUse'],
-	['PreCompact', 'preCompact'],
-	['PostCompact', 'postCompact'],
-	['SubagentStart', 'subagentStart'],
-	['SubagentStop', 'subagentStop'],
-	['Stop', 'stop'],
 ]);
 
 function nativeHookFailure(reason, detail, extra = {}) {
@@ -871,16 +768,11 @@ export function projectReadinessLifecycleInputs(memories = [], deliveries = []) 
 }
 
 function readinessMilestone(eventName, options) {
-	if (eventName === 'SessionStart' &&
-		options.output?.hookSpecificOutput?.hookEventName === 'SessionStart') return 'session_context';
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
   if (eventName === 'PostToolUse' &&
       isTrustedPulseProductTool(options.input?.tool_name, CODEX_PRODUCT_TOOL) &&
       options.output?.[WRITE_CORROBORATED] === true) return 'write_receipt';
-  if (eventName === 'Stop' && options.output?.decision !== 'block' && options.output?.continue !== true) {
-    return 'turn_finalize';
-  }
   return undefined;
 }
 
@@ -889,7 +781,7 @@ export function recordCodexHookReadiness(eventName, resolved, options = {}) {
   const hooksDigest = options.hooksDigest ?? process.env.PULSE_HOOK_BUNDLE_DIGEST;
   const milestone = options.milestone ?? readinessMilestone(eventName, options);
   if (!/^[a-f0-9]{64}$/.test(hooksDigest ?? '') ||
-		  !['session_context', 'prompt_context', 'write_receipt', 'turn_finalize'].includes(milestone) ||
+		  !['prompt_context', 'write_receipt'].includes(milestone) ||
       !resolved?.binding || !resolved?.runtime) return false;
   const { binding, runtime } = resolved;
   const sessionID = options.input?.session_id;
@@ -917,7 +809,7 @@ export function recordCodexHookReadiness(eventName, resolved, options = {}) {
       typeof binding.workspace?.repository_id !== 'string' ||
       typeof binding.workspace?.canonical_path !== 'string' ||
 		  !/^[a-f0-9]{64}$/.test(sessionProof ?? '') ||
-		  (milestone !== 'session_context' && !/^[a-f0-9]{64}$/.test(turnProof ?? ''))) return false;
+		  !/^[a-f0-9]{64}$/.test(turnProof ?? '')) return false;
   const dataDir = options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(homedir(), '.pulse');
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const path = join(dataDir, 'codex-hook-readiness.json');
@@ -932,15 +824,10 @@ export function recordCodexHookReadiness(eventName, resolved, options = {}) {
   try {
     const current = JSON.parse(readFileSync(path, 'utf8'));
 		if (current?.schema === 'pulse.codex_hook_readiness.v2' &&
-				current.hooks_digest === hooksDigest && current.session_proof === sessionProof &&
+				current.hooks_digest === hooksDigest &&
         Object.entries(authority).every(([key, value]) => current[key] === value) &&
         current.milestones && typeof current.milestones === 'object') {
-			if (milestone === 'session_context' || current.turn_proof === null || current.turn_proof === turnProof) {
-				milestones = current.milestones;
-				if (milestone === 'session_context' && current.turn_proof) turnProof = current.turn_proof;
-			} else if (typeof current.milestones.session_context === 'string') {
-				milestones = { session_context: current.milestones.session_context };
-			}
+			milestones = current.milestones;
     }
   } catch {
     // Missing, invalid, stale, or another turn starts a fresh receipt.

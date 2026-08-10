@@ -7,7 +7,7 @@
  * an LLM backend by default. Export/import stay CLI-only in v1.
  */
 import { createServer, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   readFileSync, realpathSync,
 } from 'node:fs';
@@ -203,6 +203,35 @@ interface MemoryCapsule {
   raw_input_included: false;
 }
 
+type PulseMemoryKind =
+  | 'decision'
+  | 'preference'
+  | 'open_loop'
+  | 'project_state'
+  | 'correction'
+  | 'emotion';
+
+interface PulseMemoryItem {
+  kind: PulseMemoryKind;
+  scope: 'personal' | 'project';
+  summary: string;
+  emotion?: {
+    label: 'joy' | 'sadness' | 'anger' | 'fear' | 'trust' | 'disgust' |
+      'anticipation' | 'surprise' | 'shame' | 'guilt';
+    intensity: number;
+    source: 'user' | 'inferred';
+    cause?: string;
+  };
+}
+
+interface PulseMemoryBody {
+  items: PulseMemoryItem[];
+}
+
+interface PulseMemoryQueryBody {
+  query: string;
+}
+
 interface HostTurnContext {
   schema: string;
   host: 'codex' | 'claude-code' | 'cursor';
@@ -346,6 +375,11 @@ interface ProductRuntimeModule {
     host: 'codex' | 'claude-code' | 'cursor',
     result: unknown,
   ): unknown;
+  writeHostRecallMarker(
+    resolved: ReturnType<typeof productRuntimeResolution>,
+    event: HostTurnContext,
+    host: 'cursor',
+  ): unknown;
 }
 
 async function productRuntimeModule(): Promise<ProductRuntimeModule> {
@@ -356,12 +390,237 @@ async function productRuntimeModule(): Promise<ProductRuntimeModule> {
   return await import(moduleURL) as ProductRuntimeModule;
 }
 
-async function consumeProductTurnContext(toolName: 'pulse_remember' | 'pulse_graph_delta', toolInput: unknown): Promise<HostTurnContext> {
+async function consumeProductTurnContext(
+  toolName: 'pulse_memory' | 'pulse_remember' | 'pulse_graph_delta',
+  toolInput: unknown,
+  codexMcpContext?: HostTurnContext,
+): Promise<HostTurnContext> {
   if (!PRODUCT_HOST) throw new Error('Pulse product host is unavailable');
   const runtime = await productRuntimeModule();
-  return runtime.consumeHostToolLease(
-    productRuntimeResolution(), PRODUCT_HOST, toolName, toolInput,
-  );
+  try {
+    return runtime.consumeHostToolLease(
+      productRuntimeResolution(), PRODUCT_HOST, toolName, toolInput,
+    );
+  } catch (error) {
+    if (PRODUCT_HOST === 'codex' && codexMcpContext &&
+        error instanceof Error && error.message === 'host_tool_lease_unavailable') {
+      return codexMcpContext;
+    }
+    throw error;
+  }
+}
+
+function codexMcpTurnContext(invocationKey: string, connectionID: string): HostTurnContext | undefined {
+  if (PRODUCT_HOST !== 'codex' || !/^mcp_[a-f0-9]{64}$/.test(invocationKey)) return undefined;
+  const bindingDigest = process.env.PULSE_BINDING_DIGEST ?? '';
+  const workspace = process.env.PULSE_HOST_WORKSPACE ?? '';
+  const resolverEpoch = Number(process.env.PULSE_RESOLVER_EPOCH);
+  if (!/^[a-f0-9]{64}$/.test(bindingDigest) || !isAbsolute(workspace) ||
+      !Number.isSafeInteger(resolverEpoch) || resolverEpoch < 1) return undefined;
+  const sessionDigest = createHash('sha256').update(
+    `pulse-codex-mcp-session-v1\x1f${bindingDigest}\x1f${connectionID}`,
+  ).digest('hex');
+  const turnDigest = createHash('sha256').update(
+    `pulse-codex-mcp-turn-v1\x1f${bindingDigest}\x1f${invocationKey}`,
+  ).digest('hex');
+  return {
+    schema: 'pulse.codex_turn_context.v1',
+    host: 'codex',
+    session_id: `mcp_${sessionDigest}`,
+    turn_id: `turn_${turnDigest}`,
+    workspace,
+    source_event_key: `event_${turnDigest}`,
+    idempotency_key: `lifecycle:${turnDigest}`,
+    binding_digest: bindingDigest,
+    policy_epoch: 0,
+    resolver_epoch: resolverEpoch,
+    expires_at: new Date(Date.now() + 30_000).toISOString(),
+  };
+}
+
+function validatePulseMemoryBody(value: unknown): PulseMemoryBody {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('pulse_memory input must be an object');
+  }
+  const body = value as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== 'items') || !Array.isArray(body.items) ||
+      body.items.length < 1 || body.items.length > 3) {
+    throw new Error('pulse_memory requires 1..3 items');
+  }
+  const kinds = new Set<PulseMemoryKind>([
+    'decision', 'preference', 'open_loop', 'project_state', 'correction', 'emotion',
+  ]);
+  const emotions = new Set([
+    'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust',
+    'anticipation', 'surprise', 'shame', 'guilt',
+  ]);
+  const items = body.items.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`pulse_memory items[${index}] is invalid`);
+    }
+    const item = raw as Record<string, unknown>;
+    if (Object.keys(item).some((key) => !['kind', 'scope', 'summary', 'emotion'].includes(key)) ||
+        !kinds.has(item.kind as PulseMemoryKind) ||
+        (item.scope !== 'personal' && item.scope !== 'project') ||
+        typeof item.summary !== 'string' || item.summary.trim() !== item.summary ||
+        item.summary.length < 1 || item.summary.length > 400 ||
+        Buffer.byteLength(item.summary, 'utf8') > 1200) {
+      throw new Error(`pulse_memory items[${index}] is invalid`);
+    }
+    if (item.kind !== 'emotion') {
+      if (item.emotion !== undefined) throw new Error(`pulse_memory items[${index}].emotion is unexpected`);
+      return item as unknown as PulseMemoryItem;
+    }
+    if (!item.emotion || typeof item.emotion !== 'object' || Array.isArray(item.emotion)) {
+      throw new Error(`pulse_memory items[${index}].emotion is required`);
+    }
+    const emotion = item.emotion as Record<string, unknown>;
+    if (Object.keys(emotion).some((key) => !['label', 'intensity', 'source', 'cause'].includes(key)) ||
+        !emotions.has(String(emotion.label)) || typeof emotion.intensity !== 'number' ||
+        !Number.isFinite(emotion.intensity) || emotion.intensity < 0 || emotion.intensity > 1 ||
+        (emotion.source !== 'user' && emotion.source !== 'inferred') ||
+        (emotion.cause !== undefined && (typeof emotion.cause !== 'string' ||
+          emotion.cause.trim() !== emotion.cause || emotion.cause.length < 1 || emotion.cause.length > 240))) {
+      throw new Error(`pulse_memory items[${index}].emotion is invalid`);
+    }
+    if (typeof emotion.cause === 'string' && Buffer.byteLength(emotion.cause, 'utf8') > 360) {
+      throw new Error(`pulse_memory items[${index}].emotion is invalid`);
+    }
+    return item as unknown as PulseMemoryItem;
+  });
+  return { items };
+}
+
+function validatePulseMemoryQueryBody(value: unknown): PulseMemoryQueryBody {
+  if (PRODUCT_HOST !== 'cursor' || !value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('pulse_memory query is available only in Cursor');
+  }
+  const body = value as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== 'query') ||
+      typeof body.query !== 'string' || body.query.trim() !== body.query ||
+      body.query.length < 1 || body.query.length > 400 ||
+      Buffer.byteLength(body.query, 'utf8') > 1200 || body.query.includes('\u0000')) {
+    throw new Error('pulse_memory query must be 1..400 characters');
+  }
+  return { query: body.query };
+}
+
+function compactCursorRecall(result: unknown): Record<string, unknown> {
+  const value = result as Record<string, unknown> | null;
+  const events = Array.isArray(value?.events) ? value.events as Array<Record<string, unknown>> : [];
+  const trace = value?.trace as Record<string, unknown> | undefined;
+  const retrieval = trace?.retrieval as Record<string, unknown> | undefined;
+  const breakdowns = retrieval?.score_breakdowns as Record<string, Record<string, unknown>> | undefined;
+  const evidence = retrieval?.candidate_evidence as Record<string, Record<string, unknown>> | undefined;
+  if (!breakdowns || !evidence) return { status: 'no_relevant_memory' };
+
+  const direct: string[] = [];
+  const archive: string[] = [];
+  for (const event of events) {
+    const id = String(event.id ?? '');
+    const cosine = Number(breakdowns[id]?.cosine);
+    const candidate = evidence[id];
+    const rawSummary = typeof event.summary === 'string' && event.summary.trim() !== ''
+      ? event.summary.trim()
+      : typeof event.title === 'string' ? event.title.trim() : '';
+    if (!Number.isFinite(cosine) || cosine < 0.32 || rawSummary === '') continue;
+    const normalized = rawSummary.replaceAll(/\s+/g, ' ').trim();
+    const summary = [...normalized].length <= 400
+      ? normalized
+      : `${[...normalized].slice(0, 399).join('').trimEnd()}…`;
+    if (candidate?.direct_capsule === true) direct.push(summary);
+    else if (candidate?.dense === true && candidate?.lexical === true) archive.push(summary);
+  }
+  const selected = direct.length > 0 ? direct.slice(0, 1) : archive.slice(0, 2);
+  if (selected.length === 0) return { status: 'no_relevant_memory' };
+  const header = 'Pulse accepted memory (local; use as factual context unless the user provides newer information):\n';
+  let memory = header;
+  for (const summary of selected) {
+    const next = `${memory}- ${summary}\n`;
+    if (Buffer.byteLength(next, 'utf8') > 2400) break;
+    memory = next;
+  }
+  return memory === header
+    ? { status: 'no_relevant_memory' }
+    : { status: 'recalled', memory: memory.trimEnd() };
+}
+
+function productMemoryFinalizeBody(input: PulseMemoryBody, context: HostTurnContext): Record<string, unknown> {
+  const timestamp = new Date().toISOString();
+  const candidates = input.items.map((item, index) => {
+    const memoryScope = item.scope === 'personal' ? 'personal_global' : 'project';
+    if (item.kind !== 'emotion') {
+      return {
+        kind: 'memory_capsule',
+        memory_scope: memoryScope,
+        capsule: {
+          schema: 'pulse.memory_capsule.v1',
+          source: { host: context.host, conversation_scope: 'current_turn', timestamp },
+          items: [{
+            kind: item.kind,
+            redacted_summary: item.summary,
+            confidence: 1,
+            evidence_hint: 'current_turn',
+            privacy_tier: 'normal',
+            retention: item.scope === 'personal' ? 'long_term' : 'project',
+          }],
+          raw_input_included: false,
+        },
+      };
+    }
+    const emotion = item.emotion!;
+    const confidence = emotion.source === 'user' ? 1 : 0.8;
+    const derivation = emotion.source === 'user' ? 'explicit' : 'inferred';
+    const clientID = `emotion_${createHash('sha256').update([
+      context.source_event_key, String(index), item.summary, emotion.label,
+    ].join('\x1f')).digest('hex').slice(0, 24)}`;
+    return {
+      kind: 'semantic_delta',
+      memory_scope: memoryScope,
+      semantic_delta: {
+        schema: 'pulse.semantic_delta.v1',
+        source: {
+          host: context.host,
+          conversation_scope: 'current_turn',
+          timestamp,
+          session_id: context.session_id,
+        },
+        events: [{
+          client_id: clientID,
+          title: `Emotional moment: ${emotion.label}`,
+          summary: item.summary,
+          emotional_weight: emotion.intensity,
+          confidence,
+          privacy_tier: 'normal',
+          emotions: { [emotion.label]: emotion.intensity },
+          emotion_derivation: derivation,
+          emotion_confidence: confidence,
+          observed_label: emotion.label,
+          ...(emotion.cause === undefined ? {} : {
+            trigger: {
+              summary: emotion.cause,
+              derivation,
+              confidence,
+              confirmed: emotion.source === 'user',
+            },
+          }),
+        }],
+        raw_input_included: false,
+      },
+    };
+  });
+  return {
+    schema: 'pulse.turn_finalize.v1',
+    host: context.host,
+    session_id: context.session_id,
+    turn_id: context.turn_id,
+    source_event_key: context.source_event_key,
+    idempotency_key: context.idempotency_key,
+    binding_digest: context.binding_digest,
+    policy_epoch: context.policy_epoch,
+    resolver_epoch: context.resolver_epoch,
+    candidates,
+  };
 }
 
 function assertProductMemorySourceHost(toolInput: unknown): void {
@@ -453,6 +712,26 @@ function jsonText(value: unknown) {
 		result.structuredContent = value as Record<string, unknown>;
 	}
 	return result;
+}
+
+function compactPulseMemoryResult(value: unknown) {
+  const root = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const receipts = Array.isArray(root.receipts)
+    ? root.receipts.filter((item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const rejected = receipts.some((item) =>
+    ['rejected', 'failed', 'canceled'].includes(String(item.status)));
+  const ids = [...new Set(receipts.map((item) => item.object_id ?? item.candidate_id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0))].slice(0, 3);
+  return {
+    content: [{
+      type: 'text' as const,
+      text: JSON.stringify({ status: rejected ? 'rejected' : 'stored', ids }),
+    }],
+  };
 }
 
 function redactStatusForMcp(value: unknown): unknown {
@@ -773,6 +1052,87 @@ const RESUME_OUTPUT_SCHEMA = {
   additionalProperties: false,
 };
 
+const PULSE_MEMORY_TOOL: Tool = {
+  name: 'pulse_memory',
+  description: 'Save only a durable result from this normal turn. Never save raw wording, secrets, credentials, paths, or temporary instructions. Personal memory follows the person; project memory stays in this project. An inferred emotion is only a fading hypothesis about this moment.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 3,
+        items: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                kind: {
+                  type: 'string',
+                  enum: ['decision', 'preference', 'open_loop', 'project_state', 'correction'],
+                },
+                scope: { type: 'string', enum: ['personal', 'project'] },
+                summary: { type: 'string', minLength: 1, maxLength: 400 },
+              },
+              required: ['kind', 'scope', 'summary'],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', const: 'emotion' },
+                scope: { type: 'string', enum: ['personal', 'project'] },
+                summary: { type: 'string', minLength: 1, maxLength: 400 },
+                emotion: {
+                  type: 'object',
+                  properties: {
+                    label: {
+                      type: 'string',
+                      enum: ['joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt'],
+                    },
+                    intensity: { type: 'number', minimum: 0, maximum: 1 },
+                    source: { type: 'string', enum: ['user', 'inferred'] },
+                    cause: { type: 'string', minLength: 1, maxLength: 240 },
+                  },
+                  required: ['label', 'intensity', 'source'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['kind', 'scope', 'summary', 'emotion'],
+              additionalProperties: false,
+            },
+          ],
+        },
+      },
+    },
+    required: ['items'],
+    additionalProperties: false,
+  },
+};
+
+const CURSOR_PULSE_MEMORY_TOOL: Tool = {
+  name: 'pulse_memory',
+  description: 'Cursor only: call this tool exactly once before answering every user message. For lookup, the only valid input is exactly {"query":"short semantic paraphrase"}; never add action, limit, scope, mode, items, or another field. Omit secrets and paths, and use returned memory as factual context unless the user provides newer information. Use {items} only when this same normal turn produced a durable result. Never retry a failed call.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', minLength: 1, maxLength: 400 },
+      items: PULSE_MEMORY_TOOL.inputSchema.properties!.items,
+    },
+    oneOf: [
+      {
+        required: ['query'],
+        not: { required: ['items'] },
+      },
+      {
+        required: ['items'],
+        not: { required: ['query'] },
+      },
+    ],
+    additionalProperties: false,
+  },
+};
+
 function outputSchemaForTool(name: string): Record<string, unknown> {
   if (name === 'pulse_remember') {
     if (PRODUCT_UNASSIGNED_REASON) return UNASSIGNED_REMEMBER_OUTPUT_SCHEMA;
@@ -799,6 +1159,7 @@ export function createPulseMcpServer(): Server {
 
 	server.setRequestHandler('tools/list', async () => {
 		const tools: Tool[] = [
+    PULSE_MEMORY_TOOL,
     {
       name: 'pulse_remember',
       description:
@@ -1394,7 +1755,9 @@ export function createPulseMcpServer(): Server {
       : tools.filter((tool) => tool.name !== 'pulse_consolidation_report');
     let productTools = PRODUCT_UNASSIGNED_REASON
       ? localTools.filter((tool) => tool.name === 'pulse_remember')
-      : localTools;
+      : PRODUCT_HOST_ADAPTER
+        ? localTools.filter((tool) => tool.name === 'pulse_memory')
+        : localTools.filter((tool) => tool.name !== 'pulse_memory');
 		if (PRODUCT_HOST) {
       productTools = productTools.map((tool) => {
         if (tool.name !== 'pulse_remember' && tool.name !== 'pulse_graph_delta') return tool;
@@ -1409,16 +1772,26 @@ export function createPulseMcpServer(): Server {
         return descriptor;
       });
 		}
-		productTools = productTools.map((tool) => ({
+	productTools = productTools.map((tool) => tool.name === 'pulse_memory' ? tool : ({
 			...tool,
 			outputSchema: outputSchemaForTool(tool.name),
 		}));
+		if (PRODUCT_HOST === 'cursor') {
+			productTools = productTools.map((tool) => tool.name === 'pulse_memory' ? CURSOR_PULSE_MEMORY_TOOL : tool);
+		}
 		return { tools: productTools };
   });
 
 	server.setRequestHandler('tools/call', async (request, ctx) => {
     const { name, arguments: args } = request.params;
-	const invocationKey = mcpRequestIdempotencyKey(ctx.sessionId ?? serverInstanceID, ctx.mcpReq.id);
+	const payloadDigest = createHash('sha256').update(JSON.stringify(args ?? null)).digest('hex');
+	const invocationKey = mcpRequestIdempotencyKey(
+		ctx.sessionId ?? serverInstanceID,
+		`${String(ctx.mcpReq.id)}\x1f${payloadDigest}`,
+	);
+	const requestTurnContext = codexMcpTurnContext(
+		invocationKey, ctx.sessionId ?? serverInstanceID,
+	);
 
     try {
       await assertProductBindingCurrent();
@@ -1439,14 +1812,14 @@ export function createPulseMcpServer(): Server {
         if (resolvedEngine !== null) {
           return resolvedEngine === 'standalone'
             ? standaloneResult(name, args)
-            : await daemonToolCall(name, args, invocationKey);
+            : await daemonToolCall(name, args, invocationKey, requestTurnContext);
         }
         firstCallGate = new Promise((resolve) => {
           releaseGate = resolve;
         });
       }
       try {
-        const out = await daemonToolCall(name, args, invocationKey);
+        const out = await daemonToolCall(name, args, invocationKey, requestTurnContext);
         resolvedEngine = 'daemon';
         return out;
       } catch (err: unknown) {
@@ -1494,7 +1867,43 @@ function resolveStandaloneStore(): StandaloneStore {
   return standaloneStore;
 }
 
-async function daemonToolCall(name: string, args: Record<string, unknown> | undefined, invocationKey: string) {
+async function daemonToolCall(
+  name: string,
+  args: Record<string, unknown> | undefined,
+  invocationKey: string,
+  requestTurnContext?: HostTurnContext,
+) {
+  if (name === 'pulse_memory') {
+    if (!PRODUCT_HOST_ADAPTER) throw new Error('pulse_memory requires an installed Personal binding');
+    if (PRODUCT_HOST === 'cursor' && args && Object.hasOwn(args, 'query')) {
+      const input = validatePulseMemoryQueryBody(args);
+      const context = await consumeProductTurnContext('pulse_memory', args, requestTurnContext);
+      const out = await pulseFetch('/context/query', {
+        query: input.query, mode: 'auto', top_k: 12, scope: 'user', include_trace: true,
+      }, 'POST', invocationKey);
+      try {
+        const runtime = await productRuntimeModule();
+        runtime.writeHostRecallMarker(productRuntimeResolution(), context, 'cursor');
+      } catch {
+        // Search remains fail-open; Doctor simply stays pending without its marker.
+      }
+      return jsonText(compactCursorRecall(out));
+    }
+    const input = validatePulseMemoryBody(args);
+    const context = await consumeProductTurnContext('pulse_memory', args, requestTurnContext);
+    const body = productMemoryFinalizeBody(input, context);
+    const out = await pulseFetch<unknown>(
+      '/turn/finalize', body, 'POST', String(body.idempotency_key),
+    );
+    assertTruthfulWriteResponse(out);
+    try {
+      await writeProductFinalizeMarker(context, out);
+    } catch {
+      // The committed daemon receipt remains authoritative.
+    }
+    return compactPulseMemoryResult(out);
+  }
+
   if (name === 'pulse_remember') {
     if (PRODUCT_HOST_ADAPTER) {
       assertProductMemorySourceHost(args);
@@ -1503,7 +1912,7 @@ async function daemonToolCall(name: string, args: Record<string, unknown> | unde
         const runtime = await productRuntimeModule();
         return jsonText(runtime.stageUnassignedProductCandidate(PRODUCT_HOST, args, invocationKey));
       }
-      const context = await consumeProductTurnContext('pulse_remember', args);
+      const context = await consumeProductTurnContext('pulse_remember', args, requestTurnContext);
       const body = productFinalizeBody(args as unknown as MemoryCapsule, context);
       const out = await pulseFetch<unknown>(
         '/turn/finalize', body, 'POST', String(body.idempotency_key),

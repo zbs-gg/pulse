@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   composeBoundResumeEvidence,
+  composePromptMemoryContext,
   createContinuityDeliveryOffer,
   createContinuityDeliveryObservation,
   hasContinuitySessionDelivery,
@@ -258,4 +259,127 @@ test('composition returns only the structured IDs declared as included in render
   });
   assert.equal(Object.isFrozen(result.manifest), true);
   assert.equal(Object.isFrozen(result.manifest.object_ids), true);
+});
+
+test('prompt recall injects only the strongest capsule and bounds legacy summaries', async () => {
+  const output = await composePromptMemoryContext(resolved(), 'How should memory behave?', {
+    request: async (_runtime, path, options) => {
+      assert.equal(path, '/context/query');
+      assert.equal(options.body.query, 'How should memory behave?');
+      assert.equal(options.body.top_k, 12);
+      return {
+        events: [
+          { id: 1, summary: `Strong one. ${'legacy detail '.repeat(80)}` },
+          { id: 2, summary: 'Weak noise.' },
+          { id: 3, summary: 'Strong two.' },
+          { id: 4, summary: 'Strong three.' },
+          { id: 5, summary: 'Strong four.' },
+          { id: 6, summary: 'Strong five must not appear.' },
+        ],
+        trace: { retrieval: {
+          score_breakdowns: {
+            1: { cosine: 0.72 }, 2: { cosine: 0.31 }, 3: { cosine: 0.65 },
+            4: { cosine: 0.54 }, 5: { cosine: 0.44 }, 6: { cosine: 0.91 },
+          },
+          candidate_evidence: {
+            1: { dense: true, lexical: true, direct_capsule: true },
+            2: { dense: true, lexical: true, direct_capsule: true },
+            3: { dense: true, lexical: false, direct_capsule: true },
+            4: { dense: true, lexical: false, direct_capsule: true },
+            5: { dense: true, lexical: true, direct_capsule: true },
+            6: { dense: true, lexical: true, direct_capsule: true },
+          },
+        } },
+      };
+    },
+  });
+  assert.match(output, /Strong one/);
+  assert.doesNotMatch(output, /Weak noise|Strong two|Strong three|Strong four|Strong five/);
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 1);
+  assert.equal([...output.split('\n').find((line) => line.startsWith('- ')).slice(2)].length <= 400, true);
+  assert.equal(Buffer.byteLength(output) <= 2400, true);
+});
+
+test('prompt recall injects nothing when relevance evidence is weak or absent', async () => {
+  const weak = await composePromptMemoryContext(resolved(), 'Unrelated prompt', {
+    request: async () => ({
+      events: [{ id: 1, summary: 'Some memory.' }],
+      trace: { retrieval: {
+        score_breakdowns: { 1: { cosine: 0.12 } },
+        candidate_evidence: { 1: { dense: true, lexical: true, direct_capsule: true } },
+      } },
+    }),
+  });
+  assert.equal(weak, '');
+});
+
+test('prompt recall presents the accepted decision as factual context', async () => {
+  const output = await composePromptMemoryContext(
+    resolved(),
+    'Какое правило мы приняли для связи решения и эмоционального момента?',
+    {
+      request: async () => ({
+        events: [{
+          id: 76783,
+          summary: 'Эмоциональный момент хранится как отдельный элемент памяти, а не как поле решения.',
+        }],
+        trace: { retrieval: {
+          score_breakdowns: { 76783: { cosine: 0.6851975917816162 } },
+          candidate_evidence: {
+            76783: { dense: true, lexical: true, direct_capsule: true },
+          },
+        } },
+      }),
+    },
+  );
+  assert.match(output, /^Pulse accepted memory/);
+  assert.match(output, /use as factual context/);
+  assert.match(output, /отдельный элемент памяти, а не как поле решения/);
+});
+
+test('prompt recall prefers direct capsules and never mixes archive noise', async () => {
+  const output = await composePromptMemoryContext(resolved(), 'What did we decide?', {
+    request: async () => ({
+      events: [
+        { id: 1, summary: 'Archive result with stronger raw score.' },
+        { id: 2, summary: 'The durable decision.' },
+      ],
+      trace: { retrieval: {
+        score_breakdowns: { 1: { cosine: 0.91 }, 2: { cosine: 0.55 } },
+        candidate_evidence: {
+          1: { dense: true, lexical: true, direct_capsule: false },
+          2: { dense: true, lexical: false, direct_capsule: true },
+        },
+      } },
+    }),
+  });
+  assert.match(output, /durable decision/);
+  assert.doesNotMatch(output, /Archive result/);
+});
+
+test('prompt recall accepts at most two archive events only with dense and lexical agreement', async () => {
+  const output = await composePromptMemoryContext(resolved(), 'Old context', {
+    request: async () => ({
+      events: [
+        { id: 1, summary: 'Dense only archive noise.' },
+        { id: 2, summary: 'Archive agreement one.' },
+        { id: 3, summary: 'Archive agreement two.' },
+        { id: 4, summary: 'Archive agreement three.' },
+      ],
+      trace: { retrieval: {
+        score_breakdowns: {
+          1: { cosine: 0.9 }, 2: { cosine: 0.7 }, 3: { cosine: 0.6 }, 4: { cosine: 0.5 },
+        },
+        candidate_evidence: {
+          1: { dense: true, lexical: false, direct_capsule: false },
+          2: { dense: true, lexical: true, direct_capsule: false },
+          3: { dense: true, lexical: true, direct_capsule: false },
+          4: { dense: true, lexical: true, direct_capsule: false },
+        },
+      } },
+    }),
+  });
+  assert.doesNotMatch(output, /Dense only|agreement three/);
+  assert.match(output, /agreement one/);
+  assert.match(output, /agreement two/);
 });

@@ -49,6 +49,40 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string,
 	return out, nil
 }
 
+type managedBGEProofEmbedder struct{}
+
+func (*managedBGEProofEmbedder) Model() string { return "bge-m3" }
+func (*managedBGEProofEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for index := range texts {
+		out[index] = []float32{1, 0}
+	}
+	return out, nil
+}
+
+func TestManagedBGEReadsLegacyMigrationBridgeWhileBackfillIsPending(t *testing.T) {
+	vault, err := store.Open(t.TempDir() + "/legacy-bridge.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Close()
+	result, err := vault.DB().Exec(`INSERT INTO events(title,description,scorer_version,ts) VALUES('old decision','preserved meaning','host-extracted','2026-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID, _ := result.LastInsertId()
+	if _, err := vault.DB().Exec(`INSERT INTO event_embeddings(event_id,model,dim,vector_json,text_source) VALUES(?, 'bge-m3-mlx-fp16', 2, '[1,0]', 'old decision')`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Config{Store: vault, Embedder: &managedBGEProofEmbedder{}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.eventIDs) != 1 || engine.eventIDs[0] != eventID {
+		t.Fatalf("legacy migration bridge was not searchable: ids=%v", engine.eventIDs)
+	}
+}
+
 func sqrt32(x float32) float64 {
 	return float64Sqrt(float64(x))
 }

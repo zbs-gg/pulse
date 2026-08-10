@@ -259,12 +259,12 @@ function mcpRememberInput(memoryArguments) {
     { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: 'pulse_remember', arguments: memoryArguments,
+      name: 'pulse_memory', arguments: memoryArguments,
     } },
   ].map((message) => JSON.stringify(message)).join('\n') + '\n';
 }
 
-async function waitForCandidate(baseUrl, secret, candidateID, terminalStatus) {
+async function waitForCandidate(baseUrl, secret, objectID, terminalStatus) {
   const deadline = Date.now() + 15_000;
   let lastStatus = 'missing';
   while (Date.now() < deadline) {
@@ -273,14 +273,14 @@ async function waitForCandidate(baseUrl, secret, candidateID, terminalStatus) {
     });
     if (response.ok) {
       const tray = await response.json();
-      const candidate = tray.candidates?.find((entry) => entry.candidate_id === candidateID);
+      const candidate = tray.candidates?.find((entry) => entry.canonical_object_id === objectID);
       const receipt = candidate?.latest_receipt;
       lastStatus = receipt?.status ?? lastStatus;
       if (receipt?.status === terminalStatus) return candidate;
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new Error(`candidate ${candidateID} did not reach ${terminalStatus}; last=${lastStatus}`);
+  throw new Error(`object ${objectID} did not reach ${terminalStatus}; last=${lastStatus}`);
 }
 
 const root = mkdtempSync(join(tmpdir(), 'pulse-claude-product.'));
@@ -458,16 +458,13 @@ try {
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   assert.deepEqual(settings.permissions, { allow: ['Bash(git status)'] });
   assert.deepEqual(Object.keys(settings.hooks).sort(), [
-    'PostCompact', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart',
-    'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit',
+    'PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit',
   ]);
-  assert.equal(settings.hooks.SessionStart.find((entry) =>
-    entry.hooks.some((hook) => /claude-hook SessionStart/.test(hook.command))).matcher,
-  'startup|resume|clear|compact');
   const sessionCommands = settings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command));
   assert.equal(sessionCommands.includes('echo keep-session'), true);
+  assert.equal(sessionCommands.some((command) => /claude-hook SessionStart/.test(command)), false);
   assert.equal(sessionCommands.includes('pulse hook session-start'), false);
-  assert.equal(settings.hooks.PostToolUse[0].matcher, 'mcp__pulse-product__pulse_remember');
+  assert.equal(settings.hooks.PostToolUse[0].matcher, 'mcp__pulse-product__pulse_memory');
 
   const nestedWorkspace = join(workspace, 'nested', 'feature');
   mkdirSync(nestedWorkspace, { recursive: true });
@@ -475,12 +472,6 @@ try {
   const transcriptPath = join(root, 'must-not-be-read.jsonl');
   const claudeSession = 'session-claude-e2e';
   const promptID = '019f-claude-prompt-e2e';
-  const sessionOutput = runHook(settings, 'SessionStart', {
-    session_id: claudeSession, transcript_path: transcriptPath, cwd: workspace,
-    hook_event_name: 'SessionStart', source: 'startup', permission_mode: 'default',
-  }, workspace, env);
-  assert.match(sessionOutput.hookSpecificOutput.additionalContext, /pulse.context.v1/);
-
   const promptPayload = {
     session_id: claudeSession, prompt_id: promptID, transcript_path: transcriptPath,
     cwd: workspace, hook_event_name: 'UserPromptSubmit', permission_mode: 'default',
@@ -488,24 +479,16 @@ try {
   };
   const promptOutput = runHook(settings, 'UserPromptSubmit', promptPayload, workspace, env);
   assert.equal(promptOutput.continue, true);
-  const preStop = runHook(settings, 'Stop', {
-    ...promptPayload, hook_event_name: 'Stop', stop_hook_active: false,
-    last_assistant_message: 'raw assistant text must not be stored', background_tasks: [], session_crons: [],
-  }, workspace, env);
-  assert.equal(preStop.decision, 'block');
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Call pulse_memory once/);
 
   const summary = 'Use one canonical memory object across Claude Code and Codex.';
   const claudeMemory = {
-    schema: 'pulse.memory_capsule.v1',
-    source: { host: 'claude-code', conversation_scope: 'current_turn', timestamp: '2026-07-14T10:00:00Z' },
     items: [{
-      kind: 'decision', redacted_summary: summary, confidence: 0.98,
-      evidence_hint: 'current_turn', privacy_tier: 'normal', retention: 'project',
+      kind: 'decision', scope: 'project', summary,
     }],
-    raw_input_included: false,
   };
   const preTool = runHook(settings, 'PreToolUse', {
-    ...promptPayload, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
+    ...promptPayload, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
   }, workspace, env);
   assert.deepEqual(preTool, {});
@@ -517,31 +500,26 @@ try {
   const claudeMessages = runProductMcp(
     mcpConfig, mcpRememberInput(claudeMemory), nestedWorkspace, freshMcpEnv,
   );
+  assert.deepEqual(claudeMessages.find((message) => message.id === 2).result.tools.map((tool) => tool.name), ['pulse_memory']);
   const claudeRemember = JSON.parse(claudeMessages.find((message) => message.id === 3).result.content[0].text);
-  assert.equal(claudeRemember.receipts[0].safe_provenance.host, 'claude-code');
-  assert.equal(claudeRemember.receipts[0].status, 'created');
-  assert.match(claudeRemember.receipts[0].object_id, /^pulse:/);
+  assert.equal(claudeRemember.status, 'stored');
+  assert.equal(claudeRemember.ids.length, 1);
+  assert.match(claudeRemember.ids[0], /^pulse:/);
   const claudePost = runHook(settings, 'PostToolUse', {
-    ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
+    ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
     tool_response: claudeMessages.find((message) => message.id === 3).result,
   }, workspace, env);
-  assert.match(claudePost.systemMessage, new RegExp(claudeRemember.receipts[0].receipt_id));
-  assert.match(claudePost.systemMessage, /:created/);
-  const claudeStop = runHook(settings, 'Stop', {
-    ...promptPayload, hook_event_name: 'Stop', stop_hook_active: false,
-    last_assistant_message: 'raw assistant text must not be stored', background_tasks: [], session_crons: [],
-  }, workspace, env);
-  assert.deepEqual(claudeStop, {});
+  assert.deepEqual(claudePost, {});
 
   const secret = readFileSync(join(vaultDir, 'secret.key'), 'utf8');
   const baseUrl = binding.personal.base_url;
   const claudeCommitted = await waitForCandidate(
-    baseUrl, secret, claudeRemember.receipts[0].candidate_id, 'created',
+    baseUrl, secret, claudeRemember.ids[0], 'created',
   );
   assert.equal(claudeCommitted.state, 'committed');
   assert.equal(claudeCommitted.current, true);
-  assert.equal(claudeCommitted.canonical_object_id, claudeRemember.receipts[0].object_id);
+  assert.equal(claudeCommitted.canonical_object_id, claudeRemember.ids[0]);
   assert.equal(claudeCommitted.projection_status, 'complete');
 
   const codexConnected = run(process.execPath, [packedCLI, 'connect', 'codex'], {
@@ -574,9 +552,10 @@ try {
     session_id: codexSession, turn_id: codexTurn, transcript_path: transcriptPath,
     cwd: workspace, model: 'gpt-5.6', permission_mode: 'default',
   };
-  const codexResume = run(process.execPath, [runtimeCLI, 'codex-hook', 'SessionStart'], {
+  const codexResume = run(process.execPath, [runtimeCLI, 'codex-hook', 'UserPromptSubmit'], {
     cwd: nestedWorkspace, env, input: JSON.stringify({
-      ...codexBase, hook_event_name: 'SessionStart', source: 'resume',
+      ...codexBase, turn_id: 'turn-codex-recall-claude-memory',
+      hook_event_name: 'UserPromptSubmit', prompt: summary,
     }),
   });
   assert.match(JSON.parse(codexResume.stdout).hookSpecificOutput.additionalContext, new RegExp(summary));
@@ -587,36 +566,42 @@ try {
   });
   const codexSummary = 'Codex writes to the same private vault without a review step.';
   const codexMemory = {
-    ...claudeMemory,
-    source: { host: 'codex', conversation_scope: 'current_turn', timestamp: '2026-07-14T11:00:00Z' },
     items: [{
-      ...claudeMemory.items[0], redacted_summary: codexSummary,
+      kind: 'decision', scope: 'project', summary: codexSummary,
     }],
   };
   run(process.execPath, [runtimeCLI, 'codex-hook', 'PreToolUse'], {
     cwd: workspace, env, input: JSON.stringify({
-      ...codexBase, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_remember',
+      ...codexBase, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
       tool_input: codexMemory, tool_use_id: 'tool-codex-e2e',
     }),
   });
   const codexMcpConfig = { command: process.execPath, args: [runtimeCLI, 'codex-mcp'] };
   const codexMessages = runProductMcp(codexMcpConfig, mcpRememberInput(codexMemory), nestedWorkspace, env);
   const codexRemember = JSON.parse(codexMessages.find((message) => message.id === 3).result.content[0].text);
-  assert.notEqual(codexRemember.receipts[0].content_digest, claudeRemember.receipts[0].content_digest);
-  assert.equal(codexRemember.receipts[0].status, 'created');
-  assert.match(codexRemember.receipts[0].object_id, /^pulse:/);
+  assert.equal(codexRemember.status, 'stored');
+  assert.equal(codexRemember.ids.length, 1);
+  assert.notEqual(codexRemember.ids[0], claudeRemember.ids[0]);
+  assert.match(codexRemember.ids[0], /^pulse:/);
+  run(process.execPath, [runtimeCLI, 'codex-hook', 'PostToolUse'], {
+    cwd: workspace, env, input: JSON.stringify({
+      ...codexBase, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
+      tool_input: codexMemory, tool_use_id: 'tool-codex-e2e',
+      tool_response: codexMessages.find((message) => message.id === 3).result,
+    }),
+  });
   const codexCommitted = await waitForCandidate(
-    baseUrl, secret, codexRemember.receipts[0].candidate_id, 'created',
+    baseUrl, secret, codexRemember.ids[0], 'created',
   );
   assert.equal(codexCommitted.state, 'committed');
   assert.equal(codexCommitted.current, true);
-  assert.equal(codexCommitted.canonical_object_id, codexRemember.receipts[0].object_id);
+  assert.equal(codexCommitted.canonical_object_id, codexRemember.ids[0]);
   assert.equal(codexCommitted.projection_status, 'complete');
   assert.equal(codexCommitted.latest_receipt.safe_provenance.host, 'codex');
 
-  const resumed = runHook(settings, 'SessionStart', {
-    session_id: 'session-claude-fresh', transcript_path: transcriptPath, cwd: workspace,
-    hook_event_name: 'SessionStart', source: 'resume', permission_mode: 'default',
+  const resumed = runHook(settings, 'UserPromptSubmit', {
+    session_id: 'session-claude-fresh', prompt_id: 'prompt-claude-fresh', transcript_path: transcriptPath, cwd: workspace,
+    hook_event_name: 'UserPromptSubmit', prompt: codexSummary, permission_mode: 'default',
   }, workspace, env);
   assert.match(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
 
@@ -631,14 +616,15 @@ try {
   assert.equal(report.trust.full_retrieval, true);
 
 	const installedCodexHook = join(pluginCacheRoot, pluginVersions[0], 'hooks', 'pulse-hook.mjs');
-	const sharedCodexHookRun = run(process.execPath, [installedCodexHook, 'SessionStart'], {
+	const sharedCodexHookRun = run(process.execPath, [installedCodexHook, 'UserPromptSubmit'], {
 		cwd: nestedWorkspace,
 		env,
 		input: JSON.stringify({
 			...codexBase,
 			session_id: 'session-codex-after-claude-connect',
-			hook_event_name: 'SessionStart',
-			source: 'resume',
+			turn_id: 'turn-codex-after-claude-connect',
+			hook_event_name: 'UserPromptSubmit',
+			prompt: codexSummary,
 		}),
 	});
 	assert.match(
@@ -714,10 +700,11 @@ try {
     disconnectedSettings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command)),
     ['echo keep-session'],
   );
-  const codexAfterClaudeDisconnect = run(process.execPath, [runtimeCLI, 'codex-hook', 'SessionStart'], {
+  const codexAfterClaudeDisconnect = run(process.execPath, [runtimeCLI, 'codex-hook', 'UserPromptSubmit'], {
     cwd: nestedWorkspace, env, input: JSON.stringify({
       ...codexBase, session_id: 'session-codex-after-claude-disconnect',
-      hook_event_name: 'SessionStart', source: 'resume',
+      turn_id: 'turn-codex-after-claude-disconnect',
+      hook_event_name: 'UserPromptSubmit', prompt: codexSummary,
     }),
   });
   assert.match(

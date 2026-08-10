@@ -14,8 +14,63 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nkkmnk/pulse/internal/contextquery"
 	"github.com/nkkmnk/pulse/internal/store"
 )
+
+type scopeCapturingContextQuery struct {
+	request contextquery.ContextQueryRequest
+}
+
+func (capture *scopeCapturingContextQuery) Query(_ context.Context, request contextquery.ContextQueryRequest) (*contextquery.ContextResult, error) {
+	capture.request = request
+	return &contextquery.ContextResult{
+		SchemaVersion: contextquery.SchemaVersion, Query: request.Query, Scope: request.Scope,
+	}, nil
+}
+
+func TestPersonalContextQueryDerivesScopeFromVerifiedRequestBinding(t *testing.T) {
+	vault, err := store.OpenVault(filepath.Join(t.TempDir(), "personal-query.db"), store.StoreKindPersonal, "store_personal_query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Close()
+	firstBinding := strings.Repeat("a", 64)
+	if err := vault.ConfigureProductRuntimeAuthority(firstBinding, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ConfigureContinuityDeliveryAuthority(firstBinding, "repository_project_a"); err != nil {
+		t.Fatal(err)
+	}
+	capture := &scopeCapturingContextQuery{}
+	verifier := &productBindingVerifierStub{}
+	server, err := New(Config{
+		IPCSecret: "secret", Store: vault, ProductBindingVerifier: verifier, ContextQuery: capture,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/context/query", strings.NewReader(`{"query":"remember this","scope":"user"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Pulse-Key", "secret")
+	secondBinding := strings.Repeat("b", 64)
+	workspace := filepath.Clean(t.TempDir())
+	setProductBindingHeaders(request, workspace, secondBinding, "repository_project_b", "3")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if capture.request.PersonalScope == nil ||
+		capture.request.PersonalScope.BindingDigest != secondBinding ||
+		capture.request.PersonalScope.RepositoryID != "repository_project_b" ||
+		capture.request.PersonalScope.ProjectNamespaceID == "" {
+		t.Fatalf("request scope=%#v", capture.request.PersonalScope)
+	}
+	if verifier.calls != 1 || verifier.workspace != workspace || verifier.repository != "repository_project_b" {
+		t.Fatalf("verified authority=%#v", verifier)
+	}
+}
 
 func TestPersonalTurnFinalizeUsesVerifiedRequestNamespace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "personal-write.db")

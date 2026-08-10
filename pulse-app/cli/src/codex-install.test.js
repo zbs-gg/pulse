@@ -525,8 +525,7 @@ test('successful trusted hook writes a content-free global readiness receipt', (
       runtime: { data_dir: '/vault/ready' },
     };
     for (const [event, milestone] of [
-		  ['SessionStart', 'session_context'], ['UserPromptSubmit', 'prompt_context'],
-		  ['PostToolUse', 'write_receipt'], ['Stop', 'turn_finalize'],
+		  ['UserPromptSubmit', 'prompt_context'], ['PostToolUse', 'write_receipt'],
     ]) {
       assert.equal(recordCodexHookReadiness(event, resolved, {
 			  dataDir: root, hooksDigest: 'a'.repeat(64), sessionProof: 'e'.repeat(64),
@@ -542,7 +541,7 @@ test('successful trusted hook writes a content-free global readiness receipt', (
 		assert.equal(receipt.turn_proof, 'c'.repeat(64));
 		assert.equal(receipt.session_proof, 'e'.repeat(64));
 		assert.deepEqual(Object.keys(receipt.milestones).sort(), [
-		  'prompt_context', 'session_context', 'turn_finalize', 'write_receipt',
+		  'prompt_context', 'write_receipt',
     ]);
     assert.doesNotMatch(JSON.stringify(receipt), /\/workspace\/ready/);
   } finally {

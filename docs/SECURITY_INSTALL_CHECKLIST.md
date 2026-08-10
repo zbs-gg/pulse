@@ -29,6 +29,11 @@ for a user.
       `pulse stop`.
 - [ ] No secrets are printed.
 - [ ] Install requires explicit user confirmation.
+- [ ] The host advertises only `pulse_memory`; legacy write names are hidden.
+- [ ] Prompt recall is temporary, capped at four memories / about 600 tokens,
+      and does not persist the user's question.
+- [ ] No session-start memory package, Stop interception, automatic
+      continuation, or second model pass is installed.
 
 ## Expected Install Plan
 

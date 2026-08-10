@@ -410,7 +410,14 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 	reaperWG.Add(1)
 	go func() {
 		defer reaperWG.Done()
-		backfillCapsuleEvents(reaperCtx, s, retrievalEngine)
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-reaperCtx.Done():
+			return
+		case <-timer.C:
+			backfillCapsuleEvents(reaperCtx, s, retrievalEngine)
+		}
 	}()
 
 	slog.Info("pulse listening", "addr", addr, "data_dir", dataDir,
@@ -451,6 +458,7 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 }
 
 func backfillCapsuleEvents(ctx context.Context, s *store.Store, engine *retrieve.Engine) {
+	const backgroundEmbeddingPageSize = 1
 	projected := 0
 	for ctx.Err() == nil {
 		docs, err := s.BackfillCapsuleEventsBatch(500)
@@ -472,7 +480,7 @@ func backfillCapsuleEvents(ctx context.Context, s *store.Store, engine *retrieve
 	persisted := 0
 	consecutiveFailures := 0
 	for ctx.Err() == nil {
-		docs, err := s.UnindexedHostEventDocs(500)
+		docs, err := s.UnindexedHostEventDocs(engine.EmbedderModel(), true, backgroundEmbeddingPageSize)
 		if err != nil {
 			slog.Warn("capsule event embed-index list failed", "error", err)
 			return
@@ -505,7 +513,7 @@ func backfillCapsuleEvents(ctx context.Context, s *store.Store, engine *retrieve
 			continue
 		}
 		consecutiveFailures = 0
-		if len(docs) < 500 {
+		if len(docs) < backgroundEmbeddingPageSize {
 			break
 		}
 	}

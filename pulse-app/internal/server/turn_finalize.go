@@ -719,7 +719,7 @@ func (s *Server) refreshProductRetrievalAttempt(receipt store.MemoryWriteReceipt
 	if receipt.ObjectID == "" {
 		return
 	}
-	if receipt.ReasonCode == "user_deleted" && s.cfg.Retrieval != nil && !s.cfg.Retrieval.EmbedderReady() {
+	if receipt.ReasonCode == "user_deleted" && s.cfg.Retrieval != nil {
 		status := "complete"
 		if err := s.cfg.Retrieval.Reload(context.Background()); err != nil {
 			status = "failed"
@@ -727,6 +727,9 @@ func (s *Server) refreshProductRetrievalAttempt(receipt store.MemoryWriteReceipt
 		}
 		if err := s.cfg.Store.SetPrivateProjectionStatus(receipt.ObjectID, status, time.Now().UTC()); err != nil {
 			log.Printf("memory tray projection: persist %s status failed: %v", status, err)
+		}
+		if err := s.cfg.Store.SetPendingPrivateProjectionStatus(status, time.Now().UTC()); err != nil {
+			log.Printf("memory tray projection: persist rebuilt %s status failed: %v", status, err)
 		}
 		if status == "failed" {
 			s.scheduleProjectionRetry(receipt, attempt)
@@ -741,31 +744,18 @@ func (s *Server) refreshProductRetrievalAttempt(receipt store.MemoryWriteReceipt
 	}
 	status := "complete"
 	ctx := context.Background()
-	for {
-		docs, err := s.cfg.Store.UnindexedHostEventDocs(500)
-		if err != nil {
-			status = "failed"
-			log.Printf("memory tray projection: list unindexed events failed: %v", err)
-			break
-		}
-		if len(docs) == 0 {
-			if err := s.cfg.Retrieval.Reload(ctx); err != nil {
-				status = "failed"
-				log.Printf("memory tray projection: reload failed: %v", err)
-			}
-			break
-		}
+	docs, err := s.cfg.Store.PrivateObjectEventDocs(receipt.ObjectID)
+	if err != nil {
+		status = "failed"
+		log.Printf("memory tray projection: load committed event failed: %v", err)
+	} else if len(docs) > 0 {
 		indexDocs := make([]retrieve.IndexEventDoc, len(docs))
 		for index, doc := range docs {
 			indexDocs[index] = retrieve.IndexEventDoc{EventID: doc.EventID, Text: doc.Text}
 		}
-		if err := s.cfg.Retrieval.EmbedAndIndexEvents(ctx, indexDocs); err != nil {
+		if err := s.cfg.Retrieval.EmbedAndRefreshEvents(ctx, indexDocs); err != nil {
 			status = "failed"
-			log.Printf("memory tray projection: embed/index failed: %v", err)
-			break
-		}
-		if len(docs) < 500 {
-			break
+			log.Printf("memory tray projection: embed/refresh failed: %v", err)
 		}
 	}
 	now := time.Now().UTC()

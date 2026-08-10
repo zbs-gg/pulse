@@ -66,6 +66,11 @@ not permission to repair or remove another store.
 The proof is one normal memory from real work, then a fresh task in the
 same project. A simulated corpus or source-checkout test is not a substitute.
 
+For the unfinished 0.8 behavior, the host should advertise only
+`pulse_memory`. Prompt-time recall must stay within four memories and about 600
+tokens, while weak matches add nothing. The install must not add a session-start
+memory package, a Stop hook, or a second model turn for saving memory.
+
 ## Repair, disconnect, and data
 
 ```bash

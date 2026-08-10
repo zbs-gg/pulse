@@ -18,8 +18,7 @@ test('Claude Code plugin is a native thin adapter over the shared Pulse runtime'
 
   const hooks = JSON.parse(readFileSync(join(pluginRoot, 'claude-hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(hooks.hooks).sort(), [
-    'PostCompact', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop',
-    'SubagentStart', 'SubagentStop', 'UserPromptSubmit',
+    'PostToolUse', 'PreToolUse', 'UserPromptSubmit',
   ]);
   for (const [event, matchers] of Object.entries(hooks.hooks)) {
     for (const matcher of matchers) {

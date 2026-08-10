@@ -18,6 +18,7 @@ import {
   writeCodexToolLease,
   writeCodexTurnContext,
 	writeHostToolLease,
+	writeHostRecallMarker,
 } from './codex-runtime.js';
 import { readUnassignedInbox, unassignedInboxPath } from './unassigned-inbox.js';
 import {
@@ -415,6 +416,33 @@ test('Codex tool lease joins stdio MCP without CODEX_THREAD_ID and is single-use
   assert.equal(consumed.session_id, event.session_id);
   assert.equal(consumed.turn_id, event.turn_id);
   assert.throws(() => consumeCodexToolLease(resolved, toolName, args, now), /unavailable/);
+});
+
+test('successful Cursor recall writes only the bounded Doctor lifecycle marker', () => {
+	const { resolved, event } = fixture();
+	const cursorEvent = { ...event, host: 'cursor', binding_digest: resolved.binding.binding_digest };
+	const now = new Date('2026-08-10T12:00:00Z');
+	assert.deepEqual(writeHostRecallMarker(resolved, cursorEvent, 'cursor', now), { recorded: true });
+	const marker = JSON.parse(readFileSync(join(
+		resolved.runtime.data_dir, 'runtime', 'cursor-lifecycle', 'prompt_recall.json',
+	), 'utf8'));
+	assert.deepEqual(marker, {
+		schema: 'pulse.cursor_lifecycle_event.v1',
+		binding_digest: resolved.binding.binding_digest,
+		event: 'prompt_recall',
+		observed_at: now.toISOString(),
+	});
+});
+
+test('compact pulse_memory uses the same exact single-use lease', () => {
+  const { resolved, event } = fixture();
+  const now = new Date('2026-08-09T10:00:00Z');
+  const toolName = 'mcp__pulse-product__pulse_memory';
+  const input = { items: [{ kind: 'decision', scope: 'project', summary: 'Use one compact memory tool.' }] };
+  writeCodexToolLease(resolved, event, toolName, input, 'tool-memory', now);
+  const consumed = consumeCodexToolLease(resolved, toolName, input, now);
+  assert.equal(consumed.tool_name, 'pulse_memory');
+  assert.throws(() => consumeCodexToolLease(resolved, toolName, input, now), /unavailable/);
 });
 
 test('Claude MCP server name does not become part of the governed product action', () => {

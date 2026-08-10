@@ -748,10 +748,9 @@ process.exit(0);
   mkdirSync(join(cwd, '.claude'), { recursive: true });
   writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
     hooks: {
-      SessionStart: [{ hooks: [{ type: 'command', command: 'pulse hook session-start' }] }],
       UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'pulse hook user-prompt-submit' }] }],
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'pulse hook pre-tool-use' }] }],
       PostToolUse: [{ hooks: [{ type: 'command', command: 'pulse hook post-tool-use' }] }],
-      Stop: [{ hooks: [{ type: 'command', command: 'pulse hook stop' }] }],
     },
   }, null, 2));
   writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({

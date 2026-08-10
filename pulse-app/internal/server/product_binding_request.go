@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 const (
@@ -98,4 +100,31 @@ func (s *Server) requireProductBindingAuthority(
 		return productBindingAuthority{}, false
 	}
 	return authority, true
+}
+
+// personalScopeForRequest keeps Local Preview unscoped, while Personal derives
+// every read boundary from the exact verified workspace binding on this request.
+func (s *Server) personalScopeForRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+) (*store.PersonalMemoryScopeSnapshot, bool) {
+	if s == nil || s.cfg.ProductBindingVerifier == nil {
+		return nil, true
+	}
+	authority, ok := s.requireProductBindingAuthority(w, r)
+	if !ok {
+		return nil, false
+	}
+	if s.cfg.Store == nil {
+		http.Error(w, "personal memory store unavailable", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	scope, err := s.cfg.Store.PersonalMemoryScopeSnapshotForBinding(
+		authority.BindingDigest, authority.RepositoryID,
+	)
+	if err != nil {
+		http.Error(w, "personal memory scope unavailable", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return &scope, true
 }

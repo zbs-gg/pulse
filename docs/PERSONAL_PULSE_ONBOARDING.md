@@ -106,6 +106,12 @@ separate human approval.
 This is the product proof. `pulse demo` remains an optional isolated explainer
 and cannot replace it.
 
+The unfinished 0.8 target keeps this flow invisible: recall happens temporarily
+when the user asks a question, returns no more than four relevant memories, and
+adds nothing for a weak match. A durable result is saved through the single
+`pulse_memory` tool inside the same ordinary turn. Session start and Stop do not
+run memory model passes.
+
 ## Privacy and removal
 
 - Personal memory lives in the bound local vault, not Git.

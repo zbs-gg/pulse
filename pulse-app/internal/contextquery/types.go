@@ -27,6 +27,9 @@ type ContextQueryRequest struct {
 	// ["real","meta_authorial"]) so book-canon doesn't leak into
 	// answers about real life.
 	DomainsAllowed []string `json:"domains_allowed,omitempty"`
+	// PersonalScope is injected by the server after verifying the workspace
+	// binding. It is never accepted from the JSON request body.
+	PersonalScope *store.PersonalMemoryScopeSnapshot `json:"-"`
 }
 
 type ContextResult struct {
