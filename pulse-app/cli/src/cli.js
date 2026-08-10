@@ -3284,10 +3284,14 @@ function claudeMutationFailure(result, action) {
 	return new Error(`claude mcp ${action} failed${detail ? `: ${detail}` : ''}`);
 }
 
+function claudeMcpRegistrationMissing(detail) {
+	return /not found|not registered|does not exist|no mcp server named/i.test(detail);
+}
+
 function removeClaudeCodeExternalRegistration(executable = 'claude') {
 	const removed = claudeMcpMutation(['mcp', 'remove', 'pulse', '--scope', 'local'], executable);
 	const removeDetail = `${removed.stderr || removed.stdout || removed.error?.message || ''}`;
-	if (removed.error || (removed.status !== 0 && !/not found|not registered|does not exist/i.test(removeDetail))) {
+	if (removed.error || (removed.status !== 0 && !claudeMcpRegistrationMissing(removeDetail))) {
 		throw claudeMutationFailure(removed, 'remove');
 	}
 	// Claude has no scoped `mcp get`: an unscoped read can legitimately find a
@@ -3304,7 +3308,7 @@ function installClaudeCode(runtimePath, { requireExternal = false } = {}) {
     : { mcpServers: {} };
 	const removed = claudeMcpMutation(['mcp', 'remove', 'pulse', '--scope', 'local']);
 	const removeDetail = `${removed.stderr || removed.stdout || removed.error?.message || ''}`;
-	if (removed.status !== 0 && !/not found|not registered|does not exist/i.test(removeDetail) && requireExternal) {
+	if (removed.status !== 0 && !claudeMcpRegistrationMissing(removeDetail) && requireExternal) {
 		throw claudeMutationFailure(removed, 'remove');
 	}
 	const claude = claudeMcpMutation(['mcp', 'add-json', '--scope', 'local', 'pulse', json]);
