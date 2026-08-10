@@ -1,7 +1,6 @@
 # Security Install Checklist
 
-Use this checklist before installing Pulse Personal Preview v0.7.0 or newer
-for a user.
+Use this checklist before installing Pulse Personal 0.7.2 for a user.
 
 ## Required Checks
 
@@ -12,14 +11,13 @@ for a user.
 - [ ] Emotional marks remain in Personal SQLite and cannot be published to
       Pulse Team.
 - [ ] Old chat import is not run by default.
-- [ ] The install source is real: npm preview package is published, or the user
-      explicitly provided a source bundle, tarball, or local checkout.
+- [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2`, or the user
+      explicitly provided an exact source bundle, tarball, or local checkout.
 - [ ] The exact OS, architecture, and harness are green in
       `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not
       presented as public support.
 - [ ] Local storage path is shown.
-- [ ] Claude Code MCP config location is shown.
-- [ ] Claude Code hooks location is shown.
+- [ ] The selected AI program's connection files are shown.
 - [ ] Local viewer URL is shown.
 - [ ] Wipe command is shown:
       `pulse wipe --confirm "wipe pulse memory"`.
@@ -38,15 +36,14 @@ for a user.
 ## Expected Install Plan
 
 ```bash
-pulse install-plan claude-code --json
+pulse init codex --dry-run
 ```
 
 The plan should say Pulse will install:
 
 - local Pulse daemon;
 - Pulse MCP server;
-- Claude Code MCP config;
-- Claude Code lifecycle hooks;
+- connections for every selected compatible AI program;
 - local viewer;
 - private first memory proof.
 
@@ -64,7 +61,7 @@ The plan should say Pulse will not:
 Stop and explain if:
 
 - a command asks for model API keys for the default path;
-- npm returns 404 for `@zbs-gg/pulse@preview` and no source bundle/local
+- npm returns 404 for `@zbs-gg/pulse@0.7.2` and no source bundle/local
   checkout was provided;
 - a command tries to import archives before the first proof;
 - a command offers to send an emotional mark to Team or another user;

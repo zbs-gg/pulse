@@ -1,24 +1,36 @@
-# Product
+# Pulse Personal
 
-## Register
+## Current product
 
-product
+Pulse Personal keeps approved working memory for Codex, Claude Code, and Cursor
+in a local project-bound vault. It restores relevant memories in later work and
+lets the owner inspect, correct, or delete them in Memory Home.
+
+The current public release is 0.7.2 for Apple Silicon Macs. The published npm
+tags `latest` and `preview` both point to this version. It has no Team server,
+cloud synchronization, or shared-memory command. Ordinary ChatGPT chat is not
+connected to Pulse. Emotional memory and local-store migration are unfinished
+Personal 0.8 work in a separate draft and are not part of 0.7.2.
 
 ## Users
 
-Pulse Personal is for people who work across Codex, Claude Code, and Cursor and
-do not want to explain the same project decisions again in every new session.
-Ordinary ChatGPT chat is not a supported Pulse connection yet.
+Pulse Personal is for people who work across coding AI programs and do not want
+to explain the same project decisions, constraints, and open questions again in
+every new session. The current supported programs are Codex, Claude Code, and
+Cursor. Ordinary ChatGPT chat is not a supported Pulse connection yet.
 
-## Product Purpose
+## Product principles
 
-Pulse stores small approved memories in a local SQLite database, restores the
-relevant ones in later work, and lets the owner inspect, correct, or delete them
-in Memory Home. Personal 0.8 adds momentary emotional observations and a safe
-preview for combining old local stores without changing their source files.
-The 0.8 work is not released yet.
+- Keep memory local, inspectable, correctable, and removable.
+- Show what installation changes before asking for confirmation.
+- Store compact structured memories, not raw conversations.
+- Reject secrets and local paths before writing them.
+- Keep optional memory fail-open: its failure must not block the AI program or
+  create a new turn by itself.
+- Treat Team as a separate private product boundary.
+- Do not claim support for a program or operating system without a real install.
 
-## Invisible Memory Contract
+## Unfinished 0.8 contract
 
 Pulse stays out of the normal workflow. On each user question it performs one
 temporary local relevance search and offers at most four memories within about
@@ -60,9 +72,11 @@ Personal 0.8 is therefore neither published nor accepted for ordinary work.
 The public package remains 0.7.2, Team was not enabled, and the unfinished code
 stays on the development branch for a later, narrowly scoped correction.
 
-## Brand Personality
+## Interface
 
-Clear, exacting, calm. Pulse should feel like a trustworthy local operator console, not a marketing page or another memory app demanding attention.
+Memory Home should feel like a trustworthy local operator console: readable,
+keyboard-accessible, responsive, and clear about what is stored and why. Avoid
+decorative AI-dashboard styling, hidden import state, and transcript dumps.
 
 ## Anti-References
 
@@ -81,3 +95,6 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 ## Accessibility
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
+
+Status: Personal 0.7.2 is public; Personal 0.8 remains a developer preview and
+is not production ready.

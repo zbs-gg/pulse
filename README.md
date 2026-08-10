@@ -25,6 +25,12 @@ host connections were disabled after that bounded check.
 
 ## Install
 
+Version `0.7.2` is published and installs on Macs with Apple Silicon. The exact
+npm package passed a clean installation on a separate Mac before publication.
+Intel Mac, Windows, and Linux builds are not released yet; on those systems the
+installer stops without changing files. Both npm tags, `latest` and `preview`,
+point to `0.7.2`.
+
 Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The current published Personal installation is:
 
