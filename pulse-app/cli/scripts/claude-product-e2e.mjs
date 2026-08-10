@@ -93,6 +93,10 @@ if (args[0] === '--version') { console.log('2.1.207 (Claude Code)'); process.exi
 if (args[0] !== 'mcp') process.exit(2);
 if (args[1] === 'remove') {
   if (process.env.PULSE_FAKE_CLAUDE_FAIL_REMOVE === '1' && fs.existsSync(state)) process.exit(3);
+  if (process.env.PULSE_FAKE_CLAUDE_MISSING_REMOVE === '1' && !fs.existsSync(state)) {
+    console.error('No MCP server named "pulse" in local scope');
+    process.exit(1);
+  }
   try { fs.rmSync(state); } catch {}
   process.exit(0);
 }
@@ -427,7 +431,7 @@ try {
 	rmSync(fakeClaudeState, { force: true });
 
   const connected = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-    cwd: workspace, env, timeout: 120_000,
+    cwd: workspace, env: { ...env, PULSE_FAKE_CLAUDE_MISSING_REMOVE: '1' }, timeout: 120_000,
   });
   assert.match(connected.stdout, /one bound vault, two connected harnesses/);
   assert.match(connected.stdout, /pinned local runtime/);

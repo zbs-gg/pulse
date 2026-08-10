@@ -10,14 +10,12 @@ full conversation, or send Personal memory to a cloud server.
 > for ordinary installation until this branch passes a separate live review.
 
 The owner-machine migration and atomic database switch passed on 2026-08-09,
-with source databases and recovery copies preserved. The later invisible-memory
-dogfood still did not pass. The write-schema mismatch was fixed in a local
-epoch-17 candidate: Claude Code automatically received an old acceptance
-criterion and stored a new decision plus emotional moment in one `pulse_memory`
-call without an error or retry. Codex then retrieved the new capsule for one
-semantic wording but did not use the exact rule reliably across two fresh
-questions. Cursor and the live project boundary were not accepted. Local 0.8
-host connections were disabled after that bounded check.
+with source databases and recovery copies preserved. A local epoch-22 candidate
+then passed fresh automatic semantic recall in both Codex and Claude Code: each
+used the exact stored rule that an emotional moment is a separate
+`pulse_memory` item, without the question repeating the stored wording. The
+owner-machine one-day dogfood started on 2026-08-10 with Pulse enabled in those
+two hosts. Cursor live acceptance remains pending.
 
 [![npm](https://img.shields.io/npm/v/@zbs-gg/pulse/latest?label=%40zbs-gg%2Fpulse&color=050505)](https://www.npmjs.com/package/@zbs-gg/pulse)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-050505)](./LICENSE)
@@ -143,7 +141,7 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: unfinished Personal 0.8 branch. The local-store migration and the
-corrected one-call Claude write passed, but reliable invisible recall across
-hosts did not; 0.8 is not connected for ordinary work, released, or production
-ready.
+Status: unfinished Personal 0.8 branch. The local-store migration, corrected
+one-call Claude write, and fresh invisible recall in Codex and Claude Code
+passed. An owner-machine one-day dogfood is running in those two hosts; Cursor
+acceptance remains pending. Version 0.8 is not published or production ready.

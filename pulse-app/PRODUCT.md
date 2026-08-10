@@ -53,24 +53,22 @@ path produced and atomically activated a reviewed Personal database while the
 old Pulse database, Claude Mem database, migration sources, and recovery copy
 remained preserved.
 
-The later invisible-memory dogfood still did not pass. A local epoch-17
-candidate corrected the advertised write schema so an emotion must be a
-separate item. Claude Code automatically received an old acceptance criterion
-and stored a new project decision plus emotional moment in one `pulse_memory`
-call without an error or retry. The live index contained both the new capsule
-and its embedding immediately.
+A local epoch-22 candidate corrected the advertised write schema so an emotion
+must be a separate item and fixed the bounded semantic selection path. On
+2026-08-10, fresh Codex and Claude Code turns automatically applied the exact
+stored rule that an emotional moment is a separate `pulse_memory` item without
+the question repeating the stored wording. The earlier Claude write proof also
+remains valid: one ordinary call stored a project decision and a separate
+emotional moment without an error or retry, and the live index received both
+immediately.
 
-Codex then exposed the remaining product failure. Its prompt hook retrieved the
-new capsule for one semantic wording, but two fresh Codex answers did not apply
-the exact stored rule reliably: one reported that the rule was absent and one
-replaced it with a broader interpretation. Cursor and the live project boundary
-across one shared Personal process remain unaccepted. Under the bounded
-acceptance rule, local 0.8 connections were disabled instead of adding another
-mechanism.
+The owner-machine one-day dogfood is now running with Pulse enabled in Codex and
+Claude Code. Cursor live recall and the cross-project boundary remain pending,
+so this is evidence for two local hosts rather than full three-host acceptance.
 
-Personal 0.8 is therefore neither published nor accepted for ordinary work.
-The public package remains 0.7.2, Team was not enabled, and the unfinished code
-stays on the development branch for a later, narrowly scoped correction.
+Personal 0.8 is still neither published nor production ready. The public
+package remains 0.7.2, Team was not enabled, and the unfinished code stays on
+the development branch while the bounded dogfood continues.
 
 ## Interface
 
@@ -96,5 +94,6 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 is public; Personal 0.8 remains a developer preview and
-is not production ready.
+Status: Personal 0.7.2 is public; Personal 0.8 is installed locally for a
+one-day Codex and Claude Code dogfood, remains a developer preview, and is not
+production ready.
