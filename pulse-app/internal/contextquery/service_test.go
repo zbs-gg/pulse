@@ -3,9 +3,11 @@ package contextquery
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 func TestContextResultSchemaVersion(t *testing.T) {
@@ -484,6 +486,10 @@ func TestServiceQueryPassesUserStateContextFlagsIntact(t *testing.T) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
+	req.PersonalScope = &store.PersonalMemoryScopeSnapshot{
+		BindingDigest: strings.Repeat("a", 64), RepositoryID: "repository_context_test",
+		ProjectNamespaceID: "project_context_test", EligibilityRevision: 7,
+	}
 
 	capture := &capturingRetrieval{}
 	svc := New(ServiceConfig{DB: s.DB(), Retrieval: capture})
@@ -505,5 +511,8 @@ func TestServiceQueryPassesUserStateContextFlagsIntact(t *testing.T) {
 	}
 	if capture.last.Query != "advice for the upcoming release" || capture.last.TopK != 3 {
 		t.Fatalf("request fields lost: %#v", capture.last)
+	}
+	if capture.last.PersonalScope != req.PersonalScope {
+		t.Fatalf("personal scope lost: got=%#v want=%#v", capture.last.PersonalScope, req.PersonalScope)
 	}
 }

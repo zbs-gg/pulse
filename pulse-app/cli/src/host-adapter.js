@@ -300,7 +300,7 @@ export function isGuardedCodexTool(toolName) {
 
 export function isPulseProductTool(toolName, { codexPluginAlias = false } = {}) {
   if (typeof toolName !== 'string') return false;
-  if (/^mcp__pulse[-_]product__pulse_[A-Za-z0-9._:-]+$/i.test(toolName)) return true;
+  if (/^mcp__(?:pulse[-_]product|plugin_pulse_pulse[-_]product)__pulse_[A-Za-z0-9._:-]+$/i.test(toolName)) return true;
   return codexPluginAlias && /^mcp__pulse__pulse_[A-Za-z0-9._:-]+$/i.test(toolName);
 }
 
@@ -335,14 +335,14 @@ export function isPulseRuntimeAuthorityMutation(toolName, toolInput) {
 
 export function isTrustedPulseProductTool(toolName, { codexPluginAlias = false } = {}) {
   if (!isPulseProductTool(toolName, { codexPluginAlias })) return false;
-  const productAction = 'pulse_(?:remember|graph_delta|tray|tray_status)';
-  if (new RegExp(`^mcp__pulse[-_]product__${productAction}$`, 'i').test(toolName)) return true;
+  const productAction = 'pulse_(?:memory|remember|graph_delta|tray|tray_status)';
+  if (new RegExp(`^mcp__(?:pulse[-_]product|plugin_pulse_pulse[-_]product)__${productAction}$`, 'i').test(toolName)) return true;
   return codexPluginAlias && new RegExp(`^mcp__pulse__${productAction}$`, 'i').test(toolName);
 }
 
 export function isUntrustedPulseMemoryWriteTool(toolName, options) {
   return typeof toolName === 'string' &&
-    /(?:^|__)pulse_(?:remember|graph_delta)$/i.test(toolName) &&
+    /(?:^|__)pulse_(?:memory|remember|graph_delta)$/i.test(toolName) &&
     !isTrustedPulseProductTool(toolName, options);
 }
 
@@ -374,7 +374,7 @@ export function validateHookReadiness(source, receipt, expected = {}) {
       !/^[a-f0-9]{64}$/.test(receipt.workspace_digest ?? '') ||
 		  !/^[a-f0-9]{64}$/.test(receipt.session_proof ?? '') ||
       !/^[a-f0-9]{64}$/.test(receipt.turn_proof ?? '') ||
-		  !['session_context', 'prompt_context', 'write_receipt', 'turn_finalize'].every((name) =>
+		  !['prompt_context', 'write_receipt'].every((name) =>
         typeof receipt.milestones?.[name] === 'string' && !Number.isNaN(Date.parse(receipt.milestones[name]))) ||
       Object.entries(expected).some(([name, value]) => value !== undefined && receipt[name] !== value) ||
       typeof receipt.observed_at !== 'string' || Number.isNaN(Date.parse(receipt.observed_at))) {

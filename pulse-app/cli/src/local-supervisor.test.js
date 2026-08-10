@@ -374,6 +374,12 @@ const server = createServer((request, response) => {
   }
   if (request.url === '/memory/status') { response.end('{"full_retrieval":true,"embedder":"bge-m3"}'); return; }
   if (request.url === '/retrieve' && request.method === 'POST') {
+    const authorityMatches =
+      request.headers['x-pulse-product-workspace'] === Buffer.from(process.env.PULSE_PRODUCT_WORKSPACE, 'utf8').toString('base64url') &&
+      request.headers['x-pulse-product-binding'] === process.env.PULSE_BINDING_DIGEST &&
+      request.headers['x-pulse-product-repository'] === process.env.PULSE_REPOSITORY_ID &&
+      request.headers['x-pulse-product-resolver-epoch'] === process.env.PULSE_RESOLVER_EPOCH;
+    if (!authorityMatches) { response.statusCode = 403; response.end('{"error":"binding"}'); return; }
     const count = Number(readFileSync(dataDir + '/retrieval-count.txt', 'utf8')) + 1;
     writeFileSync(dataDir + '/retrieval-count.txt', String(count), { mode: 0o600 });
     request.resume(); request.on('end', () => response.end('{"event_ids":[]}')); return;

@@ -1805,6 +1805,47 @@ func TestCommittedMemoryMovesProjectGlobalProjectWithOneLogicalHead(t *testing.T
 	}
 }
 
+func TestCandidateScopeCreatesPersonalGlobalWithoutASecondMove(t *testing.T) {
+	s, _ := openPersonalTrayStore(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	binding := strings.Repeat("c", 64)
+	req := trayFinalizeRequest("Nick prefers concise technical reports across every project.")
+	req.BindingDigest = binding
+	req.ResolverEpoch = 1
+	req.Candidates[0].MemoryScope = MemoryScopePersonalGlobal
+	finalized, err := s.FinalizeTurnForVerifiedBinding(
+		req, now, 0, binding, "repository_project_a", 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CommitMemoryTrayCandidateForVerifiedBinding(
+		finalized.Receipts[0].CandidateID, finalized.Receipts[0].CandidateVersion,
+		now.Add(time.Second), binding, "repository_project_a", 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scope string
+	if err := s.DB().QueryRow(
+		`SELECT memory_scope FROM private_memory_objects WHERE object_id=?`, created.ObjectID,
+	).Scan(&scope); err != nil || scope != MemoryScopePersonalGlobal {
+		t.Fatalf("created scope=%q err=%v", scope, err)
+	}
+	foreign, err := s.PersonalMemoryScopeSnapshotForBinding(
+		strings.Repeat("d", 64), "repository_project_b",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume, err := s.BuildResumeForPersonalScope(ResumeQuery{
+		ThreadID: "project-b", ProjectID: "repository_project_b",
+	}, foreign)
+	if err != nil || !strings.Contains(resume.ResumeMarkdown, "concise technical reports") {
+		t.Fatalf("personal memory did not cross projects: %q err=%v", resume.ResumeMarkdown, err)
+	}
+}
+
 func TestConcurrentEditCancelAndImmediateCommitHaveOneWinner(t *testing.T) {
 	s, _ := openPersonalTrayStore(t)
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)

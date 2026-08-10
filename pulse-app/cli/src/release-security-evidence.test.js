@@ -17,7 +17,7 @@ function fixture(t, { high = 0 } = {}) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const installRoot = join(root, 'install');
   const packages = {
-    'node_modules/@zbs-gg/pulse': { name: '@zbs-gg/pulse', version: '0.7.2', license: 'AGPL-3.0-only' },
+    'node_modules/@zbs-gg/pulse': { name: '@zbs-gg/pulse', version: '0.8.0', license: 'AGPL-3.0-only' },
     'node_modules/example': { name: 'example', version: '1.2.3', license: 'MIT' },
   };
   for (const [path, packageJSON] of Object.entries(packages)) {
@@ -31,7 +31,7 @@ function fixture(t, { high = 0 } = {}) {
   });
   const auditPath = join(root, 'audit.json');
   writeJSON(auditPath, { metadata: { vulnerabilities: { critical: 0, high, total: high } } });
-  const tarballPath = join(root, 'zbs-gg-pulse-0.7.2.tgz');
+  const tarballPath = join(root, 'zbs-gg-pulse-0.8.0.tgz');
   writeFileSync(tarballPath, 'package bytes\n', { mode: 0o600 });
   return {
     auditPath: resolve(auditPath), installRoot: resolve(installRoot),

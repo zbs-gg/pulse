@@ -70,6 +70,7 @@ func validTrayIdentifier(value string) bool {
 
 type PrivateMemoryCandidate struct {
 	Kind          string         `json:"kind"`
+	MemoryScope   string         `json:"memory_scope,omitempty"`
 	Capsule       *MemoryCapsule `json:"capsule,omitempty"`
 	SemanticDelta *SemanticDelta `json:"semantic_delta,omitempty"`
 }
@@ -104,10 +105,13 @@ type TurnNoChangeRequest struct {
 }
 
 type TurnFinalizeResult struct {
-	LedgerID        string               `json:"ledger_id"`
-	Status          string               `json:"status"`
-	FinalizeReceipt TurnFinalizeReceipt  `json:"finalize_receipt"`
-	Receipts        []MemoryWriteReceipt `json:"receipts"`
+	LedgerID        string                     `json:"ledger_id"`
+	Status          string                     `json:"status"`
+	FinalizeReceipt TurnFinalizeReceipt        `json:"finalize_receipt"`
+	Receipts        []MemoryWriteReceipt       `json:"receipts"`
+	EventIDs        []int64                    `json:"event_ids,omitempty"`
+	EventResults    []SemanticEventWriteResult `json:"event_results,omitempty"`
+	EmotionQuestion *EmotionQuestion           `json:"emotion_question,omitempty"`
 }
 
 type MemoryWriteReceipt struct {
@@ -223,13 +227,14 @@ type privateCapsuleIdentity struct {
 }
 
 type privateSemanticIdentity struct {
-	Schema           string              `json:"schema"`
-	Nodes            []SemanticNode      `json:"nodes,omitempty"`
-	Edges            []SemanticEdge      `json:"edges,omitempty"`
-	Facts            []SemanticFact      `json:"facts,omitempty"`
-	Events           []SemanticEvent     `json:"events,omitempty"`
-	Continuity       *SemanticContinuity `json:"continuity,omitempty"`
-	RawInputIncluded bool                `json:"raw_input_included"`
+	Schema           string                  `json:"schema"`
+	Nodes            []SemanticNode          `json:"nodes,omitempty"`
+	Edges            []SemanticEdge          `json:"edges,omitempty"`
+	Facts            []SemanticFact          `json:"facts,omitempty"`
+	Events           []SemanticEvent         `json:"events,omitempty"`
+	EmotionAnswers   []SemanticEmotionAnswer `json:"emotion_answers,omitempty"`
+	Continuity       *SemanticContinuity     `json:"continuity,omitempty"`
+	RawInputIncluded bool                    `json:"raw_input_included"`
 }
 
 type trayCandidateRow struct {
@@ -285,6 +290,10 @@ func validateTrayGrace(grace time.Duration) error {
 }
 
 func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateCandidate, error) {
+	if candidate.MemoryScope != "" && candidate.MemoryScope != MemoryScopeProject &&
+		candidate.MemoryScope != MemoryScopePersonalGlobal {
+		return preparedPrivateCandidate{}, errors.New("candidate memory_scope is unsupported")
+	}
 	var identity any
 	switch candidate.Kind {
 	case PrivateMemoryCandidateCapsule:
@@ -314,6 +323,7 @@ func preparePrivateCandidate(candidate PrivateMemoryCandidate) (preparedPrivateC
 			Schema: candidate.SemanticDelta.Schema, Nodes: candidate.SemanticDelta.Nodes,
 			Edges: candidate.SemanticDelta.Edges, Facts: candidate.SemanticDelta.Facts,
 			Events: candidate.SemanticDelta.Events, Continuity: candidate.SemanticDelta.Continuity,
+			EmotionAnswers:   candidate.SemanticDelta.EmotionAnswers,
 			RawInputIncluded: candidate.SemanticDelta.RawInputIncluded,
 		}
 	default:
@@ -1283,6 +1293,9 @@ func (s *Store) commitMemoryTrayCandidateForAuthority(
 	if err := backfillPersonalScopeForBindingTx(tx, row.bindingDigest, scope); err != nil {
 		return MemoryWriteReceipt{}, err
 	}
+	if candidate.MemoryScope != "" {
+		scope.Scope = candidate.MemoryScope
+	}
 	changed, err := tx.Exec(`
 		UPDATE memory_tray_candidates SET state='committing', updated_at=?
 		 WHERE candidate_id=? AND version=? AND state='pending'`,
@@ -1372,12 +1385,22 @@ func (s *Store) commitMemoryTrayCandidateForAuthority(
 			}
 		}
 	} else {
-		err = tx.QueryRow(`
-			SELECT object_id FROM private_memory_objects
-			 WHERE project_namespace_id=? AND memory_scope=?
-			   AND candidate_kind=? AND content_digest=? AND lifecycle='active'`,
-			scope.ProjectNamespaceID, scope.Scope, row.kind, row.digest,
-		).Scan(&objectID)
+		var duplicateQuery string
+		var duplicateArgs []any
+		if scope.Scope == MemoryScopePersonalGlobal {
+			duplicateQuery = `
+				SELECT object_id FROM private_memory_objects
+				 WHERE memory_scope=? AND candidate_kind=?
+				   AND content_digest=? AND lifecycle='active'`
+			duplicateArgs = []any{scope.Scope, row.kind, row.digest}
+		} else {
+			duplicateQuery = `
+				SELECT object_id FROM private_memory_objects
+				 WHERE project_namespace_id=? AND memory_scope=?
+				   AND candidate_kind=? AND content_digest=? AND lifecycle='active'`
+			duplicateArgs = []any{scope.ProjectNamespaceID, scope.Scope, row.kind, row.digest}
+		}
+		err = tx.QueryRow(duplicateQuery, duplicateArgs...).Scan(&objectID)
 		if err == nil {
 			status = MemoryWriteDeduplicated
 		} else if err != sql.ErrNoRows {
@@ -1588,12 +1611,33 @@ func projectPrivateSemanticObjectTx(tx *sql.Tx, objectID string, delta SemanticD
 		}
 	}
 	for _, event := range delta.Events {
-		rowID, err := insertSemanticEvent(tx, entityIDs, event, now)
+		rowID, _, _, err := insertSemanticEvent(tx, entityIDs, event, now, false)
 		if err != nil {
 			return fmt.Errorf("insert private event %q: %w", event.ClientID, err)
 		}
 		if err := insertPrivateSemanticProjectionRefTx(tx, objectID, "event", strconv.FormatInt(rowID, 10)); err != nil {
 			return fmt.Errorf("record private event %q lineage: %w", event.ClientID, err)
+		}
+	}
+	for _, answer := range delta.EmotionAnswers {
+		rowID, err := answerEmotionQuestionTx(tx, answer, now)
+		if errors.Is(err, sql.ErrNoRows) {
+			var deliveredBefore int
+			if historyErr := tx.QueryRow(`
+				SELECT COUNT(*) FROM emotion_question_delivery
+				 WHERE question_id=? AND (delivered_at IS NOT NULL OR answered_at IS NOT NULL)`,
+				answer.QuestionID).Scan(&deliveredBefore); historyErr != nil {
+				return historyErr
+			}
+			if deliveredBefore == 1 {
+				continue
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("answer private emotion question %q: %w", answer.QuestionID, err)
+		}
+		if err := insertPrivateSemanticProjectionRefTx(tx, objectID, "event", strconv.FormatInt(rowID, 10)); err != nil {
+			return fmt.Errorf("record private emotion answer %q lineage: %w", answer.QuestionID, err)
 		}
 	}
 	if delta.Continuity != nil {
@@ -1756,7 +1800,10 @@ func rebuildPrivateSemanticProjectionTx(tx *sql.Tx) error {
 func clearPrivateSemanticProjectionTx(tx *sql.Tx) error {
 	deleteNumeric := func(table, kind string) error {
 		_, err := tx.Exec(`DELETE FROM `+table+` WHERE id IN (
-			SELECT CAST(row_ref AS INTEGER) FROM private_semantic_projection_rows WHERE row_kind=?
+			SELECT CAST(projection.row_ref AS INTEGER)
+			  FROM private_semantic_projection_rows projection
+			  JOIN private_memory_objects object ON object.object_id=projection.object_id
+			 WHERE projection.row_kind=? AND object.candidate_kind='semantic_delta'
 		)`, kind)
 		return err
 	}
@@ -1771,19 +1818,25 @@ func clearPrivateSemanticProjectionTx(tx *sql.Tx) error {
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM continuity_sessions WHERE session_id IN (
-		SELECT row_ref FROM private_semantic_projection_rows WHERE row_kind='session'
+		SELECT projection.row_ref FROM private_semantic_projection_rows projection
+		JOIN private_memory_objects object ON object.object_id=projection.object_id
+		WHERE projection.row_kind='session' AND object.candidate_kind='semantic_delta'
 	)`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM continuity_threads WHERE thread_id IN (
-		SELECT row_ref FROM private_semantic_projection_rows WHERE row_kind='thread'
+		SELECT projection.row_ref FROM private_semantic_projection_rows projection
+		JOIN private_memory_objects object ON object.object_id=projection.object_id
+		WHERE projection.row_kind='thread' AND object.candidate_kind='semantic_delta'
 	)`); err != nil {
 		return err
 	}
 	if err := deleteNumeric("entities", "entity"); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`DELETE FROM private_semantic_projection_rows`)
+	_, err := tx.Exec(`DELETE FROM private_semantic_projection_rows WHERE object_id IN (
+		SELECT object_id FROM private_memory_objects WHERE candidate_kind='semantic_delta'
+	)`)
 	return err
 }
 
@@ -3315,6 +3368,9 @@ func (s *Store) applyProductMemoryWipeTx(tx *sql.Tx, now time.Time) error {
 		DELETE FROM memory_tray_candidates;
 		DELETE FROM turn_ledgers;
 		DELETE FROM memory_capsules;
+		DELETE FROM emotion_overrides;
+		DELETE FROM emotion_questions;
+		DELETE FROM emotion_question_delivery;
 		DELETE FROM continuity_observations;
 		DELETE FROM continuity_checkpoints;
 		DELETE FROM continuity_sessions;

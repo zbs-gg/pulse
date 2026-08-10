@@ -353,7 +353,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.7.2');
+  assert.equal(plan.version, '0.8.0');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -564,7 +564,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.7.2');
+  assert.equal(report.version, '0.8.0');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
@@ -748,10 +748,9 @@ process.exit(0);
   mkdirSync(join(cwd, '.claude'), { recursive: true });
   writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({
     hooks: {
-      SessionStart: [{ hooks: [{ type: 'command', command: 'pulse hook session-start' }] }],
       UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'pulse hook user-prompt-submit' }] }],
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'pulse hook pre-tool-use' }] }],
       PostToolUse: [{ hooks: [{ type: 'command', command: 'pulse hook post-tool-use' }] }],
-      Stop: [{ hooks: [{ type: 'command', command: 'pulse hook stop' }] }],
     },
   }, null, 2));
   writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({

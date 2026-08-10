@@ -79,13 +79,12 @@ func TestBackfillCapsuleEventsPagesMoreThanFiveHundredAndRetriesPartialFailure(t
 	if complete != 501 {
 		t.Fatalf("complete embeddings = %d, want 501", complete)
 	}
-	wantCalls := []int{96, 96, 96, 96, 96, 96, 21}
-	if len(embedder.calls) != len(wantCalls) {
-		t.Fatalf("embed batches = %v, want %v", embedder.calls, wantCalls)
+	if len(embedder.calls) != 502 {
+		t.Fatalf("embed call count = %d, want 502 including one retry", len(embedder.calls))
 	}
-	for i := range wantCalls {
-		if embedder.calls[i] != wantCalls[i] {
-			t.Fatalf("embed batches = %v, want %v", embedder.calls, wantCalls)
+	for index, size := range embedder.calls {
+		if size != 1 {
+			t.Fatalf("background batch %d = %d, want 1", index, size)
 		}
 	}
 	result, err := engine.Retrieve(context.Background(), retrieve.RetrieveRequest{

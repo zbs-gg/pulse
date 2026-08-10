@@ -1,17 +1,5 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" SessionStart",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -25,7 +13,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory",
         "hooks": [
           {
             "type": "command",
@@ -37,70 +25,11 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory",
         "hooks": [
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" PostToolUse",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "manual|auto",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" PreCompact",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "matcher": "manual|auto",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" PostCompact",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" SubagentStart",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" SubagentStop",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" Stop",
             "timeout": 10
           }
         ]

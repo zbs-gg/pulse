@@ -163,15 +163,16 @@ type retrieveRequest struct {
 }
 
 type retrieveResponse struct {
-	EventIDs             []int64                           `json:"event_ids"`
-	ModeUsed             string                            `json:"mode_used"`
-	Confidence           float64                           `json:"confidence"`
-	Classifier           string                            `json:"classifier"`
-	Reasoning            string                            `json:"reasoning,omitempty"`
-	EmotionRole          string                            `json:"emotion_role,omitempty"`
-	EmotionRoleReasoning string                            `json:"emotion_role_reasoning,omitempty"`
-	SurfaceabilityAction string                            `json:"surfaceability_action,omitempty"`
-	ScoreBreakdowns      map[int64]retrieve.ScoreBreakdown `json:"score_breakdowns,omitempty"`
+	EventIDs             []int64                              `json:"event_ids"`
+	ModeUsed             string                               `json:"mode_used"`
+	Confidence           float64                              `json:"confidence"`
+	Classifier           string                               `json:"classifier"`
+	Reasoning            string                               `json:"reasoning,omitempty"`
+	EmotionRole          string                               `json:"emotion_role,omitempty"`
+	EmotionRoleReasoning string                               `json:"emotion_role_reasoning,omitempty"`
+	SurfaceabilityAction string                               `json:"surfaceability_action,omitempty"`
+	ScoreBreakdowns      map[int64]retrieve.ScoreBreakdown    `json:"score_breakdowns,omitempty"`
+	CandidateEvidence    map[int64]retrieve.CandidateEvidence `json:"candidate_evidence,omitempty"`
 }
 
 // handleRetrieve serves POST /retrieve. Body: retrieveRequest. Returns
@@ -190,6 +191,10 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
+	personalScope, ok := s.personalScopeForRequest(w, r)
+	if !ok {
+		return
+	}
 	mode := retrieve.QueryMode(req.Mode)
 	if mode == "" {
 		mode = retrieve.ModeAuto
@@ -197,11 +202,12 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	resp, err := s.cfg.Retrieval.Retrieve(ctx, retrieve.RetrieveRequest{
-		Query:     req.Query,
-		Mode:      mode,
-		TopK:      req.TopK,
-		UserState: req.UserState,
-		GraphMode: req.GraphMode,
+		Query:         req.Query,
+		Mode:          mode,
+		TopK:          req.TopK,
+		UserState:     req.UserState,
+		GraphMode:     req.GraphMode,
+		PersonalScope: personalScope,
 	})
 	if err != nil {
 		slog.Error("retrieve failed", "err", err)
@@ -222,6 +228,7 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		EmotionRoleReasoning: resp.EmotionRole.Reasoning,
 		SurfaceabilityAction: string(resp.SurfaceabilityAction),
 		ScoreBreakdowns:      resp.ScoreBreakdowns,
+		CandidateEvidence:    resp.CandidateEvidence,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -264,6 +271,11 @@ func (s *Server) handleContextQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
+	personalScope, ok := s.personalScopeForRequest(w, r)
+	if !ok {
+		return
+	}
+	req.PersonalScope = personalScope
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	result, err := s.cfg.ContextQuery.Query(ctx, req)

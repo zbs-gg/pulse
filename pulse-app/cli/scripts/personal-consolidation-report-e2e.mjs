@@ -72,8 +72,9 @@ assert.equal(report.phase, 'report_ready');
 assert.deepEqual(report.source_classifications, ['backup', 'canonical_vault', 'release_artifact']);
 assert.equal(report.totals.excluded, 2);
 for (const proof of [
-  'cli_parity', 'mcp_parity', 'memory_home_visible', 'sources_byte_preserved',
+  'cli_parity', 'mcp_hidden', 'memory_home_visible', 'sources_byte_preserved',
 ]) assert.equal(report[proof], true, proof);
+assert.equal(report.mcp_parity, false);
 for (const mutation of ['imported', 'merged', 'deleted', 'published']) {
   assert.equal(report[mutation], false, mutation);
 }
@@ -81,4 +82,4 @@ assert.match(report.report_digest, /^[a-f0-9]{64}$/);
 assert.match(report.inventory_digest, /^[a-f0-9]{64}$/);
 
 process.stdout.write(`${JSON.stringify(report)}\n`);
-process.stdout.write('Pulse packed consolidation report preserved every synthetic source and matched CLI, MCP, and Memory Home.\n');
+process.stdout.write('Pulse packed consolidation report preserved every synthetic source and stayed available in CLI and Memory Home.\n');

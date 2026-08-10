@@ -404,7 +404,46 @@ func (s *Store) CapsuleEventDocs(capsuleIDs []string) ([]CapsuleEventDoc, error)
 	return docs, nil
 }
 
-func (s *Store) UnindexedHostEventDocs(limit int) ([]CapsuleEventDoc, error) {
+// PrivateObjectEventDocs returns the event projections owned by one committed
+// private memory object. Capsule objects use their direct event_id; structured
+// semantic objects use the projection ledger.
+func (s *Store) PrivateObjectEventDocs(objectID string) ([]CapsuleEventDoc, error) {
+	direct, err := s.CapsuleEventDocs([]string{objectID})
+	if err != nil || len(direct) > 0 {
+		return direct, err
+	}
+	rows, err := s.db.Query(`
+		SELECT event.id,
+		       event.title || CASE
+		         WHEN COALESCE(event.description, '')='' THEN ''
+		         ELSE char(10) || event.description
+		       END
+		  FROM private_semantic_projection_rows projection
+		  JOIN events event ON event.id=CAST(projection.row_ref AS INTEGER)
+		 WHERE projection.object_id=? AND projection.row_kind='event'
+		 ORDER BY event.id`, objectID)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	docs := []CapsuleEventDoc{}
+	for rows.Next() {
+		var doc CapsuleEventDoc
+		if err := rows.Scan(&doc.EventID, &doc.Text); err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (s *Store) UnindexedHostEventDocs(model string, includeLegacyBridge bool, limit int) ([]CapsuleEventDoc, error) {
+	if model == "" {
+		model = "bge-m3"
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
@@ -420,9 +459,14 @@ func (s *Store) UnindexedHostEventDocs(limit int) ([]CapsuleEventDoc, error) {
 		           ELSE char(10) || event.description
 		         END)
 		  FROM events event
-		  LEFT JOIN event_embeddings embedding ON embedding.event_id=event.id
-		 WHERE event.scorer_version='host-extracted' AND embedding.event_id IS NULL
-		 ORDER BY event.id LIMIT ?`, limit)
+		  LEFT JOIN event_embeddings embedding
+		    ON embedding.event_id=event.id AND embedding.model=?
+		  LEFT JOIN event_embeddings any_embedding ON any_embedding.event_id=event.id
+		 WHERE event.scorer_version='host-extracted'
+		   AND embedding.event_id IS NULL
+		   AND (? OR any_embedding.event_id IS NULL)
+		 ORDER BY CASE WHEN any_embedding.event_id IS NULL THEN 0 ELSE 1 END, event.id
+		 LIMIT ?`, model, includeLegacyBridge, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -827,6 +871,9 @@ func (s *Store) WipeMemory() error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM memory_capsules`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM emotion_overrides; DELETE FROM emotion_questions;`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`

@@ -545,9 +545,18 @@ async function waitForVault(runtime, timeoutMs, {
             if (body.full_retrieval === true && body.embedder === 'bge-m3') {
 				if (!retrievalSmoke) return;
 				lastCheck = 'managed embedder is ready; retrieval query is pending';
-              const smoke = await fetch(`${runtime.base_url}/retrieve`, {
+			  const smoke = await fetch(`${runtime.base_url}/retrieve`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Pulse-Key': secret },
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Pulse-Key': secret,
+                  ...(runtime.kind === 'personal' ? {
+                    'X-Pulse-Product-Workspace': Buffer.from(runtime.workspace_path, 'utf8').toString('base64url'),
+                    'X-Pulse-Product-Binding': runtime.binding_digest,
+                    'X-Pulse-Product-Repository': runtime.repository_id,
+                    'X-Pulse-Product-Resolver-Epoch': String(runtime.resolver_epoch),
+                  } : {}),
+                },
                 body: JSON.stringify({ query: 'Pulse managed retrieval readiness', mode: 'factual', top_k: 1 }),
                 signal: AbortSignal.timeout(1500),
               });
@@ -604,7 +613,10 @@ export async function assertVaultRuntimeHealthy(runtime, {
 }
 
 export async function startVaultRuntime(runtime, {
-  daemonPath, managedEmbedder, timeoutMs = 12000, host = 'pulse-product', allowRollback = true,
+  // A migrated Personal vault can take a little over 12 seconds to decode its
+  // existing embedding index. Keep install-time startup outside that cliff;
+  // request latency budgets begin only after the daemon reports ready.
+  daemonPath, managedEmbedder, timeoutMs = 30000, host = 'pulse-product', allowRollback = true,
   platformServices = defaultPlatformServices, requireStartupNonce = true,
 } = {}) {
   const executableProof = trustedExecutableProof(daemonPath, platformServices);

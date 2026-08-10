@@ -23,7 +23,6 @@ export function consumeHostToolLease() {
   throw new Error('runtime lease must not be reached for a forged source host');
 }
 `, { mode: 0o600 });
-  const forgedHost = host === 'codex' ? 'claude-code' : 'codex';
   const messages = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
       protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pulse-test', version: '1' },
@@ -31,15 +30,13 @@ export function consumeHostToolLease() {
     { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
-      name: 'pulse_remember', arguments: {
-        schema: 'pulse.memory_capsule.v1',
-        source: { host: forgedHost, conversation_scope: 'current_turn', timestamp: '2026-07-19T10:00:00Z' },
-        items: [{
-          kind: 'decision', redacted_summary: 'Bind memory provenance to the launcher host.', confidence: 1,
-          evidence_hint: 'current_turn', privacy_tier: 'normal', retention: 'project',
-        }],
-        raw_input_included: false,
+      name: 'pulse_memory', arguments: {
+        items: [{ kind: 'decision', scope: 'project', summary: 'Bind memory provenance to the launcher host.' }],
+        source: { host: host === 'codex' ? 'claude-code' : 'codex' },
       },
+    } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: {
+      name: 'pulse_memory', arguments: { query: 'What durable rule applies here?' },
     } },
   ];
   const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
@@ -61,41 +58,43 @@ export function consumeHostToolLease() {
 }
 
 for (const host of ['claude-code', 'cursor', 'codex'] as const) {
-  test(`bound ${host} MCP fixes source host in schema and rejects forged provenance at runtime`, () => {
+  test(`bound ${host} MCP exposes only compact pulse_memory and rejects caller provenance`, () => {
     const messages = runBoundMCP(host);
     const tools = messages.find((message) => message.id === 2)?.result?.tools;
-    const remember = tools.find((tool: { name: string }) => tool.name === 'pulse_remember');
-    assert.deepEqual(remember.inputSchema.properties.source.properties.host, { type: 'string', const: host });
-    assert.deepEqual(remember.outputSchema.required, ['ledger_id', 'status', 'finalize_receipt', 'receipts']);
-    assert.equal(remember.outputSchema.additionalProperties, false);
-    assert.deepEqual(remember.inputSchema.properties.items.items.properties.tags, {
-      type: 'array',
-      items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' },
-      maxItems: 20,
-      description: 'Optional ASCII safe slugs. Omit tags when a concept needs spaces.',
-    });
-    const consolidation = tools.find((tool: { name: string }) => tool.name === 'pulse_consolidation_report');
-    assert.ok(consolidation, `${host} must expose the same consolidation report tool`);
-    assert.deepEqual(consolidation.inputSchema.required, ['action']);
-    assert.deepEqual(
-      consolidation.inputSchema.properties.action.enum,
-      ['start', 'status', 'explain', 'cancel', 'resume'],
-    );
-    assert.deepEqual(consolidation.inputSchema.allOf, [
-      {
-        if: { properties: { action: { enum: ['explain', 'cancel', 'resume'] } } },
-        then: { required: ['report_id'] },
-      },
-      {
-        if: { properties: { action: { const: 'start' } } },
-        then: { not: { required: ['report_id'] } },
-      },
+    assert.deepEqual(tools.map((tool: { name: string }) => tool.name), ['pulse_memory']);
+    const memory = tools[0];
+    const writeSchema = memory.inputSchema;
+    if (host === 'cursor') {
+      assert.equal(memory.inputSchema.type, 'object');
+      assert.equal(memory.inputSchema.oneOf.length, 2);
+      assert.deepEqual(memory.inputSchema.oneOf[0].required, ['query']);
+      assert.equal(memory.inputSchema.properties.query.maxLength, 400);
+      assert.equal(memory.inputSchema.additionalProperties, false);
+    }
+    if (host === 'cursor') assert.deepEqual(writeSchema.oneOf[1].required, ['items']);
+    else assert.deepEqual(writeSchema.required, ['items']);
+    assert.equal(writeSchema.properties.items.maxItems, 3);
+    const [durableItem, emotionalItem] = writeSchema.properties.items.items.oneOf;
+    assert.deepEqual(durableItem.properties.kind.enum, [
+      'decision', 'preference', 'open_loop', 'project_state', 'correction',
     ]);
-    assert.equal(consolidation.inputSchema.properties.destination, undefined);
-    assert.match(consolidation.description, /read-only local memory-source report/);
+    assert.equal(durableItem.properties.summary.maxLength, 400);
+    assert.equal(durableItem.properties.emotion, undefined);
+    assert.equal(emotionalItem.properties.kind.const, 'emotion');
+    assert.equal(emotionalItem.properties.summary.maxLength, 400);
+    assert.ok(emotionalItem.required.includes('emotion'));
+    assert.equal(memory.outputSchema, undefined);
     const result = messages.find((message) => message.id === 3)?.result;
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /source host does not match the bound harness/);
+    assert.match(result.content[0].text, /pulse_memory requires 1\.\.3 items/);
     assert.doesNotMatch(result.content[0].text, /runtime lease must not be reached/);
+    const queryResult = messages.find((message) => message.id === 4)?.result;
+    assert.equal(queryResult.isError, true);
+    if (host === 'cursor') {
+      assert.match(queryResult.content[0].text, /runtime lease must not be reached/);
+    } else {
+      assert.match(queryResult.content[0].text, /pulse_memory requires 1\.\.3 items/);
+      assert.doesNotMatch(queryResult.content[0].text, /runtime lease must not be reached/);
+    }
   });
 }

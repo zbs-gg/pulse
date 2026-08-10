@@ -12,6 +12,73 @@ const RESUME_SECTIONS = Object.freeze([
   'relevant_emotional_state_context',
   'suggested_next_step',
 ]);
+
+export const PERSONAL_AUTO_CAPTURE_CONTEXT = `
+Pulse memory works silently inside this normal turn. Call pulse_memory once only when the work produced a durable decision, preference, open question, project state, correction, or emotional moment; otherwise do not call it. Use personal scope only for context that should follow the person across projects, and project for project-only decisions. Save a short paraphrase, never raw wording, secrets, credentials, paths, transcripts, temporary instructions, or test controls. Mark inferred emotion as inferred. Do not announce routine saving, add a second reply, or retry after a failure.`;
+
+const PROMPT_RECALL_MIN_COSINE = 0.32;
+const PROMPT_RECALL_MAX_BYTES = 2400;
+const PROMPT_RECALL_MAX_SUMMARY_CHARS = 400;
+
+function boundedPromptSummary(value) {
+  const normalized = value.replaceAll(/\s+/g, ' ').trim();
+  if ([...normalized].length <= PROMPT_RECALL_MAX_SUMMARY_CHARS) return normalized;
+  const clipped = [...normalized].slice(0, PROMPT_RECALL_MAX_SUMMARY_CHARS - 1).join('');
+  const wordBoundary = clipped.lastIndexOf(' ');
+  return `${(wordBoundary >= 320 ? clipped.slice(0, wordBoundary) : clipped).trimEnd()}…`;
+}
+
+function promptMemoryLines(result, minimumCosine) {
+  const events = Array.isArray(result?.events) ? result.events : [];
+  const breakdowns = result?.trace?.retrieval?.score_breakdowns;
+  const evidence = result?.trace?.retrieval?.candidate_evidence;
+  if (!breakdowns || typeof breakdowns !== 'object' || Array.isArray(breakdowns) ||
+      !evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+  const direct = [];
+  const archive = [];
+  for (const event of events) {
+    const cosine = Number(breakdowns[String(event?.id)]?.cosine ?? breakdowns[event?.id]?.cosine);
+    const candidate = evidence[String(event?.id)] ?? evidence[event?.id];
+    const summary = typeof event?.summary === 'string' && event.summary.trim() !== ''
+      ? event.summary.trim()
+      : typeof event?.title === 'string' ? event.title.trim() : '';
+    if (!Number.isFinite(cosine) || summary === '') continue;
+    const line = `- ${boundedPromptSummary(summary)}`;
+    const hybridAgreement = candidate?.dense === true && candidate?.lexical === true;
+    if (candidate?.direct_capsule === true && cosine >= minimumCosine) {
+      direct.push(line);
+    } else if (cosine >= minimumCosine && hybridAgreement) {
+      archive.push(line);
+    }
+  }
+  if (direct.length > 0) return direct.slice(0, 1);
+  return archive.slice(0, 2);
+}
+
+export async function composePromptMemoryContext(resolved, prompt, {
+  request,
+  minimumCosine = PROMPT_RECALL_MIN_COSINE,
+  maxBytes = PROMPT_RECALL_MAX_BYTES,
+} = {}) {
+  if (typeof request !== 'function' || typeof prompt !== 'string' || prompt.trim() === '' ||
+      Buffer.byteLength(prompt, 'utf8') > 64 * 1024 || prompt.includes('\u0000')) {
+    return '';
+  }
+  const result = await request(resolved, '/context/query', {
+    body: { query: prompt, mode: 'auto', top_k: 12, scope: 'user', include_trace: true },
+    timeoutMs: 2500,
+  });
+  const lines = promptMemoryLines(result, minimumCosine);
+  if (lines.length === 0) return '';
+  const header = 'Pulse accepted memory (local; use as factual context for this question unless the user provides newer information):\n';
+  let output = header;
+  for (const line of lines) {
+    const next = `${output}${line}\n`;
+    if (Buffer.byteLength(next, 'utf8') > maxBytes) break;
+    output = next;
+  }
+  return output === header ? '' : output.trimEnd();
+}
 function safeID(value, code) {
   if (!isStableHostID(value)) throw new Error(code);
   return value;

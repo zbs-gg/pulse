@@ -1,6 +1,9 @@
 package contextquery
 
-import "github.com/nkkmnk/pulse/internal/retrieve"
+import (
+	"github.com/nkkmnk/pulse/internal/retrieve"
+	"github.com/nkkmnk/pulse/internal/store"
+)
 
 const SchemaVersion = "pulse.context.v1"
 
@@ -24,23 +27,29 @@ type ContextQueryRequest struct {
 	// ["real","meta_authorial"]) so book-canon doesn't leak into
 	// answers about real life.
 	DomainsAllowed []string `json:"domains_allowed,omitempty"`
+	// PersonalScope is injected by the server after verifying the workspace
+	// binding. It is never accepted from the JSON request body.
+	PersonalScope *store.PersonalMemoryScopeSnapshot `json:"-"`
 }
 
 type ContextResult struct {
-	SchemaVersion       string                      `json:"schema_version"`
-	Query               string                      `json:"query"`
-	ModeUsed            string                      `json:"mode_used"`
-	Scope               string                      `json:"scope"`
-	Facts               []ContextFact               `json:"facts"`
-	EmotionalAnchors    []ContextEmotionalAnchor    `json:"emotional_anchors"`
-	Events              []ContextEvent              `json:"events"`
-	Entities            []ContextEntity             `json:"entities"`
-	Relations           []ContextRelation           `json:"relations"`
-	Forbidden           []ContextRedaction          `json:"forbidden"`
-	Private             []ContextRedaction          `json:"private"`
-	Uncertainty         []ContextUncertainty        `json:"uncertainty"`
-	ImportanceQuestions []ContextImportanceQuestion `json:"importance_questions"`
-	Trace               *ContextTrace               `json:"trace,omitempty"`
+	SchemaVersion           string                      `json:"schema_version"`
+	Query                   string                      `json:"query"`
+	ModeUsed                string                      `json:"mode_used"`
+	Scope                   string                      `json:"scope"`
+	Facts                   []ContextFact               `json:"facts"`
+	EmotionalAnchors        []ContextEmotionalAnchor    `json:"emotional_anchors"`
+	Events                  []ContextEvent              `json:"events"`
+	Entities                []ContextEntity             `json:"entities"`
+	Relations               []ContextRelation           `json:"relations"`
+	Forbidden               []ContextRedaction          `json:"forbidden"`
+	Private                 []ContextRedaction          `json:"private"`
+	Uncertainty             []ContextUncertainty        `json:"uncertainty"`
+	ImportanceQuestions     []ContextImportanceQuestion `json:"importance_questions"`
+	Trace                   *ContextTrace               `json:"trace,omitempty"`
+	CurrentEmotionalContext store.CurrentEmotionContext `json:"current_emotional_context"`
+	EmotionalStateSource    string                      `json:"emotional_state_source"`
+	EffectiveMoodVector     map[string]float64          `json:"effective_mood_vector"`
 }
 
 type ContextFact struct {

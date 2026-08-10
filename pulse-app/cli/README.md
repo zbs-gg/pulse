@@ -1,10 +1,12 @@
 # @zbs-gg/pulse
 
-The npm package for Pulse Personal 0.7.2. It installs one local memory engine,
-Memory Home, and local connections for Codex, Claude Code, and Cursor.
+The npm package for Pulse Personal 0.8.0. It installs one local memory engine,
+Memory Home, and local connections for Codex, Claude Code, and Cursor. Emotional
+memory stays local, describes a moment rather than a personality, and can be
+confirmed, corrected, or deleted separately from the event.
 
-This release is for Macs with Apple Silicon. Other platforms are intentionally
-left unchanged until the Mac install has passed a clean real-world test.
+Personal 0.8 is an unfinished branch and is not published. Use the published
+0.7.2 package for ordinary installation until this branch passes live review.
 
 ```bash
 npx -y @zbs-gg/pulse@0.7.2 init codex
@@ -28,8 +30,12 @@ The package contains no shared-memory server or cloud synchronization. Pulse
 Team is a separate private pilot. Personal memory remains local, raw transcript
 capture is off by default, and no backend model API is called by default.
 
+The local MCP server uses stdio and accepts both protocol `2026-07-28` and older
+clients. Persistent memory remains in SQLite; it does not depend on a lasting
+MCP session.
+
 Disconnect with `pulse disconnect codex`, `pulse disconnect claude-code`, or
 `pulse disconnect cursor`. Remove all local Pulse memory only with the separate
 confirmed command `pulse wipe --confirm "wipe pulse memory"`.
 
-License: AGPL-3.0-only. Status: developer preview.
+License: AGPL-3.0-only. Status: unfinished 0.8 development branch.

@@ -88,10 +88,6 @@ type Engine struct {
 
 	embedModel    string
 	referenceTime time.Time
-	// personalScope is a content-free snapshot of the current product
-	// eligibility boundary. Nil keeps Local Preview and legacy unbound stores on
-	// their historical unscoped behavior.
-	personalScope *store.PersonalMemoryScopeSnapshot
 
 	// assertionOverlay, when true, demotes a stale fact-event below its own
 	// correction in the final ranked list (supersession-aware). Default false:
@@ -182,15 +178,6 @@ func (e *Engine) Init(ctx context.Context) error {
 	if e.store == nil {
 		return fmt.Errorf("retrieve: store is nil")
 	}
-	scope, enabled, err := e.store.CurrentPersonalMemoryScopeSnapshot()
-	if err != nil {
-		return fmt.Errorf("retrieve init personal scope: %w", err)
-	}
-	if enabled {
-		e.personalScope = &scope
-	} else {
-		e.personalScope = nil
-	}
 	if err := e.loadEvents(ctx); err != nil {
 		return fmt.Errorf("retrieve init events: %w", err)
 	}
@@ -201,34 +188,6 @@ func (e *Engine) Init(ctx context.Context) error {
 		return fmt.Errorf("retrieve init chains: %w", err)
 	}
 	return nil
-}
-
-func samePersonalScope(a, b *store.PersonalMemoryScopeSnapshot) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
-// reloadIfEligibilityChanged prevents a long-lived daemon from ranking against
-// a stale project/global membership set after a create, correction, move, or
-// delete committed outside the immediate indexing path.
-func (e *Engine) reloadIfEligibilityChanged(ctx context.Context) error {
-	scope, enabled, err := e.store.CurrentPersonalMemoryScopeSnapshot()
-	if err != nil {
-		return err
-	}
-	var current *store.PersonalMemoryScopeSnapshot
-	if enabled {
-		current = &scope
-	}
-	e.mu.RLock()
-	unchanged := samePersonalScope(e.personalScope, current)
-	e.mu.RUnlock()
-	if unchanged {
-		return nil
-	}
-	return e.Reload(ctx)
 }
 
 // Reload re-reads the in-memory indexes under the write lock so events
@@ -321,6 +280,131 @@ func (e *Engine) EmbedAndIndexEvents(ctx context.Context, docs []IndexEventDoc) 
 	return persistErr
 }
 
+// EmbedAndRefreshEvents embeds a small interactive write and refreshes only
+// those event rows in memory. Personal archives can contain tens of thousands
+// of legacy vectors, so a full Reload on every new memory would make the write
+// wait for the whole archive to be decoded again.
+func (e *Engine) EmbedAndRefreshEvents(ctx context.Context, docs []IndexEventDoc) error {
+	persisted, persistErr := e.EmbedAndPersistEvents(ctx, docs)
+	if persisted > 0 {
+		ids := make([]int64, 0, persisted)
+		for _, doc := range docs[:persisted] {
+			ids = append(ids, doc.EventID)
+		}
+		if refreshErr := e.RefreshEvents(ctx, ids); refreshErr != nil && persistErr == nil {
+			return refreshErr
+		}
+	}
+	return persistErr
+}
+
+type indexedEventRow struct {
+	id        int64
+	vec       []float32
+	days      float64
+	anchor    bool
+	text      string
+	emotion   []float32
+	sentLabel string
+	bio       *bioSnapshot
+	access    int64
+	tags      []string
+}
+
+// RefreshEvents replaces or inserts only the requested events in the global
+// live index. Personal eligibility is applied per request, never while writing
+// or loading the shared index.
+func (e *Engine) RefreshEvents(ctx context.Context, eventIDs []int64) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(eventIDs)), ",")
+	q := `
+SELECT
+    e.id, e.ts, e.title, COALESCE(e.description, ''), ee.vector_json,
+    COALESCE(em.joy, 0), COALESCE(em.sadness, 0), COALESCE(em.anger, 0),
+    COALESCE(em.fear, 0), COALESCE(em.trust, 0), COALESCE(em.disgust, 0),
+    COALESCE(em.anticipation, 0), COALESCE(em.surprise, 0),
+    COALESCE(em.shame, 0), COALESCE(em.guilt, 0),
+    COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, ''),
+    COALESCE(e.access_count, 0), COALESCE(e.tags, '')
+FROM events e
+JOIN event_embeddings ee ON ee.event_id=e.id
+LEFT JOIN event_emotions em ON em.event_id=e.id
+WHERE (ee.model=? OR (?='bge-m3' AND ee.model='bge-m3-mlx-fp16'))
+  AND e.id IN (` + placeholders + `)
+ORDER BY e.id`
+	args := []any{e.embedModel, e.embedModel}
+	for _, id := range eventIDs {
+		args = append(args, id)
+	}
+	rows, err := e.store.DB().QueryContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("retrieve refresh events: %w", err)
+	}
+	defer rows.Close()
+	refreshed := make([]indexedEventRow, 0, len(eventIDs))
+	for rows.Next() {
+		var row indexedEventRow
+		var ts, title, description, vectorJSON, bioJSON, tagsJSON string
+		var userFlag int
+		row.emotion = make([]float32, 10)
+		if err := rows.Scan(
+			&row.id, &ts, &title, &description, &vectorJSON,
+			&row.emotion[0], &row.emotion[1], &row.emotion[2], &row.emotion[3], &row.emotion[4],
+			&row.emotion[5], &row.emotion[6], &row.emotion[7], &row.emotion[8], &row.emotion[9],
+			&userFlag, &row.sentLabel, &bioJSON, &row.access, &tagsJSON,
+		); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(vectorJSON), &row.vec); err != nil {
+			return fmt.Errorf("event %d: parse vector_json: %w", row.id, err)
+		}
+		row.days = computeDaysAgo(ts, e.referenceTime)
+		row.anchor = userFlag == 1
+		row.text = strings.ToLower(title + " " + description)
+		row.sentLabel = strings.ToLower(row.sentLabel)
+		row.bio = parseBioSnapshot(bioJSON)
+		if tagsJSON != "" {
+			_ = json.Unmarshal([]byte(tagsJSON), &row.tags)
+		}
+		refreshed = append(refreshed, row)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, row := range refreshed {
+		index := sort.Search(len(e.eventIDs), func(i int) bool { return e.eventIDs[i] >= row.id })
+		if index < len(e.eventIDs) && e.eventIDs[index] == row.id {
+			e.eventVecs[index], e.eventDays[index], e.eventAnchor[index] = row.vec, row.days, row.anchor
+			e.eventTexts[index], e.eventEmo[index], e.eventSentLabel[index] = row.text, row.emotion, row.sentLabel
+			e.eventBio[index], e.eventAccess[index], e.eventTags[index] = row.bio, row.access, row.tags
+			continue
+		}
+		e.eventIDs = insertIndexedValue(e.eventIDs, index, row.id)
+		e.eventVecs = insertIndexedValue(e.eventVecs, index, row.vec)
+		e.eventDays = insertIndexedValue(e.eventDays, index, row.days)
+		e.eventAnchor = insertIndexedValue(e.eventAnchor, index, row.anchor)
+		e.eventTexts = insertIndexedValue(e.eventTexts, index, row.text)
+		e.eventEmo = insertIndexedValue(e.eventEmo, index, row.emotion)
+		e.eventSentLabel = insertIndexedValue(e.eventSentLabel, index, row.sentLabel)
+		e.eventBio = insertIndexedValue(e.eventBio, index, row.bio)
+		e.eventAccess = insertIndexedValue(e.eventAccess, index, row.access)
+		e.eventTags = insertIndexedValue(e.eventTags, index, row.tags)
+	}
+	return nil
+}
+
+func insertIndexedValue[T any](values []T, index int, value T) []T {
+	values = append(values, value)
+	copy(values[index+1:], values[index:len(values)-1])
+	values[index] = value
+	return values
+}
+
 // loadEvents pulls (id, ts, embedding, emotion_vec) per event.
 // Joins events ⨝ event_embeddings ⨝ event_emotions. Events without embedding
 // are skipped (can't be retrieved by cosine). Events without emotion get
@@ -369,34 +453,9 @@ SELECT
 FROM events e
 JOIN event_embeddings ee ON ee.event_id = e.id
 LEFT JOIN event_emotions em ON em.event_id = e.id
-WHERE ee.model = ?
+WHERE ee.model = ? OR (?='bge-m3' AND ee.model='bge-m3-mlx-fp16')
 ORDER BY e.id`
-	args := []any{e.embedModel}
-	if e.personalScope != nil {
-		q = personalEligibleEventsCTE + `
-SELECT
-    e.id,
-    e.ts,
-    e.title,
-    COALESCE(e.description, ''),
-    ee.vector_json,
-    COALESCE(em.joy, 0), COALESCE(em.sadness, 0), COALESCE(em.anger, 0),
-    COALESCE(em.fear, 0), COALESCE(em.trust, 0), COALESCE(em.disgust, 0),
-    COALESCE(em.anticipation, 0), COALESCE(em.surprise, 0),
-    COALESCE(em.shame, 0), COALESCE(em.guilt, 0),
-    COALESCE(e.user_flag, 0), COALESCE(e.sentiment_label, ''), COALESCE(e.biometric_json, ''),
-    COALESCE(e.access_count, 0), COALESCE(e.tags, '')
-FROM events e
-JOIN eligible_events eligible ON eligible.event_id=e.id
-JOIN event_embeddings ee ON ee.event_id = e.id
-LEFT JOIN event_emotions em ON em.event_id = e.id
-WHERE ee.model = ?
-ORDER BY e.id`
-		args = []any{
-			e.personalScope.ProjectNamespaceID,
-			e.embedModel,
-		}
-	}
+	args := []any{e.embedModel, e.embedModel}
 	rows, err := e.store.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
@@ -486,21 +545,6 @@ JOIN atomic_fact_embeddings fe ON fe.fact_id = f.id
 WHERE fe.model = ?
 ORDER BY f.id`
 	args := []any{e.embedModel}
-	if e.personalScope != nil {
-		q = personalEligibleEventsCTE + `
-SELECT f.id, f.event_id, fe.vector_json
-FROM atomic_facts f
-JOIN eligible_events eligible ON eligible.event_id=f.event_id
-JOIN atomic_fact_embeddings fe ON fe.fact_id = f.id
-WHERE fe.model = ?
-ORDER BY f.id`
-		args = []any{
-			e.personalScope.ProjectNamespaceID,
-			e.personalScope.RepositoryID,
-			e.personalScope.BindingDigest,
-			e.embedModel,
-		}
-	}
 	rows, err := e.store.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		// Phase G migration may not be applied yet — treat empty as fine
@@ -534,20 +578,7 @@ ORDER BY f.id`
 
 func (e *Engine) loadChains(ctx context.Context) error {
 	q := `SELECT parent_id, child_id FROM event_chains`
-	var args []any
-	if e.personalScope != nil {
-		q = personalEligibleEventsCTE + `
-SELECT chain.parent_id, chain.child_id
-  FROM event_chains chain
-  JOIN eligible_events parent ON parent.event_id=chain.parent_id
-  JOIN eligible_events child ON child.event_id=chain.child_id`
-		args = []any{
-			e.personalScope.ProjectNamespaceID,
-			e.personalScope.RepositoryID,
-			e.personalScope.BindingDigest,
-		}
-	}
-	rows, err := e.store.DB().QueryContext(ctx, q, args...)
+	rows, err := e.store.DB().QueryContext(ctx, q)
 	if err != nil {
 		if isMissingTable(err) {
 			return nil
@@ -615,6 +646,9 @@ type RetrieveRequest struct {
 	Mode      QueryMode  // ModeAuto = router decides
 	UserState *UserState // nullable
 	TopK      int        // default 5 if zero
+	// PersonalScope is derived server-side from a verified workspace binding.
+	// Nil preserves Local Preview's historical unscoped retrieval.
+	PersonalScope *store.PersonalMemoryScopeSnapshot
 	// GraphMode enables temporal entity-graph retrieval as an EXTRA RRF input
 	// (graph-as-recall-injector). "" = OFF (default; behaviour unchanged).
 	// "anchored" = entity-anchored events; "walk" = + typed relation walk.
@@ -629,6 +663,155 @@ type RetrieveResponse struct {
 	EmotionRole          EmotionRoleDecision
 	SurfaceabilityAction SurfaceabilityAction
 	ScoreBreakdowns      map[int64]ScoreBreakdown
+	CandidateEvidence    map[int64]CandidateEvidence
+}
+
+// CandidateEvidence lets the host compositor distinguish a short, curated
+// memory capsule from a projected archive event without exposing any content.
+type CandidateEvidence struct {
+	Dense         bool `json:"dense"`
+	Lexical       bool `json:"lexical"`
+	DirectCapsule bool `json:"direct_capsule"`
+}
+
+func eligibleContains(eligible map[int64]struct{}, id int64) bool {
+	if eligible == nil {
+		return true
+	}
+	_, ok := eligible[id]
+	return ok
+}
+
+func (e *Engine) personalEligibleEventSet(
+	ctx context.Context,
+	scope *store.PersonalMemoryScopeSnapshot,
+) (map[int64]struct{}, error) {
+	if scope == nil {
+		return nil, nil
+	}
+	rows, err := e.store.DB().QueryContext(ctx, personalEligibleEventsCTE+`
+SELECT event_id FROM eligible_events ORDER BY event_id`, scope.ProjectNamespaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	eligible := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		eligible[id] = struct{}{}
+	}
+	return eligible, rows.Err()
+}
+
+func (e *Engine) directCapsuleEventSet(ctx context.Context, ids []int64) map[int64]struct{} {
+	if e.store == nil || len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := e.store.DB().QueryContext(ctx, `
+SELECT DISTINCT event_id
+  FROM memory_capsules
+ WHERE status='active' AND event_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+func (e *Engine) eligibleDirectCapsuleEventSet(
+	ctx context.Context,
+	scope *store.PersonalMemoryScopeSnapshot,
+) (map[int64]struct{}, error) {
+	out := make(map[int64]struct{})
+	if e.store == nil {
+		return out, nil
+	}
+	query := `
+SELECT DISTINCT event_id
+  FROM memory_capsules
+ WHERE status='active' AND event_id IS NOT NULL`
+	args := []any{}
+	if scope != nil {
+		query = `
+SELECT DISTINCT capsule.event_id
+  FROM memory_capsules capsule
+  JOIN private_memory_objects object ON object.object_id=capsule.id
+ WHERE capsule.status='active'
+   AND capsule.event_id IS NOT NULL
+   AND object.lifecycle='active'
+   AND (
+       object.memory_scope='personal_global' OR
+       (object.memory_scope='project' AND object.project_namespace_id=?)
+   )`
+		args = append(args, scope.ProjectNamespaceID)
+	}
+	rows, err := e.store.DB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+func preferCandidateIDs(preferred, fallback []int64, limit int) []int64 {
+	if limit <= 0 {
+		return nil
+	}
+	out := make([]int64, 0, limit)
+	seen := make(map[int64]struct{}, limit)
+	for _, candidates := range [][]int64{preferred, fallback} {
+		for _, id := range candidates {
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+			if len(out) == limit {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+func samePersonalScope(a, b *store.PersonalMemoryScopeSnapshot) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func (e *Engine) currentPersonalScope(scope *store.PersonalMemoryScopeSnapshot) (*store.PersonalMemoryScopeSnapshot, error) {
+	if scope == nil {
+		return nil, nil
+	}
+	current, err := e.store.PersonalMemoryScopeSnapshotForBinding(scope.BindingDigest, scope.RepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	return &current, nil
 }
 
 type ScoreBreakdown struct {
@@ -657,22 +840,19 @@ type ScoreBreakdown struct {
 // anchor / date) on the v2_pure base; chain mode expands via the chain graph;
 // the hybrid layer fuses BM25 via RRF.
 func (e *Engine) Retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveResponse, error) {
-	return e.retrieve(ctx, req, true)
+	return e.retrieve(ctx, req)
 }
 
-func (e *Engine) retrieve(
-	ctx context.Context,
-	req RetrieveRequest,
-	retryOnEligibilityChange bool,
-) (*RetrieveResponse, error) {
+func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveResponse, error) {
 	if e.embedder == nil {
 		return nil, fmt.Errorf("retrieve: embedder is nil")
 	}
 	if req.Query == "" {
 		return nil, fmt.Errorf("retrieve: empty query")
 	}
-	if err := e.reloadIfEligibilityChanged(ctx); err != nil {
-		return nil, fmt.Errorf("retrieve refresh personal scope: %w", err)
+	eligible, err := e.personalEligibleEventSet(ctx, req.PersonalScope)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve personal eligibility: %w", err)
 	}
 	topK := req.TopK
 	if topK <= 0 {
@@ -693,18 +873,34 @@ func (e *Engine) retrieve(
 	if err != nil {
 		return nil, fmt.Errorf("retrieve embed: %w", err)
 	}
+	directCapsuleEligible, err := e.eligibleDirectCapsuleEventSet(ctx, req.PersonalScope)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve direct capsules: %w", err)
+	}
 
 	e.mu.RLock()
+	directCapsuleLimit := topK
+	if directCapsuleLimit > 4 {
+		directCapsuleLimit = 4
+	}
+	directCapsuleIDs := e.retrieveFactualEventsEligible(qVec, directCapsuleLimit, directCapsuleEligible)
 
 	var cosineIDs []int64
 	var breakdowns map[int64]ScoreBreakdown
 	switch mode {
 	case ModeFactual:
-		cosineIDs = e.retrieveFactual(qVec, topK)
+		cosineIDs = e.retrieveFactualEligible(qVec, topK, eligible)
 	case ModeChain:
-		cosineIDs = e.retrieveChain(qVec, req.Query, topK, req.UserState)
+		cosineIDs = e.retrieveChainEligible(qVec, req.Query, topK, req.UserState, eligible)
 	default: // empathic + unknown
-		cosineIDs, breakdowns = e.retrieveEmpathicScored(qVec, req.Query, topK, req.UserState)
+		cosineIDs, breakdowns = e.retrieveEmpathicScoredEligible(qVec, req.Query, topK, req.UserState, eligible)
+	}
+	denseSet := make(map[int64]struct{}, len(cosineIDs))
+	for _, id := range cosineIDs {
+		denseSet[id] = struct{}{}
+	}
+	for _, id := range directCapsuleIDs {
+		denseSet[id] = struct{}{}
 	}
 
 	// Hybrid: pull a parallel BM25 ranking over events_fts / facts_fts /
@@ -723,6 +919,7 @@ func (e *Engine) retrieve(
 	// Factual mode: PURE cosine ranking (no BM25/RRF fusion, no empathic
 	// surfaceability) — isolate the semantic ranker, like a dedicated fact store.
 	// Empathic/chain keep the full hybrid fusion + surfaceability.
+	lexicalSet := map[int64]struct{}{}
 	if mode != ModeFactual && e.store != nil {
 		bm25Query := req.Query
 		// The legacy local expander snapshots the whole graph vocabulary at
@@ -730,12 +927,15 @@ func (e *Engine) retrieve(
 		// Disable it for scoped Personal retrieval until its transport carries
 		// the exact namespace/revision; letting foreign vocabulary rewrite the
 		// query would violate pre-influence isolation even if BM25 were scoped.
-		if e.expander != nil && e.personalScope == nil {
+		if e.expander != nil && req.PersonalScope == nil {
 			if extras, err := e.expander.Expand(ctx, req.Query); err == nil && len(extras) > 0 {
 				bm25Query = req.Query + " " + strings.Join(extras, " ")
 			}
 		}
-		bm25IDs, err := BM25SearchScoped(ctx, e.store.DB(), bm25Query, topK*2, e.personalScope)
+		bm25IDs, err := BM25SearchScoped(ctx, e.store.DB(), bm25Query, topK*2, req.PersonalScope)
+		for _, id := range bm25IDs {
+			lexicalSet[id] = struct{}{}
+		}
 		lists := [][]int64{cosineIDs}
 		if err == nil && len(bm25IDs) > 0 {
 			lists = append(lists, bm25IDs)
@@ -744,7 +944,7 @@ func (e *Engine) retrieve(
 		// / typed relation walk). Salience ranking is preserved — graph only adds
 		// candidates the cosine/BM25 paths miss (multi-hop, entity-centric).
 		if req.GraphMode != "" {
-			if gids := e.retrieveGraphCandidates(ctx, req.Query, req.GraphMode, topK); len(gids) > 0 {
+			if gids := e.retrieveGraphCandidatesScoped(ctx, req.Query, req.GraphMode, topK, req.PersonalScope); len(gids) > 0 {
 				lists = append(lists, gids)
 			}
 		}
@@ -752,9 +952,27 @@ func (e *Engine) retrieve(
 			ids = RRFFuse(lists, topK, 60)
 		}
 	}
+	// Curated capsules are the primary prompt-memory source. Reserve at most
+	// four result slots for their own semantic ranking before archive events;
+	// the host still applies its relevance threshold and falls back to archive
+	// rows only when no capsule clears it.
+	ids = preferCandidateIDs(directCapsuleIDs, ids, topK)
+	// A rare literal name can be buried below generic question words in the
+	// global BM25 window. Corroborate the already scope-fenced dense candidates
+	// against their own FTS rows in every mode. Factual mode keeps its pure
+	// cosine ranking; this adds evidence only and never widens eligibility.
+	if e.store != nil {
+		if corroborated, corroborationErr := FTSCorroborateCandidates(
+			ctx, e.store.DB(), req.Query, cosineIDs,
+		); corroborationErr == nil {
+			for _, id := range corroborated {
+				lexicalSet[id] = struct{}{}
+			}
+		}
+	}
 	var surfaceability SurfaceabilityAction
 	if mode != ModeFactual {
-		ids, surfaceability = e.applyFragileSurfaceability(ids, topK, emotionRole)
+		ids, surfaceability = e.applyFragileSurfaceabilityEligible(ids, topK, emotionRole, eligible)
 	}
 
 	// Access-frequency salience re-rank (Phase B, default-off, post-scoring):
@@ -803,27 +1021,22 @@ func (e *Engine) retrieve(
 	if e.assertionOverlay {
 		ids = e.applyAssertionDemotion(ids)
 	}
-	var scopeUsed *store.PersonalMemoryScopeSnapshot
-	if e.personalScope != nil {
-		copy := *e.personalScope
-		scopeUsed = &copy
+	// Prompt-time recall needs one mode-independent relevance signal. The
+	// query itself remains transient; expose only each returned event's cosine
+	// so host adapters can omit weak matches instead of injecting noise.
+	if breakdowns == nil {
+		breakdowns = make(map[int64]ScoreBreakdown, len(ids))
+	}
+	for _, id := range ids {
+		if _, exists := breakdowns[id]; exists {
+			continue
+		}
+		index := sort.Search(len(e.eventIDs), func(i int) bool { return e.eventIDs[i] >= id })
+		if index < len(e.eventIDs) && e.eventIDs[index] == id && index < len(e.eventVecs) {
+			breakdowns[id] = ScoreBreakdown{Cosine: float64(dotF32(qVec, e.eventVecs[index]))}
+		}
 	}
 	e.mu.RUnlock()
-
-	scopeNow, enabledNow, err := e.store.CurrentPersonalMemoryScopeSnapshot()
-	if err != nil {
-		return nil, fmt.Errorf("retrieve revalidate personal scope: %w", err)
-	}
-	var currentScope *store.PersonalMemoryScopeSnapshot
-	if enabledNow {
-		currentScope = &scopeNow
-	}
-	if !samePersonalScope(scopeUsed, currentScope) {
-		if retryOnEligibilityChange {
-			return e.retrieve(ctx, req, false)
-		}
-		return nil, ErrPersonalMemoryEligibilityChanged
-	}
 
 	// Access-frequency instrumentation (migration 029, Phase A). Best-effort and
 	// OFF by default: only when PULSE_ACCESS_FREQ is enabled do we bump a bare
@@ -832,21 +1045,22 @@ func (e *Engine) retrieve(
 	// counter-write failure never fails the retrieval (error swallowed). Counts
 	// take effect on the next Reload, and the scorer never reads them in this
 	// phase, so scoring and Go==Python parity are untouched.
-	if e.accessFreqEnabled && scopeUsed == nil && e.store != nil && len(ids) > 0 {
+	if e.accessFreqEnabled && req.PersonalScope == nil && e.store != nil && len(ids) > 0 {
 		_ = e.store.IncrementAccessCounts(ids, time.Now())
 	}
-	scopeNow, enabledNow, err = e.store.CurrentPersonalMemoryScopeSnapshot()
+	directSet := e.directCapsuleEventSet(ctx, ids)
+	evidence := make(map[int64]CandidateEvidence, len(ids))
+	for _, id := range ids {
+		_, dense := denseSet[id]
+		_, lexical := lexicalSet[id]
+		_, direct := directSet[id]
+		evidence[id] = CandidateEvidence{Dense: dense, Lexical: lexical, DirectCapsule: direct}
+	}
+	currentScope, err := e.currentPersonalScope(req.PersonalScope)
 	if err != nil {
 		return nil, fmt.Errorf("retrieve final personal scope fence: %w", err)
 	}
-	currentScope = nil
-	if enabledNow {
-		currentScope = &scopeNow
-	}
-	if !samePersonalScope(scopeUsed, currentScope) {
-		if retryOnEligibilityChange {
-			return e.retrieve(ctx, req, false)
-		}
+	if !samePersonalScope(req.PersonalScope, currentScope) {
 		return nil, ErrPersonalMemoryEligibilityChanged
 	}
 
@@ -857,6 +1071,7 @@ func (e *Engine) retrieve(
 		EmotionRole:          emotionRole,
 		SurfaceabilityAction: surfaceability,
 		ScoreBreakdowns:      breakdowns,
+		CandidateEvidence:    evidence,
 	}, nil
 }
 
@@ -962,7 +1177,7 @@ func (e *Engine) embedQuery(ctx context.Context, q string) ([]float32, error) {
 // retrieveEmpathic — full v3 ranking (delegates to retrieveEmpathicScored).
 // Anchors get slower decay (decay_lambda_anchor = 0.001 vs 0.002).
 func (e *Engine) retrieveEmpathic(qVec []float32, topK int) []int64 {
-	ids, _ := e.retrieveEmpathicScored(qVec, "", topK, nil)
+	ids, _ := e.retrieveEmpathicScoredEligible(qVec, "", topK, nil, nil)
 	return ids
 }
 
@@ -972,11 +1187,15 @@ func (e *Engine) retrieveEmpathic(qVec []float32, topK int) []int64 {
 // Mirrors the multiplicative-boost combine of retrieval_v3.retrieve(). `query`
 // feeds only temporal-keyword date inference; "" disables it.
 func (e *Engine) retrieveEmpathicScored(qVec []float32, query string, topK int, state *UserState) ([]int64, map[int64]ScoreBreakdown) {
-	scores, breakdowns := e.scoreEventsV3(qVec, query, state)
+	return e.retrieveEmpathicScoredEligible(qVec, query, topK, state, nil)
+}
+
+func (e *Engine) retrieveEmpathicScoredEligible(qVec []float32, query string, topK int, state *UserState, eligible map[int64]struct{}) ([]int64, map[int64]ScoreBreakdown) {
+	scores, breakdowns := e.scoreEventsV3Eligible(qVec, query, state, eligible)
 	if scores == nil {
 		return nil, nil
 	}
-	return topKIndicesToIDs(scores, e.eventIDs, topK), breakdowns
+	return topKEligibleIndicesToIDs(scores, e.eventIDs, topK, eligible), breakdowns
 }
 
 // scoreEventsV3 computes the full Pulse v3 score per event (cosine × recency ×
@@ -985,6 +1204,10 @@ func (e *Engine) retrieveEmpathicScored(qVec []float32, query string, topK int, 
 // chain expansion. Mirrors the boost-combine of retrieval_v3.retrieve() up to
 // (but not including) the `order = argsort(-final)` step.
 func (e *Engine) scoreEventsV3(qVec []float32, query string, state *UserState) ([]float64, map[int64]ScoreBreakdown) {
+	return e.scoreEventsV3Eligible(qVec, query, state, nil)
+}
+
+func (e *Engine) scoreEventsV3Eligible(qVec []float32, query string, state *UserState, eligible map[int64]struct{}) ([]float64, map[int64]ScoreBreakdown) {
 	n := len(e.eventIDs)
 	if n == 0 {
 		return nil, nil
@@ -994,6 +1217,10 @@ func (e *Engine) scoreEventsV3(qVec []float32, query string, state *UserState) (
 	cosines := make([]float64, n)
 	recencies := make([]float64, n)
 	for i := 0; i < n; i++ {
+		if !eligibleContains(eligible, e.eventIDs[i]) {
+			base[i] = math.Inf(-1)
+			continue
+		}
 		c := float64(dotF32(qVec, e.eventVecs[i]))
 		lambda := e.decayLambda
 		if e.eventAnchor[i] {
@@ -1012,6 +1239,10 @@ func (e *Engine) scoreEventsV3(qVec []float32, query string, state *UserState) (
 	scores := make([]float64, n)
 	breakdowns := make(map[int64]ScoreBreakdown, n)
 	for i := 0; i < n; i++ {
+		if !eligibleContains(eligible, e.eventIDs[i]) {
+			scores[i] = math.Inf(-1)
+			continue
+		}
 		// cartographerBoosts (shadow/curiosity/trigger) are a Pulse-side SUPERSET
 		// not present in the Python v3 reference. They collapse to 1.0 unless the
 		// UserState carries profile signals (shadow_themes / curiosity_signals /
@@ -1112,25 +1343,37 @@ func nonIdentityPtr(v float64) *float64 {
 // fact/vector store. Reuses e.eventVecs; does not touch scoreEventsV3 (the
 // frozen v3 empathic path).
 func (e *Engine) retrieveFactualEvents(qVec []float32, topK int) []int64 {
+	return e.retrieveFactualEventsEligible(qVec, topK, nil)
+}
+
+func (e *Engine) retrieveFactualEventsEligible(qVec []float32, topK int, eligible map[int64]struct{}) []int64 {
 	n := len(e.eventIDs)
 	if n == 0 {
 		return nil
 	}
 	scores := make([]float64, n)
 	for i := 0; i < n; i++ {
+		if !eligibleContains(eligible, e.eventIDs[i]) {
+			scores[i] = math.Inf(-1)
+			continue
+		}
 		scores[i] = float64(dotF32(qVec, e.eventVecs[i]))
 	}
-	return topKIndicesToIDs(scores, e.eventIDs, topK)
+	return topKEligibleIndicesToIDs(scores, e.eventIDs, topK, eligible)
 }
 
 func (e *Engine) retrieveFactual(qVec []float32, topK int) []int64 {
+	return e.retrieveFactualEligible(qVec, topK, nil)
+}
+
+func (e *Engine) retrieveFactualEligible(qVec []float32, topK int, eligible map[int64]struct{}) []int64 {
 	if len(e.factIDs) == 0 {
 		// No atomic_facts index (host-extracted mode never populates it) — do a
 		// CLEAN semantic ranking over EVENT embeddings instead of falling back to
 		// the empathic v3 ranker. Factual lookup wants plain cosine (what a fact
 		// store does); the empathic boosts/recency bury the answer. This reuses
 		// the already-loaded event vectors and never touches the frozen v3 path.
-		return e.retrieveFactualEvents(qVec, topK)
+		return e.retrieveFactualEventsEligible(qVec, topK, eligible)
 	}
 	n := len(e.factIDs)
 	scores := make([]float64, n)
@@ -1142,7 +1385,7 @@ func (e *Engine) retrieveFactual(qVec []float32, topK int) []int64 {
 	out := make([]int64, 0, topK)
 	for _, idx := range order {
 		eid := e.factEventIDs[idx]
-		if seen[eid] {
+		if seen[eid] || !eligibleContains(eligible, eid) {
 			continue
 		}
 		seen[eid] = true
@@ -1168,7 +1411,11 @@ func (e *Engine) retrieveFactual(qVec []float32, topK int) []int64 {
 //  3. If bestReach has ≥2 members, topologically expand from bestSeed (depth 4)
 //     and intersect with bestReach, then fill chain-first, then original top_ids.
 func (e *Engine) retrieveChain(qVec []float32, query string, topK int, state *UserState) []int64 {
-	scores, _ := e.scoreEventsV3(qVec, query, state)
+	return e.retrieveChainEligible(qVec, query, topK, state, nil)
+}
+
+func (e *Engine) retrieveChainEligible(qVec []float32, query string, topK int, state *UserState, eligible map[int64]struct{}) []int64 {
+	scores, _ := e.scoreEventsV3Eligible(qVec, query, state, eligible)
 	if scores == nil {
 		return nil
 	}
@@ -1178,6 +1425,9 @@ func (e *Engine) retrieveChain(qVec []float32, query string, topK int, state *Us
 	for _, idx := range order {
 		if len(topIDs) >= topK {
 			break
+		}
+		if !eligibleContains(eligible, e.eventIDs[idx]) {
+			continue
 		}
 		topIDs = append(topIDs, e.eventIDs[idx])
 	}
@@ -1193,6 +1443,9 @@ func (e *Engine) retrieveChain(qVec []float32, query string, topK int, state *Us
 	for _, idx := range order {
 		if len(wider) >= widerN {
 			break
+		}
+		if !eligibleContains(eligible, e.eventIDs[idx]) {
+			continue
 		}
 		wider = append(wider, e.eventIDs[idx])
 	}
@@ -1211,14 +1464,14 @@ func (e *Engine) retrieveChain(qVec []float32, query string, topK int, state *Us
 		seedLimit = len(wider)
 	}
 	for _, s := range wider[:seedLimit] {
-		reach := e.connectedComponent(s, candSet)
+		reach := e.connectedComponentEligible(s, candSet, eligible)
 		if len(reach) > len(bestReach) {
 			bestSeed, bestReach = s, reach
 		}
 	}
 
 	if bestSeed != 0 && len(bestReach) >= 2 {
-		expanded := e.expandChainFromSeeds([]int64{bestSeed}, 4)
+		expanded := e.expandChainFromSeedsEligible([]int64{bestSeed}, 4, eligible)
 		// chain_ids = [eid for eid in expanded if eid in best_reach]
 		result := make([]int64, 0, topK)
 		seen := make(map[int64]bool, topK)
@@ -1250,6 +1503,10 @@ func (e *Engine) retrieveChain(qVec []float32, query string, topK int, state *Us
 // and returns the subset of `candidates` reachable from it (including the seed
 // itself when it is a candidate). Mirrors retrieval_v3.py:631-643.
 func (e *Engine) connectedComponent(seed int64, candidates map[int64]bool) map[int64]bool {
+	return e.connectedComponentEligible(seed, candidates, nil)
+}
+
+func (e *Engine) connectedComponentEligible(seed int64, candidates map[int64]bool, eligible map[int64]struct{}) map[int64]bool {
 	visited := map[int64]bool{seed: true}
 	frontier := []int64{seed}
 	found := map[int64]bool{}
@@ -1261,7 +1518,7 @@ func (e *Engine) connectedComponent(seed int64, candidates map[int64]bool) map[i
 		frontier = frontier[1:]
 		// Python iterates c2p[n] + p2c[n] (parents first, then children).
 		for _, nb := range append(append([]int64{}, e.childToParent[n]...), e.parentToChild[n]...) {
-			if !visited[nb] {
+			if !visited[nb] && eligibleContains(eligible, nb) {
 				visited[nb] = true
 				frontier = append(frontier, nb)
 				if candidates[nb] {
@@ -1280,9 +1537,16 @@ func (e *Engine) connectedComponent(seed int64, candidates map[int64]bool) map[i
 // Python sorts on days_ago * -1). Only events present in the loaded index are
 // considered (Python's `eid not in eid_map` guard).
 func (e *Engine) expandChainFromSeeds(seeds []int64, depth int) []int64 {
+	return e.expandChainFromSeedsEligible(seeds, depth, nil)
+}
+
+func (e *Engine) expandChainFromSeedsEligible(seeds []int64, depth int, eligible map[int64]struct{}) []int64 {
 	exists := make(map[int64]bool, len(e.eventIDs))
 	daysOf := make(map[int64]float64, len(e.eventIDs))
 	for i, id := range e.eventIDs {
+		if !eligibleContains(eligible, id) {
+			continue
+		}
 		exists[id] = true
 		daysOf[id] = e.eventDays[i]
 	}
@@ -1360,6 +1624,10 @@ func (e *Engine) expandChainFromSeeds(seeds []int64, depth int) []int64 {
 }
 
 func (e *Engine) applyFragileSurfaceability(ids []int64, topK int, role EmotionRoleDecision) ([]int64, SurfaceabilityAction) {
+	return e.applyFragileSurfaceabilityEligible(ids, topK, role, nil)
+}
+
+func (e *Engine) applyFragileSurfaceabilityEligible(ids []int64, topK int, role EmotionRoleDecision, eligible map[int64]struct{}) ([]int64, SurfaceabilityAction) {
 	if len(ids) == 0 || !role.Fragile || role.ExplicitPainIntent {
 		return ids, ""
 	}
@@ -1367,7 +1635,7 @@ func (e *Engine) applyFragileSurfaceability(ids []int64, topK int, role EmotionR
 	if !allPainEventIDs(ids, emotions) {
 		return ids, ""
 	}
-	repairID, ok := e.bestRepairAnchorID(ids)
+	repairID, ok := e.bestRepairAnchorIDEligible(ids, eligible)
 	if !ok {
 		return nil, SurfaceabilitySuppress
 	}
@@ -1389,6 +1657,10 @@ func (e *Engine) eventEmotionMap() map[int64][]float32 {
 }
 
 func (e *Engine) bestRepairAnchorID(exclude []int64) (int64, bool) {
+	return e.bestRepairAnchorIDEligible(exclude, nil)
+}
+
+func (e *Engine) bestRepairAnchorIDEligible(exclude []int64, eligible map[int64]struct{}) (int64, bool) {
 	excluded := make(map[int64]bool, len(exclude))
 	for _, id := range exclude {
 		excluded[id] = true
@@ -1396,7 +1668,7 @@ func (e *Engine) bestRepairAnchorID(exclude []int64) (int64, bool) {
 	var bestID int64
 	var bestScore float32
 	for i, id := range e.eventIDs {
-		if excluded[id] || !isRepairEmotionVector(e.eventEmo[i]) {
+		if excluded[id] || !eligibleContains(eligible, id) || !isRepairEmotionVector(e.eventEmo[i]) {
 			continue
 		}
 		score := e.eventEmo[i][0] + e.eventEmo[i][4]
@@ -1449,6 +1721,24 @@ func topKIndicesToIDs(scores []float64, ids []int64, k int) []int64 {
 	out := make([]int64, k)
 	for i := 0; i < k; i++ {
 		out[i] = ids[order[i]]
+	}
+	return out
+}
+
+func topKEligibleIndicesToIDs(scores []float64, ids []int64, k int, eligible map[int64]struct{}) []int64 {
+	if eligible == nil {
+		return topKIndicesToIDs(scores, ids, k)
+	}
+	order := argsortDesc(scores)
+	out := make([]int64, 0, min(k, len(order)))
+	for _, index := range order {
+		if !eligibleContains(eligible, ids[index]) {
+			continue
+		}
+		out = append(out, ids[index])
+		if len(out) == k {
+			break
+		}
 	}
 	return out
 }

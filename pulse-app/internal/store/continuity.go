@@ -92,24 +92,26 @@ type ResumeSections struct {
 }
 
 type ResumeBlock struct {
-	Schema                 string         `json:"schema"`
-	ThreadID               string         `json:"thread_id"`
-	ProjectID              string         `json:"project_id,omitempty"`
-	SessionID              string         `json:"session_id,omitempty"`
-	TokenBudget            int            `json:"token_budget"`
-	TokenEstimate          int            `json:"token_estimate"`
-	TokenEconomy           TokenEconomy   `json:"token_economy"`
-	ResumeMarkdown         string         `json:"resume_markdown"`
-	Sections               ResumeSections `json:"sections"`
-	EvidenceRefs           []string       `json:"evidence_refs"`
-	MaterialRefs           []string       `json:"material_refs,omitempty"`
-	IncludedObjectIDs      []string       `json:"included_object_ids"`
-	IncludedEvidenceIDs    []string       `json:"included_evidence_ids"`
-	BaselineKind           string         `json:"baseline_kind,omitempty"`
-	SourceEquivalentTokens *int           `json:"source_equivalent_tokens,omitempty"`
-	CoverageCounted        int            `json:"coverage_counted,omitempty"`
-	CoverageTotal          int            `json:"coverage_total,omitempty"`
-	MemorySnapshotDigest   string         `json:"memory_snapshot_digest,omitempty"`
+	Schema                  string                `json:"schema"`
+	ThreadID                string                `json:"thread_id"`
+	ProjectID               string                `json:"project_id,omitempty"`
+	SessionID               string                `json:"session_id,omitempty"`
+	TokenBudget             int                   `json:"token_budget"`
+	TokenEstimate           int                   `json:"token_estimate"`
+	TokenEconomy            TokenEconomy          `json:"token_economy"`
+	ResumeMarkdown          string                `json:"resume_markdown"`
+	Sections                ResumeSections        `json:"sections"`
+	EvidenceRefs            []string              `json:"evidence_refs"`
+	MaterialRefs            []string              `json:"material_refs,omitempty"`
+	IncludedObjectIDs       []string              `json:"included_object_ids"`
+	IncludedEvidenceIDs     []string              `json:"included_evidence_ids"`
+	BaselineKind            string                `json:"baseline_kind,omitempty"`
+	SourceEquivalentTokens  *int                  `json:"source_equivalent_tokens,omitempty"`
+	CoverageCounted         int                   `json:"coverage_counted,omitempty"`
+	CoverageTotal           int                   `json:"coverage_total,omitempty"`
+	MemorySnapshotDigest    string                `json:"memory_snapshot_digest,omitempty"`
+	CurrentEmotionalContext CurrentEmotionContext `json:"current_emotional_context"`
+	EmotionQuestion         *EmotionQuestion      `json:"emotion_question,omitempty"`
 }
 
 type TokenEconomy struct {
@@ -394,6 +396,12 @@ func (s *Store) buildResume(
 	}
 
 	sections := ResumeSections{}
+	emotionalContext, err := s.CurrentEmotionContext(time.Now().UTC())
+	if err != nil {
+		// Emotional context is optional enrichment. A transient lock or damaged
+		// emotion row must not hide otherwise readable Personal continuity.
+		emotionalContext = CurrentEmotionContext{Items: []EmotionContextItem{}}
+	}
 	if hasCheckpoint {
 		sections.WhereWeLeftOff = []string{cp.Summary}
 		sections.ActiveDecisions = cp.Decisions
@@ -431,6 +439,13 @@ func (s *Store) buildResume(
 		if memory.EvidenceRef != "" && promoted {
 			sections.EvidenceRefs = appendUniqueContinuityItem(sections.EvidenceRefs, memory.EvidenceRef)
 		}
+	}
+	for _, item := range emotionalContext.Items {
+		text := fmt.Sprintf("%s: current influence %.2f (%s)", item.Emotion, item.Influence, item.Derivation)
+		if item.Trigger != "" {
+			text += "; cause: " + item.Trigger
+		}
+		sections.RelevantEmotionalState = appendUniqueContinuityItem(sections.RelevantEmotionalState, text)
 	}
 	if len(sections.OpenLoops) > 0 {
 		sections.SuggestedNextStep = []string{"Continue with: " + sections.OpenLoops[0]}
@@ -476,24 +491,25 @@ func (s *Store) buildResume(
 		memorySnapshotDigest = requestedScope.Digest()
 	}
 	return ResumeBlock{
-		Schema:                 ContinuitySchema,
-		ThreadID:               threadID,
-		ProjectID:              strings.TrimSpace(q.ProjectID),
-		SessionID:              strings.TrimSpace(q.SessionID),
-		TokenBudget:            budget,
-		TokenEstimate:          tokenEstimate,
-		TokenEconomy:           tokenEconomy,
-		ResumeMarkdown:         markdown,
-		Sections:               sections,
-		EvidenceRefs:           sections.EvidenceRefs,
-		MaterialRefs:           sections.MaterialRefs,
-		IncludedObjectIDs:      includedObjectIDs,
-		IncludedEvidenceIDs:    includedEvidenceIDs,
-		BaselineKind:           baselineKind,
-		SourceEquivalentTokens: sourceEquivalentTokens,
-		CoverageCounted:        coverageCounted,
-		CoverageTotal:          coverageTotal,
-		MemorySnapshotDigest:   memorySnapshotDigest,
+		Schema:                  ContinuitySchema,
+		ThreadID:                threadID,
+		ProjectID:               strings.TrimSpace(q.ProjectID),
+		SessionID:               strings.TrimSpace(q.SessionID),
+		TokenBudget:             budget,
+		TokenEstimate:           tokenEstimate,
+		TokenEconomy:            tokenEconomy,
+		ResumeMarkdown:          markdown,
+		Sections:                sections,
+		EvidenceRefs:            sections.EvidenceRefs,
+		MaterialRefs:            sections.MaterialRefs,
+		IncludedObjectIDs:       includedObjectIDs,
+		IncludedEvidenceIDs:     includedEvidenceIDs,
+		BaselineKind:            baselineKind,
+		SourceEquivalentTokens:  sourceEquivalentTokens,
+		CoverageCounted:         coverageCounted,
+		CoverageTotal:           coverageTotal,
+		MemorySnapshotDigest:    memorySnapshotDigest,
+		CurrentEmotionalContext: emotionalContext,
 	}, nil
 }
 

@@ -5,6 +5,9 @@ platforms follow after the Mac installation has been tested end to end.
 
 Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
 published on 7 August 2026 after a clean remote Mac installation.
+Personal 0.8 is unfinished and not present in npm. This document also describes
+its intended invisible-memory flow; ordinary installation remains on 0.7.2
+until 0.8 passes a separate live acceptance.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
@@ -107,6 +110,12 @@ separate human approval.
 
 This is the product proof. `pulse demo` remains an optional isolated explainer
 and cannot replace it.
+
+The unfinished 0.8 target keeps this flow invisible: recall happens temporarily
+when the user asks a question, returns no more than four relevant memories, and
+adds nothing for a weak match. A durable result is saved through the single
+`pulse_memory` tool inside the same ordinary turn. Session start and Stop do not
+run memory model passes.
 
 ## Privacy and removal
 

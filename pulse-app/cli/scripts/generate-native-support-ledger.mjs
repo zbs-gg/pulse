@@ -66,7 +66,7 @@ export function generateNativeSupportLedger({
     .sort((left, right) => `${left.host}\0${left.target_id}`.localeCompare(`${right.host}\0${right.target_id}`));
   if (records.length !== 18) fail('support_ledger_evidence_invalid');
   const lines = [
-    '# Pulse 0.7.2 Universal Gold support ledger',
+    '# Pulse 0.8.0 Universal Gold support ledger',
     '',
     '> Generated only from signed promotion authorization and 18 public-registry receipts. Do not edit rows by hand.',
     '',

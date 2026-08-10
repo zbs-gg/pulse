@@ -15,14 +15,15 @@ const SemanticDeltaSchema = "pulse.semantic_delta.v1"
 var semanticRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,95}$`)
 
 type SemanticDelta struct {
-	Schema           string              `json:"schema"`
-	Source           SemanticDeltaSource `json:"source"`
-	Nodes            []SemanticNode      `json:"nodes,omitempty"`
-	Edges            []SemanticEdge      `json:"edges,omitempty"`
-	Facts            []SemanticFact      `json:"facts,omitempty"`
-	Events           []SemanticEvent     `json:"events,omitempty"`
-	Continuity       *SemanticContinuity `json:"continuity,omitempty"`
-	RawInputIncluded bool                `json:"raw_input_included"`
+	Schema           string                  `json:"schema"`
+	Source           SemanticDeltaSource     `json:"source"`
+	Nodes            []SemanticNode          `json:"nodes,omitempty"`
+	Edges            []SemanticEdge          `json:"edges,omitempty"`
+	Facts            []SemanticFact          `json:"facts,omitempty"`
+	Events           []SemanticEvent         `json:"events,omitempty"`
+	EmotionAnswers   []SemanticEmotionAnswer `json:"emotion_answers,omitempty"`
+	Continuity       *SemanticContinuity     `json:"continuity,omitempty"`
+	RawInputIncluded bool                    `json:"raw_input_included"`
 }
 
 type SemanticDeltaSource struct {
@@ -85,11 +86,29 @@ type SemanticEvent struct {
 	Biometrics *SemanticBiometrics `json:"biometrics,omitempty"`
 	// Emotions is a Plutchik-10 vector (0..1) for emotion-alignment scoring.
 	Emotions map[string]float64 `json:"emotions,omitempty"`
+	// EmotionDerivation records whether the person named the emotion, Pulse
+	// inferred it, or the person later confirmed it.
+	EmotionDerivation string                  `json:"emotion_derivation,omitempty"`
+	EmotionConfidence float64                 `json:"emotion_confidence,omitempty"`
+	ObservedLabel     string                  `json:"observed_label,omitempty"`
+	Trigger           *SemanticEmotionTrigger `json:"trigger,omitempty"`
 	// Claims are host-extracted subject/predicate/object facts carried by this
 	// event. Each becomes a bitemporal Assertion (auto-superseding the prior
 	// claim with the same subject+predicate), so a changed fact invalidates the
 	// stale one instead of silently coexisting. Optional.
 	Claims []SemanticClaim `json:"claims,omitempty"`
+}
+
+type SemanticEmotionTrigger struct {
+	Summary    string  `json:"summary"`
+	Derivation string  `json:"derivation"`
+	Confidence float64 `json:"confidence"`
+	Confirmed  bool    `json:"confirmed,omitempty"`
+}
+
+type SemanticEmotionAnswer struct {
+	QuestionID string                 `json:"question_id"`
+	Trigger    SemanticEmotionTrigger `json:"trigger"`
 }
 
 // SemanticClaim is a structured fact: "<subject> <predicate> <object>".
@@ -129,13 +148,15 @@ type SemanticContinuity struct {
 }
 
 type SemanticDeltaResult struct {
-	OK              bool    `json:"ok"`
-	NodesUpserted   int     `json:"nodes_upserted"`
-	EdgesUpserted   int     `json:"edges_upserted"`
-	FactsUpserted   int     `json:"facts_upserted"`
-	EventsInserted  int     `json:"events_inserted"`
-	EventIDs        []int64 `json:"event_ids,omitempty"`
-	CheckpointSaved bool    `json:"checkpoint_saved"`
+	OK              bool                       `json:"ok"`
+	NodesUpserted   int                        `json:"nodes_upserted"`
+	EdgesUpserted   int                        `json:"edges_upserted"`
+	FactsUpserted   int                        `json:"facts_upserted"`
+	EventsInserted  int                        `json:"events_inserted"`
+	EventIDs        []int64                    `json:"event_ids,omitempty"`
+	EventResults    []SemanticEventWriteResult `json:"event_results,omitempty"`
+	EmotionQuestion *EmotionQuestion           `json:"emotion_question,omitempty"`
+	CheckpointSaved bool                       `json:"checkpoint_saved"`
 	// Claim-resolution counts (0 when resolution is disabled).
 	ClaimsInserted   int `json:"claims_inserted,omitempty"`
 	ClaimsSuperseded int `json:"claims_superseded,omitempty"`
@@ -146,6 +167,20 @@ type SemanticDeltaResult struct {
 	// EventsIndexed reports whether freshly ingested events were embedded and
 	// are retrievable now (nil = no retrieval engine / no events in delta).
 	EventsIndexed *bool `json:"events_indexed,omitempty"`
+}
+
+type SemanticEventWriteResult struct {
+	ClientID string `json:"client_id"`
+	ID       int64  `json:"id"`
+	Result   string `json:"result"`
+}
+
+type EmotionQuestion struct {
+	QuestionID    string `json:"question_id"`
+	EventID       int64  `json:"event_id"`
+	EventClientID string `json:"event_client_id,omitempty"`
+	Question      string `json:"question"`
+	ExpiresAt     string `json:"expires_at"`
 }
 
 func (s *Store) SaveSemanticDelta(delta SemanticDelta) (SemanticDeltaResult, error) {
@@ -256,12 +291,26 @@ func saveSemanticDeltaTx(tx *sql.Tx, delta SemanticDelta) (SemanticDeltaResult, 
 		result.FactsUpserted++
 	}
 	for _, event := range delta.Events {
-		id, err := insertSemanticEvent(tx, nodeIDs, event, now)
+		id, outcome, question, err := insertSemanticEvent(tx, nodeIDs, event, now, true)
 		if err != nil {
 			return result, err
 		}
 		result.EventIDs = append(result.EventIDs, id)
-		result.EventsInserted++
+		result.EventResults = append(result.EventResults, SemanticEventWriteResult{
+			ClientID: event.ClientID, ID: id, Result: outcome,
+		})
+		if outcome == "created" {
+			result.EventsInserted++
+		}
+		if result.EmotionQuestion == nil && question != nil {
+			question.EventClientID = event.ClientID
+			result.EmotionQuestion = question
+		}
+	}
+	for _, answer := range delta.EmotionAnswers {
+		if _, err := answerEmotionQuestionTx(tx, answer, now); err != nil {
+			return result, err
+		}
 	}
 	if delta.Continuity != nil {
 		threadID := normalizeThreadID(delta.Source.ThreadID, delta.Source.ProjectID, delta.Source.SessionID)
@@ -503,7 +552,9 @@ func upsertSemanticFact(tx *sql.Tx, ids map[string]int64, fact SemanticFact, now
 	return nil
 }
 
-func insertSemanticEvent(tx *sql.Tx, ids map[string]int64, event SemanticEvent, now string) (int64, error) {
+func insertSemanticEvent(
+	tx *sql.Tx, ids map[string]int64, event SemanticEvent, now string, deduplicate bool,
+) (int64, string, *EmotionQuestion, error) {
 	ts := now
 	if strings.TrimSpace(event.OccurredAt) != "" {
 		ts = strings.TrimSpace(event.OccurredAt)
@@ -516,52 +567,97 @@ func insertSemanticEvent(tx *sql.Tx, ids map[string]int64, event SemanticEvent, 
 	if event.Biometrics != nil {
 		raw, err := json.Marshal(event.Biometrics)
 		if err != nil {
-			return 0, fmt.Errorf("marshal event biometrics %q: %w", event.ClientID, err)
+			return 0, "", nil, fmt.Errorf("marshal event biometrics %q: %w", event.ClientID, err)
 		}
 		bioJSON = string(raw)
 	}
 	sentiment := normalizeSemanticOptional(event.Sentiment)
+	digest := ""
+	if deduplicate {
+		digest = semanticEventDigest(event)
+	}
 	res, err := tx.Exec(`
-		INSERT INTO events
+		INSERT OR IGNORE INTO events
 		  (title, description, sentiment, sentiment_label, emotional_weight,
 		   scorer_version, ts, user_flag, biometric_json,
-		   belief_class, confidence_floor, provenance, domain)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'operational', ?, 'interactive_memory', ?)`,
+		   belief_class, confidence_floor, provenance, domain, semantic_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'operational', ?, 'interactive_memory', ?, ?)`,
 		event.Title, event.Summary, sentiment, sentiment, event.EmotionalWeight,
 		"host-extracted", ts, userFlag, bioJSON,
-		event.Confidence, normalizeDomain(event.Domain))
+		event.Confidence, normalizeDomain(event.Domain), nullableString(digest))
 	if err != nil {
-		return 0, fmt.Errorf("insert semantic event %q: %w", event.ClientID, err)
+		return 0, "", nil, fmt.Errorf("insert semantic event %q: %w", event.ClientID, err)
 	}
-	eventID, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
+	created, _ := res.RowsAffected()
+	var eventID int64
+	outcome := "created"
+	if created == 0 && digest != "" {
+		outcome = "deduplicated"
+		if err := tx.QueryRow(`SELECT id FROM events WHERE semantic_digest=?`, digest).Scan(&eventID); err != nil {
+			return 0, "", nil, err
+		}
+	} else {
+		var err error
+		eventID, err = res.LastInsertId()
+		if err != nil {
+			return 0, "", nil, err
+		}
 	}
-	if len(event.Emotions) > 0 {
+	if len(event.Emotions) > 0 && outcome == "created" {
 		emo := func(key string) float64 { return event.Emotions[key] }
+		derivation := normalizedEmotionDerivation(event.EmotionDerivation, "inferred")
+		confidence := event.EmotionConfidence
+		if confidence == 0 {
+			confidence = event.Confidence
+		}
+		observed := strings.TrimSpace(event.ObservedLabel)
+		if observed == "" {
+			observed = dominantEmotionLabel(event.Emotions)
+		}
+		triggerSummary, triggerDerivation := "", ""
+		triggerConfidence, triggerConfirmed := 0.0, 0
+		if event.Trigger != nil {
+			triggerSummary = strings.TrimSpace(event.Trigger.Summary)
+			triggerDerivation = normalizedEmotionDerivation(event.Trigger.Derivation, derivation)
+			triggerConfidence = event.Trigger.Confidence
+			if event.Trigger.Confirmed || triggerDerivation == "user_confirmed" || triggerDerivation == "explicit" {
+				triggerConfirmed = 1
+			}
+		}
 		if _, err := tx.Exec(`
 			INSERT INTO event_emotions
 			  (event_id, joy, sadness, anger, fear, trust, disgust,
-			   anticipation, surprise, shame, guilt, tagger)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'host-extracted')
+			   anticipation, surprise, shame, guilt, tagger, confidence,
+			   derivation, observed_label, trigger_summary, trigger_derivation,
+			   trigger_confidence, trigger_confirmed, emotion_key)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'host-extracted', ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(event_id) DO NOTHING`,
 			eventID, emo("joy"), emo("sadness"), emo("anger"), emo("fear"), emo("trust"),
-			emo("disgust"), emo("anticipation"), emo("surprise"), emo("shame"), emo("guilt")); err != nil {
-			return 0, fmt.Errorf("insert event emotions %q: %w", event.ClientID, err)
+			emo("disgust"), emo("anticipation"), emo("surprise"), emo("shame"), emo("guilt"),
+			confidence, derivation, observed, triggerSummary, triggerDerivation,
+			triggerConfidence, triggerConfirmed, semanticEventDigest(event)); err != nil {
+			return 0, "", nil, fmt.Errorf("insert event emotions %q: %w", event.ClientID, err)
+		}
+		if err := applyEmotionOverrideTx(tx, eventID, semanticEventDigest(event)); err != nil {
+			return 0, "", nil, fmt.Errorf("apply event emotion override %q: %w", event.ClientID, err)
 		}
 	}
 	for _, ref := range event.EntityRefs {
 		entityID, ok := ids[ref]
 		if !ok {
-			return 0, fmt.Errorf("event.entity_refs references unknown node %q", ref)
+			return 0, "", nil, fmt.Errorf("event.entity_refs references unknown node %q", ref)
 		}
 		if _, err := tx.Exec(`
 			INSERT OR IGNORE INTO event_entities(event_id, entity_id)
 			VALUES (?, ?)`, eventID, entityID); err != nil {
-			return 0, fmt.Errorf("insert event entity ref %q: %w", ref, err)
+			return 0, "", nil, fmt.Errorf("insert event entity ref %q: %w", ref, err)
 		}
 	}
-	return eventID, nil
+	question, err := ensureEmotionQuestionTx(tx, eventID, event, now, deduplicate)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	return eventID, outcome, question, nil
 }
 
 func validateSemanticDelta(delta SemanticDelta) error {
@@ -589,7 +685,7 @@ func validateSemanticDelta(delta SemanticDelta) error {
 			return fmt.Errorf("%s is unsafe", field)
 		}
 	}
-	if len(delta.Nodes) == 0 && len(delta.Edges) == 0 && len(delta.Facts) == 0 && len(delta.Events) == 0 && delta.Continuity == nil {
+	if len(delta.Nodes) == 0 && len(delta.Edges) == 0 && len(delta.Facts) == 0 && len(delta.Events) == 0 && len(delta.EmotionAnswers) == 0 && delta.Continuity == nil {
 		return fmt.Errorf("semantic delta must include graph content or continuity")
 	}
 	if len(delta.Nodes) > 30 {
@@ -603,6 +699,9 @@ func validateSemanticDelta(delta SemanticDelta) error {
 	}
 	if len(delta.Events) > 20 {
 		return fmt.Errorf("events has too many items: max 20")
+	}
+	if len(delta.EmotionAnswers) > 20 {
+		return fmt.Errorf("emotion_answers has too many items: max 20")
 	}
 	refs := map[string]bool{}
 	for i, node := range delta.Nodes {
@@ -626,6 +725,11 @@ func validateSemanticDelta(delta SemanticDelta) error {
 	}
 	for i, event := range delta.Events {
 		if err := validateSemanticEvent(i, event, refs); err != nil {
+			return err
+		}
+	}
+	for i, answer := range delta.EmotionAnswers {
+		if err := validateSemanticEmotionAnswer(i, answer); err != nil {
 			return err
 		}
 	}
@@ -757,6 +861,22 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 			return fmt.Errorf("events[%d].emotions[%q] must be 0..1", i, key)
 		}
 	}
+	if len(event.Emotions) > 0 {
+		if event.EmotionDerivation != "" && normalizedEmotionDerivation(event.EmotionDerivation, "") == "" {
+			return fmt.Errorf("events[%d].emotion_derivation is unsupported", i)
+		}
+		if event.EmotionConfidence < 0 || event.EmotionConfidence > 1 {
+			return fmt.Errorf("events[%d].emotion_confidence must be 0..1", i)
+		}
+		if err := validateSemanticText(fmt.Sprintf("events[%d].observed_label", i), event.ObservedLabel, 120, false); err != nil {
+			return err
+		}
+		if event.Trigger != nil {
+			if err := validateSemanticTrigger(fmt.Sprintf("events[%d].trigger", i), *event.Trigger); err != nil {
+				return err
+			}
+		}
+	}
 	if bio := event.Biometrics; bio != nil {
 		check01 := func(name string, v *float64) error {
 			if v != nil && (*v < 0 || *v > 1) {
@@ -800,6 +920,29 @@ func validateSemanticEvent(i int, event SemanticEvent, refs map[string]bool) err
 		if err := validateSemanticText(fmt.Sprintf("events[%d].claims[%d].object", i, j), cl.Object, 400, true); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateSemanticTrigger(field string, trigger SemanticEmotionTrigger) error {
+	if err := validateSemanticText(field+".summary", trigger.Summary, 360, true); err != nil {
+		return err
+	}
+	if normalizedEmotionDerivation(trigger.Derivation, "") == "" {
+		return fmt.Errorf("%s.derivation is unsupported", field)
+	}
+	if trigger.Confidence < 0 || trigger.Confidence > 1 {
+		return fmt.Errorf("%s.confidence must be 0..1", field)
+	}
+	return nil
+}
+
+func validateSemanticEmotionAnswer(i int, answer SemanticEmotionAnswer) error {
+	if !strings.HasPrefix(answer.QuestionID, "emotion_question:") || !validTrayIdentifier(answer.QuestionID) {
+		return fmt.Errorf("emotion_answers[%d].question_id is invalid", i)
+	}
+	if err := validateSemanticTrigger(fmt.Sprintf("emotion_answers[%d].trigger", i), answer.Trigger); err != nil {
+		return err
 	}
 	return nil
 }

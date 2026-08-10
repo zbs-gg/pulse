@@ -347,7 +347,9 @@ function hostSlug(host) {
 }
 
 const LOCAL_PRODUCT_TOOL_ACTIONS = new Set([
+  'pulse_memory',
   'pulse_remember',
+  'pulse_graph_delta',
 ]);
 
 function productToolAction(toolName) {
@@ -767,6 +769,31 @@ export function writeHostFinalizeMarker(resolved, event, host, result, now = new
 		resolved.runtime.data_dir, host, event.session_id, event.turn_id,
 	), marker, { platformServices, maxBytes: 4096, label: 'host_finalize_marker' });
   return marker;
+}
+
+export function writeHostRecallMarker(resolved, event, host, now = new Date(), {
+	platformServices = defaultPlatformServices,
+} = {}) {
+	if (host !== 'cursor' || event?.host !== 'cursor' ||
+		event.binding_digest !== resolved?.binding?.binding_digest ||
+		!(now instanceof Date) || Number.isNaN(now.valueOf())) {
+		throw new Error('host_recall_marker_invalid');
+	}
+	const directory = join(resolved.runtime.data_dir, 'runtime', 'cursor-lifecycle');
+	platformServices.ensurePrivateDirectory(resolve(resolved.runtime.data_dir));
+	platformServices.ensurePrivateDirectory(join(resolved.runtime.data_dir, 'runtime'));
+	platformServices.ensurePrivateDirectory(directory);
+	platformServices.atomicWritePrivateFile(
+		join(directory, 'prompt_recall.json'),
+		`${JSON.stringify({
+			schema: 'pulse.cursor_lifecycle_event.v1',
+			binding_digest: resolved.binding.binding_digest,
+			event: 'prompt_recall',
+			observed_at: now.toISOString(),
+		})}\n`,
+		{ ensureParent: false, maxBytes: 2048 },
+	);
+	return { recorded: true };
 }
 
 export function readHostFinalizeMarker(resolved, event, host, {

@@ -139,6 +139,10 @@ func TestRememberCapsuleProjectsNormalTierToLinkedTaggedEvent(t *testing.T) {
 	if docs[0].Text != "Cut scope to the committed checklist and ship the smallest safe release." { // content only: kind is metadata, not embedded
 		t.Fatalf("doc text = %q", docs[0].Text)
 	}
+	objectDocs, err := s.PrivateObjectEventDocs(ids[0])
+	if err != nil || len(objectDocs) != 1 || objectDocs[0] != docs[0] {
+		t.Fatalf("private object docs = %#v, err=%v", objectDocs, err)
+	}
 }
 
 func TestUnindexedHostEventDocsMatchesLiveCanonicalEmbeddingText(t *testing.T) {
@@ -161,7 +165,12 @@ func TestUnindexedHostEventDocsMatchesLiveCanonicalEmbeddingText(t *testing.T) {
 		t.Fatalf("insert semantic event: %v", err)
 	}
 	semanticID, _ := res.LastInsertId()
-	docs, err := s.UnindexedHostEventDocs(10)
+	if _, err := s.DB().Exec(`
+		INSERT INTO event_embeddings(event_id, model, dim, vector_json, text_source)
+		VALUES (?, 'bge-m3-mlx-fp16', 1024, '[]', 'legacy vector')`, semanticID); err != nil {
+		t.Fatalf("insert legacy embedding: %v", err)
+	}
+	docs, err := s.UnindexedHostEventDocs("bge-m3", true, 10)
 	if err != nil {
 		t.Fatalf("unindexed docs: %v", err)
 	}
@@ -174,6 +183,28 @@ func TestUnindexedHostEventDocsMatchesLiveCanonicalEmbeddingText(t *testing.T) {
 	}
 	if got[semanticID] != "Release title\nRelease summary" {
 		t.Fatalf("semantic restart text = %q", got[semanticID])
+	}
+	interactiveDocs, err := s.UnindexedHostEventDocs("bge-m3", false, 10)
+	if err != nil {
+		t.Fatalf("interactive unindexed docs: %v", err)
+	}
+	for _, doc := range interactiveDocs {
+		if doc.EventID == semanticID {
+			t.Fatal("interactive indexing selected a searchable legacy bridge row")
+		}
+	}
+	if _, err := s.DB().Exec(`
+		UPDATE event_embeddings SET model='bge-m3' WHERE event_id=?`, semanticID); err != nil {
+		t.Fatalf("promote managed embedding: %v", err)
+	}
+	docs, err = s.UnindexedHostEventDocs("bge-m3", true, 10)
+	if err != nil {
+		t.Fatalf("managed unindexed docs: %v", err)
+	}
+	for _, doc := range docs {
+		if doc.EventID == semanticID {
+			t.Fatal("managed embedding was still scheduled for backfill")
+		}
 	}
 }
 

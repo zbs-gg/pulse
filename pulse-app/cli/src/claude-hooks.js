@@ -18,6 +18,7 @@ import {
 } from './host-adapter.js';
 import {
 	activatedBoundPulseRequest,
+  boundPulseRequest,
   readHostFinalizeMarker,
   readHostTurnContext,
   resolveBoundCodexRuntime,
@@ -25,17 +26,26 @@ import {
   writeHostTurnContext,
 } from './codex-runtime.js';
 import {
+  composePromptMemoryContext,
   composeBoundResumeEvidence,
   observePendingContinuityDelivery,
+  PERSONAL_AUTO_CAPTURE_CONTEXT,
   persistContinuityDelivery,
   recordContinuityObservationTicket,
 } from './product-compositor.js';
 
 const MAX_HOOK_INPUT = 1 << 20;
 const HOST = 'claude-code';
+const WRITE_CORROBORATED = Symbol('pulse.claude_hook_write_corroborated');
 
-function isClaudeProductRememberTool(toolName) {
-  return typeof toolName === 'string' && /^mcp__pulse-product__pulse_remember$/i.test(toolName);
+function isClaudeProductMemoryTool(toolName) {
+  return typeof toolName === 'string' &&
+    /^(?:mcp__pulse-product|mcp__plugin_pulse_pulse-product)__pulse_memory$/i.test(toolName);
+}
+
+function corroboratedWrite(output) {
+  Object.defineProperty(output, WRITE_CORROBORATED, { value: true });
+  return output;
 }
 
 export function claudeHookContractDigest(runtimeDigest) {
@@ -181,16 +191,10 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
 	const request = dependencies.request ?? activatedBoundPulseRequest;
   const recordFailure = dependencies.recordFailure ?? recordHookFailure;
 
-  if (eventName === 'PreToolUse' &&
-      (isDestructivePulseTool(rawInput.tool_name) ||
-       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
-       isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
-    return preToolDenied('Pulse deletion is user-controlled. Product vault wipe requires the privileged OS-backed Pulse surface and is never agent-callable.');
-  }
   if (eventName === 'PreToolUse' && isUntrustedPulseMemoryWriteTool(rawInput.tool_name)) {
     return preToolDenied('Pulse Personal memory writes require the pulse-product server. Legacy or lookalike Pulse servers cannot create Personal memory.');
   }
-  if (eventName === 'PreToolUse' && !isPulseProductTool(rawInput.tool_name)) return {};
+  if (eventName === 'PreToolUse' && !isClaudeProductMemoryTool(rawInput.tool_name)) return {};
 
   let resolved;
   try {
@@ -201,128 +205,47 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       : canonicalTurnEvent(rawInput, resolved);
 
     if (eventName === 'SessionStart') {
-      const context = await resumeContext(resolved, event, request, dependencies);
-      return annotateContinuityDelivery({
-        continue: true,
-        hookSpecificOutput: {
-          hookEventName: 'SessionStart',
-          additionalContext: context.additionalContext,
-        },
-      }, resolved, event, context.manifest);
+      return { continue: true };
     }
     if (eventName === 'UserPromptSubmit') {
-      try {
-        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, nativeEvent, {
-          request: dependencies.deliveryRequest ?? request,
-          platformServices: dependencies.platformServices,
-        });
-      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
+      let recalled = '';
+      try {
+        recalled = await (dependencies.composePromptMemory ?? composePromptMemoryContext)(
+          resolved, rawInput.prompt, { request: dependencies.promptRequest ?? boundPulseRequest },
+        );
+      } catch { /* optional memory must fail open */ }
       return {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
-          additionalContext: renderAdditionalContext([], contextLease(resolved.binding, now)),
+          additionalContext: `${recalled ? `${recalled}\n` : ''}${PERSONAL_AUTO_CAPTURE_CONTEXT}`,
         },
       };
     }
     if (eventName === 'PreToolUse') {
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
-      await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (isClaudeProductRememberTool(rawInput.tool_name)) {
-        (dependencies.writeToolLease ?? writeHostToolLease)(
-          resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
-        );
-      }
+      (dependencies.writeToolLease ?? writeHostToolLease)(
+        resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
+      );
       return {};
     }
     if (eventName === 'PostToolUse') {
-      if (!isClaudeProductRememberTool(rawInput.tool_name)) return {};
-      const refs = extractPulseReceiptRefs(rawInput.tool_response);
-      if (refs.length === 0) return {};
-      const marker = (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
-      const corroborated = [];
-      for (const ref of refs) {
-        const receipt = await request(resolved, `/memory/receipts/${encodeURIComponent(ref.receipt_id)}`, {
-          method: 'GET', timeoutMs: 1200,
-        });
-        if (receiptMatchesEvent(receipt, ref, marker, event)) corroborated.push(ref);
-      }
-      return corroborated.length === 0 ? {} : {
-        systemMessage: `Pulse Memory Tray receipt: ${corroborated.map((ref) => `${ref.receipt_id}:${ref.status}`).join(', ')}`,
-      };
+      if (!isClaudeProductMemoryTool(rawInput.tool_name)) return {};
+      (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
+      return corroboratedWrite({});
     }
-    if (eventName === 'PreCompact') {
-      return { systemMessage: 'Pulse kept the current turn open across compaction.' };
-    }
-    if (eventName === 'PostCompact') {
-      return { systemMessage: 'Pulse binding will be reloaded on the compacted session start.' };
-    }
-    if (eventName === 'SubagentStart') {
-      const context = await resumeContext(resolved, nativeEvent, request, dependencies);
-      return annotateContinuityDelivery({
-        hookSpecificOutput: {
-          hookEventName: 'SubagentStart',
-          additionalContext: context.additionalContext,
-        },
-		systemMessage: 'Pulse subagent boundary: return typed durable-memory candidates to the parent; the parent finalizes the turn once. Role-scoped retrieval is not active.',
-      }, resolved, nativeEvent, context.manifest);
-    }
+    if (eventName === 'PreCompact' || eventName === 'PostCompact' || eventName === 'SubagentStart') return {};
     if (eventName === 'SubagentStop') return {};
-    if (eventName === 'Stop') {
-      if (Array.isArray(rawInput.background_tasks) && rawInput.background_tasks.length > 0) {
-        return {
-          decision: 'block',
-          reason: `Pulse deferred turn finalization while ${rawInput.background_tasks.length} background task(s) remain active.`,
-        };
-      }
-      try {
-        (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
-        return {};
-      } catch {
-        // First Stop requests one bounded model pass; recursive Stop seals no-change.
-      }
-      if (!event.stop_hook_active) {
-        await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-        return {
-          decision: 'block',
-          reason: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, stop again without calling a memory tool.',
-        };
-      }
-      try {
-        await request(resolved, '/turn/no-change', {
-          body: noChangeBody(resolved, event),
-          idempotencyKey: event.idempotency_key,
-        });
-      } catch (error) {
-        if (!(error?.status === 409 && /turn already finalized with a different result/.test(error.message))) throw error;
-      }
-      return {};
-    }
+    if (eventName === 'Stop') return {};
     throw new Error('unsupported_claude_code_hook');
   } catch (error) {
     if (eventName === 'PreToolUse') {
       return preToolDenied('pulse_authority_unavailable: restart the task after Pulse binding is restored');
     }
-    if (eventName === 'Stop') {
-      let event;
-      try {
-        event = resolved
-          ? canonicalTurnEvent(rawInput, resolved)
-          : normalizeClaudeHook('Stop', rawInput);
-      } catch {
-        event = undefined;
-      }
-      if (event) {
-        const receipt = hookFailureReceipt(event, 'finalize_failed', now);
-        recordFailure(resolved, receipt);
-      }
-      return {};
-    }
-    return {
-      continue: true,
-      systemMessage: `Pulse ${eventName} degraded: bound memory context is unavailable.`,
-    };
+    return eventName === 'PreToolUse'
+      ? preToolDenied('pulse_authority_unavailable: restart the task after Pulse binding is restored')
+      : { continue: true };
   }
 }
 
@@ -395,10 +318,8 @@ export function claudeWorkspaceDigest(canonicalPath) {
 function readinessMilestone(eventName, options) {
   if (eventName === 'UserPromptSubmit' &&
       options.output?.hookSpecificOutput?.hookEventName === 'UserPromptSubmit') return 'prompt_context';
-  if (eventName === 'PostToolUse' && isClaudeProductRememberTool(options.input?.tool_name) &&
-      /^Pulse Memory Tray receipt:/.test(options.output?.systemMessage ?? '')) return 'write_receipt';
-  if (eventName === 'Stop' && options.output?.decision !== 'block' &&
-      options.output?.continue !== true) return 'turn_finalize';
+  if (eventName === 'PostToolUse' && isClaudeProductMemoryTool(options.input?.tool_name) &&
+      options.output?.[WRITE_CORROBORATED] === true) return 'write_receipt';
   return undefined;
 }
 
@@ -406,7 +327,7 @@ export function recordClaudeHookReadiness(eventName, resolved, options = {}) {
 	const digest = options.hooksDigest ?? installedClaudeHookContractDigest() ?? process.env.PULSE_CLAUDE_HOOKS_DIGEST;
   const milestone = options.milestone ?? readinessMilestone(eventName, options);
   if (!/^[a-f0-9]{64}$/.test(digest ?? '') || ![
-    'prompt_context', 'write_receipt', 'turn_finalize',
+    'prompt_context', 'write_receipt',
   ].includes(milestone) || !resolved?.binding || !resolved?.runtime) return false;
   const { binding, runtime } = resolved;
   const sessionID = options.input?.session_id;
@@ -442,7 +363,7 @@ export function recordClaudeHookReadiness(eventName, resolved, options = {}) {
   try {
     const current = JSON.parse(readFileSync(path, 'utf8'));
     if (current?.schema === 'pulse.claude_code_hook_readiness.v1' &&
-        current.hooks_digest === digest && current.turn_proof === turnProof &&
+        current.hooks_digest === digest &&
         Object.entries(authority).every(([key, value]) => current[key] === value) &&
         current.milestones && typeof current.milestones === 'object') {
       milestones = current.milestones;

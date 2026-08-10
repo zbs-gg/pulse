@@ -27,16 +27,14 @@
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0"
-  },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "mcp",
@@ -60,5 +58,8 @@
     "url": "https://github.com/zbs-gg/pulse/issues"
   },
   "homepage": "https://github.com/zbs-gg/pulse#readme",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0"
+  }
 }

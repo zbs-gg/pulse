@@ -17,6 +17,17 @@ type boundedRecordingEmbedder struct {
 
 type healthAwareEmbedder struct{ ready bool }
 
+type fixedQueryEmbedder struct{}
+
+func (*fixedQueryEmbedder) Model() string { return "fake-embed" }
+func (*fixedQueryEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for index := range texts {
+		vectors[index] = []float32{1, 0}
+	}
+	return vectors, nil
+}
+
 func (e *healthAwareEmbedder) Model() string { return "health-aware" }
 func (e *healthAwareEmbedder) Ready() bool   { return e.ready }
 func (e *healthAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
@@ -107,6 +118,129 @@ func TestEmbedAndPersistEventsDefersReloadForPagedBackfill(t *testing.T) {
 	}
 	if len(engine.eventIDs) != 1 {
 		t.Fatalf("explicit reload live events=%d", len(engine.eventIDs))
+	}
+}
+
+func TestEmbedAndRefreshEventsDoesNotReloadHistoricalCorpus(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "interactive-refresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	embedder := &boundedRecordingEmbedder{}
+	engine := New(Config{Store: s, Embedder: embedder})
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.DB().Exec(`INSERT INTO events(id,title,description,ts) VALUES(1,'historical','',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO event_embeddings(event_id,model,dim,vector_json,text_source) VALUES(1,?,4,'[1,0,0,0]','historical')`, embedder.Model()); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A full Reload would now fail. The interactive path must touch only the
+	// new row and keep the already-loaded historical event available.
+	if _, err := s.DB().Exec(`UPDATE event_embeddings SET vector_json='not-json' WHERE event_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO events(id,title,description,ts) VALUES(2,'fresh memory','',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.EmbedAndRefreshEvents(context.Background(), []IndexEventDoc{{EventID: 2, Text: "fresh memory"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(engine.eventIDs); got != "[1 2]" {
+		t.Fatalf("live event ids = %s, want [1 2]", got)
+	}
+}
+
+func TestRetrieveMarksDirectCapsuleEvidenceWithoutTreatingArchiveProjectionAsCapsule(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "candidate-evidence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB().Exec(`
+		INSERT INTO events(id,title,description,ts) VALUES
+		  (1,'direct durable decision','direct durable decision',?),
+		  (2,'archive projection event','archive projection event',?);
+		INSERT INTO event_embeddings(event_id,model,dim,vector_json,text_source) VALUES
+		  (1,'fake-embed',5,'[1,0,0,0,0]','direct durable decision'),
+		  (2,'fake-embed',5,'[0,1,0,0,0]','archive projection event');
+		INSERT INTO memory_capsules(
+		  id,schema_version,source_host,conversation_scope,source_timestamp,kind,
+		  redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,
+		  created_at,status,event_id
+		) VALUES (
+		  'capsule_direct','pulse.memory_capsule.v1','codex','current_turn',?,'decision',
+		  'direct durable decision',1,'current_turn','normal','project','[]',?,'active',1
+		)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Config{Store: s, Embedder: &fakeEmbedder{dim: 5}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Retrieve(context.Background(), RetrieveRequest{
+		Query: "durable decision archive", Mode: ModeFactual, TopK: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CandidateEvidence[1].DirectCapsule {
+		t.Fatalf("direct capsule evidence missing: %#v", result.CandidateEvidence)
+	}
+	if result.CandidateEvidence[2].DirectCapsule {
+		t.Fatalf("archive event misclassified as direct capsule: %#v", result.CandidateEvidence)
+	}
+	if !result.CandidateEvidence[1].Lexical || !result.CandidateEvidence[2].Lexical {
+		t.Fatalf("factual dense candidates lost literal corroboration: %#v", result.CandidateEvidence)
+	}
+}
+
+func TestRetrieveReservesPrimarySlotsForDirectCapsules(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "capsule-first.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB().Exec(`
+		INSERT INTO events(id,title,description,ts) VALUES
+		  (1,'current capsule','current capsule',?),
+		  (2,'archive one','archive one',?),
+		  (3,'archive two','archive two',?);
+		INSERT INTO event_embeddings(event_id,model,dim,vector_json,text_source) VALUES
+		  (1,'fake-embed',2,'[0.9,0.4358899]','current capsule'),
+		  (2,'fake-embed',2,'[1,0]','archive one'),
+		  (3,'fake-embed',2,'[0.99,0.1410674]','archive two');
+		INSERT INTO memory_capsules(
+		  id,schema_version,source_host,conversation_scope,source_timestamp,kind,
+		  redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,
+		  created_at,status,event_id
+		) VALUES (
+		  'capsule_current','pulse.memory_capsule.v1','codex','current_turn',?,'decision',
+		  'current capsule',1,'current_turn','normal','project','[]',?,'active',1
+		)`, now, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Config{Store: s, Embedder: &fixedQueryEmbedder{}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Retrieve(context.Background(), RetrieveRequest{
+		Query: "current plan", Mode: ModeFactual, TopK: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(result.EventIDs); got != "[1 2]" {
+		t.Fatalf("capsule-first ids = %s, want [1 2]", got)
+	}
+	if !result.CandidateEvidence[1].DirectCapsule {
+		t.Fatalf("primary capsule evidence missing: %#v", result.CandidateEvidence)
 	}
 }
 

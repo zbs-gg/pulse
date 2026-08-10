@@ -1,7 +1,8 @@
 # Install Pulse With Your AI Agent
 
-Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Do not
-attempt to install this version on Intel Mac, Windows, or Linux.
+> Personal 0.8 is not published. Use `@zbs-gg/pulse@0.7.2` for an ordinary
+> installation. The 0.8 commands in this branch are development material until
+> a separate live acceptance is complete.
 
 The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
 and was published to npm on 7 August 2026.
@@ -64,6 +65,11 @@ not permission to repair or remove another store.
 The proof is one normal memory from real work, then a fresh task in the
 same project. A simulated corpus or source-checkout test is not a substitute.
 
+For the unfinished 0.8 behavior, the host should advertise only
+`pulse_memory`. Prompt-time recall must stay within four memories and about 600
+tokens, while weak matches add nothing. The install must not add a session-start
+memory package, a Stop hook, or a second model turn for saving memory.
+
 ## Repair, disconnect, and data
 
 ```bash
@@ -84,7 +90,7 @@ Please audit and install Pulse Personal for this project.
 
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check `npm view @zbs-gg/pulse dist-tags --json`. Host-neutral Personal
-   requires 0.7.2 or newer, `pulse.personal_install_plan.v2`, and its
+   requires published 0.7.2 or newer, `pulse.personal_install_plan.v2`, and its
    signed manifest plus exact release assets.
 3. Explain every local write, privacy default, repair step, and removal step.
 4. Ask me before installing.

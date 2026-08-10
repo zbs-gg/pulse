@@ -23,7 +23,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { validateCapsule, validateDelta } from './validation.js';
+import { validateCapsule, validateDelta, type CleanEvent } from './validation.js';
 
 const STORE_SCHEMA = 'pulse.standalone_store.v1';
 const CAPSULE_SCHEMA = 'pulse.memory_capsule.v1';
@@ -104,6 +104,17 @@ interface StoreFile {
     next_event_id: number;
   };
   checkpoints: StoredCheckpoint[];
+  emotion_questions: Array<{
+    question_id: string;
+    event_id: number;
+    question: string;
+    asked_at: string;
+    expires_at: string;
+    delivered_at?: string;
+    answered_at?: string;
+    state: 'open' | 'answered' | 'expired';
+    answer_event_id?: number;
+  }>;
 }
 
 function emptyStore(): StoreFile {
@@ -115,6 +126,7 @@ function emptyStore(): StoreFile {
     items: [],
     graph: { nodes: [], edges: [], facts: [], events: [], next_event_id: 1 },
     checkpoints: [],
+    emotion_questions: [],
   };
 }
 
@@ -151,6 +163,73 @@ function storedItemIdentity(item: StoredItem): string {
     retention: item.retention,
     tags: item.tags,
   });
+}
+
+function semanticEventIdentity(event: CleanEvent): string {
+  return createHash('sha256').update(JSON.stringify({
+    title: event.title,
+    summary: event.summary,
+    sentiment: event.sentiment,
+    entity_refs: [...event.entity_refs].sort(),
+    emotional_weight: event.emotional_weight,
+    confidence: event.confidence,
+    privacy_tier: event.privacy_tier,
+    domain: event.domain,
+    emotions: event.emotions,
+    emotion_derivation: event.emotion_derivation,
+    emotion_confidence: event.emotion_confidence,
+    observed_label: event.observed_label,
+    trigger: event.trigger,
+  })).digest('hex');
+}
+
+function emotionQuestionID(event: CleanEvent): string {
+  return `emotion_question:${createHash('sha256')
+    .update(`pulse:emotion-question:v1:${semanticEventIdentity(event)}`)
+    .digest('hex').slice(0, 32)}`;
+}
+
+function currentEmotionContext(store: StoreFile, now = new Date()): Record<string, unknown> {
+  const items: Array<Record<string, unknown>> = [];
+  for (const event of store.graph.events) {
+    if (!event.emotions || typeof event.emotions !== 'object' || Array.isArray(event.emotions)) continue;
+    const occurredAt = typeof event.occurred_at === 'string' && event.occurred_at.trim() !== ''
+      ? event.occurred_at
+      : (typeof event.created_at === 'string' ? event.created_at : '');
+    const occurredMs = Date.parse(occurredAt);
+    if (!Number.isFinite(occurredMs)) continue;
+    const ageHours = Math.max(0, (now.getTime() - occurredMs) / 3_600_000);
+    if (ageHours > 7 * 24) continue;
+    const confidence = typeof event.emotion_confidence === 'number'
+      ? event.emotion_confidence
+      : (typeof event.confidence === 'number' ? event.confidence : 0);
+    for (const [emotion, rawIntensity] of Object.entries(event.emotions as Record<string, unknown>)) {
+      if (typeof rawIntensity !== 'number') continue;
+      const influence = rawIntensity * confidence * 2 ** (-ageHours / 24);
+      if (influence < 0.25) continue;
+      const trigger = event.trigger && typeof event.trigger === 'object' && !Array.isArray(event.trigger)
+        ? event.trigger as Record<string, unknown>
+        : {};
+      items.push({
+        event_id: event.id,
+        emotion,
+        observed_label: typeof event.observed_label === 'string' ? event.observed_label : '',
+        intensity: rawIntensity,
+        confidence,
+        influence,
+        derivation: typeof event.emotion_derivation === 'string' ? event.emotion_derivation : 'inferred',
+        occurred_at: occurredAt,
+        trigger: typeof trigger.summary === 'string' ? trigger.summary : '',
+        trigger_confirmed: trigger.confirmed === true,
+      });
+    }
+  }
+  items.sort((a, b) => Number(b.influence) - Number(a.influence));
+  return {
+    as_of: now.toISOString(),
+    items,
+    ...(items.length > 0 && Number(items[0].influence) >= 0.5 ? { dominant: items[0] } : {}),
+  };
 }
 
 function asRecord(value: unknown, what: string): Record<string, unknown> {
@@ -273,6 +352,7 @@ export class StandaloneStore {
     if (parsed.schema !== STORE_SCHEMA) {
       throw new Error(`unsupported standalone store schema: ${parsed.schema}`);
     }
+    parsed.emotion_questions ??= [];
     return parsed;
   }
 
@@ -424,11 +504,78 @@ export class StandaloneStore {
       }
 
       const eventIds: number[] = [];
+      const eventResults: Array<{ client_id: string; id: number; result: 'created' | 'deduplicated' }> = [];
+      let emotionQuestion: Record<string, unknown> | undefined;
       for (const event of delta.events) {
+        const semanticDigest = semanticEventIdentity(event);
+        const existing = store.graph.events.find((candidate) => candidate.semantic_digest === semanticDigest);
+        if (existing && typeof existing.id === 'number') {
+          eventIds.push(existing.id);
+          eventResults.push({ client_id: event.client_id, id: existing.id, result: 'deduplicated' });
+          continue;
+        }
         const id = store.graph.next_event_id;
         store.graph.next_event_id += 1;
-        store.graph.events.push({ ...event, id, created_at: now });
+        store.graph.events.push({ ...event, id, semantic_digest: semanticDigest, created_at: now });
         eventIds.push(id);
+        eventResults.push({ client_id: event.client_id, id, result: 'created' });
+        const strongest = Math.max(0, ...Object.values(event.emotions));
+        if (strongest >= 0.6 && !event.trigger?.summary) {
+          const questionId = emotionQuestionID(event);
+          const expiresAt = new Date(Date.parse(now) + 7 * 24 * 60 * 60 * 1000).toISOString();
+          store.emotion_questions.push({
+            question_id: questionId,
+            event_id: id,
+            question: 'Что именно сейчас вызвало эту эмоцию?',
+            asked_at: now,
+            expires_at: expiresAt,
+            delivered_at: now,
+            state: 'open',
+          });
+          emotionQuestion ??= {
+            question_id: questionId,
+            event_id: id,
+            event_client_id: event.client_id,
+            question: 'Что именно сейчас вызвало эту эмоцию?',
+            expires_at: expiresAt,
+          };
+        }
+      }
+
+      for (const answer of delta.emotion_answers) {
+        const question = store.emotion_questions.find((candidate) => candidate.question_id === answer.question_id);
+        if (!question || question.state !== 'open') {
+          throw new Error('emotion question is not open');
+        }
+        if (Date.parse(question.expires_at) < Date.parse(now)) {
+          question.state = 'expired';
+          throw new Error('emotion question has expired');
+        }
+        const sourceEvent = store.graph.events.find((candidate) => candidate.id === question.event_id);
+        if (!sourceEvent) throw new Error('emotion question event is missing');
+        sourceEvent.trigger = { ...answer.trigger, confirmed: true };
+        const answerEventId = store.graph.next_event_id;
+        store.graph.next_event_id += 1;
+        store.graph.events.push({
+          id: answerEventId,
+          client_id: `emotion-answer:${answer.question_id}`,
+          title: 'Confirmed emotion cause',
+          summary: answer.trigger.summary,
+          emotional_weight: 0,
+          confidence: answer.trigger.confidence,
+          privacy_tier: 'private',
+          domain: 'real',
+          created_at: now,
+        });
+        store.graph.edges.push({
+          from_event_id: answerEventId,
+          to_event_id: question.event_id,
+          kind: 'causal',
+          strength: answer.trigger.confidence,
+        });
+        question.state = 'answered';
+        question.answered_at = now;
+        question.answer_event_id = answerEventId;
       }
 
       let checkpointSaved = false;
@@ -461,8 +608,10 @@ export class StandaloneStore {
         nodes_upserted: nodesUpserted,
         edges_upserted: edgesUpserted,
         facts_upserted: factsUpserted,
-        events_inserted: eventIds.length,
+        events_inserted: eventResults.filter((item) => item.result === 'created').length,
         event_ids: eventIds,
+        event_results: eventResults,
+        ...(emotionQuestion ? { emotion_question: emotionQuestion } : {}),
         checkpoint_saved: checkpointSaved,
       };
     });
@@ -510,6 +659,13 @@ export class StandaloneStore {
       ...checkpoints.flatMap((c) => [...c.emotional_anchors, ...c.state_signals]),
       ...itemsByKind('state_signal'),
     ]);
+    const emotionalContext = currentEmotionContext(store);
+    const emotionalItems = Array.isArray(emotionalContext.items)
+      ? emotionalContext.items as Array<Record<string, unknown>>
+      : [];
+    for (const item of emotionalItems) {
+      stateContext.push(`${String(item.emotion)}: current influence ${Number(item.influence).toFixed(2)} (${String(item.derivation)})`);
+    }
     const activeThreads = dedupe(checkpoints.flatMap((c) => c.active_threads));
     const reviewInsights = dedupe(checkpoints.flatMap((c) => c.review_insights));
     const suggestedNextStep =
@@ -537,7 +693,7 @@ export class StandaloneStore {
       markdownParts.push(`## ${title}`);
       markdownParts.push(entries.map((entry) => `- ${entry}`).join('\n'));
     }
-    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0;
+    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0 && store.graph.events.length === 0;
     if (storeIsEmpty) {
       markdownParts.splice(
         1,
@@ -592,12 +748,13 @@ export class StandaloneStore {
       },
       evidence_refs: evidenceRefs,
       material_refs: [],
+      current_emotional_context: emotionalContext,
     };
   }
 
   status(): Record<string, unknown> {
     const store = this.load();
-    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0;
+    const storeIsEmpty = store.items.length === 0 && store.checkpoints.length === 0 && store.graph.events.length === 0;
     return {
       billing_mode: 'host-extracted',
       host: 'standalone',
@@ -620,12 +777,24 @@ export class StandaloneStore {
     const query = asString(body.query, 'context query');
     const topK = typeof body.top_k === 'number' ? body.top_k : 8;
     const { items } = this.recall({ query, limit: topK, privacy_ceiling: 'private' });
+    const store = this.load();
+    const emotionalContext = currentEmotionContext(store);
+    const explicitState = body.user_state && typeof body.user_state === 'object' && !Array.isArray(body.user_state)
+      ? body.user_state as Record<string, unknown>
+      : undefined;
+    const effectiveMood = explicitState?.mood_vector && typeof explicitState.mood_vector === 'object'
+      ? explicitState.mood_vector
+      : Object.fromEntries((emotionalContext.items as Array<Record<string, unknown>>)
+        .map((item) => [String(item.emotion), Number(item.influence)]));
     return {
       schema: 'pulse.context.v1',
       engine: 'standalone_lite',
       query,
       results: items,
       note: UPGRADE_HINT,
+      current_emotional_context: emotionalContext,
+      emotional_state_source: explicitState ? 'explicit' : ((emotionalContext.items as unknown[]).length > 0 ? 'memory' : 'none'),
+      effective_mood_vector: effectiveMood,
     };
   }
 

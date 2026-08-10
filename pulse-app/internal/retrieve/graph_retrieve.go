@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"regexp"
 	"strings"
+
+	"github.com/nkkmnk/pulse/internal/store"
 )
 
 // Temporal entity-graph retrieval — "graph-as-recall-injector" (NOT graph-as-king).
@@ -51,6 +53,10 @@ func ftsOrQuery(q string) string {
 // graph. mode: "anchored" (entity → its events) or "walk" (+ typed relation walk).
 // Best-effort: any DB error yields nil (the caller just loses the extra RRF input).
 func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string, topK int) []int64 {
+	return e.retrieveGraphCandidatesScoped(ctx, query, mode, topK, nil)
+}
+
+func (e *Engine) retrieveGraphCandidatesScoped(ctx context.Context, query, mode string, topK int, scope *store.PersonalMemoryScopeSnapshot) []int64 {
 	if e.store == nil || (mode != "anchored" && mode != "walk") {
 		return nil
 	}
@@ -63,7 +69,7 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 	seedQuery := `SELECT rowid FROM entities_fts WHERE entities_fts MATCH ?1
 		 ORDER BY bm25(entities_fts) LIMIT ?2`
 	seedArgs := []any{match, graphMaxSeeds}
-	if e.personalScope != nil {
+	if scope != nil {
 		seedQuery = `
 			SELECT rowid
 			  FROM entities_fts
@@ -82,7 +88,7 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 			          )
 			   )
 			 ORDER BY bm25(entities_fts) LIMIT ?2`
-		seedArgs = []any{match, graphMaxSeeds, e.personalScope.ProjectNamespaceID}
+		seedArgs = []any{match, graphMaxSeeds, scope.ProjectNamespaceID}
 	}
 	seeds := queryInt64s(ctx, db, seedQuery, seedArgs...)
 	if len(seeds) == 0 {
@@ -91,7 +97,7 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 
 	ents := seeds
 	if mode == "walk" {
-		ents = e.walkEntities(ctx, db, seeds)
+		ents = e.walkEntitiesScoped(ctx, db, seeds, scope)
 	}
 
 	// 2) gather events linked to the reached entities (event_entities), capped.
@@ -100,7 +106,7 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 	for _, ent := range ents {
 		eventQuery := `SELECT event_id FROM event_entities WHERE entity_id = ?1 LIMIT ?2`
 		eventArgs := []any{ent, graphMaxEventsPerEnt}
-		if e.personalScope != nil {
+		if scope != nil {
 			eventQuery = `
 				WITH eligible_objects AS (
 				    SELECT object_id
@@ -129,7 +135,7 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 				 WHERE link.entity_id=?2
 				 LIMIT ?3`
 			eventArgs = []any{
-				e.personalScope.ProjectNamespaceID,
+				scope.ProjectNamespaceID,
 				ent, graphMaxEventsPerEnt,
 			}
 		}
@@ -150,6 +156,10 @@ func (e *Engine) retrieveGraphCandidates(ctx context.Context, query, mode string
 // walkEntities does a typed, capped relation walk (<=2 hops, strength-filtered)
 // from the seed entities and returns seeds + reached entities.
 func (e *Engine) walkEntities(ctx context.Context, db *sql.DB, seeds []int64) []int64 {
+	return e.walkEntitiesScoped(ctx, db, seeds, nil)
+}
+
+func (e *Engine) walkEntitiesScoped(ctx context.Context, db *sql.DB, seeds []int64, scope *store.PersonalMemoryScopeSnapshot) []int64 {
 	seen := map[int64]bool{}
 	for _, s := range seeds {
 		seen[s] = true
@@ -168,7 +178,7 @@ func (e *Engine) walkEntities(ctx context.Context, db *sql.DB, seeds []int64) []
 				   WHERE to_entity_id = ?1 AND strength >= ?2
 				 ORDER BY 1 LIMIT ?3`
 			relationArgs := []any{node, graphMinEdgeStrength, graphMaxEdgesPerNode}
-			if e.personalScope != nil {
+			if scope != nil {
 				relationQuery = `
 					WITH eligible_relations AS (
 					    SELECT relation.id, relation.from_entity_id, relation.to_entity_id, relation.strength
@@ -194,7 +204,7 @@ func (e *Engine) walkEntities(ctx context.Context, db *sql.DB, seeds []int64) []
 					 WHERE to_entity_id=?2 AND strength>=?3
 					ORDER BY 1 LIMIT ?4`
 				relationArgs = []any{
-					e.personalScope.ProjectNamespaceID,
+					scope.ProjectNamespaceID,
 					node, graphMinEdgeStrength, graphMaxEdgesPerNode,
 				}
 			}

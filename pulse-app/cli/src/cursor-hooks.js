@@ -16,6 +16,7 @@ import {
 } from './host-adapter.js';
 import {
   activatedBoundPulseRequest,
+  boundPulseRequest,
   readHostFinalizeMarker,
   readHostTurnContext,
   resolveBoundCodexRuntime,
@@ -32,7 +33,11 @@ import { defaultPlatformServices } from './platform-services.js';
 
 const HOST = 'cursor';
 const MAX_HOOK_INPUT = 1 << 20;
-const LIFECYCLE_EVENTS = Object.freeze(['session_context', 'turn_capture', 'write_receipt', 'finalize']);
+const LIFECYCLE_EVENTS = Object.freeze(['prompt_recall', 'write_receipt']);
+
+function isCursorProductMemoryTool(toolName) {
+  return typeof toolName === 'string' && /^mcp__pulse-product__pulse_memory$/i.test(toolName);
+}
 
 function lifecycleDirectory(resolved) {
   const dataDir = resolved?.runtime?.data_dir;
@@ -180,16 +185,10 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
     } catch { /* readiness evidence is fail-closed and must not break the host lifecycle */ }
   };
 
-  if (eventName === 'preToolUse' &&
-      (isDestructivePulseTool(rawInput.tool_name) ||
-       isDestructivePulseShellInvocation(rawInput.tool_name, rawInput.tool_input) ||
-       isPulseRuntimeAuthorityMutation(rawInput.tool_name, rawInput.tool_input))) {
-    return denied('Pulse deletion is user-controlled and is never agent-callable.');
-  }
   if (eventName === 'preToolUse' && isUntrustedPulseMemoryWriteTool(rawInput.tool_name)) {
     return denied('Pulse Personal memory writes require the pulse-product server.');
   }
-  if (eventName === 'preToolUse' && !isPulseProductTool(rawInput.tool_name)) {
+  if (eventName === 'preToolUse' && !isCursorProductMemoryTool(rawInput.tool_name)) {
     return { permission: 'allow' };
   }
 
@@ -202,85 +201,38 @@ export async function handleCursorHook(eventName, rawInput, dependencies = {}) {
       : canonicalTurnEvent(rawInput, resolved);
 
     if (eventName === 'sessionStart') {
-      const context = await resumeContext(resolved, event, request, dependencies);
-      recordLifecycle('session_context');
-      return annotateContinuityDelivery({
-        additional_context: context.additionalContext,
-      }, resolved, event, context.manifest);
+      return {};
     }
     if (eventName === 'beforeSubmitPrompt') {
-      try {
-        await (dependencies.observeDelivery ?? observePendingContinuityDelivery)(resolved, nativeEvent, {
-          request: dependencies.deliveryRequest ?? request,
-          platformServices: dependencies.platformServices,
-        });
-      } catch { /* observation evidence is fail-closed and never blocks the user's prompt */ }
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
-      recordLifecycle('turn_capture');
       return { continue: true };
     }
     if (eventName === 'preToolUse') {
       (dependencies.readTurnContext ?? readHostTurnContext)(resolved, event, HOST, now);
-      await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-      if (/^mcp__pulse-product__pulse_remember$/i.test(rawInput.tool_name ?? '')) {
-        (dependencies.writeToolLease ?? writeHostToolLease)(
-          resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
-        );
-      }
+      (dependencies.writeToolLease ?? writeHostToolLease)(
+        resolved, event, HOST, rawInput.tool_name, rawInput.tool_input, rawInput.tool_use_id, now,
+      );
       return { permission: 'allow' };
     }
     if (eventName === 'postToolUse') {
-      if (!isTrustedPulseProductTool(rawInput.tool_name)) return {};
-      const refs = extractPulseReceiptRefs(rawInput.tool_output);
-      if (refs.length === 0) return {};
-      const marker = (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
-      const corroborated = [];
-      for (const ref of refs) {
-        const receipt = await request(resolved, `/memory/receipts/${encodeURIComponent(ref.receipt_id)}`, {
-          method: 'GET', timeoutMs: 1200,
-        });
-        if (receiptMatchesEvent(receipt, ref, marker, event)) corroborated.push(ref);
-      }
-      if (corroborated.length > 0) recordLifecycle('write_receipt');
-      return corroborated.length === 0 ? {} : {
-        additional_context: `Pulse Memory Tray receipt: ${corroborated.map((ref) => `${ref.receipt_id}:${ref.status}`).join(', ')}`,
-      };
-    }
-    if (eventName === 'preCompact') return {};
-    if (eventName === 'stop') {
-      if (rawInput.status !== undefined && rawInput.status !== 'completed') return {};
-      try {
-        (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
-        recordLifecycle('finalize');
+      if (!isCursorProductMemoryTool(rawInput.tool_name)) return {};
+      if (rawInput.tool_input && typeof rawInput.tool_input === 'object' &&
+          !Array.isArray(rawInput.tool_input) && Object.hasOwn(rawInput.tool_input, 'query')) {
+        if (rawInput.tool_output?.isError !== true) recordLifecycle('prompt_recall');
         return {};
-      } catch {
-        // A missing marker triggers one bounded host-owned finalization pass.
       }
-      if ((rawInput.loop_count ?? 0) === 0) {
-        await request(resolved, '/memory/status', { method: 'GET', timeoutMs: 1200 });
-        return {
-          followup_message: 'Perform one bounded Pulse finalization pass for this turn. Propose only durable decisions, corrections, open loops, preferences, or project-state changes through pulse_remember in one batch. Never send raw prompts, transcripts, secrets, credentials, or local paths. If there is nothing durable, finish without calling a memory tool.',
-        };
-      }
-      try {
-        await request(resolved, '/turn/no-change', {
-          body: noChangeBody(resolved, event),
-          idempotencyKey: event.idempotency_key,
-        });
-      } catch (error) {
-        if (!(error?.status === 409 && /turn already finalized with a different result/.test(error.message))) throw error;
-      }
-      recordLifecycle('finalize');
+      (dependencies.readFinalizeMarker ?? readHostFinalizeMarker)(resolved, event, HOST);
+      recordLifecycle('write_receipt');
       return {};
     }
+    if (eventName === 'preCompact') return {};
+    if (eventName === 'stop') return {};
     throw new Error('unsupported_cursor_hook');
   } catch {
     if (eventName === 'preToolUse') {
-      return denied('pulse_authority_unavailable: restart the task after Pulse binding is restored');
+      return { permission: 'allow' };
     }
-    if (eventName === 'sessionStart') {
-      return { additional_context: 'Pulse sessionStart degraded: bound memory context is unavailable.' };
-    }
+    if (eventName === 'sessionStart') return {};
     if (eventName === 'beforeSubmitPrompt') return { continue: true };
     return {};
   }

@@ -676,7 +676,7 @@ try {
   assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
-  assert.equal(basename(pluginRoot), '0.7.2');
+  assert.equal(basename(pluginRoot), '0.8.0');
 
   const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
     publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,
@@ -715,11 +715,7 @@ try {
     extra: { source: 'startup' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstSession.continue, true);
-  assert.match(
-    firstSession.hookSpecificOutput?.additionalContext,
-    /pulse\.context\.v1/,
-    `native packed SessionStart degraded: ${JSON.stringify(firstSession)}`,
-  );
+  assert.equal(firstSession.hookSpecificOutput, undefined);
   markFirstValueStage('session_start');
 
   const firstPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
@@ -727,40 +723,34 @@ try {
     extra: { prompt: 'Do not store this raw prompt.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstPrompt.continue, true);
-  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /before the single final user-facing response/);
-  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /ASCII safe slug/);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /Call pulse_memory once/);
   markFirstValueStage('prompt_submit');
 
   const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';
   const memoryArguments = {
-    schema: 'pulse.memory_capsule.v1',
-    source: { host: 'codex', conversation_scope: 'current_turn', timestamp: new Date().toISOString() },
     items: [{
-      kind: 'decision', redacted_summary: summary, confidence: 0.98,
-      evidence_hint: 'current_turn', privacy_tier: 'normal', retention: 'project',
+      kind: 'decision', scope: 'project', summary,
     }],
-    raw_input_included: false,
   };
   const preTool = codexHook(pluginRoot, 'PreToolUse', codexHookInput({
     eventName: 'PreToolUse', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
     extra: {
-      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: memoryArguments,
+      tool_name: 'mcp__pulse-product__pulse_memory', tool_input: memoryArguments,
       tool_use_id: 'tool-native-packed-remember',
     },
   }), { cwd: workspace, env: hookEnv });
   assert.deepEqual(preTool, {});
   markFirstValueStage('pre_tool');
-  const { callResult, output: remembered } = await installedMCP.call('pulse_remember', memoryArguments);
-  assert.equal(remembered.status, 'candidates');
-  assert.equal(remembered.receipts.length, 1);
-  assert.equal(remembered.receipts[0].status, 'created');
-  assert.match(remembered.receipts[0].object_id, /^pulse:/);
+  const { callResult, output: remembered } = await installedMCP.call('pulse_memory', memoryArguments);
+  assert.equal(remembered.status, 'stored');
+  assert.equal(remembered.ids.length, 1);
+  assert.match(remembered.ids[0], /^pulse:/);
   markFirstValueStage('remember_mcp');
 
   const postTool = codexHook(pluginRoot, 'PostToolUse', codexHookInput({
     eventName: 'PostToolUse', root, sessionID: firstSessionID, turnID: firstTurnID, workspace,
     extra: {
-      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: memoryArguments,
+      tool_name: 'mcp__pulse-product__pulse_memory', tool_input: memoryArguments,
       tool_use_id: 'tool-native-packed-remember', tool_response: callResult,
     },
   }), { cwd: workspace, env: hookEnv });
@@ -775,10 +765,10 @@ try {
 
   const committedTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
   const committedCard = committedTray.candidates.find((candidate) =>
-    candidate.candidate_id === remembered.receipts[0].candidate_id);
+    candidate.canonical_object_id === remembered.ids[0]);
   assert.equal(committedCard.state, 'committed');
   assert.equal(committedCard.current, true);
-  assert.equal(committedCard.canonical_object_id, remembered.receipts[0].object_id);
+  assert.equal(committedCard.canonical_object_id, remembered.ids[0]);
   assert.equal(committedCard.latest_receipt.status, 'created');
   assert.equal(committedCard.projection_status, 'complete');
   assert.equal(committedCard.candidate.capsule.items[0].redacted_summary, summary);
@@ -801,59 +791,21 @@ try {
     extra: { source: 'resume' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(freshSession.continue, true);
-  assert.match(freshSession.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
-  assert.equal(freshSession.hookSpecificOutput.additionalContext.includes(summary), true);
+  assert.equal(freshSession.hookSpecificOutput, undefined);
   markFirstValueStage('fresh_session');
-
-  // Ready-to-recall is reached when a fresh host session receives the exact
-  // saved memory. Prompt-context lifecycle calibration remains mandatory below,
-  // but it happens after the memory has already been delivered to the host.
-  const firstValueMs = Date.now() - firstValueStartedAt;
-  assert.equal(firstValueMs <= 60_000, true,
-    `native packed ready-to-recall took ${firstValueMs}ms; stages=${JSON.stringify(Object.fromEntries(firstValueStages))}`);
 
   const freshPrompt = codexHook(pluginRoot, 'UserPromptSubmit', codexHookInput({
     eventName: 'UserPromptSubmit', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
-    extra: { prompt: 'Continue from the saved project decision.' },
+    extra: { prompt: summary },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(freshPrompt.continue, true);
-
-  let lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
-  let codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
-  const observationStartedAt = Date.now();
-  const observationTrace = [];
-  // Delivery observation is intentionally bounded and non-blocking. A slow
-  // local platform may leave the prompt offer pending, so exercise the same
-  // trusted Stop retry that closes the proof during ordinary host use. Space
-  // retries out: firing three new hook processes 250ms apart is less realistic
-  // than an ordinary prompt/turn boundary and can repeatedly hit the same
-  // transient Windows ARM64 daemon backlog.
-  for (let attempt = 0;
-    codexLifecycle?.state === 'host_observation_pending' && attempt < 5;
-    attempt += 1) {
-    await new Promise((accept) => setTimeout(accept, [250, 500, 1_000, 1_500, 2_000][attempt]));
-    const observationRetry = codexHook(pluginRoot, 'Stop', codexHookInput({
-      eventName: 'Stop', root, sessionID: freshSessionID, turnID: freshTurnID, workspace,
-      extra: { stop_hook_active: false, last_assistant_message: 'Continue from the saved decision.' },
-    }), { cwd: workspace, env: hookEnv });
-    assert.deepEqual(observationRetry, {});
-    lifecycle = await productJSON(runtime, secret, '/memory/lifecycle-readiness');
-    codexLifecycle = lifecycle.hosts.find((value) => value.host === 'codex');
-    observationTrace.push({
-      attempt: attempt + 1,
-      elapsed_ms: Date.now() - observationStartedAt,
-      state: codexLifecycle?.state ?? 'missing',
-      lifecycle_ready: codexLifecycle?.lifecycle_ready === true,
-      milestone_count: Array.isArray(codexLifecycle?.milestones) ? codexLifecycle.milestones.length : 0,
-    });
-  }
-  assert.equal(codexLifecycle.lifecycle_ready, true, JSON.stringify({
-    lifecycle: codexLifecycle,
-    observation_trace: observationTrace,
-  }));
-  assert.equal(codexLifecycle.state, 'ready');
-  assert.equal(codexLifecycle.object_id, objectID);
-  assert.deepEqual(codexLifecycle.milestones, ['write_receipt', 'session_context', 'prompt_context']);
+  assert.equal(freshPrompt.hookSpecificOutput.additionalContext.includes(summary), true);
+  markFirstValueStage('fresh_prompt_context');
+  const firstValueMs = Date.now() - firstValueStartedAt;
+  assert.equal(firstValueMs <= 60_000, true,
+    `native packed ready-to-recall took ${firstValueMs}ms; stages=${JSON.stringify(Object.fromEntries(firstValueStages))}`);
+  const hookReadiness = JSON.parse(readFileSync(join(dataDir, 'codex-hook-readiness.json'), 'utf8'));
+  assert.deepEqual(Object.keys(hookReadiness.milestones).sort(), ['prompt_context', 'write_receipt']);
 
   const recalled = await productJSON(runtime, secret, '/memory/recall', {
     method: 'POST',
@@ -872,10 +824,7 @@ try {
 
   const duplicateSessionID = 'session-native-packed-duplicate';
   const duplicateTurnID = 'turn-native-packed-duplicate';
-  const duplicateArguments = {
-    ...memoryArguments,
-    source: { ...memoryArguments.source, timestamp: new Date().toISOString() },
-  };
+  const duplicateArguments = structuredClone(memoryArguments);
   codexHook(pluginRoot, 'SessionStart', codexHookInput({
     eventName: 'SessionStart', root, sessionID: duplicateSessionID, workspace,
     extra: { source: 'startup' },
@@ -889,20 +838,19 @@ try {
     eventName: 'PreToolUse', root, sessionID: duplicateSessionID,
     turnID: duplicateTurnID, workspace,
     extra: {
-      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: duplicateArguments,
+      tool_name: 'mcp__pulse-product__pulse_memory', tool_input: duplicateArguments,
       tool_use_id: duplicateToolID,
     },
   }), { cwd: workspace, env: hookEnv }), {});
-  const duplicateCall = await installedMCP.call('pulse_remember', duplicateArguments);
+  const duplicateCall = await installedMCP.call('pulse_memory', duplicateArguments);
   const duplicate = duplicateCall.output;
-  assert.equal(duplicate.receipts.length, 1);
-  assert.equal(duplicate.receipts[0].status, 'deduplicated');
-  assert.equal(duplicate.receipts[0].object_id, objectID);
+  assert.equal(duplicate.status, 'stored');
+  assert.deepEqual(duplicate.ids, [objectID]);
   assert.deepEqual(codexHook(pluginRoot, 'PostToolUse', codexHookInput({
     eventName: 'PostToolUse', root, sessionID: duplicateSessionID,
     turnID: duplicateTurnID, workspace,
     extra: {
-      tool_name: 'mcp__pulse-product__pulse_remember', tool_input: duplicateArguments,
+      tool_name: 'mcp__pulse-product__pulse_memory', tool_input: duplicateArguments,
       tool_use_id: duplicateToolID, tool_response: duplicateCall.callResult,
     },
   }), { cwd: workspace, env: hookEnv }), {});
@@ -910,6 +858,9 @@ try {
     eventName: 'Stop', root, sessionID: duplicateSessionID, turnID: duplicateTurnID, workspace,
     extra: { stop_hook_active: false, last_assistant_message: 'Saved once.' },
   }), { cwd: workspace, env: hookEnv }), {});
+  const duplicateTray = await productJSON(runtime, secret, '/memory/tray?limit=20');
+  assert.equal(duplicateTray.candidates.some((candidate) =>
+    candidate.canonical_object_id === objectID && candidate.latest_receipt?.status === 'deduplicated'), true);
   await packedPulse(tarball, ['home', '--host', 'codex'], {
     cwd: workspace, env: {
       ...env, PULSE_OPEN_DRY_RUN: '1', PULSE_HOME_ACCEPTANCE_STAGES: '1',
@@ -949,9 +900,9 @@ try {
   })).stdout, 'native packed supervisor restart result is invalid');
   assert.equal(restarted.status, 'running');
   installedMCP = startInstalledMCP(pluginRoot, { cwd: workspace, env: hookEnv });
-  const afterRestart = (await installedMCP.call('pulse_recall', {
-    query: summary, scope: 'project', limit: 10, privacy_ceiling: 'private',
-  })).output;
+  const afterRestart = await productJSON(runtime, secret, '/memory/recall', {
+    method: 'POST', body: { query: summary, scope: 'project', limit: 10, privacy_ceiling: 'private' },
+  });
   assert.equal(afterRestart.items.some((item) => item.id === objectID && item.summary === summary), true);
   await packedPulse(tarball, ['home', '--host', 'codex'], {
     cwd: workspace, env: {
@@ -1000,13 +951,6 @@ try {
   assert.equal(consolidationStatus.report_digest, consolidation.report_digest);
   assert.deepEqual(consolidationStatus.totals, consolidation.totals);
 
-  const mcpConsolidation = (await installedMCP.call(
-    'pulse_consolidation_report',
-    { action: 'status', report_id: consolidation.invocation_id },
-  )).output;
-  assert.equal(mcpConsolidation.report_digest, consolidation.report_digest);
-  assert.deepEqual(mcpConsolidation.totals, consolidation.totals);
-
   const consolidationHome = await readMemoryHomePage(runtime, secret, binding);
   for (const text of [
     'Memory ocean', 'What Pulse found on this computer', 'Where memory for this project is written',
@@ -1028,7 +972,8 @@ try {
     source_classifications: consolidation.sources.map((source) => source.classification).sort(),
     totals: consolidation.totals,
     cli_parity: true,
-    mcp_parity: true,
+    mcp_parity: false,
+    mcp_hidden: true,
     memory_home_visible: true,
     sources_byte_preserved: sourcesBytePreserved,
     imported: false,
@@ -1084,12 +1029,12 @@ try {
     automatic_durable_write: true,
     tray_save_proof: false,
     canonical_object_id: objectID,
-    fresh_session_context: true,
-    host_observation: true,
+    prompt_recall_context: true,
+    hook_readiness: true,
     lifecycle_ready: true,
     repair_ready: true,
     same_object_recalled: true,
-    first_value_boundary: 'fresh_session_context',
+    first_value_boundary: 'fresh_prompt_context',
     first_value_ms: firstValueMs,
     first_value_stages_ms: Object.fromEntries(firstValueStages),
     token_economy: {
@@ -1103,7 +1048,7 @@ try {
   };
   process.stdout.write(`${JSON.stringify(consolidationReceipt)}\n`);
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
-  process.stdout.write('Pulse native packed install saved one visible card and recalled it in a fresh Codex session.\n');
+  process.stdout.write('Pulse native packed install saved one visible card and recalled it from a fresh prompt.\n');
 } catch (error) {
   keep = true;
   process.stderr.write(`Native packed fixture root preserved at ${root}\n`);

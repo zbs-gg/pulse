@@ -383,3 +383,20 @@ test('graph_delta still accepts a clean delta', () => {
   assert.equal(out.ok, true);
   assert.equal(out.nodes_upserted, 1);
 });
+
+test('graph_delta rejects secret or path-like emotion causes before persistence', () => {
+  const store = new StandaloneStore(tempDataDir());
+  const d = baseDelta() as Record<string, unknown>;
+  d.events = [{
+    client_id: 'event:emotion-cause',
+    title: 'A private emotional moment',
+    summary: 'A short safe description.',
+    emotions: { fear: 0.8 },
+    emotion_derivation: 'inferred',
+    emotion_confidence: 0.7,
+    trigger: { summary: 'The file /Users/nik/.ssh/id_ed25519 was involved.', derivation: 'inferred', confidence: 0.4 },
+    confidence: 0.8,
+    privacy_tier: 'private',
+  }];
+  assert.throws(() => store.graphDelta(d), /secret|path/i);
+});

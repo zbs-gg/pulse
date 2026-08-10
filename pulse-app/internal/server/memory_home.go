@@ -246,6 +246,7 @@ type memoryHomeTemplateData struct {
 	EconomyValue             string
 	EconomyDetail            string
 	HasLatestMemory          bool
+	HasEmotionalMemory       bool
 	HasNextPreview           bool
 	HasPending               bool
 	HasUnassigned            bool
@@ -281,6 +282,7 @@ func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
 		StoreLabel:            memoryHomeStoreLabel(page.Data.Boundary.StoreKind),
 		MemoryCount:           fmt.Sprintf("%d", page.Data.Memories.ActiveCount),
 		HasLatestMemory:       len(page.Data.Memories.LatestActive) > 0,
+		HasEmotionalMemory:    len(page.Data.EmotionalMemory) > 0,
 		HasNextPreview:        page.Data.NextTaskPreview != nil,
 		HasPending:            len(page.Pending) > 0,
 		HasUnassigned:         len(page.Unassigned) > 0,
@@ -695,6 +697,42 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       {{if .HasMoreMemories}}<form method="get" action=""><input type="hidden" name="q" value="{{.Data.Filter.Text}}"><input type="hidden" name="project" value="{{.Data.Filter.Project}}"><input type="hidden" name="harness" value="{{.Data.Filter.Harness}}"><input type="hidden" name="from" value="{{.Data.Filter.DateFrom}}"><input type="hidden" name="to" value="{{.Data.Filter.DateTo}}"><input type="hidden" name="scope" value="{{.Data.Filter.Scope}}"><input type="hidden" name="offset" value="{{.NextMemoryOffset}}"><button>Next</button></form>{{end}}
     </div>{{end}}
   </section>
+
+  {{if .HasEmotionalMemory}}
+  <section id="emotions" aria-labelledby="emotions-title">
+    <div class="section-head"><div><div class="eyebrow">Moment, not personality</div><h2 id="emotions-title">Emotional memory</h2></div><p>The event stays in history. Only its influence on today fades: it halves every 24 hours and stops shaping current context after seven days.</p></div>
+    {{range .Data.EmotionalPatterns}}<div class="status-banner"><div><strong>{{.Emotion}} appears repeatedly</strong><p>{{.Count}} confirmed moments between {{.FirstSeen}} and {{.LastSeen}}. This is an observation, not a personality trait.</p></div></div>{{end}}
+    <div class="memory-list">
+      {{range .Data.EmotionalMemory}}{{$event := .}}
+      <article class="memory">
+        <div class="meta"><span>{{if eq .Derivation "inferred"}}Pulse inferred this{{else}}Named or confirmed by you{{end}} · Device only</span><span>{{.OccurredAt}}</span></div>
+        <p class="summary">{{.Summary}}</p>
+        {{range .Labels}}<p><strong>{{.Emotion}}</strong> · then {{printf "%.2f" .Intensity}} · now {{printf "%.2f" .CurrentInfluence}}</p>{{end}}
+        {{if .Trigger}}<p>Cause: {{.Trigger}} {{if .TriggerConfirmed}}(confirmed){{else}}(Pulse assumption){{end}}</p>{{else}}<p>Cause is not known.</p>{{end}}
+        {{if .Question}}<p class="receipt">Waiting question: {{.Question.Question}}</p>{{end}}
+        <div class="memory-actions">
+          <form method="post" action="emotion/{{.EventID}}/confirm" data-home-mutation data-home-pending-label="Confirming emotion…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="primary">Confirm this mark</button></form>
+          <details><summary>Correct emotion or cause</summary>
+            <form class="memory-editor" method="post" action="emotion/{{.EventID}}/edit" data-home-mutation data-home-pending-label="Updating emotion…">
+              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+              <p class="receipt">Saving replaces the current emotional mark with the values below. The event itself is not changed.</p>
+              <label>Emotion<select name="emotion"><option{{if eq .PrimaryEmotion "joy"}} selected{{end}}>joy</option><option{{if eq .PrimaryEmotion "sadness"}} selected{{end}}>sadness</option><option{{if eq .PrimaryEmotion "anger"}} selected{{end}}>anger</option><option{{if eq .PrimaryEmotion "fear"}} selected{{end}}>fear</option><option{{if eq .PrimaryEmotion "trust"}} selected{{end}}>trust</option><option{{if eq .PrimaryEmotion "disgust"}} selected{{end}}>disgust</option><option{{if eq .PrimaryEmotion "anticipation"}} selected{{end}}>anticipation</option><option{{if eq .PrimaryEmotion "surprise"}} selected{{end}}>surprise</option><option{{if eq .PrimaryEmotion "shame"}} selected{{end}}>shame</option><option{{if eq .PrimaryEmotion "guilt"}} selected{{end}}>guilt</option></select></label>
+              <label>Intensity 0–1<input name="intensity" type="number" min="0" max="1" step="0.01" value="{{printf "%.2f" .PrimaryIntensity}}"></label>
+              <label>Confidence 0–1<input name="confidence" type="number" min="0" max="1" step="0.01" value="{{printf "%.2f" .Confidence}}"></label>
+              <input type="hidden" name="derivation" value="user_confirmed">
+              <label>Your label<input name="observed_label" maxlength="120" value="{{.ObservedLabel}}"></label>
+              <label>Cause, if known<input name="trigger_summary" maxlength="360" value="{{.Trigger}}"></label>
+              <input type="hidden" name="trigger_derivation" value="user_confirmed"><input type="hidden" name="trigger_confidence" value="1">
+              <div class="controls"><button class="primary">Save correction</button></div>
+            </form>
+          </details>
+          <form method="post" action="emotion/{{.EventID}}/delete" data-home-mutation data-home-confirm="Delete only this emotional mark?" data-home-pending-label="Deleting emotional mark…"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button>Delete emotional mark</button></form>
+        </div>
+      </article>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
 
   {{if .HasPending}}
   <section id="memory-tray">

@@ -46,6 +46,7 @@ import {
 } from './install-plan.js';
 import { detectClaudeCodeCLI, detectCursorInstallation, SUPPORTED_HOST_IDS } from './supported-hosts.js';
 import { selectHomeDoctorReport } from './home-doctor.js';
+import { renderLocalMergeReview } from './local-merge-review.js';
 import {
   formatConsolidationExplanation,
   formatConsolidationReport,
@@ -84,7 +85,13 @@ import {
 import { claudeHookContractDigest, claudeWorkspaceDigest, runClaudeHookCLI } from './claude-hooks.js';
 import { activateClaudePlugin, disableClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
 import { inspectCursorLifecycleReadiness, runCursorHookCLI } from './cursor-hooks.js';
-import { cursorHomePath, inspectCursorPlugin, installCursorPlugin, removeCursorPlugin } from './cursor-install.js';
+import {
+  cursorHomePath,
+  inspectCursorNativeIntegration,
+  installCursorNativeIntegration,
+  removeCursorNativeIntegration,
+  restoreCursorNativeIntegrationBackup,
+} from './cursor-install.js';
 import {
 	codexMarketplaceDoctorCheck,
   codexHomePath,
@@ -155,7 +162,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.7.2';
+const PREVIEW_VERSION = '0.8.0';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -168,7 +175,7 @@ const FIRST_PROOF_RECALL_PROMPT = 'What did we decide about how Pulse stores mem
 const CODEX_PRODUCT_MCP_ARGS = Object.freeze([
   '--input-type=module',
   '--eval',
-  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.7.2','mcp','server.mjs')).href);",
+  "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.8.0','mcp','server.mjs')).href);",
 ]);
 
 const args = process.argv.slice(2);
@@ -245,9 +252,11 @@ Usage:
   pulse migrate request chatgpt|claude|codex|claude-code [--downloads <dir>] [--timeout-ms <ms>] [--interval-ms <ms>] [--html <file>] [--out <file>] [--open]
   pulse migrate preview-latest chatgpt|claude [--downloads <dir>] [--html <file>] [--out <file>] [--open]
   pulse migrate wait-latest chatgpt|claude [--downloads <dir>] [--timeout-ms <ms>] [--interval-ms <ms>] [--html <file>] [--out <file>] [--open]
+  pulse migrate local-stores --out <preview.json> [--open]
+  pulse migrate local-status --json
   pulse migrate preview <export-folder-or-json-or-zip> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate preview-people-graph <graph-dir-or-people-index> [--json] [--html <file>] [--out <file>] [--open]
-  pulse migrate commit <preview-json-file> --confirm "import pulse graph" [--privacy private|sensitive|normal] [--open]
+  pulse migrate commit <preview-json-file> --confirm "import pulse graph"|"merge local pulse memory" [--privacy private|sensitive|normal] [--open]
   pulse home [--host claude-code|codex|cursor] [--base <url>] [--data-dir <path>]
   pulse history ingest codex [--roots 50]
   pulse history status|explain|usage|resume|cancel|home [--job <job_id>]
@@ -1068,29 +1077,42 @@ function personalInstallHostRegistry(targets) {
   };
   const lifecycleFor = async (context, host) => {
     try {
-      const result = await boundPulseRequest(context.resolved, '/memory/lifecycle-readiness', {
-        method: 'GET', timeoutMs: 1500,
-      });
-      if (result?.schema !== 'pulse.supported_host_lifecycle_readiness.v1' ||
-          !Array.isArray(result.hosts) || result.hosts.length !== SUPPORTED_HOST_IDS.length) {
-        throw new Error('supported_host_lifecycle_invalid');
-      }
-      const seen = new Set();
-      for (const entry of result.hosts) {
-        if (!entry || !SUPPORTED_HOST_IDS.includes(entry.host) || seen.has(entry.host) ||
-            typeof entry.lifecycle_ready !== 'boolean' ||
-            !['first_memory_pending', 'context_offer_pending', 'host_observation_pending', 'ready'].includes(entry.state) ||
-            !Array.isArray(entry.milestones) || entry.milestones.some((value) =>
-              !['write_receipt', 'session_context', 'prompt_context'].includes(value))) {
-          throw new Error('supported_host_lifecycle_invalid');
+      let ready = false;
+      let milestones = [];
+      if (host === 'codex') {
+        const receipt = safeReadJSON(join(DATA_DIR, 'codex-hook-readiness.json'));
+        const result = validateHookReadiness(
+          codexHookContractDigest(context.edge.plugin_tree_digest, context.edge.runtime_tree_digest),
+          receipt,
+          {
+            binding_digest: context.binding.binding_digest,
+            resolver_epoch: context.binding.resolver_epoch,
+            repository_id: context.binding.workspace.repository_id,
+            workspace_digest: codexWorkspaceDigest(context.binding.workspace.canonical_path),
+          },
+        );
+        ready = result.ready === true;
+        if (ready) milestones = Object.keys(receipt.milestones).sort();
+      } else if (host === 'claude-code') {
+        const installedRuntime = inspectCodexRuntime();
+        const result = checkClaudeNativeProductHooks(installedRuntime, context.resolved.runtime, context.binding);
+        ready = result.ok === true;
+        if (ready) {
+          const receipt = safeReadJSON(join(context.resolved.runtime.data_dir, 'claude-code-hook-readiness.json'));
+          milestones = Object.keys(receipt?.milestones ?? {}).sort();
         }
-        seen.add(entry.host);
+      } else if (host === 'cursor') {
+        const result = inspectCursorLifecycleReadiness(context.resolved);
+        ready = result.ready === true;
+        if (ready) milestones = Object.entries(result.observed)
+          .filter(([, observed]) => observed === true).map(([name]) => name).sort();
       }
-      const selected = result.hosts.find((entry) => entry.host === host);
-      if (!selected || selected.lifecycle_ready !== (selected.state === 'ready')) {
-        throw new Error('supported_host_lifecycle_invalid');
-      }
-      return selected;
+      return {
+        host,
+        state: ready ? 'ready' : 'first_memory_pending',
+        lifecycle_ready: ready,
+        milestones,
+      };
     } catch {
       return { host, state: 'first_memory_pending', lifecycle_ready: false, milestones: [] };
     }
@@ -1209,8 +1231,9 @@ function personalInstallHostRegistry(targets) {
     },
     cursor: {
       inspect: async (context) => {
-        const result = inspectCursorPlugin({
-          cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
+        const result = inspectCursorNativeIntegration({
+          cursorHome: cursorHomePath(), pluginRoot: context.edge.plugin_root,
+          expectedDigest: context.edge.plugin_tree_digest,
         });
         const staticReady = result.ready === true && captureFor(context, 'cursor') && accessFor(context, 'cursor');
         const lifecycle = staticReady
@@ -1228,17 +1251,33 @@ function personalInstallHostRegistry(targets) {
         };
       },
       activate: async (context) => {
-        const installed = installCursorPlugin(context.edge.plugin_root, {
-          cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
-        });
-        writeCaptureStateFiles({
-          globalDataDir: DATA_DIR, binding: context.binding, host: 'cursor', enabled: true,
-          reason: 'cursor_plugin_connected',
-        });
-        writeProductHostAccess({
-          productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'cursor',
-        });
-        prewarmPersonalHostWorker('cursor', installed.path, context.binding);
+        const localFiles = snapshotLocalFiles([
+          ...captureStatePaths(DATA_DIR, context.binding),
+          productHostAccessPath({ productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'cursor' }),
+        ]);
+        let installed;
+        try {
+          installed = installCursorNativeIntegration(context.edge.plugin_root, {
+            cursorHome: cursorHomePath(), expectedDigest: context.edge.plugin_tree_digest,
+          });
+          writeCaptureStateFiles({
+            globalDataDir: DATA_DIR, binding: context.binding, host: 'cursor', enabled: true,
+            reason: 'cursor_native_connected',
+          });
+          writeProductHostAccess({
+            productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'cursor',
+          });
+          prewarmPersonalHostWorker('cursor', installed.plugin_root, context.binding);
+        } catch (error) {
+          const failures = [];
+          if (installed?.backup) {
+            try { restoreCursorNativeIntegrationBackup(installed.backup, { cursorHome: cursorHomePath() }); }
+            catch (failure) { failures.push(failure); }
+          }
+          try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
+          if (failures.length > 0) throw new PersonalInstallError('cursor_activation_rollback_failed');
+          throw error;
+        }
       },
     },
   };
@@ -1594,7 +1633,17 @@ async function runProductMcpServer(host) {
   if (!captureEnabledForHost(capture, host)) {
     throw new Error(`Pulse ${host} capture is disabled for this bound workspace`);
   }
-	await ensureActivatedVaultRuntime(resolved);
+  const localSourceRoot = process.env.PULSE_LOCAL_SOURCE_CHECKOUT;
+  if (localSourceRoot) {
+    const checkout = realpathSync(resolve(localSourceRoot));
+    const currentCheckout = realpathSync(resolve(CLI_PACKAGE_ROOT, '..', '..'));
+    if (checkout !== currentCheckout || !existsSync(join(checkout, '.git')) ||
+        !existsSync(join(checkout, 'mcp', 'dist', 'index.js'))) {
+      throw new Error('Pulse local source checkout is invalid');
+    }
+  } else {
+    await ensureActivatedVaultRuntime(resolved);
+  }
   process.env.PULSE_BASE_URL = resolved.runtime.base_url;
   process.env.PULSE_DATA_DIR = resolved.runtime.data_dir;
   process.env.PULSE_RUNTIME_MODE = 'local-stdio';
@@ -2352,7 +2401,7 @@ async function codexDoctorReport({
       ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
       : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
     hooks: hookReadiness.ready
-		  ? { ok: true, detail: 'SessionStart and one complete same-session lifecycle observed' }
+		  ? { ok: true, detail: 'prompt context and memory receipt hooks observed' }
       : { ok: false, reason: hookReadiness.reason, detail: hookReadiness.detail ?? hookReadiness.reason },
   };
   const personalLiveReadiness = projectPersonalLiveReadiness(checks, new Date());
@@ -2497,13 +2546,17 @@ function checkClaudeProductHooks(installedRuntime, runtime, binding) {
     const entries = Array.isArray(settings.hooks?.[event]) ? settings.hooks[event] : [];
     const pulseHandlers = entries.flatMap((entry) => (Array.isArray(entry?.hooks) ? entry.hooks : []))
       .filter((handler) => isPulseHookCommand(handler?.command));
-    const expectedHandler = expected[event][0].hooks[0];
-    const exactEntry = entries.some((entry) =>
-      (entry.matcher ?? '') === (expected[event][0].matcher ?? '') &&
-      Array.isArray(entry.hooks) && entry.hooks.some((handler) =>
-        handler?.type === expectedHandler.type && handler?.command === expectedHandler.command &&
-        handler?.timeout === expectedHandler.timeout));
-    if (pulseHandlers.length !== 1 || !exactEntry) errors.push(event);
+    const expectedEntries = expected[event];
+    const exactEntries = expectedEntries.every((expectedEntry) => {
+      const expectedHandler = expectedEntry.hooks[0];
+      return entries.some((entry) =>
+        (entry.matcher ?? '') === (expectedEntry.matcher ?? '') &&
+        Array.isArray(entry.hooks) && entry.hooks.some((handler) =>
+          handler?.type === expectedHandler.type && handler?.command === expectedHandler.command &&
+          handler?.timeout === expectedHandler.timeout));
+    });
+    const expectedHandlerCount = expectedEntries.reduce((total, entry) => total + entry.hooks.length, 0);
+    if (pulseHandlers.length !== expectedHandlerCount || !exactEntries) errors.push(event);
   }
   if (errors.length > 0) return { ok: false, detail: `missing, duplicate, or stale: ${errors.join(', ')}` };
 	return checkClaudeNativeProductHooks(installedRuntime, runtime, binding);
@@ -2515,7 +2568,7 @@ function checkClaudeNativeProductHooks(installedRuntime, runtime, binding) {
 	}
   const digest = claudeHookContractDigest(installedRuntime.digest);
   const receipt = safeReadJSON(join(runtime.data_dir, 'claude-code-hook-readiness.json'));
-  const milestones = ['prompt_context', 'write_receipt', 'turn_finalize'];
+  const milestones = ['prompt_context', 'write_receipt'];
   const observed = receipt?.schema === 'pulse.claude_code_hook_readiness.v1' &&
     receipt.hooks_digest === digest && receipt.binding_digest === binding.binding_digest &&
     receipt.resolver_epoch === binding.resolver_epoch &&
@@ -2527,7 +2580,7 @@ function checkClaudeNativeProductHooks(installedRuntime, runtime, binding) {
     CLAUDE_HOOK_EVENTS.includes(receipt.last_event) &&
     typeof receipt.observed_at === 'string' && !Number.isNaN(Date.parse(receipt.observed_at));
   return observed
-    ? { ok: true, detail: 'prompt context, truthful Memory Tray receipt, and turn finalization observed' }
+    ? { ok: true, detail: 'prompt context and truthful Memory Tray receipt observed' }
     : { ok: false, detail: 'native hooks installed; complete one real prompt that saves a visible Memory Tray candidate' };
 }
 
@@ -2823,8 +2876,9 @@ async function cursorProductDoctorReport() {
     productEdgeError = error.message;
   }
   const plugin = productEdge
-    ? inspectCursorPlugin({
+    ? inspectCursorNativeIntegration({
         cursorHome: cursorHomePath(),
+        pluginRoot: productEdge.plugin_root,
         expectedDigest: productEdge.plugin_tree_digest,
       })
     : { ready: false, reason: 'cursor_product_edge_unavailable' };
@@ -2860,14 +2914,14 @@ async function cursorProductDoctorReport() {
       ? { ok: true, detail: 'shared Pulse Core is running' }
       : { ok: false, detail: `shared Pulse Core is ${runtimeStatus.status}` },
     plugin: plugin.ready
-      ? { ok: true, detail: 'exact signed Cursor plugin installed' }
-      : { ok: false, detail: productEdgeError ?? plugin.reason ?? 'Cursor plugin unavailable' },
+      ? { ok: true, detail: 'signed Pulse runtime connected to Cursor IDE and Agent CLI' }
+      : { ok: false, detail: productEdgeError ?? plugin.reason ?? 'Cursor connection unavailable' },
     host_access: hostAccess
       ? { ok: true, detail: 'workspace-scoped Cursor access marker verified' }
       : { ok: false, detail: hostAccessError ?? 'workspace-scoped Cursor access marker missing' },
     hooks: lifecycle.ready
-      ? { ok: true, detail: 'session context, turn capture, write receipt, and finalize observed' }
-      : { ok: false, detail: 'plugin installed; complete one normal Cursor turn' },
+      ? { ok: true, detail: 'one automatic recall and one successful write observed' }
+      : { ok: false, detail: 'connection installed; complete one recall and one write in Cursor' },
     vault: liveVault
       ? { ok: true, detail: `${resolved.runtime.kind}:${resolved.runtime.store_id}; live authenticated status` }
       : { ok: false, detail: liveError ?? `bound vault is ${runtimeStatus.status}; live status unavailable or mismatched` },
@@ -3283,8 +3337,11 @@ function shellQuote(value) {
 }
 
 const CLAUDE_HOOK_EVENTS = [
-  'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact',
-  'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop',
+  'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
+];
+const CLAUDE_RECOGNIZED_PULSE_HOOK_EVENTS = [
+  ...CLAUDE_HOOK_EVENTS,
+  'SessionStart', 'PreCompact', 'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop',
 ];
 
 function pulseHookCommand(eventName, runtimePath) {
@@ -3313,31 +3370,16 @@ function hookConfig(runtimePath, runtimeDigest) {
   });
   return {
     hooks: {
-      SessionStart: [
-        {
-          matcher: 'startup|resume|clear|compact',
-          hooks: [handler('SessionStart', 60)],
-        },
-      ],
       UserPromptSubmit: [
         {
           hooks: [handler('UserPromptSubmit')],
         },
       ],
-      PreToolUse: [{ matcher: '*', hooks: [handler('PreToolUse', 10)] }],
+      PreToolUse: [{ matcher: 'mcp__pulse-product__pulse_memory', hooks: [handler('PreToolUse', 10)] }],
       PostToolUse: [
         {
-          matcher: 'mcp__pulse-product__pulse_remember',
+          matcher: 'mcp__pulse-product__pulse_memory',
           hooks: [handler('PostToolUse', 10)],
-        },
-      ],
-      PreCompact: [{ matcher: 'manual|auto', hooks: [handler('PreCompact')] }],
-      PostCompact: [{ matcher: 'manual|auto', hooks: [handler('PostCompact')] }],
-      SubagentStart: [{ matcher: '*', hooks: [handler('SubagentStart', 60)] }],
-      SubagentStop: [{ matcher: '*', hooks: [handler('SubagentStop')] }],
-      Stop: [
-        {
-          hooks: [handler('Stop', 60)],
         },
       ],
     },
@@ -3363,7 +3405,12 @@ function installClaudeCodeHooks(runtimePath, runtimeDigest, { dryRun = false } =
   }
   const path = resolve(process.cwd(), '.claude', 'settings.local.json');
   const current = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
-  current.hooks = mergeHookConfig(current.hooks ?? {}, hooks.hooks);
+  const cleanedHooks = {};
+  for (const [event, entries] of Object.entries(current.hooks ?? {})) {
+    const kept = withoutPulseHookEntries(Array.isArray(entries) ? entries : []);
+    if (kept.length > 0) cleanedHooks[event] = kept;
+  }
+  current.hooks = mergeHookConfig(cleanedHooks, hooks.hooks);
   atomicWriteJSON(path, current);
   ensureGitignoreEntry('.claude/settings.local.json');
   console.log(`[pulse] Claude Code continuity hooks written to ${path}`);
@@ -3570,10 +3617,9 @@ function checkClaudeMCPConfigured() {
 function checkClaudeHooksConfigured() {
   const settings = safeReadJSON(resolve(process.cwd(), '.claude', 'settings.local.json'));
   const required = [
-    ['SessionStart', 'session-start'],
     ['UserPromptSubmit', 'user-prompt-submit'],
+    ['PreToolUse', 'pre-tool-use'],
     ['PostToolUse', 'post-tool-use'],
-    ['Stop', 'stop'],
   ];
   const missing = [];
   for (const [event, hookName] of required) {
@@ -3588,7 +3634,7 @@ function checkClaudeHooksConfigured() {
   if (missing.length > 0) {
     return { ok: false, detail: `missing ${missing.join(', ')}` };
   }
-  return { ok: true, detail: 'SessionStart, prompt/tool, and Stop hooks installed' };
+  return { ok: true, detail: 'prompt recall and pulse_memory hooks installed' };
 }
 
 async function checkViewerReady() {
@@ -3899,7 +3945,7 @@ function withoutPulseHookEntries(entries) {
 
 function isPulseHookCommand(command) {
   const text = String(command ?? '');
-  const hookName = String.raw`(?:session-start|user-prompt-submit|post-tool-use|stop)`;
+  const hookName = String.raw`(?:session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop)`;
   return new RegExp(String.raw`\bpulse\s+hook\s+${hookName}\b`).test(text)
 		|| isPulseProductHookCommand(text)
     || (
@@ -3911,7 +3957,7 @@ function isPulseHookCommand(command) {
 
 function isPulseProductHookCommand(command) {
 	const text = String(command ?? '');
-	const nativeEvent = CLAUDE_HOOK_EVENTS.join('|');
+	const nativeEvent = CLAUDE_RECOGNIZED_PULSE_HOOK_EVENTS.join('|');
 	return new RegExp(String.raw`(?:^|\s)(?:'[^']*\/src\/cli\.js'|"[^"]*\/src\/cli\.js"|\S*\/src\/cli\.js)\s+claude-hook\s+(?:${nativeEvent})(?:\s|$)`).test(text);
 }
 
@@ -4099,26 +4145,43 @@ async function connectCursor() {
 		const resolved = resolveCodexMcpRuntime(process.cwd());
 		const productState = readProductActivationBundle(DATA_DIR);
 		const edge = committedCodexProductEdge(productState);
-		const installed = installCursorPlugin(edge.plugin_root, {
-			cursorHome: cursorHomePath(), expectedDigest: edge.plugin_tree_digest,
-		});
-		writeCaptureStateFiles({
-			globalDataDir: DATA_DIR, binding: resolved.binding, host: 'cursor', enabled: true,
-			reason: 'cursor_plugin_connected',
-		});
-		const defaults = defaultBindingPaths();
-		writeProductLocators({
-			codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
-			registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
-			publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
-			anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
-			trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
-		});
-		writeProductHostAccess({
-			productHome: join(homedir(), '.pulse'), binding: resolved.binding, host: 'cursor',
-		});
-		console.log(`[pulse] Cursor plugin ${installed.reused ? 'already connected' : 'connected'} to the shared ${resolved.runtime.kind} vault.`);
-		console.log('[pulse] Reload Cursor once so it discovers the local Pulse plugin.');
+		const localFiles = snapshotLocalFiles([
+			...captureStatePaths(DATA_DIR, resolved.binding),
+			join(codexHomePath(), 'pulse', 'product-locators.json'),
+			productHostAccessPath({ productHome: join(homedir(), '.pulse'), binding: resolved.binding, host: 'cursor' }),
+		]);
+		let installed;
+		try {
+			installed = installCursorNativeIntegration(edge.plugin_root, {
+				cursorHome: cursorHomePath(), expectedDigest: edge.plugin_tree_digest,
+			});
+			writeCaptureStateFiles({
+				globalDataDir: DATA_DIR, binding: resolved.binding, host: 'cursor', enabled: true,
+				reason: 'cursor_native_connected',
+			});
+			const defaults = defaultBindingPaths();
+			writeProductLocators({
+				codexHome: codexHomePath(), binding: resolved.binding, dataDir: DATA_DIR,
+				registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+				publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+				anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+				trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+			});
+			writeProductHostAccess({
+				productHome: join(homedir(), '.pulse'), binding: resolved.binding, host: 'cursor',
+			});
+		} catch (error) {
+			const failures = [];
+			if (installed?.backup) {
+				try { restoreCursorNativeIntegrationBackup(installed.backup, { cursorHome: cursorHomePath() }); }
+				catch (failure) { failures.push(failure); }
+			}
+			try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
+			if (failures.length > 0) throw new PersonalInstallError('cursor_activation_rollback_failed');
+			throw error;
+		}
+		console.log(`[pulse] Cursor IDE and Agent CLI ${installed.reused ? 'are already connected' : 'connected'} to the shared ${resolved.runtime.kind} vault.`);
+		console.log('[pulse] Reload Cursor IDE once so it reads the updated hooks and MCP settings.');
 	} finally {
 		await release();
 	}
@@ -4149,10 +4212,10 @@ async function disconnectCursor() {
 			}
 		}
 		const result = accessResult.remaining_for_host === 0
-			? removeCursorPlugin({ cursorHome: cursorHomePath() })
+			? removeCursorNativeIntegration({ cursorHome: cursorHomePath() })
 			: { removed: false };
 		console.log(accessResult.remaining_for_host > 0
-			? '[pulse] Cursor disconnected from this workspace; the global plugin remains for another workspace.'
+			? '[pulse] Cursor disconnected from this workspace; the shared connection remains for another workspace.'
 			: `[pulse] Cursor ${result.removed ? 'disconnected' : 'was not connected'}. Local memory was preserved.`);
 	} finally {
 		await release();
@@ -9690,7 +9753,159 @@ function emitMigrationPreview(target, rest) {
   printMigrationPreview(preview);
 }
 
+function localStoreMergePreview(path) {
+	try {
+		const preview = JSON.parse(readFileSync(resolve(path), 'utf8'));
+		return preview?.schema === 'pulse.local_store_merge_preview.v1';
+	} catch {
+		return false;
+	}
+}
+
+function localMergeExecutable(runtime) {
+	const status = inspectVaultRuntime(runtime);
+	let candidate = ['running', 'crashed'].includes(status.status) ? status.executable : undefined;
+	let expectedDigest = ['running', 'crashed'].includes(status.status) ? status.executable_digest : undefined;
+	if (!candidate) {
+		const activation = safeReadJSON(join(DATA_DIR, 'runtime', 'product-daemon.json'));
+		candidate = activation?.daemon_path;
+		expectedDigest = activation?.daemon_digest;
+	}
+	if (typeof candidate !== 'string' || !isAbsolute(candidate) || !/^[a-f0-9]{64}$/.test(expectedDigest ?? '')) {
+		throw new Error('Pulse Personal must be installed before local memory can be merged');
+	}
+	let proof;
+	try { proof = defaultPlatformServices.inspectExecutable(resolve(candidate)); } catch { proof = null; }
+	if (!proof?.executable || proof.owner_only !== true || proof.sha256 !== expectedDigest) {
+		throw new Error('The installed Pulse program could not be verified');
+	}
+	return { executable: proof.canonical_path, status };
+}
+
+function runLocalMergeExecutable(executable, commandArgs, timeout = 20 * 60_000) {
+	const result = spawnSync(executable, ['local-migrate', ...commandArgs], {
+		encoding: 'utf8',
+		env: {
+			HOME: homedir(), PATH: '',
+			ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '',
+		},
+		maxBuffer: 16 * 1024 * 1024,
+		timeout,
+	});
+	if (result.status !== 0) {
+		const detail = `${result.stderr ?? ''}`.trim().split('\n').at(-1) || 'local memory operation failed';
+		throw new Error(detail);
+	}
+	try { return JSON.parse(result.stdout); } catch {
+		throw new Error('Pulse returned an invalid local memory result');
+	}
+}
+
+async function localMergeRuntimeContext() {
+	await recoverBindingAuthority();
+	const resolved = resolveCodexMcpRuntime(process.cwd());
+	const canonicalPath = join(resolved.runtime.data_dir, 'pulse.db');
+	const program = localMergeExecutable(resolved.runtime);
+	return { ...resolved, canonicalPath, ...program };
+}
+
+async function runLocalStoresPreview(rest) {
+	const out = restArg(rest, '--out');
+	if (!out) throw new Error('pulse migrate local-stores requires --out <preview.json>');
+	const outputPath = resolve(out);
+	const context = await localMergeRuntimeContext();
+	const preview = runLocalMergeExecutable(context.executable, [
+		'preview', '--home', homedir(), '--canonical', context.canonicalPath,
+		'--store-id', context.runtime.store_id, '--out', outputPath,
+	]);
+	const reviewPath = `${outputPath.replace(/\.json$/i, '')}.html`;
+	writeFileSync(reviewPath, renderLocalMergeReview(preview, outputPath), { mode: 0o600 });
+	console.log(`[pulse] New Personal memory prepared beside the current database: ${outputPath}`);
+	console.log(`[pulse] Added ${preview.totals?.events_created ?? 0} events and ${preview.totals?.capsules_created ?? 0} saved memories; combined ${preview.totals?.events_deduplicated ?? 0} repeated events.`);
+	if ((preview.conflicts?.length ?? 0) > 0) {
+		console.log(`Никита, посмотри вот сюда и выбери, какую из ${preview.conflicts.length} конфликтующих записей оставить: ${reviewPath}`);
+	} else {
+		console.log(`[pulse] No conflicting memories found. Next: pulse migrate commit ${outputPath} --confirm "merge local pulse memory"`);
+	}
+	if (rest.includes('--open')) openExternalURL(pathToFileURL(reviewPath).href);
+}
+
+async function runLocalStoresStatus(rest) {
+	const context = await localMergeRuntimeContext();
+	const status = runLocalMergeExecutable(context.executable, [
+		'status', '--home', homedir(), '--canonical', context.canonicalPath,
+	], 2 * 60_000);
+	if (rest.includes('--json')) {
+		console.log(JSON.stringify(status, null, 2));
+		return;
+	}
+	console.log(`[pulse] Found ${status.sources?.length ?? 0} local memory stores; prepared merges: ${status.pending_previews?.length ?? 0}.`);
+}
+
+async function restartLocalMergeRuntime(context, previous) {
+	if (previous.status !== 'running') return;
+	await startVaultRuntime(context.runtime, {
+		daemonPath: context.executable,
+		managedEmbedder: previous.managed_embedder,
+		host: 'pulse-product', allowRollback: false,
+	});
+	await assertVaultRuntimeHealthy(context.runtime);
+}
+
+async function commitLocalStoresPreview(previewPath, rest) {
+	if (restArg(rest, '--confirm') !== 'merge local pulse memory') {
+		throw new Error('pulse migrate commit requires --confirm "merge local pulse memory"');
+	}
+	const absolutePreview = resolve(previewPath);
+	const preview = JSON.parse(readFileSync(absolutePreview, 'utf8'));
+	const context = await localMergeRuntimeContext();
+	if (resolve(preview.canonical_path ?? '') !== context.canonicalPath || preview.store_id !== context.runtime.store_id) {
+		throw new Error('This preview belongs to a different Personal memory database');
+	}
+	const release = await acquireVaultActivationLock(context.runtime);
+	let archivePath;
+	try {
+		const previous = inspectVaultRuntime(context.runtime);
+		if (previous.status === 'running') await stopVaultRuntimeAndWait(context.runtime);
+		try {
+			const committed = runLocalMergeExecutable(context.executable, [
+				'commit', '--preview', absolutePreview, '--confirm', 'merge local pulse memory',
+			]);
+			archivePath = committed.archive_path;
+			await restartLocalMergeRuntime(context, previous);
+		} catch (error) {
+			if (archivePath) {
+				try {
+					await stopVaultRuntimeAndWait(context.runtime);
+					runLocalMergeExecutable(context.executable, [
+						'rollback', '--preview', absolutePreview, '--archive', archivePath,
+					]);
+					await restartLocalMergeRuntime(context, previous);
+				} catch (rollbackError) {
+					throw new Error(`New memory could not start and the automatic rollback also failed: ${rollbackError.message}`);
+				}
+			} else if (previous.status === 'running') {
+				await restartLocalMergeRuntime(context, previous);
+			}
+			throw error;
+		}
+	} finally {
+		await release();
+	}
+	console.log('[pulse] The merged Personal memory is now active. Every old database remains unchanged.');
+	console.log(`[pulse] The previous active database is preserved at: ${archivePath}`);
+	if (rest.includes('--open')) await runHome([]);
+}
+
 async function runMigrate(subcommand, rest) {
+	if (subcommand === 'local-stores') {
+		await runLocalStoresPreview(rest);
+		return;
+	}
+	if (subcommand === 'local-status') {
+		await runLocalStoresStatus(rest);
+		return;
+	}
   if (subcommand === 'start') {
     await runMigrationStart(rest);
     return;
@@ -9708,7 +9923,12 @@ async function runMigrate(subcommand, rest) {
     return;
   }
   if (subcommand === 'commit') {
-    await commitMigrationPreview(rest.find((arg) => !arg.startsWith('--')), rest);
+		const previewPath = rest.find((arg) => !arg.startsWith('--'));
+		if (previewPath && localStoreMergePreview(previewPath)) {
+			await commitLocalStoresPreview(previewPath, rest);
+		} else {
+			await commitMigrationPreview(previewPath, rest);
+		}
     return;
   }
   if (subcommand === 'request') {
@@ -9753,7 +9973,7 @@ async function runMigrate(subcommand, rest) {
     return;
   }
   if (subcommand !== 'preview') {
-    throw new Error('pulse migrate supports: start, guide, concierge, request, wait-latest, preview-latest, preview-people-graph, preview, commit');
+		throw new Error('pulse migrate supports: local-stores, local-status, start, guide, concierge, request, wait-latest, preview-latest, preview-people-graph, preview, commit');
   }
   const target = rest.find((arg) => !arg.startsWith('--'));
   if (!target) {
