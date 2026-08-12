@@ -1,11 +1,14 @@
 # Install Pulse With Your AI Agent
 
-> Personal 0.8 is not published. Use `@zbs-gg/pulse@0.7.2` for an ordinary
-> installation. The 0.8 commands in this branch are development material until
-> a separate live acceptance is complete.
+> Personal 0.8.0 is published under the npm `preview` tag after live Codex and
+> Claude Code acceptance on Apple Silicon. It is not production ready and
+> Cursor live acceptance remains pending. Use `@zbs-gg/pulse@0.7.2` for the
+> stable installation or select `@preview` explicitly.
 
 The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
 and was published to npm on 7 August 2026.
+The exact 0.8.0 preview archive passed a clean Apple Silicon installation in
+the publication workflow on 12 August 2026.
 
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real
@@ -18,6 +21,12 @@ From the Git project that should receive Personal memory:
 
 ```bash
 npx -y @zbs-gg/pulse@0.7.2 init codex
+```
+
+To install the preview deliberately:
+
+```bash
+npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The Personal installer verifies a signed release, provisions one shared Core,
@@ -65,7 +74,7 @@ not permission to repair or remove another store.
 The proof is one normal memory from real work, then a fresh task in the
 same project. A simulated corpus or source-checkout test is not a substitute.
 
-For the unfinished 0.8 behavior, the host should advertise only
+For the 0.8 preview behavior, the host should advertise only
 `pulse_memory`. Prompt-time recall must stay within four memories and about 600
 tokens, while weak matches add nothing. The install must not add a session-start
 memory package, a Stop hook, or a second model turn for saving memory.

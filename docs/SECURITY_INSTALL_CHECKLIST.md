@@ -1,6 +1,7 @@
 # Security Install Checklist
 
-Use this checklist before installing Pulse Personal 0.7.2 for a user.
+Use this checklist before installing stable Pulse Personal 0.7.2 or the
+explicit 0.8.0 preview for a user.
 
 ## Required Checks
 
@@ -11,8 +12,9 @@ Use this checklist before installing Pulse Personal 0.7.2 for a user.
 - [ ] Emotional marks remain in Personal SQLite and cannot be published to
       Pulse Team.
 - [ ] Old chat import is not run by default.
-- [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2`, or the user
-      explicitly provided an exact source bundle, tarball, or local checkout.
+- [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2` for stable
+      or `@zbs-gg/pulse@0.8.0` for the selected preview, or the user explicitly
+      provided an exact source bundle, tarball, or local checkout.
 - [ ] The exact OS, architecture, and harness are green in
       `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not
       presented as public support.
@@ -61,7 +63,7 @@ The plan should say Pulse will not:
 Stop and explain if:
 
 - a command asks for model API keys for the default path;
-- npm returns 404 for `@zbs-gg/pulse@0.7.2` and no source bundle/local
+- npm returns 404 for the exact selected Pulse version and no source bundle/local
   checkout was provided;
 - a command tries to import archives before the first proof;
 - a command offers to send an emotional mark to Team or another user;
