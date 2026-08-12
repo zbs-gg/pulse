@@ -1,13 +1,12 @@
 {
   "mcpServers": {
     "pulse-product": {
-      "command": "node",
+      "command": "/bin/sh",
       "args": [
-        "--input-type=module",
-        "--eval",
-        "const{join}=await import('node:path');const{homedir}=await import('node:os');const{pathToFileURL}=await import('node:url');const root=process.env.CODEX_HOME||join(homedir(),'.codex');await import(pathToFileURL(join(root,'plugins','cache','zbs-gg','pulse','0.8.0','mcp','server.mjs')).href);"
+        "-c",
+        "exec \"$HOME/.local/bin/pulse\" codex-mcp"
       ],
-      "env_vars": ["CODEX_HOME"]
+      "env_vars": []
     }
   }
 }

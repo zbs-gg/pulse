@@ -287,3 +287,28 @@ func (s *Server) handleContextQuery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }
+
+func (s *Server) handleMemoryRecallActivity(w http.ResponseWriter, r *http.Request) {
+	authority, ok := s.requireProductBindingAuthority(w, r)
+	if !ok {
+		return
+	}
+	host, ok := exactSingleHeader(r, "X-Pulse-Product-Host")
+	if !ok || (host != "codex" && host != "claude-code") {
+		http.Error(w, "product host is invalid", http.StatusBadRequest)
+		return
+	}
+	var request memoryRecallActivityRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&request) != nil || request.Schema != "pulse.memory_recall_activity.v1" ||
+		request.ResultCount < 0 || request.ResultCount > 4 || !memoryActivityDigest.MatchString(request.ResultDigest) {
+		http.Error(w, "memory recall activity is invalid", http.StatusBadRequest)
+		return
+	}
+	if err := s.recordMemoryRecallActivity(authority, host, request, time.Now()); err != nil {
+		http.Error(w, "memory recall activity is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

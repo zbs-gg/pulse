@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { normalizeCodexHook } from './host-adapter.js';
-import { handleCodexHook } from './codex-hooks.js';
+import { handleCodexHook, projectCodexLifecycleAttestation } from './codex-hooks.js';
 
 const base = {
   session_id: '019f5fc4-fea2-7142-90de-691158b1052d',
@@ -107,9 +107,8 @@ test('installed Codex hook surface has no SessionStart, compaction, subagent, or
   for (const matchers of Object.values(config.hooks)) {
     for (const matcher of matchers) {
       for (const handler of matcher.hooks) {
-        assert.doesNotMatch(handler.command, /CLAUDE_PLUGIN_ROOT/);
-        assert.match(handler.command, /\$\{PLUGIN_ROOT\}\/hooks\/pulse-hook\.mjs/);
-        assert.match(handler.command, /\$\{PLUGIN_ROOT\}\/hooks\/pulse-hook\.mjs/);
+        assert.doesNotMatch(handler.command, /CLAUDE_PLUGIN_ROOT|\bnode\b/);
+        assert.match(handler.command, /\.local\/bin\/pulse.*product-hook/);
       }
     }
   }
@@ -120,4 +119,20 @@ test('Codex normalization discards raw prompt and transcript', () => {
     ...base, prompt: 'private wording', transcript_path: '/private/transcript.jsonl',
   });
   assert.doesNotMatch(JSON.stringify(event), /private wording|transcript/);
+});
+
+test('Codex readiness separates Pulse delivery from unobservable model usage', () => {
+  const delivered = projectCodexLifecycleAttestation({
+    readiness: { ready: true, hooks_digest: 'a'.repeat(64) },
+  });
+  assert.equal(delivered.ready, true);
+  assert.equal(delivered.delivery_observed, true);
+  assert.equal(delivered.model_usage_observable, false);
+  assert.equal(delivered.proof_level, 'pulse_delivery_receipt');
+
+  const connected = projectCodexLifecycleAttestation({ readiness: { ready: false } });
+  assert.equal(connected.ready, true);
+  assert.equal(connected.delivery_observed, false);
+  assert.equal(connected.proof_level, 'connection_only');
+  assert.match(connected.detail, /No memory delivery has been recorded yet/);
 });

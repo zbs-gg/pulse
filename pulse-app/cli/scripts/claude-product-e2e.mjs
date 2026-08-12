@@ -85,44 +85,61 @@ function packedTarball(root) {
 }
 
 function writeFakeClaude(path) {
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `#!${process.execPath}
 const fs = require('node:fs');
+const path = require('node:path');
 const args = process.argv.slice(2);
 const state = process.env.PULSE_FAKE_CLAUDE_STATE;
+function readState() {
+  try { return JSON.parse(fs.readFileSync(state, 'utf8')); } catch { return {}; }
+}
+function writeState(value) {
+  fs.mkdirSync(path.dirname(state), { recursive: true });
+  fs.writeFileSync(state, JSON.stringify(value));
+}
 if (args[0] === '--version') { console.log('2.1.207 (Claude Code)'); process.exit(0); }
-if (args[0] !== 'mcp') process.exit(2);
-if (args[1] === 'remove') {
-  if (process.env.PULSE_FAKE_CLAUDE_FAIL_REMOVE === '1' && fs.existsSync(state)) process.exit(3);
-  if (process.env.PULSE_FAKE_CLAUDE_MISSING_REMOVE === '1' && !fs.existsSync(state)) {
-    console.error('No MCP server named "pulse" in local scope');
-    process.exit(1);
+if (args[0] === 'plugin') {
+  const command = args[1];
+  const current = readState();
+  if (command === 'list') {
+    const list = current.installPath ? [{
+      id: 'pulse@zbs-gg', version: current.version,
+      installPath: current.installPath, enabled: current.enabled === true,
+    }] : [];
+    console.log(JSON.stringify(list));
+    process.exit(0);
   }
-  try { fs.rmSync(state); } catch {}
-  process.exit(0);
-}
-if (args[1] === 'add-json') {
-  const config = JSON.parse(args[args.length - 1]);
-  fs.writeFileSync(state, JSON.stringify(config));
-	if (process.env.PULSE_FAKE_CLAUDE_ADD_WRITES_THEN_FAIL === '1') process.exit(2);
-  console.log('Added stdio MCP server pulse');
-  process.exit(0);
-}
-if (args[1] === 'get') {
-  if (!fs.existsSync(state)) process.exit(1);
-  const config = JSON.parse(fs.readFileSync(state, 'utf8'));
-  console.log('pulse:');
-  console.log('  Scope: Local config (private to you in this project)');
-  console.log('  Status: ✔ Connected');
-  console.log('  Type: stdio');
-  console.log('  Command: ' + config.command);
-  console.log('  Args: ' + config.args.join(' '));
-  if (config.env && Object.keys(config.env).length) {
-    console.log('  Environment:');
-    for (const [name, value] of Object.entries(config.env)) console.log('    ' + name + '=' + value);
+  if (command === 'marketplace' && args[2] === 'add') {
+    writeState({ ...current, marketplace: path.resolve(args[3]) });
+    process.exit(0);
   }
-  console.log('');
-  console.log('To remove this server, run: claude mcp remove pulse');
-  process.exit(0);
+  if (command === 'install' || command === 'update') {
+    if (!current.marketplace) process.exit(2);
+    const source = path.join(current.marketplace, 'plugins', 'pulse');
+    const manifest = JSON.parse(fs.readFileSync(path.join(source, '.codex-plugin', 'plugin.json'), 'utf8'));
+    const installPath = path.join(process.env.HOME, '.claude', 'plugins', 'cache', 'zbs-gg', 'pulse', manifest.version);
+    fs.rmSync(installPath, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(installPath), { recursive: true });
+    fs.cpSync(source, installPath, { recursive: true });
+    writeState({ ...current, installPath, version: manifest.version, enabled: current.enabled === true });
+    process.exit(0);
+  }
+  if (command === 'enable' || command === 'disable') {
+    if (!current.installPath) process.exit(2);
+    writeState({ ...current, enabled: command === 'enable' });
+    process.exit(0);
+  }
+  if (command === 'uninstall') {
+    if (current.installPath) fs.rmSync(current.installPath, { recursive: true, force: true });
+    writeState({ marketplace: current.marketplace });
+    process.exit(0);
+  }
+  process.exit(2);
+}
+if (args[0] === 'mcp' && args[1] === 'remove') {
+  console.error('No MCP server named "pulse" in local scope');
+  process.exit(1);
 }
 process.exit(2);
 `, { mode: 0o700 });
@@ -216,7 +233,7 @@ function hookCommand(settings, event, payload) {
     return true;
   });
   const handlers = entries.flatMap((entry) => entry.hooks)
-    .filter((handler) => /claude-hook\s/.test(handler.command));
+    .filter((handler) => /\b(?:claude-hook|product-hook)\s/.test(handler.command));
   assert.equal(handlers.length, 1, `${event} must have exactly one Pulse handler`);
   return handlers[0].command;
 }
@@ -317,7 +334,7 @@ try {
     cwd: root, timeout: 120_000,
   });
   const packedCLI = join(installRoot, 'node_modules', '@zbs-gg', 'pulse', 'src', 'cli.js');
-  const fakeClaude = join(tools, 'claude');
+  const fakeClaude = join(home, '.local', 'bin', 'claude');
   writeFakeClaude(fakeClaude);
 	const fakeCodex = join(tools, 'codex');
 	writeFakeCodex(fakeCodex);
@@ -345,6 +362,7 @@ try {
 		PULSE_NATIVE_PACKED_FIXTURE_PORT: String(port),
 		PULSE_NATIVE_PACKED_FIXTURE_BINDING_KEY_PATH: bindingPaths.privateKeyPath,
 		PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: fakeCodex,
+		PULSE_NATIVE_PACKED_CLAUDE_EXECUTABLE: fakeClaude,
   };
   for (const name of [
     'PULSE_GO_BIN', 'PULSE_LOCAL_EMBED_PYTHON', 'PULSE_LOCAL_EMBED_HELPER', 'PULSE_LOCAL_EMBED_MODEL',
@@ -408,39 +426,18 @@ try {
 	assert.deepEqual(readFileSync(projectMcpPath), mcpBeforeFailedConnect);
 	assert.deepEqual(readFileSync(projectSettingsPath), settingsBeforeFailedConnect);
 	await releaseActivationLock();
-	const failedExternalRegistration = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace, env: { ...env, PULSE_FAKE_CLAUDE_ADD_WRITES_THEN_FAIL: '1' },
-		timeout: 120_000, status: 1,
-	});
-	assert.match(`${failedExternalRegistration.stdout}${failedExternalRegistration.stderr}`, /claude mcp add-json failed/);
-	assert.equal(existsSync(fakeClaudeState), false, 'failed external registration must be removed during rollback');
-	assert.deepEqual(readFileSync(projectMcpPath), mcpBeforeFailedConnect);
-	assert.deepEqual(readFileSync(projectSettingsPath), settingsBeforeFailedConnect);
-
-	const failedExternalRollback = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-		cwd: workspace,
-		env: {
-			...env,
-			PULSE_FAKE_CLAUDE_ADD_WRITES_THEN_FAIL: '1',
-			PULSE_FAKE_CLAUDE_FAIL_REMOVE: '1',
-		},
-		timeout: 120_000, status: 1,
-	});
-	assert.match(`${failedExternalRollback.stdout}${failedExternalRollback.stderr}`, /rollback failed: claude mcp remove failed/);
-	assert.equal(existsSync(fakeClaudeState), true, 'failed rollback must be reported instead of silently claiming cleanup');
-	rmSync(fakeClaudeState, { force: true });
-
   const connected = run(process.execPath, [packedCLI, 'connect', 'claude-code'], {
-    cwd: workspace, env: { ...env, PULSE_FAKE_CLAUDE_MISSING_REMOVE: '1' }, timeout: 120_000,
+    cwd: workspace, env, timeout: 120_000,
   });
   assert.match(connected.stdout, /one bound vault, two connected harnesses/);
   assert.match(connected.stdout, /pinned local runtime/);
-  const mcpConfig = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
-  assert.equal(mcpConfig.type, 'stdio');
-  assert.equal(mcpConfig.command, process.execPath);
-  assert.equal(mcpConfig.args[1], 'claude-mcp');
-  assert.equal(mcpConfig.env.PULSE_DATA_DIR, join(root, 'pulse'));
-  assert.equal(mcpConfig.env.PULSE_GO_BIN, undefined);
+  const claudePlugin = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
+  assert.equal(claudePlugin.enabled, true);
+  const mcpConfig = {
+    command: join(home, '.local', 'bin', 'pulse'),
+    args: ['claude-mcp'],
+    env: {},
+  };
   assert.doesNotMatch(JSON.stringify(mcpConfig), /PULSE_API_KEY|secret\.key|\bnpx\b/);
   assert.doesNotMatch(connected.stdout, /[?&]key=|PULSE_API_KEY|secret\.key/i);
 	const viewerResult = run(process.execPath, [packedCLI, 'viewer', '--print-url'], {
@@ -461,14 +458,16 @@ try {
   const settingsPath = join(workspace, '.claude', 'settings.local.json');
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   assert.deepEqual(settings.permissions, { allow: ['Bash(git status)'] });
-  assert.deepEqual(Object.keys(settings.hooks).sort(), [
-    'PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit',
-  ]);
+  assert.deepEqual(Object.keys(settings.hooks).sort(), ['SessionStart']);
   const sessionCommands = settings.hooks.SessionStart.flatMap((entry) => entry.hooks.map((hook) => hook.command));
   assert.equal(sessionCommands.includes('echo keep-session'), true);
   assert.equal(sessionCommands.some((command) => /claude-hook SessionStart/.test(command)), false);
   assert.equal(sessionCommands.includes('pulse hook session-start'), false);
-  assert.equal(settings.hooks.PostToolUse[0].matcher, 'mcp__pulse-product__pulse_memory');
+  const claudeHooks = JSON.parse(readFileSync(join(claudePlugin.installPath, 'hooks', 'hooks.json'), 'utf8'));
+  assert.equal(
+    claudeHooks.hooks.PostToolUse[0].matcher.split('|').includes('mcp__pulse-product__pulse_memory'),
+    true,
+  );
 
   const nestedWorkspace = join(workspace, 'nested', 'feature');
   mkdirSync(nestedWorkspace, { recursive: true });
@@ -481,9 +480,12 @@ try {
     cwd: workspace, hook_event_name: 'UserPromptSubmit', permission_mode: 'default',
     prompt: 'raw prompt must not be stored anywhere',
   };
-  const promptOutput = runHook(settings, 'UserPromptSubmit', promptPayload, workspace, env);
+  const pluginEnv = { ...env, CLAUDE_PLUGIN_ROOT: claudePlugin.installPath };
+  const promptOutput = runHook(claudeHooks, 'UserPromptSubmit', promptPayload, workspace, pluginEnv);
   assert.equal(promptOutput.continue, true);
   assert.match(promptOutput.hookSpecificOutput.additionalContext, /Call pulse_memory once/);
+  const claudeReadinessPath = join(vaultDir, 'claude-code-hook-readiness.json');
+  assert.equal(existsSync(claudeReadinessPath), true, 'native prompt must record Claude readiness');
 
   const summary = 'Use one canonical memory object across Claude Code and Codex.';
   const claudeMemory = {
@@ -491,16 +493,14 @@ try {
       kind: 'decision', scope: 'project', summary,
     }],
   };
-  const preTool = runHook(settings, 'PreToolUse', {
+  const preTool = runHook(claudeHooks, 'PreToolUse', {
     ...promptPayload, hook_event_name: 'PreToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
-  }, workspace, env);
+  }, workspace, pluginEnv);
   assert.deepEqual(preTool, {});
   const freshMcpEnv = { ...env };
-  for (const name of [
-    'PULSE_DATA_DIR', 'PULSE_GO_BIN', 'PULSE_BINDING_REGISTRY_PATH',
-    'PULSE_BINDING_PUBLIC_KEY_PATH', 'PULSE_BINDING_ANCHOR_PATH', 'PULSE_TRUST_MODE',
-  ]) delete freshMcpEnv[name];
+  delete freshMcpEnv.PULSE_GO_BIN;
+  freshMcpEnv.CLAUDE_PLUGIN_ROOT = claudePlugin.installPath;
   const claudeMessages = runProductMcp(
     mcpConfig, mcpRememberInput(claudeMemory), nestedWorkspace, freshMcpEnv,
   );
@@ -509,12 +509,14 @@ try {
   assert.equal(claudeRemember.status, 'stored');
   assert.equal(claudeRemember.ids.length, 1);
   assert.match(claudeRemember.ids[0], /^pulse:/);
-  const claudePost = runHook(settings, 'PostToolUse', {
+  const claudePost = runHook(claudeHooks, 'PostToolUse', {
     ...promptPayload, hook_event_name: 'PostToolUse', tool_name: 'mcp__pulse-product__pulse_memory',
     tool_input: claudeMemory, tool_use_id: 'tool-claude-e2e',
     tool_response: claudeMessages.find((message) => message.id === 3).result,
-  }, workspace, env);
+  }, workspace, pluginEnv);
   assert.deepEqual(claudePost, {});
+  const claudeReadiness = JSON.parse(readFileSync(claudeReadinessPath, 'utf8'));
+  assert.deepEqual(Object.keys(claudeReadiness.milestones).sort(), ['prompt_context', 'write_receipt']);
 
   const secret = readFileSync(join(vaultDir, 'secret.key'), 'utf8');
   const baseUrl = binding.personal.base_url;
@@ -549,7 +551,7 @@ try {
 	assert.match(`${failedPluginUpgrade.stdout}${failedPluginUpgrade.stderr}`, /codex_plugin_snapshot_mismatch/);
 	assert.deepEqual(readFileSync(pluginMcpPath), pluginMcpBeforeFailedUpgrade);
 
-  const runtimeCLI = mcpConfig.args[0];
+  const runtimeCLI = join(root, 'pulse', 'runtime', 'codex', 'current', 'src', 'cli.js');
   const codexSession = 'session-codex-e2e';
   const codexTurn = 'turn-codex-e2e';
   const codexBase = {
@@ -603,10 +605,10 @@ try {
   assert.equal(codexCommitted.projection_status, 'complete');
   assert.equal(codexCommitted.latest_receipt.safe_provenance.host, 'codex');
 
-  const resumed = runHook(settings, 'UserPromptSubmit', {
+  const resumed = runHook(claudeHooks, 'UserPromptSubmit', {
     session_id: 'session-claude-fresh', prompt_id: 'prompt-claude-fresh', transcript_path: transcriptPath, cwd: workspace,
     hook_event_name: 'UserPromptSubmit', prompt: codexSummary, permission_mode: 'default',
-  }, workspace, env);
+  }, workspace, pluginEnv);
   assert.match(resumed.hookSpecificOutput.additionalContext, new RegExp(codexSummary));
 
   const doctor = run(process.execPath, [packedCLI, 'doctor', 'claude-code', '--json'], {
@@ -635,8 +637,7 @@ try {
 		JSON.parse(sharedCodexHookRun.stdout).hookSpecificOutput.additionalContext,
 		new RegExp(codexSummary),
 	);
-	const sharedMcp = JSON.parse(readFileSync(fakeClaudeState, 'utf8'));
-	assert.equal(sharedMcp.env.PULSE_GO_BIN, undefined);
+	assert.equal(mcpConfig.env.PULSE_GO_BIN, undefined);
 	const locator = JSON.parse(readFileSync(join(codexHome, 'pulse', 'product-locators.json'), 'utf8'));
 	const locatorEntry = Object.values(locator.entries)[0];
 	const upgradedRuntimeReceipt = JSON.parse(readFileSync(join(vaultDir, 'supervisor-runtime.json'), 'utf8'));
@@ -654,15 +655,14 @@ try {
 		'plugin_tree_digest', 'release_manifest_digest',
 	]) assert.match(productDaemon[field], /^[a-f0-9]{64}$/);
 
-  writeFileSync(fakeClaudeState, JSON.stringify({
-		...sharedMcp,
-		env: { ...sharedMcp.env, PULSE_BINDING_PUBLIC_KEY_PATH: join(root, 'tampered.pub') },
-  }));
+  const installedClaudeMcpPath = join(claudePlugin.installPath, '.mcp.json');
+  const installedClaudeMcp = readFileSync(installedClaudeMcpPath);
+  writeFileSync(installedClaudeMcpPath, `${installedClaudeMcp.toString('utf8')}\n`);
   const tamperedDoctor = run(process.execPath, [packedCLI, 'doctor', 'claude-code', '--json'], {
     cwd: workspace, env, status: 1,
   });
-  assert.equal(JSON.parse(tamperedDoctor.stdout).checks.mcp.ok, false);
-	writeFileSync(fakeClaudeState, JSON.stringify(sharedMcp));
+  assert.equal(JSON.parse(tamperedDoctor.stdout).checks.plugin.ok, false);
+	writeFileSync(installedClaudeMcpPath, installedClaudeMcp);
 
 	const persisted = readFilesRecursively(vaultDir);
   for (const bytes of persisted) {
@@ -719,7 +719,7 @@ try {
     cwd: workspace, env, status: 1,
   });
   const disconnectedReport = JSON.parse(disconnected.stdout);
-  assert.equal(disconnectedReport.checks.mcp.ok, false);
+  assert.equal(disconnectedReport.checks.plugin.ok, false);
   assert.equal(disconnectedReport.checks.capture.ok, false);
 
   process.stdout.write('Pulse Claude Code packed-product cross-harness E2E passed.\n');

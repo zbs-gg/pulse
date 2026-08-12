@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 )
@@ -16,6 +17,10 @@ type supportedHostLifecycleState struct {
 	Milestones     []string `json:"milestones"`
 	ObjectID       string   `json:"object_id,omitempty"`
 	ContextID      string   `json:"context_id,omitempty"`
+	LastWriteAt    string   `json:"last_write_at,omitempty"`
+	LastRecallAt   string   `json:"last_recall_at,omitempty"`
+	RecallCount    int      `json:"recall_count"`
+	DeliveryProof  string   `json:"delivery_proof"`
 }
 
 type supportedHostLifecycleReadiness struct {
@@ -46,6 +51,18 @@ func projectSupportedHostLifecycleReadiness(
 		}
 		projected := ProjectReadinessLifecycleInputs(hostMemories, hostDeliveries)
 		state := supportedHostLifecycleState{Host: host, State: projected.State, Milestones: []string{}}
+		for _, memory := range hostMemories {
+			if memory.CreatedAt > state.LastWriteAt {
+				state.LastWriteAt = memory.CreatedAt
+			}
+		}
+		for _, delivery := range hostDeliveries {
+			if delivery.CreatedAt > state.LastRecallAt {
+				state.LastRecallAt = delivery.CreatedAt
+				state.RecallCount = len(delivery.ObjectIDs)
+				state.DeliveryProof = delivery.Acknowledgement
+			}
+		}
 		if projected.TerminalMemory != nil {
 			state.Milestones = append(state.Milestones, "write_receipt")
 			state.ObjectID = projected.TerminalMemory.ObjectID
@@ -63,21 +80,18 @@ func projectSupportedHostLifecycleReadiness(
 	return result
 }
 
-func (s *Server) handleSupportedHostLifecycleReadiness(w http.ResponseWriter, r *http.Request) {
+func (s *Server) supportedHostLifecycleReadiness() (supportedHostLifecycleReadiness, error) {
 	bindingDigest, repositoryID, ok := s.cfg.Store.ProductRuntimeBoundary()
 	if !ok {
-		http.Error(w, "product lifecycle boundary unavailable", http.StatusServiceUnavailable)
-		return
+		return supportedHostLifecycleReadiness{}, fmt.Errorf("product lifecycle boundary unavailable")
 	}
 	memories, err := s.cfg.Store.TerminalMemoryReadinessFacts(repositoryID, bindingDigest, 100)
 	if err != nil {
-		http.Error(w, "product lifecycle memory facts unavailable", http.StatusServiceUnavailable)
-		return
+		return supportedHostLifecycleReadiness{}, fmt.Errorf("product lifecycle memory facts unavailable")
 	}
 	deliveryFacts, err := s.cfg.Store.ReadMemoryHomeDeliveryFacts(repositoryID, bindingDigest, 100)
 	if err != nil {
-		http.Error(w, "product lifecycle delivery facts unavailable", http.StatusServiceUnavailable)
-		return
+		return supportedHostLifecycleReadiness{}, fmt.Errorf("product lifecycle delivery facts unavailable")
 	}
 	deliveries := make([]ContextDeliveryReadinessFact, 0, len(deliveryFacts))
 	for _, fact := range deliveryFacts {
@@ -92,6 +106,40 @@ func (s *Server) handleSupportedHostLifecycleReadiness(w http.ResponseWriter, r 
 			CreatedAt: fact.CreatedAt,
 		})
 	}
+	result := projectSupportedHostLifecycleReadiness(memories, deliveries)
+	activity, err := readMemoryActivity(s.cfg.MemoryActivityPath)
+	if err != nil {
+		return supportedHostLifecycleReadiness{}, fmt.Errorf("product memory activity unavailable")
+	}
+	for index := range result.Hosts {
+		host := &result.Hosts[index]
+		recall, ok := activity.Hosts[host.Host]
+		if ok && recall.RepositoryID == repositoryID && recall.RecalledAt > host.LastRecallAt {
+			host.LastRecallAt = recall.RecalledAt
+			host.RecallCount = recall.ResultCount
+			host.DeliveryProof = "pulse_delivery_receipt"
+			host.Milestones = append(host.Milestones, "automatic_recall")
+		}
+		host.LifecycleReady = host.LastWriteAt != "" && host.LastRecallAt != ""
+		if host.LifecycleReady {
+			host.State = "ready"
+		} else if host.LastWriteAt != "" {
+			host.State = "automatic_recall_pending"
+		} else if host.LastRecallAt != "" {
+			host.State = "durable_write_pending"
+		} else {
+			host.State = "first_activity_pending"
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) handleSupportedHostLifecycleReadiness(w http.ResponseWriter, r *http.Request) {
+	result, err := s.supportedHostLifecycleReadiness()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, projectSupportedHostLifecycleReadiness(memories, deliveries))
+	writeJSON(w, result)
 }

@@ -151,9 +151,10 @@ const SAFE_ARTIFACT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const WORKSPACE_ID = /^workspace_[a-f0-9]{32}$/;
 
 function ownerControlledTreeDigest(root, label, {
-	excludeRootFiles = [], platformServices = defaultPlatformServices,
+	excludeRootDirectories = [], excludeRootFiles = [], platformServices = defaultPlatformServices,
 } = {}) {
 	const base = resolve(root);
+	const excludedDirectories = new Set(excludeRootDirectories);
 	const excluded = new Set(excludeRootFiles);
 	const windows = platformServices.platform === 'win32';
 	const rootInfo = lstatSync(base);
@@ -166,6 +167,7 @@ function ownerControlledTreeDigest(root, label, {
 	const proofFiles = [];
 	const visit = (directory, prefix = '') => {
 		for (const name of readdirSync(directory).sort()) {
+			const excludedDirectory = prefix === '' && excludedDirectories.has(name);
 			const excludedFromDigest = prefix === '' && excluded.has(name);
 			const path = join(directory, name);
 			const relative = prefix ? `${prefix}/${name}` : name;
@@ -173,7 +175,7 @@ function ownerControlledTreeDigest(root, label, {
 			if (info.isSymbolicLink() || (!windows && (info.uid !== currentUID || (info.mode & 0o022) !== 0 ||
 				(info.isFile() && info.nlink !== 1)))) throw new Error(`${label}_unsafe`);
 			if (info.isDirectory()) {
-				visit(path, relative);
+				if (!excludedDirectory) visit(path, relative);
 			} else if (info.isFile()) {
 				if (windows && info.size > 64 * 1024 * 1024) throw new Error(`${label}_unsafe`);
 				const bytes = readFileSync(path);
@@ -209,6 +211,28 @@ function ownerControlledTreeDigest(root, label, {
 		} catch { throw new Error(`${label}_unsafe`); }
 	}
 	return hash.digest('hex');
+}
+
+function validateClaudeInUseDirectory(pluginRoot) {
+	const root = join(resolve(pluginRoot), '.in_use');
+	if (!existsSync(root)) return;
+	const info = lstatSync(root);
+	const windows = defaultPlatformServices.platform === 'win32';
+	const currentUID = typeof process.geteuid === 'function' ? process.geteuid() : info.uid;
+	if (!info.isDirectory() || info.isSymbolicLink() || (!windows &&
+		(info.uid !== currentUID || (info.mode & 0o022) !== 0))) {
+		throw new Error('claude_plugin_in_use_unsafe');
+	}
+	const entries = readdirSync(root);
+	if (entries.length > 64) throw new Error('claude_plugin_in_use_unsafe');
+	for (const name of entries) {
+		if (!/^[1-9][0-9]{0,9}$/.test(name)) throw new Error('claude_plugin_in_use_unsafe');
+		const lease = lstatSync(join(root, name));
+		if (!lease.isFile() || lease.isSymbolicLink() || lease.size > 512 || (!windows &&
+			(lease.uid !== currentUID || (lease.mode & 0o022) !== 0 || lease.nlink !== 1))) {
+			throw new Error('claude_plugin_in_use_unsafe');
+		}
+	}
 }
 
 function requireProductEdgeFile(root, relative, label) {
@@ -481,6 +505,27 @@ export function inspectCodexPluginCompatibility(plugin, edge) {
 		return { ok: false, reason: 'codex_plugin_snapshot_mismatch', detail: 'installed plugin bytes do not match the signed release' };
 	}
 	return { ok: true, reason: 'codex_plugin_exact', detail: `pulse@zbs-gg ${plugin.version}`, digest };
+}
+
+export function inspectClaudePluginCompatibility(plugin, edge) {
+	if (!plugin?.installed) return { ok: false, reason: 'claude_plugin_missing', detail: 'pulse@zbs-gg is not installed' };
+	if (!plugin.enabled) return { ok: false, reason: 'claude_plugin_disabled', detail: 'pulse@zbs-gg is disabled' };
+	if (plugin.version !== edge?.release_version) {
+		return { ok: false, reason: 'claude_plugin_version_mismatch', detail: 'installed plugin version does not match the signed release' };
+	}
+	let digest;
+	try {
+		validateClaudeInUseDirectory(plugin.path);
+		digest = ownerControlledTreeDigest(plugin.path, 'claude_plugin_snapshot', {
+			excludeRootDirectories: ['.in_use'],
+		});
+	} catch (error) {
+		return { ok: false, reason: 'claude_plugin_snapshot_unsafe', detail: error.message };
+	}
+	if (digest !== edge?.plugin_tree_digest) {
+		return { ok: false, reason: 'claude_plugin_snapshot_mismatch', detail: 'installed plugin bytes do not match the signed release' };
+	}
+	return { ok: true, reason: 'claude_plugin_exact', detail: `pulse@zbs-gg ${plugin.version}`, digest };
 }
 
 function runtimeRoot(dataDir) {

@@ -75,6 +75,13 @@ function nativePackedCodexCandidates(env, pathAPI) {
     ? [pathAPI.resolve(value)] : [];
 }
 
+function nativePackedClaudeCandidates(env, pathAPI) {
+  const value = env.PULSE_NATIVE_PACKED_CLAUDE_EXECUTABLE;
+  return env.PULSE_TRUST_MODE === 'test' && env.PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION === '1' &&
+    typeof value === 'string' && pathAPI.isAbsolute(value)
+    ? [pathAPI.resolve(value)] : [];
+}
+
 function protectedHarnessCandidates(env, pathAPI, name) {
   const root = env.RUNNER_TEMP;
   const value = env[`PULSE_PROTECTED_HARNESS_${name}`];
@@ -95,9 +102,10 @@ function windowsCandidates(home, env, pathAPI) {
   const appData = env.APPDATA || pathAPI.join(home, 'AppData', 'Roaming');
   const programFiles = env.ProgramFiles || 'C:\\Program Files';
   const nativePackedCodex = nativePackedCodexCandidates(env, pathAPI);
-  const isolatedNativePacked = nativePackedCodex.length > 0;
+  const nativePackedClaude = nativePackedClaudeCandidates(env, pathAPI);
+  const isolatedNativePacked = nativePackedCodex.length > 0 || nativePackedClaude.length > 0;
   return {
-    claude: isolatedNativePacked ? [] : [
+    claude: isolatedNativePacked ? nativePackedClaude : [
       ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'claude.exe'),
       pathAPI.join(home, '.local', 'bin', 'claude.cmd'),
@@ -124,15 +132,20 @@ function windowsCandidates(home, env, pathAPI) {
 
 function posixCandidates(platform, home, env, pathAPI) {
   const nativePackedCodex = nativePackedCodexCandidates(env, pathAPI);
-  const isolatedNativePacked = nativePackedCodex.length > 0;
+  const nativePackedClaude = nativePackedClaudeCandidates(env, pathAPI);
+  const isolatedNativePacked = nativePackedCodex.length > 0 || nativePackedClaude.length > 0;
   const common = {
-    claude: isolatedNativePacked ? [] : [
+    claude: isolatedNativePacked ? nativePackedClaude : [
       ...protectedHarnessCandidates(env, pathAPI, 'CLAUDE_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude',
     ],
     codex: isolatedNativePacked ? nativePackedCodex : [
       ...protectedHarnessCandidates(env, pathAPI, 'CODEX_EXECUTABLE'),
       pathAPI.join(home, '.local', 'bin', 'codex'),
+	  ...(platform === 'darwin' ? [
+		'/Applications/ChatGPT.app/Contents/Resources/codex',
+		pathAPI.join(home, 'Applications', 'ChatGPT.app', 'Contents', 'Resources', 'codex'),
+	  ] : []),
       ...(platform === 'darwin' ? ['/opt/homebrew/bin/codex'] : []),
       '/usr/local/bin/codex',
       '/usr/bin/codex',

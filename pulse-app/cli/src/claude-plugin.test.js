@@ -10,13 +10,13 @@ const pluginRoot = join(repoRoot, 'plugins', 'pulse');
 test('Claude Code plugin is a native thin adapter over the shared Pulse runtime', () => {
   const manifest = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(manifest.name, 'pulse');
-  assert.equal(manifest.hooks, './claude-hooks/hooks.json');
-  assert.equal(manifest.mcpServers['pulse-product'].command, 'node');
+  assert.equal(manifest.hooks, undefined);
+  assert.equal(manifest.mcpServers['pulse-product'].command, '/bin/sh');
   assert.deepEqual(manifest.mcpServers['pulse-product'].args, [
-    '${CLAUDE_PLUGIN_ROOT}/mcp/claude-server.mjs',
+    '-c', 'exec "$HOME/.local/bin/pulse" claude-mcp',
   ]);
 
-  const hooks = JSON.parse(readFileSync(join(pluginRoot, 'claude-hooks', 'hooks.json'), 'utf8'));
+  const hooks = JSON.parse(readFileSync(join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(hooks.hooks).sort(), [
     'PostToolUse', 'PreToolUse', 'UserPromptSubmit',
   ]);
@@ -24,16 +24,13 @@ test('Claude Code plugin is a native thin adapter over the shared Pulse runtime'
     for (const matcher of matchers) {
       for (const handler of matcher.hooks) {
         assert.equal(handler.type, 'command');
-        assert.equal(handler.command, 'node');
-        assert.deepEqual(handler.args, ['${CLAUDE_PLUGIN_ROOT}/hooks/claude-hook.mjs', event]);
+        assert.equal(handler.args, undefined);
+        assert.equal(handler.command, `exec "$HOME/.local/bin/pulse" product-hook ${event}`);
       }
     }
   }
-  const launcher = readFileSync(join(pluginRoot, 'hooks', 'claude-hook.mjs'), 'utf8');
-  assert.match(launcher, /runHookWorkerClient\(/);
-  assert.match(launcher, /host: 'claude-code'/);
-  assert.doesNotMatch(launcher, /spawn\(/);
-  assert.match(readFileSync(join(pluginRoot, 'mcp', 'claude-server.mjs'), 'utf8'), /'claude-mcp'/);
+  assert.match(readFileSync(join(repoRoot, 'pulse-app', 'cli', 'src', 'cli.js'), 'utf8'),
+    /runProductHookCLI\(args\[1\]\)/);
 });
 
 test('signed local marketplace exposes Pulse to Claude Code plugin installation', () => {

@@ -85,7 +85,7 @@ test('Claude PostToolUse uses the host marker and stays silent', async () => {
 
 test('installed Claude hooks contain only prompt recall and pulse_memory lease/receipt', () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-  const config = JSON.parse(readFileSync(resolve(root, 'plugins/pulse/claude-hooks/hooks.json'), 'utf8'));
+  const config = JSON.parse(readFileSync(resolve(root, 'plugins/pulse/hooks/hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(config.hooks).sort(), ['PostToolUse', 'PreToolUse', 'UserPromptSubmit']);
   assert.match(config.hooks.PreToolUse[0].matcher, /mcp__plugin_pulse_pulse-product__pulse_memory/);
   assert.match(config.hooks.PostToolUse[0].matcher, /mcp__plugin_pulse_pulse-product__pulse_memory/);

@@ -16,7 +16,8 @@ const RESUME_SECTIONS = Object.freeze([
 export const PERSONAL_AUTO_CAPTURE_CONTEXT = `
 Pulse memory works silently inside this normal turn. Call pulse_memory once only when the work produced a durable decision, preference, open question, project state, correction, or emotional moment; otherwise do not call it. Use personal scope only for context that should follow the person across projects, and project for project-only decisions. Save a short paraphrase, never raw wording, secrets, credentials, paths, transcripts, temporary instructions, or test controls. Mark inferred emotion as inferred. Do not announce routine saving, add a second reply, or retry after a failure.`;
 
-const PROMPT_RECALL_MIN_COSINE = 0.32;
+const PROMPT_RECALL_CAPSULE_MIN_COSINE = 0.45;
+const PROMPT_RECALL_ARCHIVE_MIN_COSINE = 0.32;
 const PROMPT_RECALL_MAX_BYTES = 2400;
 const PROMPT_RECALL_MAX_SUMMARY_CHARS = 400;
 
@@ -28,7 +29,7 @@ function boundedPromptSummary(value) {
   return `${(wordBoundary >= 320 ? clipped.slice(0, wordBoundary) : clipped).trimEnd()}…`;
 }
 
-function promptMemoryLines(result, minimumCosine) {
+function promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine) {
   const events = Array.isArray(result?.events) ? result.events : [];
   const breakdowns = result?.trace?.retrieval?.score_breakdowns;
   const evidence = result?.trace?.retrieval?.candidate_evidence;
@@ -45,9 +46,9 @@ function promptMemoryLines(result, minimumCosine) {
     if (!Number.isFinite(cosine) || summary === '') continue;
     const line = `- ${boundedPromptSummary(summary)}`;
     const hybridAgreement = candidate?.dense === true && candidate?.lexical === true;
-    if (candidate?.direct_capsule === true && cosine >= minimumCosine) {
+    if (candidate?.direct_capsule === true && cosine >= capsuleMinimumCosine) {
       direct.push(line);
-    } else if (cosine >= minimumCosine && hybridAgreement) {
+    } else if (cosine >= archiveMinimumCosine && hybridAgreement) {
       archive.push(line);
     }
   }
@@ -57,7 +58,9 @@ function promptMemoryLines(result, minimumCosine) {
 
 export async function composePromptMemoryContext(resolved, prompt, {
   request,
-  minimumCosine = PROMPT_RECALL_MIN_COSINE,
+	recordActivity,
+  capsuleMinimumCosine = PROMPT_RECALL_CAPSULE_MIN_COSINE,
+  archiveMinimumCosine = PROMPT_RECALL_ARCHIVE_MIN_COSINE,
   maxBytes = PROMPT_RECALL_MAX_BYTES,
 } = {}) {
   if (typeof request !== 'function' || typeof prompt !== 'string' || prompt.trim() === '' ||
@@ -68,8 +71,21 @@ export async function composePromptMemoryContext(resolved, prompt, {
     body: { query: prompt, mode: 'auto', top_k: 12, scope: 'user', include_trace: true },
     timeoutMs: 2500,
   });
-  const lines = promptMemoryLines(result, minimumCosine);
-  if (lines.length === 0) return '';
+  const lines = promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine);
+	const recallDigest = createHash('sha256')
+		.update('pulse-memory-recall-result-v1\x1f')
+		.update(lines.join('\n'))
+		.digest('hex');
+	if (typeof recordActivity === 'function') {
+		try {
+			await recordActivity({
+				schema: 'pulse.memory_recall_activity.v1',
+				result_count: lines.length,
+				result_digest: recallDigest,
+			});
+		} catch { /* activity evidence must never block or repeat a user turn */ }
+	}
+	if (lines.length === 0) return '';
   const header = 'Pulse accepted memory (local; use as factual context for this question unless the user provides newer information):\n';
   let output = header;
   for (const line of lines) {

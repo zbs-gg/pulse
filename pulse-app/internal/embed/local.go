@@ -351,8 +351,8 @@ func (c *LocalClient) Embed(ctx context.Context, texts []string, _ InputType) ([
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.cmd == nil {
+		c.mu.Unlock()
 		return nil, errors.New("local embed: helper not started — call Start() first")
 	}
 
@@ -363,39 +363,68 @@ func (c *LocalClient) Embed(ctx context.Context, texts []string, _ InputType) ([
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("local embed: marshal request: %w", err)
 	}
 	if len(encoded)+1 > localMaximumRequestBytes {
+		c.mu.Unlock()
 		return nil, errors.New("local embed: request exceeds protocol limit")
 	}
-	callCtx, cancel := context.WithTimeout(ctx, c.callTimeout)
-	defer cancel()
 	if !c.ready.Load() {
 		c.stopLocked()
+		c.mu.Unlock()
 		return nil, errors.New("local embed: helper is not running")
 	}
-	if err := c.writeWithContext(callCtx, append(encoded, '\n')); err != nil {
+	writeCtx, cancelWrite := context.WithTimeout(ctx, c.callTimeout)
+	err = c.writeWithContext(writeCtx, append(encoded, '\n'))
+	cancelWrite()
+	if err != nil {
 		c.stopLocked()
-		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		c.mu.Unlock()
+		if errors.Is(writeCtx.Err(), context.DeadlineExceeded) {
 			return nil, errors.New("local embed: helper did not accept request within timeout")
 		}
 		return nil, fmt.Errorf("local embed: write: %w", err)
 	}
 
-	line, err := c.readWithContext(callCtx, c.responseBytes)
-	if err != nil {
-		c.stopLocked()
-		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-			return nil, errors.New("local embed: helper did not respond within timeout")
+	// Once the serialized request is accepted, its response must be consumed
+	// before another exchange can start. The caller may stop waiting, but its
+	// cancellation must not kill the healthy helper or leave a stale JSON line
+	// for the next request. The exchange goroutine owns the lock until it has
+	// drained and validated the response under Pulse's own bounded timeout.
+	type exchangeResult struct {
+		vectors [][]float32
+		err     error
+	}
+	result := make(chan exchangeResult, 1)
+	go func() {
+		responseCtx, cancelResponse := context.WithTimeout(context.Background(), c.callTimeout)
+		defer cancelResponse()
+		line, readErr := c.readWithContext(responseCtx, c.responseBytes)
+		if readErr != nil {
+			c.stopLocked()
+			c.mu.Unlock()
+			if errors.Is(responseCtx.Err(), context.DeadlineExceeded) {
+				result <- exchangeResult{err: errors.New("local embed: helper did not respond within timeout")}
+				return
+			}
+			result <- exchangeResult{err: fmt.Errorf("local embed: read response: %w", readErr)}
+			return
 		}
-		return nil, fmt.Errorf("local embed: read response: %w", err)
+		vectors, decodeErr := c.decodeResponse(line, id, len(texts))
+		if decodeErr != nil {
+			c.stopLocked()
+		}
+		c.mu.Unlock()
+		result <- exchangeResult{vectors: vectors, err: decodeErr}
+	}()
+
+	select {
+	case exchange := <-result:
+		return exchange.vectors, exchange.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	vectors, err := c.decodeResponse(line, id, len(texts))
-	if err != nil {
-		c.stopLocked()
-		return nil, err
-	}
-	return vectors, nil
 }
 
 func (c *LocalClient) decodeResponse(line []byte, id string, textCount int) ([][]float32, error) {

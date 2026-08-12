@@ -116,3 +116,17 @@ test('Claude local MCP removal does not reject a same-name server from another s
   assert.match(removal, /\['mcp', 'remove', 'pulse', '--scope', 'local'\]/);
   assert.doesNotMatch(removal, /\['mcp', 'get', 'pulse'\]/);
 });
+
+test('Codex adapter verifies the signed marketplace source before reusing an installed plugin', () => {
+  const registry = between(
+    'function personalInstallHostRegistry(targets)',
+    'function personalInstallCoreHealth',
+  );
+  const codexAdapter = registry.slice(
+    registry.indexOf('codex: {'),
+    registry.indexOf('cursor: {'),
+  );
+  assert.match(codexAdapter, /inspectCodexMarketplaceSnapshot\(context\.edge, DATA_DIR\)/);
+  assert.match(codexAdapter, /sameCodexMarketplaceRoot\(marketplace\.root, snapshot\.marketplace_root\)/);
+  assert.match(codexAdapter, /checkCodexPluginMcp\(plugin\)\.ok === true/);
+});

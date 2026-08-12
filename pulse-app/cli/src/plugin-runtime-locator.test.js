@@ -65,6 +65,34 @@ test('product hook compile cache is release-bound and safely optional', () => {
   }
 });
 
+test('Claude runtime integrity ignores only safe numeric in-use leases', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-claude-plugin-lease-'));
+  try {
+    writeFileSync(join(root, 'runtime.mjs'), 'export const ready = true;\n');
+    const trust = {
+      assertTreeEntry(path, _relative, expectedKind) {
+        const info = lstatSync(path);
+        assert.equal(info.isSymbolicLink(), false);
+        assert.equal(expectedKind === 'directory' ? info.isDirectory() : info.isFile(), true);
+        return info;
+      },
+      validateTree() {},
+    };
+    const signedDigest = __runtimeLocatorTest.pluginTreeDigest(root, trust, 'claude-code');
+    mkdirSync(join(root, '.in_use'), { mode: 0o700 });
+    writeFileSync(join(root, '.in_use', '12345'), '{"pid":12345}\n', { mode: 0o600 });
+    assert.equal(__runtimeLocatorTest.pluginTreeDigest(root, trust, 'claude-code'), signedDigest);
+    assert.notEqual(__runtimeLocatorTest.pluginTreeDigest(root, trust, 'codex'), signedDigest);
+    writeFileSync(join(root, '.in_use', 'not-a-pid'), 'unsafe\n', { mode: 0o600 });
+    assert.throws(
+      () => __runtimeLocatorTest.pluginTreeDigest(root, trust, 'claude-code'),
+      /lease directory is unsafe/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('plugin runtime locator delegates Windows private reads, trees, and executables to the native adapter', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-plugin-windows-trust-'));
   try {

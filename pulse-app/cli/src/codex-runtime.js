@@ -492,6 +492,12 @@ export async function boundPulseRequest(resolved, path, options = {}) {
 		platformServices: options.platformServices ?? defaultPlatformServices,
 	}),
   };
+	if (options.productHost !== undefined) {
+		if (!['codex', 'claude-code'].includes(options.productHost)) {
+			throw new Error('product_request_host_invalid');
+		}
+		headers['X-Pulse-Product-Host'] = options.productHost;
+	}
   if (method !== 'GET') {
     headers['Content-Type'] = 'application/json';
     if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;

@@ -386,7 +386,7 @@ export function validateHookReadiness(source, receipt, expected = {}) {
 function legacyPulseHookCommand(command) {
   return typeof command === 'string' &&
     /(?:^|\s)(?:pulse|[^\s]+\/cli\.js)(?:'|")?\s+hook\s+(?:session-start|user-prompt-submit|post-tool-use|stop)(?:\s|$)/.test(command) &&
-    !command.includes('${PLUGIN_ROOT}/hooks/pulse-hook.mjs');
+    !command.includes('product-hook');
 }
 
 export function migrateLegacyPulseHookConfig(rawConfig) {

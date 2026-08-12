@@ -383,6 +383,8 @@ func runLocalVault(dataDir, addr string, kind config.VaultKind, storeID string) 
 		HomePresence:                homePresence,
 		EnhancedPresenceAuthorizer:  enhancedPresenceAuthorizer,
 		UnassignedInboxPath:         unassignedInboxPath,
+		StorageStatusPath:           filepath.Join(dataDir, "storage-home.json"),
+		MemoryActivityPath:          filepath.Join(dataDir, "memory-activity.json"),
 		HomeBindingVerifier:         homeBindingVerifier,
 		ProductBindingVerifier:      productBindingVerifier,
 		EnableHistoricalCodexSource: kind != "",

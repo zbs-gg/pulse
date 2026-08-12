@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -56,12 +57,17 @@ func TestLocalHelperProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	scanner := bufio.NewScanner(os.Stdin)
+	requestCount := 0
 	for scanner.Scan() {
+		requestCount++
 		var request struct {
 			ID    string   `json:"id"`
 			Texts []string `json:"texts"`
 		}
 		_ = json.Unmarshal(scanner.Bytes(), &request)
+		if mode == "delay-first" && requestCount == 1 {
+			time.Sleep(150 * time.Millisecond)
+		}
 		count := len(request.Texts)
 		if mode == "count" {
 			count++
@@ -251,6 +257,32 @@ func TestManagedLocalWriteDeadlineKillsAndReapsHelperThatStopsReading(t *testing
 	}
 	if client.Ready() || client.cmd != nil {
 		t.Fatal("timed-out write left helper ready or attached")
+	}
+}
+
+func TestManagedLocalCallerCancellationDrainsResponseAndKeepsHelperReady(t *testing.T) {
+	client := managedTestClient(t, "delay-first")
+	client.callTimeout = time.Second
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelledCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, err := client.Embed(cancelledCtx, []string{"cancel this caller"}, TypeSearchQuery); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled call error = %v", err)
+	}
+
+	vectors, err := client.Embed(context.Background(), []string{"next request"}, TypeSearchQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.Ready() || client.cmd == nil {
+		t.Fatal("caller cancellation stopped the healthy helper")
+	}
+	if len(vectors) != 1 || len(vectors[0]) != localManagedDimensions {
+		t.Fatalf("next vectors = %d", len(vectors))
 	}
 }
 

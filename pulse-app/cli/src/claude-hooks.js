@@ -211,8 +211,17 @@ export async function handleClaudeHook(eventName, rawInput, dependencies = {}) {
       (dependencies.writeTurnContext ?? writeHostTurnContext)(resolved, event, HOST, now);
       let recalled = '';
       try {
+		const recordActivity = dependencies.recordRecallActivity ??
+			(dependencies.promptRequest ? undefined : (activity) => boundPulseRequest(
+				resolved, '/memory/activity/recall', {
+					body: activity, productHost: HOST, timeoutMs: 1000,
+				},
+			));
         recalled = await (dependencies.composePromptMemory ?? composePromptMemoryContext)(
-          resolved, rawInput.prompt, { request: dependencies.promptRequest ?? boundPulseRequest },
+			resolved, rawInput.prompt, {
+				request: dependencies.promptRequest ?? boundPulseRequest,
+				...(recordActivity ? { recordActivity } : {}),
+			},
         );
       } catch { /* optional memory must fail open */ }
       return {

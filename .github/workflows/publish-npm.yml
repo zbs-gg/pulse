@@ -25,11 +25,11 @@ jobs:
     timeout-minutes: 35
     env:
       EXPECTED_PACKAGE: '@zbs-gg/pulse'
-      EXPECTED_VERSION: '0.7.2'
-      EXPECTED_ARCHIVE_SHA256: 9a9e687df1c01e06e352e7d2a41e5147bdc77fda5e3ed9d592d8c199da0d2d4f
-      EXPECTED_TREE_SHA256: 97557d8af16106583ead0f86fdb8f00b1e4c278f57efa6a0124775a78169832a
-      EXPECTED_ARTIFACT_SET_SHA256: 4023182649ca46cf4548351a74ab46defc32207c9eaab54c70c8856d1fa722f3
-      EXPECTED_SNAPSHOT_SHA256: 51ff82ed9e9cbcb1c3ec2aff1ba522b26a34121e758b6083253489391a3f7793
+      EXPECTED_VERSION: '0.8.0'
+      EXPECTED_ARCHIVE_SHA256: 5f2c848057cd10ba93ffe20365d883393abcb2faffde21be8a89823043aab663
+      EXPECTED_TREE_SHA256: 93bba7d42056ecf2f21d729176a5b6e6aae3a03b0a5c77e658d6001036aeef52
+      EXPECTED_ARTIFACT_SET_SHA256: c026757b18c7aaa2a57494c63bff2351baa758800e7bc98a1e9b5c93244ec86a
+      EXPECTED_SNAPSHOT_SHA256: 423a9208551199036239b3b858eadc2dc08a7f25ae0b451270936a8d674dfcaa
       EXPECTED_NODE_SHA256: 55a772a600b7bdafb4b35945b3935090e27aff9934b4c11b281220fcd99139d7
     steps:
       - name: Check out the exact commit without helper actions
@@ -83,19 +83,19 @@ jobs:
           expected_snapshot="$RUNNER_TEMP/personal-release-snapshot.json"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
             --output "$expected_manifest" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/epoch-9/catalog/artifact-set.json
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.0/epoch-34/catalog/artifact-set.json
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
             --output "$expected_snapshot" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/catalog/snapshot.json
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.0/catalog/snapshot.json
           test "$(shasum -a 256 "$expected_manifest" | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
           test "$(shasum -a 256 "$expected_snapshot" | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
           package_dir="$RUNNER_TEMP/pulse-package"
           unpack_dir="$RUNNER_TEMP/pulse-unpacked"
           mkdir -p "$package_dir" "$unpack_dir"
-          archive="$package_dir/zbs-gg-pulse-0.7.2.tgz"
+          archive="$package_dir/zbs-gg-pulse-0.8.0.tgz"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
             --output "$archive" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.7.2/npm/zbs-gg-pulse-0.7.2.tgz
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.0/npm/zbs-gg-pulse-0.8.0.tgz
           test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$unpack_dir"
           cmp "$expected_manifest" "$unpack_dir/package/release/personal-preview-manifest.json"
@@ -161,4 +161,4 @@ jobs:
         if: github.ref == 'refs/heads/main' && inputs.publish
         working-directory: pulse-app/cli
         shell: bash
-        run: npm publish "$PULSE_NPM_ARCHIVE" --ignore-scripts --access public --tag latest --provenance
+        run: npm publish "$PULSE_NPM_ARCHIVE" --ignore-scripts --access public --tag preview --provenance
