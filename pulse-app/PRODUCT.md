@@ -72,6 +72,14 @@ That ambiguity remains under observation during dogfood. Cursor live recall
 remains pending, so this is evidence for two local hosts rather than full
 three-host acceptance.
 
+A frozen 50-case baseline on a copy of the active Personal vault did not pass
+the combined practical bar. Published `0.8.0` retrieved the expected memory in
+34 of 40 cases, stayed silent in 7 of 10 unrelated controls, and returned two
+internal query errors. Warm p95 and context size passed. The live answer score
+was not run after retrieval failed, because replacing a preselected missed case
+would be post-selection. Product work should fix false-positive context and
+query reliability before expanding the benchmark or importing more archives.
+
 On 2026-08-11, a separate Claude Chat experiment automatically recalled the
 exact `LUNA-724-PURPLE` marker from an isolated hosted store of 21 memories.
 Claude also called Pulse once for an unrelated question without mixing memory

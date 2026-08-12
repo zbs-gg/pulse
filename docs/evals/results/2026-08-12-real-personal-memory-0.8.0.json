@@ -1,0 +1,83 @@
+{
+  "schema": "pulse.real_memory_eval_aggregate.v1",
+  "measured_at": "2026-08-12T11:30:22.896Z",
+  "product": {
+    "package": "@zbs-gg/pulse",
+    "version": "0.8.0",
+    "npm_archive_sha256": "0e576eeedbd72b0a2c21823c6a72b07c3065a6bb15fd58ea404a47d09f85224d",
+    "release_epoch": 34,
+    "daemon_sha256": "60b3da2884641b467d47ea5c6e20b461128eb91f60b635fa4d0de1ff438887a6",
+    "embedder": "bge-m3"
+  },
+  "corpus": {
+    "events": 76795,
+    "capsules": 373,
+    "emotions": 5989,
+    "embeddings": 76795
+  },
+  "evaluation_set": {
+    "private_hit_cases": 40,
+    "irrelevant_controls": 10,
+    "codex_cases": 25,
+    "claude_code_cases": 25,
+    "gold_source": "active_personal_capsule",
+    "raw_history_temporal_replay": false
+  },
+  "retrieval": {
+    "cases": 50,
+    "query_errors": 2,
+    "expected_hits": 40,
+    "correct_hits": 34,
+    "expected_silences": 10,
+    "correct_silences": 7,
+    "injected_memories": 42,
+    "cold_ms": 463,
+    "warm_p50_ms": 368.4,
+    "warm_p95_ms": 546.7,
+    "maximum_context_bytes": 736,
+    "maximum_estimated_tokens": 184,
+    "query_persistence_unchanged": true,
+    "by_host": {
+      "codex": {
+        "cases": 25,
+        "hit_cases": 20,
+        "correct_hits": 18,
+        "silence_cases": 5,
+        "correct_silences": 2
+      },
+      "claude-code": {
+        "cases": 25,
+        "hit_cases": 20,
+        "correct_hits": 16,
+        "silence_cases": 5,
+        "correct_silences": 5
+      }
+    }
+  },
+  "project_isolation": {
+    "cases": 1,
+    "evaluated_cases": 0,
+    "leaks": 0,
+    "status": "inconclusive_query_error"
+  },
+  "live_answer": {
+    "selected_cases": 10,
+    "evaluated_cases": 0,
+    "correct_cases": null,
+    "status": "blocked_retrieval_bar"
+  },
+  "practical_bar": {
+    "status": "not_passed",
+    "failure_reasons": [
+      "irrelevant_silence",
+      "query_errors",
+      "project_isolation_inconclusive"
+    ],
+    "retrieval_hit_minimum": 32,
+    "silence_minimum": 9,
+    "live_answer_minimum": 8,
+    "project_leaks_allowed": 0,
+    "warm_p95_ms_maximum": 1000,
+    "context_tokens_maximum": 600
+  }
+}
