@@ -26,8 +26,8 @@ jobs:
     env:
       EXPECTED_PACKAGE: '@zbs-gg/pulse'
       EXPECTED_VERSION: '0.8.0'
-      EXPECTED_ARCHIVE_SHA256: 249615af9eddfde01895a0af2f621a4bde0b64beb590378a5e6b16ae446eb3ec
-      EXPECTED_TREE_SHA256: 1e7199279c3a897cfd774db2f4319243d2e91a7fe33fa995709019ee6a7ce259
+      EXPECTED_ARCHIVE_SHA256: 9adc255ca34007c7c27352caa5b0438673c9f46b8e7480f343febb1509890d6c
+      EXPECTED_TREE_SHA256: 86a694e2768a4a84d7a71fc0519ac504e6625c2f38928044fe7996ce88898ff5
       EXPECTED_ARTIFACT_SET_SHA256: c026757b18c7aaa2a57494c63bff2351baa758800e7bc98a1e9b5c93244ec86a
       EXPECTED_SNAPSHOT_SHA256: 423a9208551199036239b3b858eadc2dc08a7f25ae0b451270936a8d674dfcaa
       EXPECTED_NODE_SHA256: 55a772a600b7bdafb4b35945b3935090e27aff9934b4c11b281220fcd99139d7
@@ -95,7 +95,7 @@ jobs:
           archive="$package_dir/zbs-gg-pulse-0.8.0.tgz"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
             --output "$archive" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.0/npm/epoch-34-winpath/zbs-gg-pulse-0.8.0.tgz
+            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.0/npm/epoch-34-winacl/zbs-gg-pulse-0.8.0.tgz
           test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$unpack_dir"
           cmp "$expected_manifest" "$unpack_dir/package/release/personal-preview-manifest.json"

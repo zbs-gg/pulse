@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { cleanPulseStorage, inspectPulseStorage, writeStorageHomeSnapshot } from './storage-maintenance.js';
+import {
+  __storageMaintenanceTest,
+  cleanPulseStorage,
+  inspectPulseStorage,
+  writeStorageHomeSnapshot,
+} from './storage-maintenance.js';
 
 function file(path, bytes = 16) {
   mkdirSync(dirname(path), { recursive: true });
@@ -113,4 +118,9 @@ test('Memory Home snapshot accepts a separate trusted vault but rejects a vault 
     () => writeStorageHomeSnapshot({ dataDir: value.dataDir, vaultDataDir: linkedVault }),
     /storage_home_vault_invalid/,
   );
+});
+
+test('Memory Home does not interpret synthetic Windows directory modes as POSIX access', () => {
+  assert.equal(__storageMaintenanceTest.privateDirectoryMode(0o777, 'win32'), true);
+  assert.equal(__storageMaintenanceTest.privateDirectoryMode(0o777, 'linux'), false);
 });

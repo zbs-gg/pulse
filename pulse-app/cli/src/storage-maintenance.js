@@ -35,6 +35,13 @@ function privateRegular(path) {
   return info.isFile() && !info.isSymbolicLink() && (info.mode & 0o022) === 0;
 }
 
+function privateDirectoryMode(mode, platform = process.platform) {
+  // POSIX mode bits do not describe Windows ACLs. Node reports synthetic
+  // directory permissions there, so treating 0777 as world-writable rejects
+  // every otherwise valid Personal vault on Windows.
+  return platform === 'win32' || (mode & 0o022) === 0;
+}
+
 function readAuthority(artifactsRoot) {
   const path = join(artifactsRoot, 'artifact-generation-authority.json');
   if (!existsSync(path) || !privateRegular(path)) fail('storage_release_authority_unavailable');
@@ -237,7 +244,7 @@ export function writeStorageHomeSnapshot({ dataDir, vaultDataDir, archiveReceipt
     fail('storage_home_vault_invalid');
   }
   const vaultInfo = lstatSync(vault);
-  if (vaultInfo.isSymbolicLink() || !vaultInfo.isDirectory() || (vaultInfo.mode & 0o022) !== 0) {
+  if (vaultInfo.isSymbolicLink() || !vaultInfo.isDirectory() || !privateDirectoryMode(vaultInfo.mode)) {
     fail('storage_home_vault_invalid');
   }
   const report = inspectPulseStorage({ dataDir: root });
@@ -263,4 +270,4 @@ export function writeStorageHomeSnapshot({ dataDir, vaultDataDir, archiveReceipt
   return snapshot;
 }
 
-export const __storageMaintenanceTest = Object.freeze({ digestReport, pathBytes });
+export const __storageMaintenanceTest = Object.freeze({ digestReport, pathBytes, privateDirectoryMode });
