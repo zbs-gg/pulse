@@ -25,6 +25,14 @@ specific semantic question found the intended decision; this remains a
 dogfood risk rather than a release claim. Cursor live acceptance remains
 pending.
 
+The first frozen large-vault baseline on 2026-08-12 did not pass its combined
+practical bar. On a copy containing 76,795 real events, published `0.8.0` found
+the expected Personal memory in 34 of 40 cases, but stayed silent in only 7 of
+10 unrelated controls and returned two internal query errors. Warm p95 was
+547 ms and the largest context was about 184 tokens. This makes noise and query
+reliability the next defects to fix; it does not invalidate the narrower live
+dogfood evidence above. [Method and aggregate](./docs/evals/2026-08-12-real-personal-memory-baseline.md).
+
 A separate remote Claude Chat experiment passed on 2026-08-11 against an
 isolated hosted store containing 21 memories. Automatic recall required a
 short account-level **Instructions for Claude** rule and the Pulse connector in

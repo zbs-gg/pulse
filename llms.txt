@@ -13,6 +13,14 @@ Claude question still surfaced an unrelated old memory, so this remains a
 dogfood candidate rather than a release claim. Cursor live acceptance remains
 pending. The stable published install remains 0.7.2.
 
+The first frozen large-vault baseline on 2026-08-12 did not pass its combined
+practical bar: published 0.8.0 found 34 of 40 expected memories, stayed silent
+in 7 of 10 unrelated controls, and returned two internal query errors. Warm p95
+was 547 ms and maximum delivered context was about 184 tokens. The detailed
+method and aggregate are in
+docs/evals/2026-08-12-real-personal-memory-baseline.md. This is a real Personal
+capsule retrieval baseline, not yet a raw-chat temporal replay.
+
 A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
 an isolated hosted store of 21 memories. It required an account-level
 Instructions for Claude rule plus Pulse set to Always available. MCP server

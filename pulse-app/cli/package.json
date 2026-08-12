@@ -95,6 +95,7 @@
     "attest:personal-preview": "node scripts/personal-preview-release-attestation.mjs",
     "test:codex-product:real-mlx": "PULSE_CODEX_E2E_REQUIRE_REAL_MLX=1 node scripts/codex-product-e2e.mjs",
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
+    "eval:real-personal-memory": "node scripts/real-personal-memory-eval.mjs",
     "verify:personal-package": "node scripts/verify-personal-package.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",

@@ -31,14 +31,13 @@ The adapters and product claims need replacement; the corpora do not need to be
 discarded. Causal traversal over people, projects, and event relationships
 belongs in an Atlas benchmark rather than the Pulse memory score.
 
-## The first honest runner will exercise the product boundary
+## The first honest runner exercised the product boundary
 
-The next runner must install the published `@zbs-gg/pulse@0.8.0` archive in an
-isolated temporary home and vault. It must save memories through the shipped
-`pulse_memory` contract and query through the same prompt-time product path used
-by Codex and Claude Code. It must not write benchmark items directly into
-SQLite, call the Python reference retriever, or provide hidden state, graph, or
-gold-answer fields to Pulse.
+The new runner downloaded the published `@zbs-gg/pulse@0.8.0`, verified its
+release identity, copied the active Personal SQLite database with online backup,
+and queried through the shipped prompt-time product compositor. It did not call
+the Python reference retriever or provide hidden state, graph, or gold-answer
+fields to Pulse.
 
 Retrieval and model answering are scored separately. The deterministic layer
 records whether the right memory was offered, whether an unrelated memory was
@@ -46,11 +45,15 @@ injected, whether a weak query stayed silent, latency, and returned bytes. A
 separate answer check may then measure whether the host preserved corrections
 and negation after receiving the context.
 
-The first bounded run uses the 15 single-memory own-data questions plus
-irrelevant controls. The sixteenth dossier-style question and the old
-top-eight consolidation task do not match automatic Pulse 0.8's one-capsule or
-two-archive-event output contract; they stay available for a later explicit
-search or Atlas evaluation rather than being forced into this score.
+The frozen private run used 40 semantic questions grounded in active Personal
+capsules plus 10 unrelated controls. It found the expected memory in 34 cases,
+stayed silent in 7 controls, and returned two internal query errors. Useful
+recall, latency, and context size passed their initial limits; silence and
+reliability did not. The full method and aggregate are recorded in
+[`2026-08-12-real-personal-memory-baseline.md`](./2026-08-12-real-personal-memory-baseline.md).
+
+The old single-memory own-data set remains a technical smoke corpus. Its former
+MCP result remains historical and is not relabelled as a 0.8 product score.
 
 ## EmoBench needs a product-facing revision
 
