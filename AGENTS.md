@@ -18,8 +18,10 @@
 
 ## Installation and repository work
 
-- The current public release is Personal 0.7.2 for Apple Silicon Macs. Do not
-  present Intel Mac, Windows, or Linux as supported by this release.
+- The stable public release is Personal 0.7.2 for Apple Silicon Macs. Personal
+  0.8.0 is a public npm preview for the same target; it is not the stable
+  default or a production-ready release. Do not present Intel Mac, Windows, or
+  Linux as publicly supported from fixture evidence alone.
 - Before installation, show the exact files and settings that will change and
   ask the person to confirm. `--yes` does not bypass macOS protected actions.
 - Do not change global AI-program settings, system trust, or an existing Pulse

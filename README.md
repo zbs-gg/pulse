@@ -6,9 +6,10 @@ found. Version `0.8.0` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
-> **0.8.0 is an unfinished branch, not a published package.** The commands and
-> behavior below describe the intended next release. Use the published 0.7.2
-> for ordinary installation until this branch passes a separate live review.
+> **0.8.0 is published as an npm preview, not as the stable default.** It passed
+> live owner-machine use in Codex and Claude Code on Apple Silicon. Cursor live
+> acceptance and production readiness remain pending. Use 0.7.2 for the stable
+> installation or select `@preview` explicitly to try 0.8.0.
 
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
@@ -38,11 +39,12 @@ with the local Personal 0.8 vault and is not part of the published install.
 
 ## Install
 
-Version `0.7.2` is published and installs on Macs with Apple Silicon. The exact
-npm package passed a clean installation on a separate Mac before publication.
-Intel Mac, Windows, and Linux builds are not released yet; on those systems the
-installer stops without changing files. Both npm tags, `latest` and `preview`,
-point to `0.7.2`.
+Version `0.7.2` remains the stable release for Macs with Apple Silicon. Version
+`0.8.0` is published under the npm `preview` tag for the same public target.
+Its exact archive passed installation on a clean Apple Silicon GitHub runner
+before publication. Intel Mac, Windows, and Linux are not public support claims
+yet; fixture and packaging checks on those targets do not replace live product
+acceptance.
 
 Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The current published Personal installation is:
@@ -51,6 +53,12 @@ installs anything. The current published Personal installation is:
 npx -y @zbs-gg/pulse@0.7.2 init codex
 pulse doctor
 pulse home
+```
+
+To try the 0.8 preview explicitly:
+
+```bash
+npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The installer finds Codex, Claude Code, and Cursor, shows every file it will
@@ -75,7 +83,7 @@ opens Memory Home for inspecting, correcting, and deleting local memories.
 
 ## What is stored
 
-In the unfinished 0.8 branch, Pulse exposes one memory tool, `pulse_memory`.
+In the 0.8 preview, Pulse exposes one memory tool, `pulse_memory`.
 The AI program may call it during an ordinary working turn when a durable
 decision, preference, open question, project state, correction, or emotional
 moment appears. One call accepts at most three short items and does not create
@@ -117,7 +125,7 @@ normal session completion available. A failed memory attempt must not create
 an automatic continuation. The repository tests this boundary, but a packaged
 test is not a substitute for a fresh real session in each AI program.
 
-The unfinished 0.8 branch does not preload a session memory package. Each user
+The 0.8 preview does not preload a session memory package. Each user
 question triggers one temporary local relevance search; the question is not
 saved. At most four memories and about 600 tokens are offered, and weak matches
 produce no memory context. Stable rules remain in `AGENTS.md` or `CLAUDE.md`
@@ -163,12 +171,13 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: unfinished Personal 0.8 branch. Installed local epoch 34 passed the
+Status: Personal 0.8.0 is published under the npm `preview` tag. Installed
+local epoch 34 passed the
 local-store migration, cancellation-safe semantic search, one-call writes,
 cross-host recall, project boundary, irrelevant-query silence, and fail-open
 operation in fresh Codex and Claude Code sessions. An owner-machine one-day
 dogfood started in those two hosts on 2026-08-12; broad ambiguous questions
 remain under observation and Cursor acceptance remains pending. A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
-is not Personal sync or a supported install. Version 0.8 is not published or
-production ready.
+is not Personal sync or a supported install. Version 0.8 is not the stable
+default or production ready.

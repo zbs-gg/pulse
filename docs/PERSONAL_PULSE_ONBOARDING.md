@@ -4,10 +4,11 @@ Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
 platforms follow after the Mac installation has been tested end to end.
 
 Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
-published on 7 August 2026 after a clean remote Mac installation.
-Personal 0.8 is unfinished and not present in npm. This document also describes
-its intended invisible-memory flow; ordinary installation remains on 0.7.2
-until 0.8 passes a separate live acceptance.
+published on 7 August 2026 after a clean remote Mac installation. Personal
+0.8.0 was published under the npm `preview` tag on 12 August after clean
+installation and live owner-machine acceptance in Codex and Claude Code.
+Cursor live acceptance and production readiness remain pending; ordinary
+stable installation stays on 0.7.2.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
@@ -31,6 +32,12 @@ Run this inside the project:
 
 ```bash
 npx -y @zbs-gg/pulse@0.7.2 init codex
+```
+
+The explicit preview command is:
+
+```bash
+npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The first screen says what will be downloaded, how much disk it needs, every
@@ -111,7 +118,7 @@ separate human approval.
 This is the product proof. `pulse demo` remains an optional isolated explainer
 and cannot replace it.
 
-The unfinished 0.8 target keeps this flow invisible: recall happens temporarily
+The 0.8 preview keeps this flow invisible: recall happens temporarily
 when the user asks a question, returns no more than four relevant memories, and
 adds nothing for a weak match. A durable result is saved through the single
 `pulse_memory` tool inside the same ordinary turn. Session start and Stop do not

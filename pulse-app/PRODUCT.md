@@ -7,11 +7,11 @@ knowledge they need at the moment they need it, stays silent when nothing
 relevant is found, and lets the owner inspect, correct, or delete memories in
 Memory Home.
 
-The current public release is 0.7.2 for Apple Silicon Macs. The published npm
-tags `latest` and `preview` both point to this version. It has no Team server,
-cloud synchronization, or shared-memory command. Ordinary ChatGPT chat is not
-connected to Pulse. Emotional memory and local-store migration are unfinished
-Personal 0.8 work in a separate draft and are not part of 0.7.2.
+The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.0 is
+published under the npm `preview` tag for the same target; it is not production
+ready. It has no Team server, cloud synchronization, or shared-memory command.
+Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
+reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
 
 ## Users
 
@@ -31,7 +31,7 @@ Cursor. Ordinary ChatGPT chat is not a supported Pulse connection yet.
 - Treat Team as a separate private product boundary.
 - Do not claim support for a program or operating system without a real install.
 
-## Unfinished 0.8 contract
+## 0.8 preview contract
 
 Pulse stays out of the normal workflow. On each user question it performs one
 temporary local relevance search and offers at most four memories within about
@@ -81,9 +81,9 @@ The resulting visible tool call and additional tool round trip happen on every
 ordinary message. The hosted store is not synchronized with the local Personal
 0.8 vault, so this is remote-connector evidence rather than Personal support.
 
-Personal 0.8 is still neither published nor production ready. The public
-package remains 0.7.2, Team was not enabled, and the unfinished code stays on
-the development branch while the bounded dogfood continues.
+Personal 0.8.0 is now a public preview but is not production ready. The stable
+`latest` package remains 0.7.2, Team was not enabled, and the bounded dogfood
+continues in Codex and Claude Code.
 
 ## Interface
 
@@ -91,7 +91,7 @@ Memory Home should feel like a trustworthy local operator console: readable,
 keyboard-accessible, responsive, and clear about what is stored and why. Avoid
 decorative AI-dashboard styling, hidden import state, and transcript dumps.
 
-The unfinished 0.8 operator surface reports each supported host's last recall
+The 0.8 preview operator surface reports each supported host's last recall
 and write receipt without retaining the question or memory text. It also shows
 protected storage and safe generated cleanup. The CLI keeps the same boundary:
 `pulse storage clean` preserves the active release, one rollback, the vault,
@@ -115,8 +115,9 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 is public; Personal 0.8 epoch 34 is installed locally for
-a one-day Codex and Claude Code dogfood that started on 2026-08-12, remains a
-developer preview, and is not production ready. Separate Claude Chat remote
+Status: Personal 0.7.2 remains the stable public release; Personal 0.8.0 is a
+public npm preview and epoch 34 is installed locally for a one-day Codex and
+Claude Code dogfood that started on 2026-08-12. It is not production ready.
+Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.

@@ -2,6 +2,23 @@
 
 All notable changes to Pulse.
 
+## 0.8.0 — 2026-08-12
+
+- Added temporary prompt-time recall that stays silent on weak matches and
+  offers at most four memories within about 600 tokens.
+- Replaced the advertised legacy write tools with one bounded `pulse_memory`
+  call for decisions, preferences, open questions, project state, corrections,
+  and separate emotional moments.
+- Separated personal memory from repository-bound project memory and made new
+  writes visible to semantic search without restarting Pulse.
+- Kept semantic retrieval healthy after a cancelled question and kept Codex or
+  Claude Code usable when Pulse is unavailable.
+- Added content-free recall/write receipts in Memory Home, safe storage
+  reporting and cleanup, Codex executable selection, and safe handling of
+  Claude Code's `.in_use` files and Windows storage metadata.
+- Published this release under the npm `preview` tag. Stable `latest` remains
+  0.7.2; live Cursor acceptance and production readiness remain pending.
+
 ## 0.7.0 — 2026-08-01
 
 - Split the public product into local-only Pulse Personal. The shared-memory

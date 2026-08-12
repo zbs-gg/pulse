@@ -1,7 +1,7 @@
 # Pulse Personal 0.8.0
 
-This is an unfinished development branch. Do not claim that 0.8.0 is published
-or installable from npm. The owner-machine migration passed on 2026-08-09, and
+Version 0.8.0 is published under the npm `preview` tag. It is not the stable
+default or production ready. The owner-machine migration passed on 2026-08-09, and
 its old sources are preserved in a verified encrypted external archive. On
 2026-08-12, installed local epoch 34 passed automatic semantic recall and
 one-call writes across fresh Codex and Claude Code sessions. A cancelled search
@@ -11,7 +11,7 @@ memory, and both hosts remained usable with Pulse stopped. The one-day
 owner-machine dogfood is now running in those two hosts. One broad, ambiguous
 Claude question still surfaced an unrelated old memory, so this remains a
 dogfood candidate rather than a release claim. Cursor live acceptance remains
-pending. The current published install remains 0.7.2.
+pending. The stable published install remains 0.7.2.
 
 A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
 an isolated hosted store of 21 memories. It required an account-level
@@ -25,10 +25,11 @@ need when they need it and stays silent when nothing relevant is found. The
 public package `@zbs-gg/pulse` contains only Personal: no shared-memory server,
 cloud synchronization, team command, device key, or shared database is shipped.
 
-Version 0.7.2 is published and supports only Macs with Apple Silicon. The exact
-npm package passed a clean installation on a separate Mac before publication.
-Both npm tags, `latest` and `preview`, resolve to 0.7.2. On other systems the
-installer must stop without changing files.
+Version 0.7.2 is the stable public release for Macs with Apple Silicon. Version
+0.8.0 is a public preview for the same target. The exact 0.8.0 archive passed a
+clean Apple Silicon installation before publication. The npm `latest` tag
+resolves to 0.7.2 and `preview` resolves to 0.8.0. Other operating systems are
+not public support claims yet.
 
 Before installation, inspect README.md, AGENTS.md, and
 docs/SECURITY_INSTALL_CHECKLIST.md. Explain what will be written and ask for
@@ -39,6 +40,10 @@ Normal installation:
     npx -y @zbs-gg/pulse@0.7.2 init codex
     pulse doctor
     pulse home
+
+Preview installation:
+
+    npx -y @zbs-gg/pulse@preview init codex
 
 Per-harness preview and confirmation:
 
@@ -66,7 +71,7 @@ Trust boundaries:
 - one unanswered cause question may appear only in a later ordinary response
   and never creates an automatic continuation.
 
-Unfinished 0.8 host contract:
+0.8 preview host contract:
 
 - expose only `pulse_memory`; keep `pulse_remember` and `pulse_graph_delta` as
   hidden compatibility aliases;
@@ -95,10 +100,10 @@ or the npm package. Do not infer that the presence of 0.8 code proves a real
 three-person pilot, fresh-session acceptance, or a published emotional-memory
 feature.
 
-Status: unfinished development branch; installed local epoch 34 passed
+Status: Personal 0.8.0 is published as an npm preview; installed local epoch 34 passed
 migration, cancellation-safe semantic search, fresh Codex/Claude Code automatic
 recall, cross-host writes, project isolation, irrelevant-query silence, and
 fail-open operation; one-day owner-machine dogfood started in those two hosts
 on 2026-08-12; broad ambiguous questions remain under observation and Cursor
 acceptance is pending; separate Claude Chat remote recall passed with a visible
-per-message tool call and no Personal sync; not published or production ready.
+per-message tool call and no Personal sync; not the stable default or production ready.
