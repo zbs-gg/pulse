@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const REPORT_SCHEMA = 'pulse.storage_report.v1';
 const CLEAN_RESULT_SCHEMA = 'pulse.storage_clean_result.v1';
@@ -149,7 +149,7 @@ function digestReport(report) {
 }
 
 export function inspectPulseStorage({ dataDir, commands = processCommands() } = {}) {
-  if (typeof dataDir !== 'string' || !resolve(dataDir).startsWith(sep) || !existsSync(dataDir)) {
+  if (typeof dataDir !== 'string' || !isAbsolute(dataDir) || !existsSync(dataDir)) {
     fail('storage_data_dir_invalid');
   }
   const root = resolve(dataDir);
@@ -232,7 +232,7 @@ export async function cleanPulseStorage({ dataDir, planDigest, verify = async ()
 export function writeStorageHomeSnapshot({ dataDir, vaultDataDir, archiveReceiptPath } = {}) {
   const root = resolve(dataDir ?? '');
   const vault = resolve(vaultDataDir ?? '');
-  if (typeof vaultDataDir !== 'string' || !vaultDataDir.startsWith(sep) ||
+  if (typeof vaultDataDir !== 'string' || !isAbsolute(vaultDataDir) ||
       !existsSync(vault) || resolve(vaultDataDir) !== vault) {
     fail('storage_home_vault_invalid');
   }
