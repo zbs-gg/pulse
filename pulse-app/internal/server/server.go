@@ -99,6 +99,14 @@ type Config struct {
 	// installed harnesses before a user chooses an exact project. Empty hides
 	// the queue without changing canonical memory behavior.
 	UnassignedInboxPath string
+	// StorageStatusPath is an owner-only, content-free projection written by
+	// the installed CLI before opening Memory Home. It contains byte counts and
+	// an optional verified archive path, never memory text or search queries.
+	StorageStatusPath string
+	// MemoryActivityPath stores only host, project scope, time, result count,
+	// and result digest for the latest automatic recall. It never stores query
+	// or memory text.
+	MemoryActivityPath string
 	// HomeBindingVerifier re-reads the signed workspace authority before every
 	// Home render or mutation so a stale daemon/session cannot survive revoke.
 	HomeBindingVerifier HomeBindingVerifier
@@ -146,6 +154,7 @@ type Server struct {
 	homeSessions             *viewerSessionManager
 	homePresentation         *MemoryPresentationService
 	homeProtectedWipeMu      sync.Mutex
+	memoryActivityMu         sync.Mutex
 	homeProtectedWipeItems   map[string]homeProtectedWipePending
 	trayScheduleMu           sync.Mutex
 	traySchedules            map[memoryTrayScheduleKey]*memoryTrayScheduleState
@@ -423,6 +432,7 @@ func (s *Server) localHandler() http.Handler {
 			r.Get("/memory/lifecycle-readiness", s.handleSupportedHostLifecycleReadiness)
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
 			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)
+			r.Post("/memory/activity/recall", s.handleMemoryRecallActivity)
 		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)

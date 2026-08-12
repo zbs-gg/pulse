@@ -2038,6 +2038,40 @@ func TestTerminalMemoryReadinessFactsDoNotRequirePresentation(t *testing.T) {
 	}
 }
 
+func TestTerminalMemoryReadinessFactsReturnsNewestWithinLimit(t *testing.T) {
+	s, _ := openPersonalTrayStore(t)
+	base := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	var newest MemoryWriteReceipt
+	for index, summary := range []string{
+		"Older durable readiness fact.",
+		"Newest durable readiness fact.",
+	} {
+		req := trayFinalizeRequest(summary)
+		req.SessionID = fmt.Sprintf("session-readiness-%d", index)
+		req.TurnID = fmt.Sprintf("turn-readiness-%d", index)
+		req.SourceEventKey = fmt.Sprintf("event_%064x", index+1)
+		req.IdempotencyKey = fmt.Sprintf("finalize-readiness-%d", index)
+		finalized, err := s.FinalizeTurn(req, base.Add(time.Duration(index)*time.Minute), 10*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := finalized.Receipts[0]
+		newest, err = s.CommitMemoryTrayCandidate(
+			pending.CandidateID, pending.CandidateVersion, base.Add(time.Duration(index)*time.Minute),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	facts, err := s.TerminalMemoryReadinessFacts("repository_pulse", testTrayBindingDigest, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 || facts[0].ReceiptID != newest.ReceiptID {
+		t.Fatalf("limited readiness facts=%#v, want newest receipt %s", facts, newest.ReceiptID)
+	}
+}
+
 func TestConcurrentExactPresentationsConvergeOnOneImmutableReceipt(t *testing.T) {
 	s, _ := openPersonalTrayStore(t)
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)

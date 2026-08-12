@@ -14,6 +14,7 @@ import {
   finalizeCodexRuntimeInstall,
   inspectCodexRuntime,
 	inspectCodexMarketplaceSnapshot,
+	inspectClaudePluginCompatibility,
 	inspectCodexPluginCompatibility,
   installCodexRuntime,
 	materializeCodexMarketplaceSnapshot,
@@ -252,7 +253,23 @@ test('signed Codex product edge accepts only the exact release-owned plugin and 
 		assert.equal(inspectCodexPluginCompatibility({
 			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
 		}, edge).ok, true);
+		mkdirSync(join(installedPlugin, '.in_use'), { mode: 0o700 });
+		writeFileSync(join(installedPlugin, '.in_use', '12345'), '{"pid":12345}\n', { mode: 0o600 });
+		assert.equal(inspectClaudePluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).ok, true);
+		assert.equal(inspectCodexPluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).reason, 'codex_plugin_snapshot_mismatch');
+		writeFileSync(join(installedPlugin, '.in_use', 'not-a-pid'), 'unsafe\n', { mode: 0o600 });
+		assert.equal(inspectClaudePluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).reason, 'claude_plugin_snapshot_unsafe');
+	rmSync(join(installedPlugin, '.in_use'), { recursive: true, force: true });
 		writeFileSync(join(installedPlugin, '.mcp.json'), '{"tampered":true}\n');
+		assert.equal(inspectClaudePluginCompatibility({
+			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
+		}, edge).reason, 'claude_plugin_snapshot_mismatch');
 		assert.equal(inspectCodexPluginCompatibility({
 			installed: true, enabled: true, version: '0.7.0', path: installedPlugin,
 		}, edge).reason, 'codex_plugin_snapshot_mismatch');

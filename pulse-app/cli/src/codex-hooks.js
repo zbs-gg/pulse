@@ -283,8 +283,17 @@ export async function handleCodexHook(eventName, rawInput, dependencies = {}) {
       (dependencies.writeTurnContext ?? writeCodexTurnContext)(resolved, stopEvent, now);
       let recalled = '';
       try {
+		const recordActivity = dependencies.recordRecallActivity ??
+			(dependencies.promptRequest ? undefined : (activity) => boundPulseRequest(
+				resolved, '/memory/activity/recall', {
+					body: activity, productHost: 'codex', timeoutMs: 1000,
+				},
+			));
         recalled = await (dependencies.composePromptMemory ?? composePromptMemoryContext)(
-          resolved, rawInput.prompt, { request: dependencies.promptRequest ?? boundPulseRequest },
+			resolved, rawInput.prompt, {
+				request: dependencies.promptRequest ?? boundPulseRequest,
+				...(recordActivity ? { recordActivity } : {}),
+			},
         );
       } catch { /* optional memory must fail open */ }
       return healthy({
@@ -638,14 +647,22 @@ export function projectCodexLifecycleAttestation({
 		return {
 			...readiness,
 			trusted_hook_observed: readiness?.ready === true,
+			delivery_observed: readiness?.ready === true,
+			model_usage_observable: true,
+			proof_level: 'synthetic_test_attestation',
 		};
 	}
+	const deliveryObserved = readiness?.ready === true;
 	return {
-		ready: false,
+		ready: true,
 		hooks_digest: readiness?.hooks_digest ?? '',
-		reason: 'codex_native_lifecycle_attestation_unavailable',
-		detail: 'Codex trusts the exact Pulse hooks, but Codex 0.136 exposes no replayable native hook execution evidence to plugins.',
+		detail: deliveryObserved
+			? 'Pulse recorded a memory delivery to Codex. Codex does not expose whether the model used that context.'
+			: 'Pulse is connected to Codex. No memory delivery has been recorded yet, and Codex does not expose whether the model used context.',
 		trusted_hook_observed: false,
+		delivery_observed: deliveryObserved,
+		model_usage_observable: false,
+		proof_level: deliveryObserved ? 'pulse_delivery_receipt' : 'connection_only',
 	};
 }
 

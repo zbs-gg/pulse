@@ -329,14 +329,15 @@ test('npm publication runs the repository release gate before preparing package 
 
   const workflow = readFileSync(join(root, '.github', 'workflows', 'publish-npm.yml'), 'utf8');
   assert.match(workflow, /runs-on: macos-15/);
-  assert.match(workflow, /EXPECTED_VERSION: '0\.7\.2'/);
+  assert.match(workflow, /EXPECTED_VERSION: '0\.8\.0'/);
   assert.match(workflow, /default: false/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.7\.2\/epoch-9\/catalog\/artifact-set\.json/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.7\.2\/catalog\/snapshot\.json/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.0\/epoch-34\/catalog\/artifact-set\.json/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.0\/catalog\/snapshot\.json/);
   assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
   assert.match(workflow, /init codex --only codex --yes --json/);
   assert.match(workflow, /r\.outcome!=="ready"/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish/);
+  assert.match(workflow, /--tag preview --provenance/);
 
 });
 

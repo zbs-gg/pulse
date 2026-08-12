@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" UserPromptSubmit",
+            "command": "exec \"$HOME/.local/bin/pulse\" product-hook UserPromptSubmit",
             "timeout": 30
           }
         ]
@@ -13,11 +13,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory",
+        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory|mcp__plugin_pulse_pulse-product__pulse_memory",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" PreToolUse",
+            "command": "exec \"$HOME/.local/bin/pulse\" product-hook PreToolUse",
             "timeout": 10
           }
         ]
@@ -25,11 +25,11 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory",
+        "matcher": "mcp__pulse__pulse_memory|mcp__pulse-product__pulse_memory|mcp__plugin_pulse_pulse-product__pulse_memory",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/pulse-hook.mjs\" PostToolUse",
+            "command": "exec \"$HOME/.local/bin/pulse\" product-hook PostToolUse",
             "timeout": 10
           }
         ]

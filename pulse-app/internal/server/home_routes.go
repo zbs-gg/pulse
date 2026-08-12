@@ -619,6 +619,10 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 			unassignedUnavailable = true
 		}
 	}
+	hostActivity := []memoryHomeHostActivityCard{}
+	if lifecycle, lifecycleErr := s.supportedHostLifecycleReadiness(); lifecycleErr == nil {
+		hostActivity = memoryHomeHostActivityCards(lifecycle)
+	}
 	page, err := renderMemoryHomeHTML(memoryHomePage{
 		Data: data, Pending: cards, Historical: s.memoryHomeHistoricalReview(),
 		EnhancedPresenceProfile: s.cfg.EnhancedPresenceAuthorizer.Profile(),
@@ -627,7 +631,9 @@ func (s *Server) handleHomePage(w http.ResponseWriter, r *http.Request) {
 		UnassignedActivity: memoryHomeUnassignedActivities(
 			unassignedSnapshot.Activity, data.Boundary.BindingDigest,
 		),
-		CSRFToken: session.CSRFToken,
+		CSRFToken:    session.CSRFToken,
+		HostActivity: hostActivity,
+		Storage:      readMemoryHomeStorageCard(s.cfg.StorageStatusPath),
 	})
 	if err != nil {
 		http.Error(w, "Memory Home render failed", http.StatusInternalServerError)

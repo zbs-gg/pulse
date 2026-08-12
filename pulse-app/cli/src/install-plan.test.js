@@ -360,18 +360,18 @@ test('advertised 8 GB desktops pass at the exact 7 GiB process-visible floor', (
   }
 });
 
-test('Codex detection inspects absolute candidates and probes a version only when explicitly requested', () => {
+test('Codex detection inspects absolute candidates and proves the selected CLI can start', () => {
   const root = mkdtempSync(join(tmpdir(), 'pulse-codex-detect.'));
   try {
     const executable = join(root, 'codex');
-    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(executable, '#!/bin/sh\necho "codex-cli 0.114.0"\n', { mode: 0o700 });
     chmodSync(executable, 0o700);
 
     const inspected = detectCodexCLI({ candidates: [executable] });
     assert.equal(inspected.available, true);
     assert.equal(inspected.executable_path, realpathSync(executable));
     assert.match(inspected.executable_sha256, /^[a-f0-9]{64}$/);
-    assert.equal(inspected.version, null);
+    assert.equal(inspected.version, '0.114.0');
     assert.equal(inspected.reason_code, null);
     const found = detectCodexCLI({
       codexPath: executable,

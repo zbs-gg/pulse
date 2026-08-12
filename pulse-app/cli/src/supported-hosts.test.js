@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
   detectCodexCLI,
   detectCursorInstallation,
   detectSupportedHosts,
+  probeHostVersion,
   SUPPORTED_HOST_IDS,
 } from './supported-hosts.js';
 import { createPlatformServices } from './platform-services.js';
@@ -112,9 +113,51 @@ test('Windows host discovery uses bounded native-adapter candidates and never PO
     },
   });
   const detected = detectCodexCLI({
-    candidates: [codexPath], platformServices: services,
+		candidates: [codexPath], platformServices: services,
+		versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.8.0' }),
   });
   assert.equal(detected.available, true);
   assert.equal(detected.executable_path, codexPath);
   assert.equal(detected.executable_sha256, 'c'.repeat(64));
+});
+
+test('Codex detection skips a broken CLI and selects the next working bounded candidate', () => {
+	const root = mkdtempSync(join(tmpdir(), 'pulse-codex-detect.'));
+	try {
+		const broken = join(root, 'broken-codex');
+		const desktop = join(root, 'desktop-codex');
+		writeFileSync(broken, '#!/bin/sh\nexit 127\n', { mode: 0o700 });
+		writeFileSync(desktop, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+		const detected = detectCodexCLI({
+			candidates: [broken, desktop],
+			versionProbe: (path) => path === realpathSync(broken)
+				? { status: 127, stderr: 'broken runtime' }
+				: { status: 0, stdout: 'codex-cli 0.146.0-alpha.9.2' },
+		});
+		assert.equal(detected.available, true);
+		assert.equal(detected.executable_path, realpathSync(desktop));
+		assert.equal(detected.version, '0.146.0-alpha.9.2');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('host version probe runs an absolute executable without PATH lookup', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-host-version-'));
+  const protectedCodexHome = join(root, 'protected-codex-home');
+  const previousCodexHome = process.env.CODEX_HOME;
+  try {
+    mkdirSync(protectedCodexHome);
+    const executable = join(root, 'codex-desktop');
+    writeFileSync(executable, '#!/bin/sh\ntouch "$CODEX_HOME/probed"\nprintf "codex-cli 0.146.0\\n"\n', { mode: 0o700 });
+    process.env.CODEX_HOME = protectedCodexHome;
+    const result = probeHostVersion(executable);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /0\.146\.0/);
+    assert.deepEqual(readdirSync(protectedCodexHome), []);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

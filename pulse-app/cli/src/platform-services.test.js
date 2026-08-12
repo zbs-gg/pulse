@@ -40,27 +40,31 @@ test('macOS host discovery includes the Homebrew Codex executable', () => {
     home: '/Users/pulse',
   });
 
-  assert.ok(services.hostCandidates().codex.includes('/opt/homebrew/bin/codex'));
+	assert.ok(services.hostCandidates().codex.includes('/opt/homebrew/bin/codex'));
+	assert.ok(services.hostCandidates().codex.includes('/Applications/ChatGPT.app/Contents/Resources/codex'));
 });
 
 test('native packed Codex calibration path is available only under the exact isolated attestation', () => {
   const executable = '/opt/native-codex/bin/codex';
+  const claudeExecutable = '/opt/native-claude/bin/claude';
   const attested = createPlatformServices({
     platform: 'linux', architecture: 'x64', home: '/home/pulse',
     env: {
       PULSE_TRUST_MODE: 'test',
       PULSE_NATIVE_PACKED_FIXTURE_ATTESTATION: '1',
       PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable,
+      PULSE_NATIVE_PACKED_CLAUDE_EXECUTABLE: claudeExecutable,
     },
   });
   assert.deepEqual(attested.hostCandidates().codex, [executable]);
-  assert.deepEqual(attested.hostCandidates().claude, []);
+  assert.deepEqual(attested.hostCandidates().claude, [claudeExecutable]);
   assert.deepEqual(attested.hostCandidates().cursor, []);
   const production = createPlatformServices({
     platform: 'linux', architecture: 'x64', home: '/home/pulse',
     env: { PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: executable },
   });
   assert.equal(production.hostCandidates().codex.includes(executable), false);
+  assert.equal(production.hostCandidates().claude.includes(claudeExecutable), false);
 });
 
 test('protected vendor harness paths are accepted only inside a GitHub runner temp root', () => {

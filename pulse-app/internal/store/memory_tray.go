@@ -1163,7 +1163,7 @@ func (s *Store) TerminalMemoryReadinessFacts(
 		   )
 		 WHERE receipt.status IN ('created','updated','deduplicated')
 		   AND ledger.binding_digest=?
-		 ORDER BY receipt.created_at, receipt.receipt_id
+		 ORDER BY receipt.created_at DESC, receipt.receipt_id DESC
 		 LIMIT ?`, expectedBindingDigest, limit)
 	if err != nil {
 		return nil, err

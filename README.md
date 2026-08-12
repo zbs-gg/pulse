@@ -1,7 +1,8 @@
 # Pulse Personal
 
-Pulse keeps approved working memory for Codex, Claude Code, and Cursor on your
-computer. Version `0.8.0` can also remember emotions attached to a specific
+Pulse is memory for AI tools. It gives Codex and Claude Code the knowledge they
+need at the moment they need it, and stays silent when nothing relevant is
+found. Version `0.8.0` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
@@ -9,13 +10,27 @@ full conversation, or send Personal memory to a cloud server.
 > behavior below describe the intended next release. Use the published 0.7.2
 > for ordinary installation until this branch passes a separate live review.
 
-The owner-machine migration and atomic database switch passed on 2026-08-09,
-with source databases and recovery copies preserved. A local epoch-22 candidate
-then passed fresh automatic semantic recall in both Codex and Claude Code: each
-used the exact stored rule that an emotional moment is a separate
-`pulse_memory` item, without the question repeating the stored wording. The
-owner-machine one-day dogfood started on 2026-08-10 with Pulse enabled in those
-two hosts. Cursor live acceptance remains pending.
+The owner-machine migration and atomic database switch passed on 2026-08-09.
+The old Pulse and Claude Mem sources, migration copies, and recovery files are
+preserved in a verified encrypted external archive. On 2026-08-12, installed
+local epoch 34 passed automatic semantic recall and one-call writing across
+fresh Codex and Claude Code sessions. A cancelled search no longer disabled
+full semantic retrieval for the next question. Personal memory crossed
+projects, project memory stayed inside its repository, an unrelated question
+received no memory, and both hosts kept working with Pulse stopped. The
+owner-machine one-day dogfood is now running in those two hosts. One broad,
+ambiguous Claude question still surfaced an unrelated old memory before a more
+specific semantic question found the intended decision; this remains a
+dogfood risk rather than a release claim. Cursor live acceptance remains
+pending.
+
+A separate remote Claude Chat experiment passed on 2026-08-11 against an
+isolated hosted store containing 21 memories. Automatic recall required a
+short account-level **Instructions for Claude** rule and the Pulse connector in
+**Always available** mode; MCP server instructions alone did not trigger the
+tool. Each ordinary message therefore makes one visible `pulse_recall` call.
+This proves the remote connector flow only: the hosted store is not synchronized
+with the local Personal 0.8 vault and is not part of the published install.
 
 [![npm](https://img.shields.io/npm/v/@zbs-gg/pulse/latest?label=%40zbs-gg%2Fpulse&color=050505)](https://www.npmjs.com/package/@zbs-gg/pulse)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-050505)](./LICENSE)
@@ -108,6 +123,13 @@ saved. At most four memories and about 600 tokens are offered, and weak matches
 produce no memory context. Stable rules remain in `AGENTS.md` or `CLAUDE.md`
 instead of being duplicated by Pulse.
 
+The same branch adds bounded storage maintenance. `pulse storage` reports
+protected releases and generated files that can be removed. `pulse storage
+clean` requires an exact confirmation, keeps the active release plus one
+rollback, and removes only unchanged generated artifacts after a launch and
+recall check. It never includes the active vault, keys, migration sources, or
+unknown files.
+
 ## Existing databases
 
 Official `0.6.7` and `0.7.1` Personal databases are upgraded in place without
@@ -141,7 +163,12 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: unfinished Personal 0.8 branch. The local-store migration, corrected
-one-call Claude write, and fresh invisible recall in Codex and Claude Code
-passed. An owner-machine one-day dogfood is running in those two hosts; Cursor
-acceptance remains pending. Version 0.8 is not published or production ready.
+Status: unfinished Personal 0.8 branch. Installed local epoch 34 passed the
+local-store migration, cancellation-safe semantic search, one-call writes,
+cross-host recall, project boundary, irrelevant-query silence, and fail-open
+operation in fresh Codex and Claude Code sessions. An owner-machine one-day
+dogfood started in those two hosts on 2026-08-12; broad ambiguous questions
+remain under observation and Cursor acceptance remains pending. A separate Claude Chat
+remote-recall experiment passed with a visible tool call on every message, but
+is not Personal sync or a supported install. Version 0.8 is not published or
+production ready.

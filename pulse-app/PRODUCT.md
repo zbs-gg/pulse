@@ -2,9 +2,10 @@
 
 ## Current product
 
-Pulse Personal keeps approved working memory for Codex, Claude Code, and Cursor
-in a local project-bound vault. It restores relevant memories in later work and
-lets the owner inspect, correct, or delete them in Memory Home.
+Pulse Personal is memory for AI tools. It gives Codex and Claude Code the
+knowledge they need at the moment they need it, stays silent when nothing
+relevant is found, and lets the owner inspect, correct, or delete memories in
+Memory Home.
 
 The current public release is 0.7.2 for Apple Silicon Macs. The published npm
 tags `latest` and `preview` both point to this version. It has no Team server,
@@ -49,22 +50,36 @@ inference as inference, and decay under the existing influence rules.
 ## Current Evidence
 
 The owner-machine migration passed on 2026-08-09. The existing local-store merge
-path produced and atomically activated a reviewed Personal database while the
-old Pulse database, Claude Mem database, migration sources, and recovery copy
-remained preserved.
+path produced and atomically activated a reviewed Personal database. The old
+Pulse database, Claude Mem database, migration sources, and recovery files are
+preserved in a verified encrypted external archive.
 
-A local epoch-22 candidate corrected the advertised write schema so an emotion
-must be a separate item and fixed the bounded semantic selection path. On
-2026-08-10, fresh Codex and Claude Code turns automatically applied the exact
-stored rule that an emotional moment is a separate `pulse_memory` item without
-the question repeating the stored wording. The earlier Claude write proof also
-remains valid: one ordinary call stored a project decision and a separate
-emotional moment without an error or retry, and the live index received both
-immediately.
+On 2026-08-12, installed local epoch 34 passed fresh Codex and Claude Code
+acceptance. Both hosts automatically recalled old memory without its exact
+wording, wrote durable changes with one `pulse_memory` call, and recalled each
+other's new records. A deliberately cancelled search returned control
+immediately, while the following question still used full BGE-M3 semantic
+retrieval. Personal memory followed the owner into another project; the Pulse
+Personal project decision stayed inside its repository. An unrelated question
+received no memory. With Pulse deliberately unavailable, terminal and file
+work, cancellation, and normal session completion remained usable in both
+hosts.
 
 The owner-machine one-day dogfood is now running with Pulse enabled in Codex and
-Claude Code. Cursor live recall and the cross-project boundary remain pending,
-so this is evidence for two local hosts rather than full three-host acceptance.
+Claude Code. One broad, ambiguous Claude question surfaced an unrelated old
+memory before a more specific semantic question found the intended decision.
+That ambiguity remains under observation during dogfood. Cursor live recall
+remains pending, so this is evidence for two local hosts rather than full
+three-host acceptance.
+
+On 2026-08-11, a separate Claude Chat experiment automatically recalled the
+exact `LUNA-724-PURPLE` marker from an isolated hosted store of 21 memories.
+Claude also called Pulse once for an unrelated question without mixing memory
+into the answer. This required an account-level Claude instruction and the
+connector in Always available mode; MCP server instructions alone were ignored.
+The resulting visible tool call and additional tool round trip happen on every
+ordinary message. The hosted store is not synchronized with the local Personal
+0.8 vault, so this is remote-connector evidence rather than Personal support.
 
 Personal 0.8 is still neither published nor production ready. The public
 package remains 0.7.2, Team was not enabled, and the unfinished code stays on
@@ -75,6 +90,12 @@ the development branch while the bounded dogfood continues.
 Memory Home should feel like a trustworthy local operator console: readable,
 keyboard-accessible, responsive, and clear about what is stored and why. Avoid
 decorative AI-dashboard styling, hidden import state, and transcript dumps.
+
+The unfinished 0.8 operator surface reports each supported host's last recall
+and write receipt without retaining the question or memory text. It also shows
+protected storage and safe generated cleanup. The CLI keeps the same boundary:
+`pulse storage clean` preserves the active release, one rollback, the vault,
+keys, source data, and unknown files.
 
 ## Anti-References
 
@@ -94,6 +115,8 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 is public; Personal 0.8 is installed locally for a
-one-day Codex and Claude Code dogfood, remains a developer preview, and is not
-production ready.
+Status: Personal 0.7.2 is public; Personal 0.8 epoch 34 is installed locally for
+a one-day Codex and Claude Code dogfood that started on 2026-08-12, remains a
+developer preview, and is not production ready. Separate Claude Chat remote
+recall passed with an account-level instruction and a visible per-message tool
+call; it is not part of the Personal installation.

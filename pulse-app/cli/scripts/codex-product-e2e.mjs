@@ -467,10 +467,11 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   const nativeMcp = run('codex', ['mcp', 'get', 'pulse-product', '--json'], { cwd: workspace, env });
   const nativeMcpConfig = JSON.parse(nativeMcp.stdout);
   assert.equal(nativeMcpConfig.transport.type, 'stdio');
-  assert.equal(nativeMcpConfig.transport.command, 'node');
-  assert.deepEqual(nativeMcpConfig.transport.args.slice(0, 2), ['--input-type=module', '--eval']);
-  assert.match(nativeMcpConfig.transport.args[2], /CODEX_HOME/);
-  assert.deepEqual(nativeMcpConfig.transport.env_vars, ['CODEX_HOME']);
+  assert.equal(nativeMcpConfig.transport.command, '/bin/sh');
+  assert.deepEqual(nativeMcpConfig.transport.args, [
+    '-c', 'exec "$HOME/.local/bin/pulse" codex-mcp',
+  ]);
+  assert.deepEqual(nativeMcpConfig.transport.env_vars, []);
   assert.equal(nativeMcpConfig.transport.cwd, null);
 
   const cacheVersions = readdirSync(join(codexHome, 'plugins', 'cache', 'zbs-gg', 'pulse'));
@@ -766,7 +767,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 		cwd: workspace, env, status: 1,
 	});
   const report = JSON.parse(doctor.stdout);
-	assert.equal(report.verdict, 'Pulse Codex automatic lifecycle is not ready.');
+	assert.equal(report.verdict, 'Pulse Codex connection is not ready.');
 	assert.equal(report.trust.authority_mode, 'synthetic-test');
 	assert.equal(report.checks.native_hook_trust.ok, false);
 	assert.equal(report.checks.native_hook_trust.reason, 'codex_native_hook_trust_required',
@@ -837,7 +838,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 `, { mode: 0o700 });
 	chmodSync(mutatingCodex, 0o700);
 	const mutationDoctor = run(process.execPath, [packedCLI, 'doctor', 'codex', '--json'], {
-		cwd: workspace, env: { ...env, PATH: `${mutatingTools}:${tools}` }, status: 1,
+		cwd: workspace,
+		env: { ...env, PULSE_NATIVE_PACKED_CODEX_EXECUTABLE: mutatingCodex },
+		status: 1,
 	});
 	const mutationReport = JSON.parse(mutationDoctor.stdout);
 	assert.equal(mutationReport.checks.plugin.reason, 'codex_product_state_changed_during_inspection');

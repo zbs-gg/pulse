@@ -1,16 +1,29 @@
 # Pulse Personal 0.8.0
 
 This is an unfinished development branch. Do not claim that 0.8.0 is published
-or installable from npm. The owner-machine migration passed on 2026-08-09. A
-local epoch-22 candidate then passed fresh automatic semantic recall in Codex
-and Claude Code: both applied the exact stored rule that an emotional moment is
-a separate memory item without the question repeating its wording. The
-owner-machine one-day dogfood started on 2026-08-10 in those two hosts. Cursor
-live acceptance remains pending. The current published install remains 0.7.2.
+or installable from npm. The owner-machine migration passed on 2026-08-09, and
+its old sources are preserved in a verified encrypted external archive. On
+2026-08-12, installed local epoch 34 passed automatic semantic recall and
+one-call writes across fresh Codex and Claude Code sessions. A cancelled search
+did not disable full semantic retrieval for the next question. Personal memory
+crossed projects, project memory did not, an unrelated question received no
+memory, and both hosts remained usable with Pulse stopped. The one-day
+owner-machine dogfood is now running in those two hosts. One broad, ambiguous
+Claude question still surfaced an unrelated old memory, so this remains a
+dogfood candidate rather than a release claim. Cursor live acceptance remains
+pending. The current published install remains 0.7.2.
 
-Pulse is local working memory for Codex, Claude Code, and Cursor. The public
-package `@zbs-gg/pulse` contains only Personal: no shared-memory server, cloud
-synchronization, team command, device key, or shared database is shipped.
+A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
+an isolated hosted store of 21 memories. It required an account-level
+Instructions for Claude rule plus Pulse set to Always available. MCP server
+instructions alone were insufficient. Each ordinary message makes one visible
+pulse_recall call; this is neither local Personal synchronization nor a
+published installation path.
+
+Pulse is memory for AI tools: it gives Codex and Claude Code the knowledge they
+need when they need it and stays silent when nothing relevant is found. The
+public package `@zbs-gg/pulse` contains only Personal: no shared-memory server,
+cloud synchronization, team command, device key, or shared database is shipped.
 
 Version 0.7.2 is published and supports only Macs with Apple Silicon. The exact
 npm package passed a clean installation on a separate Mac before publication.
@@ -62,6 +75,9 @@ Unfinished 0.8 host contract:
 - retrieve temporarily on each user question, save neither the question nor a
   session-start context package, and offer at most four memories / 600 tokens;
 - omit memory context when relevance is weak.
+- let `pulse storage` report protected and removable data; let `pulse storage
+  clean` remove only unchanged generated artifacts while preserving the active
+  release, one rollback, the vault, keys, sources, and unknown files.
 
 Official 0.6.7 Personal databases upgrade in place. Databases from unpublished
 shared-memory builds are refused without modification.
@@ -79,7 +95,10 @@ or the npm package. Do not infer that the presence of 0.8 code proves a real
 three-person pilot, fresh-session acceptance, or a published emotional-memory
 feature.
 
-Status: unfinished development branch; migration, corrected Claude write, and
-fresh Codex/Claude Code invisible recall accepted; one-day owner-machine dogfood
-running in those two hosts; Cursor acceptance pending; not published or
-production ready.
+Status: unfinished development branch; installed local epoch 34 passed
+migration, cancellation-safe semantic search, fresh Codex/Claude Code automatic
+recall, cross-host writes, project isolation, irrelevant-query silence, and
+fail-open operation; one-day owner-machine dogfood started in those two hosts
+on 2026-08-12; broad ambiguous questions remain under observation and Cursor
+acceptance is pending; separate Claude Chat remote recall passed with a visible
+per-message tool call and no Personal sync; not published or production ready.

@@ -673,9 +673,12 @@ function parsePrivateJSON(bytes) {
 
 // The plugin owns this verification because code inside the installed runtime
 // cannot establish its own integrity after Node has already executed it.
-function trustedTreeDigest(root, { label, excludeRootFile, trust = createTrustServices() } = {}) {
+function trustedTreeDigest(root, {
+  label, excludeRootDirectories = [], excludeRootFile, trust = createTrustServices(),
+} = {}) {
   if (typeof trust.treeDigest === 'function') return trust.treeDigest(root, excludeRootFile);
   trust.assertTreeEntry(root, '.', 'directory');
+  const excludedDirectories = new Set(excludeRootDirectories);
   const hash = createHash('sha256');
   const entries = [];
   let totalBytes = 0;
@@ -683,6 +686,7 @@ function trustedTreeDigest(root, { label, excludeRootFile, trust = createTrustSe
   const visit = (directory, prefix = '', depth = 0) => {
     if (depth > TREE_MAX_DEPTH) throw new Error(`${label} exceeds the trusted tree depth limit`);
     for (const name of readdirSync(directory).sort()) {
+      const excludedDirectory = prefix === '' && excludedDirectories.has(name);
       const excludedFromDigest = prefix === '' && name === excludeRootFile;
       visited++;
       if (visited > TREE_MAX_ENTRIES) throw new Error(`${label} exceeds the trusted tree entry limit`);
@@ -692,7 +696,7 @@ function trustedTreeDigest(root, { label, excludeRootFile, trust = createTrustSe
       if (preliminary.isSymbolicLink()) throw new Error(`${label} contains a symlink: ${relative}`);
       if (preliminary.isDirectory()) {
         trust.assertTreeEntry(path, relative, 'directory');
-        visit(path, relative, depth + 1);
+        if (!excludedDirectory) visit(path, relative, depth + 1);
       } else if (preliminary.isFile()) {
         trust.assertTreeEntry(path, relative, 'file');
         if (!Number.isSafeInteger(preliminary.size) || preliminary.size < 0 ||
@@ -730,7 +734,31 @@ function runtimeTreeDigest(root, trust) {
   });
 }
 
-function pluginTreeDigest(root, trust) {
+function validateClaudeInUseDirectory(pluginRoot, trust) {
+  const root = join(resolve(pluginRoot), '.in_use');
+  if (!existsSync(root)) return;
+  trust.assertTreeEntry(root, '.in_use', 'directory');
+  const entries = readdirSync(root);
+  if (entries.length > 64) throw new Error('Pulse Claude plugin lease directory is unsafe');
+  for (const name of entries) {
+    if (!/^[1-9][0-9]{0,9}$/.test(name)) {
+      throw new Error('Pulse Claude plugin lease directory is unsafe');
+    }
+    const path = join(root, name);
+    const info = trust.assertTreeEntry(path, `.in_use/${name}`, 'file');
+    if (info.isSymbolicLink() || info.nlink !== 1 || info.size > 512) {
+      throw new Error('Pulse Claude plugin lease directory is unsafe');
+    }
+  }
+}
+
+function pluginTreeDigest(root, trust, host) {
+  if (host === 'claude-code') {
+    validateClaudeInUseDirectory(root, trust);
+    return trustedTreeDigest(root, {
+      excludeRootDirectories: ['.in_use'], label: 'Pulse trusted plugin', trust,
+    });
+  }
   return trustedTreeDigest(root, { label: 'Pulse trusted plugin', trust });
 }
 
@@ -917,7 +945,7 @@ export function resolveProductEnvironment({
       actualRuntimeDigest !== activation.runtime_tree_digest) {
     throw new Error('Pulse product runtime and activation are out of sync; retry after activation completes.');
   }
-  const actualPluginDigest = edgeProof?.pluginDigest ?? pluginTreeDigest(pluginRoot, trust);
+  const actualPluginDigest = edgeProof?.pluginDigest ?? pluginTreeDigest(pluginRoot, trust, host);
   if (actualPluginDigest !== activation.plugin_tree_digest) {
     throw new Error('Pulse installed plugin does not match the signed product activation.');
   }
@@ -948,6 +976,7 @@ export function resolveProductEnvironment({
 export const __runtimeLocatorTest = Object.freeze({
   canonicalWorkspace,
   createTrustServices,
+  pluginTreeDigest,
   selectLocatorEntry,
   trustedTreeDigest,
   workspaceDigest,

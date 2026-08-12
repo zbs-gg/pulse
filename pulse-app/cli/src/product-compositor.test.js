@@ -301,6 +301,7 @@ test('prompt recall injects only the strongest capsule and bounds legacy summari
 });
 
 test('prompt recall injects nothing when relevance evidence is weak or absent', async () => {
+	const activity = [];
   const weak = await composePromptMemoryContext(resolved(), 'Unrelated prompt', {
     request: async () => ({
       events: [{ id: 1, summary: 'Some memory.' }],
@@ -308,9 +309,47 @@ test('prompt recall injects nothing when relevance evidence is weak or absent', 
         score_breakdowns: { 1: { cosine: 0.12 } },
         candidate_evidence: { 1: { dense: true, lexical: true, direct_capsule: true } },
       } },
-    }),
+		}),
+		recordActivity: async (receipt) => activity.push(receipt),
   });
   assert.equal(weak, '');
+	assert.equal(activity.length, 1);
+	assert.deepEqual(Object.keys(activity[0]).sort(), ['result_count', 'result_digest', 'schema']);
+	assert.equal(activity[0].result_count, 0);
+	assert.match(activity[0].result_digest, /^[a-f0-9]{64}$/);
+	assert.doesNotMatch(JSON.stringify(activity), /Unrelated prompt|Some memory/);
+});
+
+test('prompt recall rejects the observed unrelated capsule but keeps a relevant personal capsule', async () => {
+  const response = (cosine, summary) => ({
+    events: [{ id: 1, summary }],
+    trace: { retrieval: {
+      score_breakdowns: { 1: { cosine } },
+      candidate_evidence: { 1: { dense: true, lexical: false, direct_capsule: true } },
+    } },
+  });
+  const unrelated = await composePromptMemoryContext(resolved(), 'Сколько минут варить яйцо всмятку?', {
+    request: async () => response(0.3974492847919464, 'A detailed ZBS Eye codebase review.'),
+  });
+  const relevant = await composePromptMemoryContext(resolved(), 'Как Ник предпочитает получать технические отчёты?', {
+    request: async () => response(0.5178588628768921,
+      'Technical reports should use short titled sections followed by connected explanatory paragraphs.'),
+  });
+  assert.equal(unrelated, '');
+  assert.match(relevant, /short titled sections/);
+});
+
+test('prompt recall keeps the stricter lexical agreement rule for archive events at 0.32', async () => {
+  const output = await composePromptMemoryContext(resolved(), 'Old context', {
+    request: async () => ({
+      events: [{ id: 1, summary: 'Archive agreement.' }],
+      trace: { retrieval: {
+        score_breakdowns: { 1: { cosine: 0.33 } },
+        candidate_evidence: { 1: { dense: true, lexical: true, direct_capsule: false } },
+      } },
+    }),
+  });
+  assert.match(output, /Archive agreement/);
 });
 
 test('prompt recall presents the accepted decision as factual context', async () => {

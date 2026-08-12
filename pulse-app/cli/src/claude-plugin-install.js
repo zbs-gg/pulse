@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { isAbsolute, resolve } from 'node:path';
 
-import { inspectCodexPluginCompatibility } from './codex-install.js';
+import { inspectClaudePluginCompatibility } from './codex-install.js';
 
 export function parseClaudePluginList(value) {
   try {
@@ -38,7 +38,7 @@ function requireSuccess(result, action) {
 export function activateClaudePlugin(edge, {
   executable = 'claude',
   run = (args) => claudePluginCommand(args, executable),
-  inspect = inspectCodexPluginCompatibility,
+  inspect = inspectClaudePluginCompatibility,
 } = {}) {
   if (!edge || typeof edge.marketplace_root !== 'string' || !isAbsolute(edge.marketplace_root) ||
       typeof edge.plugin_root !== 'string' || !isAbsolute(edge.plugin_root) ||

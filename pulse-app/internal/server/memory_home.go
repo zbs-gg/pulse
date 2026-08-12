@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -232,6 +233,41 @@ type memoryHomePage struct {
 	Unassigned              []memoryHomeUnassignedCard
 	UnassignedActivity      []memoryHomeUnassignedActivity
 	CSRFToken               string
+	HostActivity            []memoryHomeHostActivityCard
+	Storage                 memoryHomeStorageCard
+}
+
+type memoryHomeHostActivityCard struct {
+	HostLabel  string
+	State      string
+	StateLabel string
+	Recall     string
+	Write      string
+}
+
+type memoryHomeStorageSnapshot struct {
+	Schema                string `json:"schema"`
+	GeneratedAt           string `json:"generated_at"`
+	TotalBytes            int64  `json:"total_bytes"`
+	ProtectedReleaseBytes int64  `json:"protected_release_bytes"`
+	ReclaimableBytes      int64  `json:"reclaimable_bytes"`
+	SkippedBytes          int64  `json:"skipped_bytes"`
+	ActiveEpoch           int    `json:"active_epoch"`
+	PreviousEpoch         int    `json:"previous_epoch"`
+	Archive               *struct {
+		Path       string `json:"path"`
+		VerifiedAt string `json:"verified_at"`
+		SHA256     string `json:"sha256"`
+	} `json:"archive,omitempty"`
+}
+
+type memoryHomeStorageCard struct {
+	Available    bool
+	NeedsCleanup bool
+	Total        string
+	Reclaimable  string
+	Release      string
+	Archive      string
 }
 
 type memoryHomeTemplateData struct {
@@ -270,6 +306,86 @@ type memoryHomeTemplateData struct {
 	HasPreviousMemories      bool
 	NextMemoryOffset         int
 	PreviousMemoryOffset     int
+}
+
+func memoryHomeHostActivityCards(value supportedHostLifecycleReadiness) []memoryHomeHostActivityCard {
+	cards := make([]memoryHomeHostActivityCard, 0, 2)
+	for _, host := range value.Hosts {
+		if host.Host != "codex" && host.Host != "claude-code" {
+			continue
+		}
+		card := memoryHomeHostActivityCard{HostLabel: map[string]string{
+			"codex": "Codex", "claude-code": "Claude Code",
+		}[host.Host]}
+		if host.LifecycleReady {
+			card.State, card.StateLabel = "ready", "Automatic memory observed"
+		} else if host.LastWriteAt != "" || host.LastRecallAt != "" {
+			card.State, card.StateLabel = "partial", "Connected; one proof is still missing"
+		} else {
+			card.State, card.StateLabel = "action", "Connected; no recent activity receipt"
+		}
+		if host.LastRecallAt == "" {
+			card.Recall = "No automatic recall recorded yet"
+		} else if host.RecallCount == 0 {
+			card.Recall = "Last search found no relevant memory · " + host.LastRecallAt
+		} else {
+			proof := "Pulse delivered memory; model use is not observable"
+			if host.DeliveryProof == "host_observed" {
+				proof = "Host confirmed the delivered memory"
+			}
+			card.Recall = fmt.Sprintf("Last recall: %d item(s) · %s · %s", host.RecallCount, proof, host.LastRecallAt)
+		}
+		if host.LastWriteAt == "" {
+			card.Write = "No durable write recorded yet"
+		} else {
+			card.Write = "Last durable write · " + host.LastWriteAt
+		}
+		cards = append(cards, card)
+	}
+	return cards
+}
+
+func memoryHomeBytes(bytes int64) string {
+	if bytes < 0 {
+		return "Unavailable"
+	}
+	value := float64(bytes)
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	unit := 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	if value >= 10 || unit == 0 {
+		return fmt.Sprintf("%.0f %s", value, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", value, units[unit])
+}
+
+func readMemoryHomeStorageCard(path string) memoryHomeStorageCard {
+	if path == "" {
+		return memoryHomeStorageCard{}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 || len(raw) > 16<<10 {
+		return memoryHomeStorageCard{}
+	}
+	var value memoryHomeStorageSnapshot
+	if json.Unmarshal(raw, &value) != nil || value.Schema != "pulse.storage_home.v1" ||
+		value.TotalBytes < 0 || value.ProtectedReleaseBytes < 0 || value.ReclaimableBytes < 0 ||
+		value.ActiveEpoch < 1 || value.PreviousEpoch < 1 {
+		return memoryHomeStorageCard{}
+	}
+	archive := "No verified external archive recorded"
+	if value.Archive != nil && value.Archive.Path != "" && value.Archive.VerifiedAt != "" {
+		archive = "Verified archive: " + value.Archive.Path + " · " + value.Archive.VerifiedAt
+	}
+	return memoryHomeStorageCard{
+		Available: true, NeedsCleanup: value.ReclaimableBytes > 0, Total: memoryHomeBytes(value.TotalBytes),
+		Reclaimable: memoryHomeBytes(value.ReclaimableBytes),
+		Release:     fmt.Sprintf("Active epoch %d · rollback epoch %d · %s protected", value.ActiveEpoch, value.PreviousEpoch, memoryHomeBytes(value.ProtectedReleaseBytes)),
+		Archive:     archive,
+	}
 }
 
 func renderMemoryHomeHTML(page memoryHomePage) (string, error) {
@@ -579,6 +695,9 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
     .action { padding:20px; border-radius:18px; background:var(--paper); border:1px solid var(--line); }
     .action strong { display:block; margin-bottom:6px; }
     .status-ready { border-left:5px solid var(--green); } .status-partial,.status-warming { border-left:5px solid var(--amber); } .status-blocked { border-left:5px solid var(--red); } .status-action { border-left:5px solid var(--blue); }
+    .activity-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:22px 0 34px; }
+    .activity-card { min-width:0; padding:18px; border:1px solid var(--line); border-left-width:5px; border-radius:16px; background:var(--paper); }
+    .activity-card strong { display:block; margin-bottom:5px; } .activity-card p { margin-top:7px; font-size:13px; overflow-wrap:anywhere; }
     .metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin:30px 0 46px; background:var(--line); border:1px solid var(--line); border-radius:18px; overflow:hidden; }
     .metric { min-height:142px; padding:22px; background:var(--paper); } .metric .value { display:block; margin:11px 0 5px; font-size:34px; line-height:1; font-weight:750; letter-spacing:-.04em; } .metric small { color:var(--muted); }
     section { margin-top:38px; } .section-head { display:flex; justify-content:space-between; gap:18px; align-items:end; margin-bottom:16px; } .section-head p { max-width:590px; }
@@ -657,7 +776,7 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       .topbar { display:grid; grid-template-columns:1fr auto; align-items:start; margin-bottom:18px; }
       .app-nav { grid-column:1 / -1; grid-row:2; margin-top:8px; }
       .logout { grid-column:2; grid-row:1; }
-      .hero,.metrics,.memory-list,.ocean-answers,.ocean-totals,.filters,.history-answers,.history-counts,.history-edit-grid { grid-template-columns:1fr; }
+      .hero,.metrics,.activity-grid,.memory-list,.ocean-answers,.ocean-totals,.filters,.history-answers,.history-counts,.history-edit-grid { grid-template-columns:1fr; }
       .history-edit-grid .wide { grid-column:auto; }
       .status-banner,.feed-head { align-items:flex-start; flex-direction:column; gap:8px; }
       .ocean-head,.ocean-next { align-items:flex-start; flex-direction:column; }
@@ -678,6 +797,14 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
   </div>
 
   {{if ne .StatusTone "ready"}}<div class="status-banner status-{{.StatusTone}}" role="status"><div><strong>{{.StatusTitle}}</strong><p>{{.StatusDetail}}</p></div><p>Next: {{.Data.Readiness.NextAction.Label}}</p></div>{{end}}
+
+  <section aria-labelledby="activity-title">
+    <div class="section-head"><div><div class="eyebrow">Works without opening this page</div><h2 id="activity-title">Pulse activity</h2></div><p>Pulse can prove delivery and saving. Codex does not expose whether its model actually used delivered context, so that claim stays separate.</p></div>
+    <div class="activity-grid">
+      {{range .HostActivity}}<article class="activity-card status-{{.State}}"><strong>{{.HostLabel}} · {{.StateLabel}}</strong><p>{{.Recall}}</p><p>{{.Write}}</p></article>{{end}}
+      {{if .Storage.Available}}<article class="activity-card status-{{if .Storage.NeedsCleanup}}partial{{else}}ready{{end}}"><strong>Storage · {{.Storage.Total}} total</strong><p>{{.Storage.Reclaimable}} can be removed with <code>pulse storage clean</code>.</p><p>{{.Storage.Release}}</p><p>{{.Storage.Archive}}</p></article>{{else}}<article class="activity-card status-action"><strong>Storage status unavailable</strong><p>Run <code>pulse home</code> from the installed Pulse command to refresh it.</p></article>{{end}}
+    </div>
+  </section>
 
   <section class="feed" id="memories" aria-labelledby="memories-title">
     <div class="feed-head"><div><div class="eyebrow">Personal memory</div><h1 id="memories-title">Memories</h1><p>Useful structured memories saved automatically for this project and Personal Global.</p></div><div class="feed-count">{{.MemoryCount}} matching</div></div>

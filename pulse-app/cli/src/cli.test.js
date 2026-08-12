@@ -121,7 +121,9 @@ function runWithDetectedHost(args, host) {
       ? join(home, 'Applications', 'Cursor.app', 'Contents', 'MacOS', 'Cursor')
       : join(home, '.local', 'bin', 'cursor');
   mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
-  writeExecutable(executable, '#!/bin/sh\nexit 0\n');
+  writeExecutable(executable, host === 'codex'
+    ? '#!/bin/sh\nprintf "codex-cli 0.146.0\\n"\n'
+    : '#!/bin/sh\nexit 0\n');
   return { home, cwd, result: runInWorkspace(args, cwd, home) };
 }
 
