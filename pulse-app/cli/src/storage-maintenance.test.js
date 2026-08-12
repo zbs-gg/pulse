@@ -120,7 +120,9 @@ test('Memory Home snapshot accepts a separate trusted vault but rejects a vault 
   );
 });
 
-test('Memory Home does not interpret synthetic Windows directory modes as POSIX access', () => {
-  assert.equal(__storageMaintenanceTest.privateDirectoryMode(0o777, 'win32'), true);
-  assert.equal(__storageMaintenanceTest.privateDirectoryMode(0o777, 'linux'), false);
+test('Memory Home does not interpret synthetic Windows modes as POSIX access', () => {
+  assert.equal(__storageMaintenanceTest.privateMode(0o777, 'win32'), true);
+  assert.equal(__storageMaintenanceTest.privateMode(0o666, 'win32'), true);
+  assert.equal(__storageMaintenanceTest.privateMode(0o777, 'linux'), false);
+  assert.equal(__storageMaintenanceTest.privateMode(0o666, 'linux'), false);
 });
