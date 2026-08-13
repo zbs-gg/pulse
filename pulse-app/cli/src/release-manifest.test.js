@@ -60,8 +60,8 @@ function artifact(kind, overrides = {}) {
       stapled: false,
       team_id: null,
     },
-    url: `https://releases.zbs.gg/pulse/0.8.0/${kind}.${format}`,
-    version: '0.8.0',
+    url: `https://releases.zbs.gg/pulse/0.8.1/${kind}.${format}`,
+    version: '0.8.1',
     ...overrides,
   };
 }
@@ -83,7 +83,7 @@ function payload(keyID, overrides = {}) {
       issued_at: '2026-07-15T00:00:00.000Z',
       key_id: keyID,
       package: '@zbs-gg/pulse',
-      version: '0.8.0',
+      version: '0.8.1',
     },
     schema: 'pulse.personal_preview.release_manifest.v1',
   };
@@ -106,7 +106,7 @@ function verifyOptions(keys, overrides = {}) {
     minimumAcceptedEpoch: 7,
     now: new Date('2026-07-16T00:00:00.000Z'),
     osVersion: '14.5',
-    packageVersion: '0.8.0',
+    packageVersion: '0.8.1',
     platform: 'darwin',
     trustedKeys: [{
       key_id: keys.keyID,
@@ -182,7 +182,7 @@ function targetArtifact(kind, targetID, overrides = {}) {
     platform,
     signing,
     tree_digest: 'b'.repeat(64),
-    url: `https://releases.zbs.gg/pulse/0.8.0/${targetID}/${kind}.tar.gz`,
+    url: `https://releases.zbs.gg/pulse/0.8.1/${targetID}/${kind}.tar.gz`,
     ...overrides,
   });
 }
@@ -207,18 +207,18 @@ function catalogPayload(channelKeys, overrides = {}) {
       model: targetArtifact('model', 'darwin-arm64', {
         architecture: 'all', minimum_os: '0.0', platform: 'all',
         signing: portableSigning(),
-        url: 'https://releases.zbs.gg/pulse/0.8.0/model.tar.gz',
+        url: 'https://releases.zbs.gg/pulse/0.8.1/model.tar.gz',
       }),
       'plugin-runtime': targetArtifact('plugin-runtime', 'darwin-arm64', {
         architecture: 'all', minimum_os: '0.0', platform: 'all',
         signing: portableSigning(),
-        url: 'https://releases.zbs.gg/pulse/0.8.0/plugin-runtime.tar.gz',
+        url: 'https://releases.zbs.gg/pulse/0.8.1/plugin-runtime.tar.gz',
       }),
     },
     release: {
       channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
       issued_at: '2026-07-15T00:00:00.000Z', key_id: channelKeys.keyID,
-      package: '@zbs-gg/pulse', version: '0.8.0',
+      package: '@zbs-gg/pulse', version: '0.8.1',
     },
     schema: 'pulse.personal_preview.release_catalog.v2',
     targets,
@@ -264,7 +264,7 @@ function artifactSetEnvelope(channelKeys, overrides = {}) {
   delete payload.release.expires_at;
   delete payload.release.issued_at;
   payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
-  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.8.0/catalog/snapshot.json';
+  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.8.1/catalog/snapshot.json';
   payload.host_policy = {
     harnesses: loadNativeUniversalMatrix().harnesses.map((harness) => structuredClone(harness)),
   };
@@ -283,7 +283,7 @@ function snapshotEnvelope(rootKeys, channelKeys, artifactSet, overrides = {}) {
   const payload = {
     artifact_set: {
       sha256: createHash('sha256').update(`${canonicalReleaseJSON(artifactSet)}\n`).digest('hex'),
-      url: 'https://releases.zbs.gg/pulse/0.8.0/epoch-7/catalog/artifact-set.json',
+      url: 'https://releases.zbs.gg/pulse/0.8.1/epoch-7/catalog/artifact-set.json',
     },
     channel: {
       key_id: channelKeys.keyID,
@@ -297,7 +297,7 @@ function snapshotEnvelope(rootKeys, channelKeys, artifactSet, overrides = {}) {
     release_epoch: 7,
     revoked_key_ids: [],
     schema: 'pulse.release_snapshot.v1',
-    version: '0.8.0',
+    version: '0.8.1',
     ...overrides,
   };
   return {
@@ -420,7 +420,7 @@ test('v3 snapshot rejects tamper, revocation, expiry, downgrade, and cross-origi
     snapshotEnvelope(root, channel, artifactSet, {
       artifact_set: {
         sha256: createHash('sha256').update(`${canonicalReleaseJSON(artifactSet)}\n`).digest('hex'),
-        url: 'https://evil.example/pulse/0.8.0/epoch-7/catalog/artifact-set.json',
+        url: 'https://evil.example/pulse/0.8.1/epoch-7/catalog/artifact-set.json',
       },
     }),
     options,
@@ -437,7 +437,7 @@ test('v2 catalog binds canonical trees and rejects mismatched platform verificat
 
   const legacyModel = catalogPayload(channel);
   legacyModel.common_artifacts.model.format = 'safetensors';
-  legacyModel.common_artifacts.model.url = 'https://releases.zbs.gg/pulse/0.8.0/model.safetensors';
+  legacyModel.common_artifacts.model.url = 'https://releases.zbs.gg/pulse/0.8.1/model.safetensors';
   expectCode(() => verifyReleaseManifestEnvelope(catalogEnvelope(root, channel, legacyModel), verifyOptions(root)), 'artifact_format_invalid');
 
   const wrongProfile = catalogPayload(channel);

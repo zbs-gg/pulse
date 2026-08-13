@@ -66,7 +66,7 @@ test('public aggregate contains counts and product proof but no case text or pri
     { id: 'silent', host: 'claude-code', expectation: 'silence', live_answer: false, passed: true, returned_count: 0, error_code: null, elapsed_ms: 100, context_bytes: 0, estimated_tokens: 0 },
   ];
   const aggregate = buildAggregate({
-    packageProof: { version: '0.8.0', sha256: 'a'.repeat(64), release_epoch: 34, daemon_sha256: 'b'.repeat(64) },
+    packageProof: { version: '0.8.1', sha256: 'a'.repeat(64), release_epoch: 34, daemon_sha256: 'b'.repeat(64) },
     sourceCounts: { events: 76_793, capsules: 371, emotions: 5_989, embeddings: 76_793 },
     cases,
     queryPersistence: { unchanged: true },

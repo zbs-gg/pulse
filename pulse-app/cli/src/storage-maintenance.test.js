@@ -31,7 +31,7 @@ function fixture() {
   file(join(dataDir, 'dev-builds', 'candidate', 'runtime'), 50);
   file(join(dataDir, 'vaults', 'personal', 'pulse.db'), 500);
   const generation = (epoch, path) => ({
-    schema: 'pulse.artifact_activation_set.v1', epoch, version: '0.8.0', manifest_digest: String(epoch).padStart(64, '0'),
+    schema: 'pulse.artifact_activation_set.v1', epoch, version: '0.8.1', manifest_digest: String(epoch).padStart(64, '0'),
     activations: { daemon: { version_path: path } },
   });
   writeFileSync(join(artifacts, 'artifact-generation-authority.json'), `${JSON.stringify({

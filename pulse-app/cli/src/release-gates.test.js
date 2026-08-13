@@ -52,7 +52,7 @@ test('public package audit rejects repository archives, personal paths, emails, 
   try {
     mkdirSync(join(packageRoot, 'src'), { recursive: true });
     mkdirSync(join(packageRoot, 'release'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.8.0"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.8.1"}\n');
     writeFileSync(join(packageRoot, 'src', 'cli.js'), 'export const ready = true;\n');
     writeFileSync(join(packageRoot, 'release', 'pulse-release-root.pem'), [
       '-----BEGIN PUBLIC KEY-----',
@@ -119,7 +119,7 @@ test('vendored MCP manifest advertises only scripts present in the public packag
   try {
     const nestedRoot = join(packageRoot, 'vendor', 'pulse-preview-source', 'mcp');
     mkdirSync(join(nestedRoot, 'src'), { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.8.0"}\n');
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.8.1"}\n');
     const sourcePackageJSON = JSON.parse(readFileSync(join(root, 'mcp', 'package.json'), 'utf8'));
     const publicPackageJSON = publicMcpPackageManifest(sourcePackageJSON);
     writeFileSync(join(nestedRoot, 'package.json'), `${JSON.stringify(publicPackageJSON, null, 2)}\n`);
@@ -329,10 +329,10 @@ test('npm publication runs the repository release gate before preparing package 
 
   const workflow = readFileSync(join(root, '.github', 'workflows', 'publish-npm.yml'), 'utf8');
   assert.match(workflow, /runs-on: macos-15/);
-  assert.match(workflow, /EXPECTED_VERSION: '0\.8\.0'/);
+  assert.match(workflow, /EXPECTED_VERSION: '0\.8\.1'/);
   assert.match(workflow, /default: false/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.0\/epoch-34\/catalog\/artifact-set\.json/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.0\/catalog\/snapshot\.json/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.1\/epoch-35\/catalog\/artifact-set\.json/);
+  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.1\/catalog\/snapshot\.json/);
   assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
   assert.match(workflow, /init codex --only codex --yes --json/);
   assert.match(workflow, /r\.outcome!=="ready"/);

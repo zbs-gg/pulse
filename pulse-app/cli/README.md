@@ -1,11 +1,11 @@
 # @zbs-gg/pulse
 
-The npm package for Pulse Personal 0.8.0. It installs one local memory engine,
+The npm package for Pulse Personal 0.8.1. It installs one local memory engine,
 Memory Home, and local connections for Codex, Claude Code, and Cursor. Emotional
 memory stays local, describes a moment rather than a personality, and can be
 confirmed, corrected, or deleted separately from the event.
 
-Personal 0.8.0 is a preview release, not the stable default. It passed live
+Personal 0.8.1 is a preview release, not the stable default. It passed live
 owner-machine use in Codex and Claude Code; Cursor live acceptance remains
 pending, and the preview is not production ready. The npm `latest` tag remains
 on 0.7.2 while this package is distributed through `preview`.
@@ -40,4 +40,4 @@ Disconnect with `pulse disconnect codex`, `pulse disconnect claude-code`, or
 `pulse disconnect cursor`. Remove all local Pulse memory only with the separate
 confirmed command `pulse wipe --confirm "wipe pulse memory"`.
 
-License: AGPL-3.0-only. Status: Personal 0.8.0 preview; stable remains 0.7.2.
+License: AGPL-3.0-only. Status: Personal 0.8.1 preview; stable remains 0.7.2.

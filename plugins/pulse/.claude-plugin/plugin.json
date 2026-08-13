@@ -1,6 +1,6 @@
 {
   "name": "pulse",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Local-first private working memory for Claude Code.",
   "author": {
     "name": "ZBS.GG"

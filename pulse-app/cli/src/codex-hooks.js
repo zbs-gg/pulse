@@ -614,7 +614,7 @@ function queryCodexNativeHooks({ codexExecutable, cwd, timeoutMs }) {
 			id: 1,
 			method: 'initialize',
 			params: {
-				clientInfo: { name: 'pulse-doctor', version: '0.8.0' },
+				clientInfo: { name: 'pulse-doctor', version: '0.8.1' },
 				capabilities: { experimentalApi: true },
 			},
 		});

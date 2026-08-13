@@ -73,3 +73,12 @@ opaque score.
 CodeGraph is installed but the dirty EmoBench checkout is not initialized. This
 audit therefore used exact source inspection and did not create `.codegraph` or
 change any benchmark files.
+
+## The product runs confirm the audit
+
+The subsequent product-path runs are recorded in
+[`2026-08-14-product-memory-benchmarks.md`](./2026-08-14-product-memory-benchmarks.md).
+They confirm that only 5 of 35 EmoBench v3 questions exercise information a
+normal Pulse host can actually provide. They also replace the simulated public
+benchmark adapters with one runner that writes through `pulse_memory` and reads
+through the shipped automatic prompt compositor.

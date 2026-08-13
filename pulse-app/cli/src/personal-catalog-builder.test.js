@@ -236,8 +236,8 @@ test('snapshot-only publication proves the existing artifact set before replacin
     rootKeyPath: current.options.rootKey,
     trustedKeys: current.trustedKeys,
   });
-  const artifactSetKey = 'pulse/0.8.0/epoch-9/catalog/artifact-set.json';
-  const snapshotKey = 'pulse/0.8.0/catalog/snapshot.json';
+  const artifactSetKey = 'pulse/0.8.1/epoch-9/catalog/artifact-set.json';
+  const snapshotKey = 'pulse/0.8.1/catalog/snapshot.json';
   const store = new Map([[artifactSetKey, {
     bytes: readFileSync(built.artifactSetPath), cacheControl: 'public, max-age=31536000, immutable',
     contentType: 'application/json', etag: 'artifact-set',

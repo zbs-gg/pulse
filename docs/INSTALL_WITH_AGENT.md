@@ -1,14 +1,14 @@
 # Install Pulse With Your AI Agent
 
-> Personal 0.8.0 is published under the npm `preview` tag after live Codex and
+> Personal 0.8.1 is published under the npm `preview` tag after live Codex and
 > Claude Code acceptance on Apple Silicon. It is not production ready and
 > Cursor live acceptance remains pending. Use `@zbs-gg/pulse@0.7.2` for the
 > stable installation or select `@preview` explicitly.
 
 The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
 and was published to npm on 7 August 2026.
-The exact 0.8.0 preview archive passed a clean Apple Silicon installation in
-the publication workflow on 12 August 2026.
+The exact 0.8.1 preview archive passed a clean Apple Silicon installation in
+the publication workflow on 14 August 2026.
 
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real

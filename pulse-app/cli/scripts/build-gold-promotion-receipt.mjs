@@ -69,7 +69,7 @@ export function buildGoldPromotionReceipt({
     typeof path === 'string' && isAbsolute(path) && resolve(path) === path)) fail('gold_promotion_arguments_invalid');
   const candidate = canonicalFile(candidatePath, 'pulse.npm_production_candidate.v1').value;
   if (candidate.production !== true || candidate.production_ready !== true || candidate.support_claim !== false || candidate.release_epoch !== 9 ||
-      candidate.package !== '@zbs-gg/pulse' || candidate.version !== '0.8.0' ||
+      candidate.package !== '@zbs-gg/pulse' || candidate.version !== '0.8.1' ||
       !SHA256.test(candidate.sha256 ?? '') || !SHA256.test(candidate.artifact_set_digest ?? '')) {
     fail('gold_promotion_candidate_invalid');
   }

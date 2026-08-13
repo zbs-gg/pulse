@@ -27,7 +27,7 @@ import {
 
 function artifactDescriptor(id, kind, sha256) {
 	return {
-		id, kind, sha256, version: '0.8.0', epoch: 8, bytes: 1,
+		id, kind, sha256, version: '0.8.1', epoch: 8, bytes: 1,
 		origin: 'https://releases.zbs.gg', url: `https://releases.zbs.gg/${id}`,
 		...(kind === 'model' ? { model_policy: { data_only: true, custom_code: false } } : {}),
 	};
@@ -120,7 +120,7 @@ async function managedActivationFixture(dataDir, { presenceHelper = true } = {})
 	}
 	const release = {
 		schema: 'pulse.verified_release_manifest.v2', manifest_digest: 'a'.repeat(64),
-		version: '0.8.0', epoch: 8,
+		version: '0.8.1', epoch: 8,
 		artifacts: Object.fromEntries(fixtures.map(([descriptor]) => [descriptor.kind, descriptor])),
 	};
 	writeActivatedArtifactSet(release, { installRoot });

@@ -339,6 +339,19 @@ test('prompt recall rejects the observed unrelated capsule but keeps a relevant 
   assert.match(relevant, /short titled sections/);
 });
 
+test('a weak direct capsule never falls through to the lower archive threshold', async () => {
+  const output = await composePromptMemoryContext(resolved(), 'Сколько минут варить яйцо всмятку?', {
+    request: async () => ({
+      events: [{ id: 1, summary: 'A Redis migration decision unrelated to cooking.' }],
+      trace: { retrieval: {
+        score_breakdowns: { 1: { cosine: 0.3718 } },
+        candidate_evidence: { 1: { dense: true, lexical: true, direct_capsule: true } },
+      } },
+    }),
+  });
+  assert.equal(output, '');
+});
+
 test('prompt recall keeps the stricter lexical agreement rule for archive events at 0.32', async () => {
   const output = await composePromptMemoryContext(resolved(), 'Old context', {
     request: async () => ({

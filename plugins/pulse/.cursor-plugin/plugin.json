@@ -1,7 +1,7 @@
 {
   "name": "pulse",
   "displayName": "Pulse",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Local-first private working memory for Cursor.",
   "author": {
     "name": "ZBS.GG"

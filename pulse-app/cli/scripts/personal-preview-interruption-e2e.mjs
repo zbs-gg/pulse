@@ -46,8 +46,8 @@ function packedTarball(root) {
 
 function artifact(bytes) {
   return {
-    id: 'pulse-daemon', kind: 'daemon', version: '0.8.0', epoch: 7,
-    url: 'https://releases.zbs.gg/pulse/0.8.0/daemon.dmg',
+    id: 'pulse-daemon', kind: 'daemon', version: '0.8.1', epoch: 7,
+    url: 'https://releases.zbs.gg/pulse/0.8.1/daemon.dmg',
     origin: 'https://releases.zbs.gg', bytes: bytes.length, sha256: digest(bytes),
   };
 }

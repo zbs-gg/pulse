@@ -1,6 +1,6 @@
-# Pulse Personal 0.8.0
+# Pulse Personal 0.8.1
 
-Version 0.8.0 is published under the npm `preview` tag. It is not the stable
+Version 0.8.1 is published under the npm `preview` tag. It is not the stable
 default or production ready. The owner-machine migration passed on 2026-08-09, and
 its old sources are preserved in a verified encrypted external archive. On
 2026-08-12, installed local epoch 34 passed automatic semantic recall and
@@ -21,6 +21,16 @@ method and aggregate are in
 docs/evals/2026-08-12-real-personal-memory-baseline.md. This is a real Personal
 capsule retrieval baseline, not yet a raw-chat temporal replay.
 
+The current installed-product benchmark compares the published 0.8.0 path with
+the 0.8.1 fix. On the compact product set, 0.8.1 recalled 12 of 15 useful
+memories and stayed silent on all 5 unrelated controls; published 0.8.0 recalled
+13 of 15 and stayed silent on 2 of 5. Full raw-history LoCoMo evidence retrieval
+was 561 of 1,535 eligible questions. A bounded 30-question LongMemEval-S run
+recalled an official answer turn in every case, but is an oracle retrieval
+ceiling rather than official answer accuracy. Only 5 of 35 existing EmoBench
+questions currently exercise the actual Pulse Personal contract. Details:
+docs/evals/2026-08-14-product-memory-benchmarks.md.
+
 A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
 an isolated hosted store of 21 memories. It required an account-level
 Instructions for Claude rule plus Pulse set to Always available. MCP server
@@ -34,9 +44,9 @@ public package `@zbs-gg/pulse` contains only Personal: no shared-memory server,
 cloud synchronization, team command, device key, or shared database is shipped.
 
 Version 0.7.2 is the stable public release for Macs with Apple Silicon. Version
-0.8.0 is a public preview for the same target. The exact 0.8.0 archive passed a
+0.8.1 is a public preview for the same target. The exact 0.8.1 archive passed a
 clean Apple Silicon installation before publication. The npm `latest` tag
-resolves to 0.7.2 and `preview` resolves to 0.8.0. Other operating systems are
+resolves to 0.7.2 and `preview` resolves to 0.8.1. Other operating systems are
 not public support claims yet.
 
 Before installation, inspect README.md, AGENTS.md, and
@@ -108,7 +118,8 @@ or the npm package. Do not infer that the presence of 0.8 code proves a real
 three-person pilot, fresh-session acceptance, or a published emotional-memory
 feature.
 
-Status: Personal 0.8.0 is published as an npm preview; installed local epoch 34 passed
+Status: Personal 0.8.1 is published as an npm preview; signed epoch 35 passed
+the complete Personal release gate, while installed local epoch 34 passed
 migration, cancellation-safe semantic search, fresh Codex/Claude Code automatic
 recall, cross-host writes, project isolation, irrelevant-query silence, and
 fail-open operation; one-day owner-machine dogfood started in those two hosts

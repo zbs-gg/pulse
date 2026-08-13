@@ -32,7 +32,7 @@ function treeEntry(path, bytes, mode) {
 
 function artifact(id, kind, sha, modelPolicy = null) {
   return {
-    id, kind, version: '0.8.0', epoch: 8, bytes: 1, sha256: sha,
+    id, kind, version: '0.8.1', epoch: 8, bytes: 1, sha256: sha,
     origin: 'https://releases.zbs.gg', url: `https://releases.zbs.gg/${id}`,
     ...(kind === 'model' ? { model_policy: modelPolicy ?? { data_only: true, custom_code: false } } : {}),
   };

@@ -59,7 +59,7 @@ async function portableArchive(entries) {
 function portableArtifact(bytes, overrides = {}) {
   return artifact(bytes, {
     format: 'tar.gz',
-    url: 'https://releases.zbs.gg/pulse/0.8.0/daemon.tar.gz',
+    url: 'https://releases.zbs.gg/pulse/0.8.1/daemon.tar.gz',
     ...overrides,
   });
 }
@@ -98,8 +98,8 @@ function sandbox() { return mkdtempSync(join(tmpdir(), 'pulse-artifact-installer
 
 function artifact(bytes, overrides = {}) {
   return {
-    id: 'pulse-daemon', kind: 'daemon', version: '0.8.0', epoch: 7,
-    url: 'https://releases.zbs.gg/pulse/0.8.0/daemon.dmg',
+    id: 'pulse-daemon', kind: 'daemon', version: '0.8.1', epoch: 7,
+    url: 'https://releases.zbs.gg/pulse/0.8.1/daemon.dmg',
     origin: 'https://releases.zbs.gg', bytes: bytes.length, sha256: digest(bytes),
     ...overrides,
   };
@@ -326,7 +326,7 @@ test('model activation permits one non-executable safetensors file and rejects c
     safetensors(source, { weight: { dtype: 'F16', shape: [2, 4], data_offsets: [0, 16] } });
     const bytes = readFileSync(source);
     const modelArtifact = artifact(bytes, {
-      id: 'pulse-model', kind: 'model', url: 'https://releases.zbs.gg/pulse/0.8.0/model.safetensors',
+      id: 'pulse-model', kind: 'model', url: 'https://releases.zbs.gg/pulse/0.8.1/model.safetensors',
       model_policy: { data_only: true, custom_code: false },
     });
     const manifest = treeManifest([{ path: 'model.safetensors', bytes, mode: 0o600, executable: false }]);
@@ -401,7 +401,7 @@ test('activation keeps distinct release identities when carrier bytes are reused
   };
   try {
     writeFileSync(source, bytes, { mode: 0o600 });
-    const releaseOne = artifact(bytes, { version: '0.8.0', epoch: 7 });
+    const releaseOne = artifact(bytes, { version: '0.8.1', epoch: 7 });
     const releaseTwo = artifact(bytes, { version: '0.8.1', epoch: 8 });
     const first = await activateArtifactVersion(releaseOne, source, {
       installRoot, materialize, testOnlyMaterializer: true, treeManifest: manifest,
@@ -486,7 +486,7 @@ test('one generation transaction owns active set and floor while pointer files r
     };
   };
   try {
-    const first = await stage(Buffer.from('first committed generation'), '0.8.0', 7);
+    const first = await stage(Buffer.from('first committed generation'), '0.8.1', 7);
     commitArtifactGeneration(first, { installRoot });
     const firstPointer = readFileSync(join(installRoot, 'pulse-daemon', 'current.json'), 'utf8');
 

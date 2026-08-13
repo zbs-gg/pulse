@@ -50,7 +50,7 @@ test('Cursor plugin installation rejects links and restores the last known good 
   try {
     const cursorHome = join(root, '.cursor');
     const good = installCursorPlugin(fixturePlugin(root, '0.7.0'), { cursorHome });
-    const bad = fixturePlugin(root, '0.8.0');
+    const bad = fixturePlugin(root, '0.8.1');
     chmodSync(join(bad, 'hooks', 'cursor-hook.mjs'), 0o777);
     assert.throws(() => installCursorPlugin(bad, { cursorHome }), /cursor_plugin_source_unsafe/);
     const current = inspectCursorPlugin({ cursorHome });
@@ -79,7 +79,7 @@ test('Cursor native integration merges hooks and MCP for IDE and Agent CLI witho
   const root = mkdtempSync(join(tmpdir(), 'pulse-cursor-native-'));
   try {
     const cursorHome = join(root, '.cursor');
-    const source = fixturePlugin(root, '0.8.0');
+    const source = fixturePlugin(root, '0.8.1');
     mkdirSync(cursorHome, { recursive: true });
     writeFileSync(join(cursorHome, 'hooks.json'), JSON.stringify({
       version: 1,
@@ -134,7 +134,7 @@ test('Cursor native disconnect removes only Pulse settings and preserves other h
   const root = mkdtempSync(join(tmpdir(), 'pulse-cursor-native-remove-'));
   try {
     const cursorHome = join(root, '.cursor');
-    const source = fixturePlugin(root, '0.8.0');
+    const source = fixturePlugin(root, '0.8.1');
     mkdirSync(cursorHome, { recursive: true });
     writeFileSync(join(cursorHome, 'hooks.json'), JSON.stringify({
       version: 1, hooks: { beforeSubmitPrompt: [{ command: '/opt/orca/cursor-hook.sh' }] },
