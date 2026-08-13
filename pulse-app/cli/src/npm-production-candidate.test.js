@@ -57,7 +57,7 @@ async function fixture(t) {
   mkdirSync(securityRoot, { mode: 0o700 });
   const manifest = {
     payload: {
-      release: { package: '@zbs-gg/pulse', version: '0.8.0' },
+      release: { package: '@zbs-gg/pulse', version: '0.8.1' },
       targets: Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => [targetID, {}])),
     },
     schema: 'pulse.personal_release_artifact_set.v1',
@@ -77,7 +77,7 @@ async function fixture(t) {
   writeCanonical(join(catalogRoot, 'catalog-build-receipt.json'), {
     artifact_count: 14,
     artifact_set_digest: artifactSetDigest,
-    artifact_set_url: 'https://releases.zbs.gg/pulse/0.8.0/epoch-9/catalog/artifact-set.json',
+    artifact_set_url: 'https://releases.zbs.gg/pulse/0.8.1/epoch-9/catalog/artifact-set.json',
     channel_key_id: 'channel',
     host_target_count: 18,
     hosts: ['claude-code', 'codex', 'cursor'],
@@ -88,16 +88,16 @@ async function fixture(t) {
     schema: 'pulse.personal_release_catalog_build.v3',
     snapshot_digest: snapshotDigest,
     snapshot_expires_at: '2026-08-26T00:00:00.000Z',
-    snapshot_url: 'https://releases.zbs.gg/pulse/0.8.0/catalog/snapshot.json',
+    snapshot_url: 'https://releases.zbs.gg/pulse/0.8.1/catalog/snapshot.json',
     target_count: 6,
     target_ids: DESKTOP_TARGET_IDS,
   });
   const tarball = await packageTarball({
     name: '@zbs-gg/pulse',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
-    version: '0.8.0',
+    version: '0.8.1',
   }, manifestBytes);
-  const tarballPath = resolve(root, 'zbs-gg-pulse-0.8.0.tgz');
+  const tarballPath = resolve(root, 'zbs-gg-pulse-0.8.1.tgz');
   writeFileSync(tarballPath, tarball, { mode: 0o600 });
   const matrix = loadNativeUniversalMatrix();
   const packageSHA256 = createHash('sha256').update(tarball).digest('hex');
@@ -115,7 +115,7 @@ async function fixture(t) {
     package_sha256: packageSHA256,
     sbom_sha256: createHash('sha256').update(sbomBytes).digest('hex'),
     schema: 'pulse.release_dependency_receipt.v1',
-    version: '0.8.0',
+    version: '0.8.1',
   });
   for (const harness of matrix.harnesses) {
     for (const target of matrix.targets) {
@@ -233,8 +233,8 @@ test('production candidate rejects incomplete native proof and packaged manifest
   const badTarball = await packageTarball({
     name: '@zbs-gg/pulse',
     repository: { url: 'git+https://github.com/zbs-gg/pulse.git' },
-    version: '0.8.0',
-  }, `${canonical({ schema: 'pulse.personal_release_artifact_set.v1', payload: { release: { version: '0.8.0' } } })}\n`);
+    version: '0.8.1',
+  }, `${canonical({ schema: 'pulse.personal_release_artifact_set.v1', payload: { release: { version: '0.8.1' } } })}\n`);
   writeFileSync(drift.tarballPath, badTarball);
   await assert.rejects(
     buildNpmProductionCandidate({ ...drift, commit: COMMIT, universalRunID: 12 }),

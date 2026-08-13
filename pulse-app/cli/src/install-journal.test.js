@@ -22,7 +22,7 @@ function record(overrides = {}) {
   return {
     schema: 'pulse.personal_install_journal.v1',
     release_epoch: 7,
-    release_version: '0.8.0',
+    release_version: '0.8.1',
     manifest_digest: 'a'.repeat(64),
     phase: 'artifacts_staged',
     artifact_ids: ['pulse-daemon', 'pulse-model'],

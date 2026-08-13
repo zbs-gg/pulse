@@ -2,14 +2,14 @@
 
 Pulse is memory for AI tools. It gives Codex and Claude Code the knowledge they
 need at the moment they need it, and stays silent when nothing relevant is
-found. Version `0.8.0` can also remember emotions attached to a specific
+found. Version `0.8.1` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
-> **0.8.0 is published as an npm preview, not as the stable default.** It passed
+> **0.8.1 is published as an npm preview, not as the stable default.** It passed
 > live owner-machine use in Codex and Claude Code on Apple Silicon. Cursor live
 > acceptance and production readiness remain pending. Use 0.7.2 for the stable
-> installation or select `@preview` explicitly to try 0.8.0.
+> installation or select `@preview` explicitly to try 0.8.1.
 
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
@@ -33,6 +33,17 @@ the expected Personal memory in 34 of 40 cases, but stayed silent in only 7 of
 reliability the next defects to fix; it does not invalidate the narrower live
 dogfood evidence above. [Method and aggregate](./docs/evals/2026-08-12-real-personal-memory-baseline.md).
 
+The current product-path benchmark isolates the installed Pulse runtime rather
+than a Python approximation. The 0.8.1 fix removed weak direct-capsule noise:
+on the compact product set it recalled 12 of 15 useful memories and stayed
+silent on all 5 unrelated controls, versus 13 of 15 and 2 of 5 for published
+0.8.0. Full raw-history LoCoMo evidence retrieval reached 561 of 1,535 eligible
+questions. A bounded LongMemEval-S run found an official answer turn for all 30
+sampled questions, but that is an oracle retrieval ceiling, not official answer
+accuracy. The existing emotional benchmark mostly tests hidden user state,
+biometrics, and graph traversal that Pulse never receives; only 5 of its 35
+questions currently test the Personal product. [Current benchmark report](./docs/evals/2026-08-14-product-memory-benchmarks.md).
+
 A separate remote Claude Chat experiment passed on 2026-08-11 against an
 isolated hosted store containing 21 memories. Automatic recall required a
 short account-level **Instructions for Claude** rule and the Pulse connector in
@@ -48,7 +59,7 @@ with the local Personal 0.8 vault and is not part of the published install.
 ## Install
 
 Version `0.7.2` remains the stable release for Macs with Apple Silicon. Version
-`0.8.0` is published under the npm `preview` tag for the same public target.
+`0.8.1` is published under the npm `preview` tag for the same public target.
 Its exact archive passed installation on a clean Apple Silicon GitHub runner
 before publication. Intel Mac, Windows, and Linux are not public support claims
 yet; fixture and packaging checks on those targets do not replace live product
@@ -179,13 +190,15 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: Personal 0.8.0 is published under the npm `preview` tag. Installed
-local epoch 34 passed the
+Status: Personal 0.8.1 is published under the npm `preview` tag. Signed epoch
+35 passed the complete Personal release gate; installed epoch 34 remains the
+owner-machine dogfood baseline that passed the
 local-store migration, cancellation-safe semantic search, one-call writes,
 cross-host recall, project boundary, irrelevant-query silence, and fail-open
 operation in fresh Codex and Claude Code sessions. An owner-machine one-day
-dogfood started in those two hosts on 2026-08-12; broad ambiguous questions
-remain under observation and Cursor acceptance remains pending. A separate Claude Chat
+dogfood started in those two hosts on 2026-08-12. Version 0.8.1 removes the
+confirmed weak-capsule noise path; raw-history recall and Cursor acceptance
+remain pending product limits. A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
 is not Personal sync or a supported install. Version 0.8 is not the stable
 default or production ready.

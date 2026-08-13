@@ -112,8 +112,8 @@ function assertPackageManifest(root, relativePath, text) {
     }
   }
   if (relativePath === 'package.json') {
-    if (manifest.name !== '@zbs-gg/pulse' || manifest.version !== '0.8.0' || manifest.private === true) {
-      throw new Error('public package identity must be @zbs-gg/pulse@0.8.0');
+    if (manifest.name !== '@zbs-gg/pulse' || manifest.version !== '0.8.1' || manifest.private === true) {
+      throw new Error('public package identity must be @zbs-gg/pulse@0.8.1');
     }
     if (Object.keys(manifest.bin ?? {}).some((name) => /team/i.test(name))) {
       throw new Error('public package exposes a Team command');

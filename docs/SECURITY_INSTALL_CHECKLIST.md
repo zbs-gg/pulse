@@ -1,7 +1,7 @@
 # Security Install Checklist
 
 Use this checklist before installing stable Pulse Personal 0.7.2 or the
-explicit 0.8.0 preview for a user.
+explicit 0.8.1 preview for a user.
 
 ## Required Checks
 
@@ -13,7 +13,7 @@ explicit 0.8.0 preview for a user.
       Pulse Team.
 - [ ] Old chat import is not run by default.
 - [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2` for stable
-      or `@zbs-gg/pulse@0.8.0` for the selected preview, or the user explicitly
+      or `@zbs-gg/pulse@0.8.1` for the selected preview, or the user explicitly
       provided an exact source bundle, tarball, or local checkout.
 - [ ] The exact OS, architecture, and harness are green in
       `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not

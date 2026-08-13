@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { pinnedReleaseKeyring, verifyPersonalReleaseArtifactSet } from '../src/release-manifest.js';
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const EPOCH = 9;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';

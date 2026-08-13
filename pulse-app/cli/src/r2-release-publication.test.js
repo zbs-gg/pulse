@@ -22,14 +22,14 @@ function catalogFixture(t, targets = [
     'catalog/artifact-set.json',
   ];
   for (const suffix of paths) {
-    const path = join(root, 'pulse', '0.8.0', 'epoch-9', suffix);
+    const path = join(root, 'pulse', '0.8.1', 'epoch-9', suffix);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, `fixture:${suffix}\n`, { mode: 0o600 });
   }
-  const snapshotPath = join(root, 'pulse', '0.8.0', 'catalog', 'snapshot.json');
+  const snapshotPath = join(root, 'pulse', '0.8.1', 'catalog', 'snapshot.json');
   mkdirSync(dirname(snapshotPath), { recursive: true, mode: 0o700 });
   writeFileSync(snapshotPath, 'fixture:snapshot\n', { mode: 0o600 });
-  const artifactSetPath = join(root, 'pulse', '0.8.0', 'epoch-9', 'catalog', 'artifact-set.json');
+  const artifactSetPath = join(root, 'pulse', '0.8.1', 'epoch-9', 'catalog', 'artifact-set.json');
   writeFileSync(artifactSetPath, `${JSON.stringify({ payload: {
     targets: Object.fromEntries(targets.map((target) => [target, {}])),
   } })}\n`, { mode: 0o600 });
@@ -97,7 +97,7 @@ test('R2 publication verifies all immutable bytes and exposes the snapshot last'
   });
   assert.equal(receipt.object_count, 16);
   assert.equal(receipt.snapshot_published_last, true);
-  assert.equal(origin.puts.at(-1), 'pulse/0.8.0/catalog/snapshot.json');
+  assert.equal(origin.puts.at(-1), 'pulse/0.8.1/catalog/snapshot.json');
   assert.equal(origin.puts.length, 16);
   assert.equal(releasePublicationObjects(catalogRoot, { verifyCatalog: acceptFixtureCatalog }).immutable.length, 15);
   assert.equal(receipt.objects.every((object) => /^[a-f0-9]{64}$/.test(object.sha256)), true);
@@ -110,7 +110,7 @@ test('R2 publication can publish Mac Apple Silicon before the other platforms', 
     catalogRoot, client: origin.client, fetchImpl: origin.fetchImpl, verifyCatalog: acceptFixtureCatalog,
   });
   assert.equal(receipt.object_count, 6);
-  assert.equal(origin.puts.at(-1), 'pulse/0.8.0/catalog/snapshot.json');
+  assert.equal(origin.puts.at(-1), 'pulse/0.8.1/catalog/snapshot.json');
   assert.equal(origin.puts.some((key) => key.includes('darwin-x64')), false);
   assert.equal(releasePublicationObjects(catalogRoot, { verifyCatalog: acceptFixtureCatalog }).immutable.length, 5);
 });
@@ -132,6 +132,6 @@ test('R2 publication reuses identical immutable objects and stops on byte drift 
   await assert.rejects(publishR2Release({
     catalogRoot, client: origin.client, fetchImpl: origin.fetchImpl, verifyCatalog: acceptFixtureCatalog,
   }), { code: 'r2_release_immutable_conflict' });
-  assert.equal(origin.objects.has('pulse/0.8.0/catalog/snapshot.json'), false);
+  assert.equal(origin.objects.has('pulse/0.8.1/catalog/snapshot.json'), false);
   assert.equal(origin.puts.length, 0);
 });

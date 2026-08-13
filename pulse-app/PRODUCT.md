@@ -7,7 +7,7 @@ knowledge they need at the moment they need it, stays silent when nothing
 relevant is found, and lets the owner inspect, correct, or delete memories in
 Memory Home.
 
-The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.0 is
+The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.1 is
 published under the npm `preview` tag for the same target; it is not production
 ready. It has no Team server, cloud synchronization, or shared-memory command.
 Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
@@ -80,6 +80,17 @@ was not run after retrieval failed, because replacing a preselected missed case
 would be post-selection. Product work should fix false-positive context and
 query reliability before expanding the benchmark or importing more archives.
 
+The current benchmark uses an isolated installation of the exact signed
+runtime and the real `pulse_memory` plus prompt-time context path. The 0.8.1
+fix recalled 12 of 15 useful memories and stayed silent on all 5 unrelated
+controls, compared with 13 of 15 and 2 of 5 for published 0.8.0. Full raw-history
+LoCoMo evidence retrieval reached 561 of 1,535 eligible questions. A bounded
+30-question LongMemEval-S run recalled an official answer turn in every case,
+but does not measure official answer accuracy. The existing EmoBench is not a
+valid product score: 30 of its 35 questions depend on hidden state, biometrics,
+or Atlas-like graph traversal that Pulse does not receive. It must be rebuilt
+before it can be used for product comparison.
+
 On 2026-08-11, a separate Claude Chat experiment automatically recalled the
 exact `LUNA-724-PURPLE` marker from an isolated hosted store of 21 memories.
 Claude also called Pulse once for an unrelated question without mixing memory
@@ -89,7 +100,7 @@ The resulting visible tool call and additional tool round trip happen on every
 ordinary message. The hosted store is not synchronized with the local Personal
 0.8 vault, so this is remote-connector evidence rather than Personal support.
 
-Personal 0.8.0 is now a public preview but is not production ready. The stable
+Personal 0.8.1 is now a public preview but is not production ready. The stable
 `latest` package remains 0.7.2, Team was not enabled, and the bounded dogfood
 continues in Codex and Claude Code.
 
@@ -123,9 +134,10 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 remains the stable public release; Personal 0.8.0 is a
-public npm preview and epoch 34 is installed locally for a one-day Codex and
-Claude Code dogfood that started on 2026-08-12. It is not production ready.
+Status: Personal 0.7.2 remains the stable public release; Personal 0.8.1 is a
+public npm preview. Signed epoch 35 passed the complete Personal release gate,
+and epoch 34 is installed locally for the Codex and Claude Code dogfood that
+started on 2026-08-12. It is not production ready.
 Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.

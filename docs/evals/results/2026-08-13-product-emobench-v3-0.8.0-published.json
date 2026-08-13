@@ -1,0 +1,356 @@
+{
+  "schema": "pulse.product_memory_benchmark_result.v1",
+  "measured_at": "2026-08-13T16:37:57.251Z",
+  "product": {
+    "package": "@zbs-gg/pulse",
+    "version": "0.8.0",
+    "npm_archive_sha256": "0e576eeedbd72b0a2c21823c6a72b07c3065a6bb15fd58ea404a47d09f85224d",
+    "release_epoch": 34,
+    "daemon_sha256": "60b3da2884641b467d47ea5c6e20b461128eb91f60b635fa4d0de1ff438887a6",
+    "embedder": "bge-m3",
+    "path": "pulse_memory -> Personal daemon -> automatic prompt context",
+    "compositor": "published_package",
+    "compositor_sha256": "293b68fa96e62eb7509bd65c86a5127ea68838473676723aedb28118ca449ff2"
+  },
+  "suite": {
+    "id": "emobench-v3-product",
+    "source_sha256": "a63762f5f1dd8d1cfe36573914e27a0e0f0e2bc9e6d4171f4232d7cb5acc1369",
+    "stored_items": 60,
+    "hit_queries": 5,
+    "silence_queries": 5,
+    "excluded": [
+      {
+        "cases": 10,
+        "reason": "hidden_user_state"
+      },
+      {
+        "cases": 10,
+        "reason": "hidden_biometrics"
+      },
+      {
+        "cases": 10,
+        "reason": "atlas_graph_chain"
+      }
+    ]
+  },
+  "writing": {
+    "elapsed_ms": 5366,
+    "calls": 60,
+    "stored_items": 59,
+    "rejected_items": 1,
+    "rejected_ids": [
+      "event-52"
+    ]
+  },
+  "retrieval": {
+    "correct_hits": 3,
+    "expected_hits": 5,
+    "correct_silences": 2,
+    "expected_silences": 5,
+    "query_errors": 0,
+    "cold_ms": 77.9,
+    "warm_p50_ms": 85.5,
+    "warm_p95_ms": 97.1,
+    "maximum_context_bytes": 709,
+    "maximum_estimated_tokens": 178,
+    "cases": [
+      {
+        "id": "T1",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 2,
+        "returned_count": 2,
+        "returned_digests": [
+          "55059ed55d2eb5335f7beb77bad1c2eb68d25ba8558891b6d51559d63b4d5ad0",
+          "a5d855e6eca9e0ba3893b6b924061aa5741df6bcb32f64e33900193d4ce64bc4"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
+            "cosine": 0.5320035219192505,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+            "cosine": 0.541068434715271,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 77.9,
+        "context_bytes": 687,
+        "estimated_tokens": 172,
+        "error_code": null
+      },
+      {
+        "id": "T2",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 2,
+        "returned_digests": [
+          "88b6b12ae96e721689d81de3bf087026df944335df76950406296cd17e662841",
+          "a5d855e6eca9e0ba3893b6b924061aa5741df6bcb32f64e33900193d4ce64bc4"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+            "cosine": 0.5322720408439636,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+            "cosine": 0.4985730051994324,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 85.5,
+        "context_bytes": 709,
+        "estimated_tokens": 178,
+        "error_code": null
+      },
+      {
+        "id": "T3",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 2,
+        "returned_digests": [
+          "88b6b12ae96e721689d81de3bf087026df944335df76950406296cd17e662841",
+          "a67691b74ac0cfd97665742d3a90108a3bb83583bd4333d3a81f4dbbc4cd5115"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+            "cosine": 0.5336021184921265,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "811786ad1ae74adfdd20dd0372abaaebc6246e343aebd01da0bfc4c02bf0106c",
+            "cosine": 0.5367645025253296,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 81.5,
+        "context_bytes": 607,
+        "estimated_tokens": 152,
+        "error_code": null
+      },
+      {
+        "id": "T4",
+        "expectation": "hit",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 1,
+        "returned_digests": [
+          "68017dd97827e58cbb5c8045056a9b7ec5feb1914cf5a533c5de2d5c1d03670f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "9400f1b21cb527d7fa3d3eabba93557a18ebe7a2ca4e471cfe5e4c5b4ca7f767",
+            "cosine": 0.5271120667457581,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 85.6,
+        "context_bytes": 430,
+        "estimated_tokens": 108,
+        "error_code": null
+      },
+      {
+        "id": "T5",
+        "expectation": "hit",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "8403d1773ab9b7be97ae8437416788c7b6aeb9cc755f58d822f5c9198c768b68",
+          "ba22767931b03fbf677e6bf3e091a5de689f8664066dc7debc39ea8185d05b98"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "c837649cce43f2729138e72cc315207057ac82599a59be72765a477f22d14a54",
+            "cosine": 0.5498049259185791,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "e629fa6598d732768f7c726b4b621285f9c3b85303900aa912017db7617d8bdb",
+            "cosine": 0.5363197326660156,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 79.4,
+        "context_bytes": 505,
+        "estimated_tokens": 127,
+        "error_code": null
+      },
+      {
+        "id": "silence-01",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 1,
+        "returned_digests": [
+          "91087965fc22fabb6e2f0e358240d8efde517954d17b1cb876e00d2bba6a2319"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "2fca346db656187102ce806ac732e06a62df0dbb2829e511a770556d398e1a6e",
+            "cosine": 0.3896377980709076,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 97.1,
+        "context_bytes": 429,
+        "estimated_tokens": 108,
+        "error_code": null
+      },
+      {
+        "id": "silence-02",
+        "expectation": "silence",
+        "passed": true,
+        "expected_rank": null,
+        "returned_count": 0,
+        "returned_digests": [],
+        "selected_evidence": [],
+        "elapsed_ms": 74.5,
+        "context_bytes": 0,
+        "estimated_tokens": 0,
+        "error_code": null
+      },
+      {
+        "id": "silence-03",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "4ec3c22860cfc5e4461e9cd61600dfbb4a5530768e671785c8680a4322031dc6",
+          "29cb8edb5fbd4bd88e92fca13dbdf18233fbc9c3fb04a2133d973bc63cd51c31"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "cosine": 0.409173846244812,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5",
+            "cosine": 0.4041258990764618,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 90.2,
+        "context_bytes": 690,
+        "estimated_tokens": 173,
+        "error_code": null
+      },
+      {
+        "id": "silence-04",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "2113a047a95cc4d6865745e6ffd2ee59af3bd824a935655780fc04569df97014",
+          "a42e6e51c49e331ffc1b21c30f4f31406e406ece5131e75051d3e94b7e6b679d"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "98010bd9270f9b100b6214a21754fd33bdc8d41b2bc9f9dd16ff54d3c34ffd71",
+            "cosine": 0.3688754141330719,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "1a6562590ef19d1045d06c4055742d38288e9e6dcd71ccde5cee80f1d5a774eb",
+            "cosine": 0.3518970310688019,
+            "direct_capsule": false,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 94.9,
+        "context_bytes": 657,
+        "estimated_tokens": 165,
+        "error_code": null
+      },
+      {
+        "id": "silence-05",
+        "expectation": "silence",
+        "passed": true,
+        "expected_rank": null,
+        "returned_count": 0,
+        "returned_digests": [],
+        "selected_evidence": [],
+        "elapsed_ms": 81.9,
+        "context_bytes": 0,
+        "estimated_tokens": 0,
+        "error_code": null
+      }
+    ]
+  },
+  "storage": {
+    "npm_archive_bytes": 3327032,
+    "npm_unpacked_physical_bytes": 10776576,
+    "npm_installed_dependency_tree_physical_bytes": 25595904,
+    "npm_install_elapsed_ms": 849,
+    "shared_runtime_physical_bytes": 1032921088,
+    "shared_runtime_artifacts": {
+      "daemon": {
+        "sha256": "7748fa89a3feb60007c3dfb46655df6f8cdaa472901c5c1a7625cdc76c6b876f",
+        "physical_bytes": 15605760
+      },
+      "embedder-runtime": {
+        "sha256": "5a74017b95ab39266c75def93c4f0f2d5fc79fadeacf6524158295cf63239ec1",
+        "physical_bytes": 403472384
+      },
+      "model": {
+        "sha256": "1ef15999fb6c1b19528c5db8f2390e48a769d3c39d90599a9a987654bb53f809",
+        "physical_bytes": 586780672
+      },
+      "plugin-runtime": {
+        "sha256": "9ebe69ad68782aac8cb53bcd091ac1927f2fc9d3f196f8993a784e368c367f1d",
+        "physical_bytes": 27062272
+      }
+    },
+    "benchmark_vault_physical_bytes": 7815168,
+    "benchmark_database_logical_bytes": 1703936,
+    "database_counts": {
+      "events": 59,
+      "capsules": 0,
+      "emotions": 59,
+      "embeddings": 41
+    }
+  },
+  "privacy": {
+    "query_persistence_checked": true,
+    "query_matches_before": 0,
+    "query_matches_after": 0,
+    "query_persistence_unchanged": true
+  }
+}

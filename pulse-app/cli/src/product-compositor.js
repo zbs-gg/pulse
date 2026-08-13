@@ -46,8 +46,8 @@ function promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine) {
     if (!Number.isFinite(cosine) || summary === '') continue;
     const line = `- ${boundedPromptSummary(summary)}`;
     const hybridAgreement = candidate?.dense === true && candidate?.lexical === true;
-    if (candidate?.direct_capsule === true && cosine >= capsuleMinimumCosine) {
-      direct.push(line);
+    if (candidate?.direct_capsule === true) {
+      if (cosine >= capsuleMinimumCosine) direct.push(line);
     } else if (cosine >= archiveMinimumCosine && hybridAgreement) {
       archive.push(line);
     }

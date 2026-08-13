@@ -34,7 +34,7 @@ assert.equal(product.system_python_exposed, false);
 assert.equal(product.personal_only_package, true);
 assert.equal(product.external_publication_performed, false);
 assert.equal(product.full_retrieval, true);
-assert.equal(product.package_version, '0.8.0');
+assert.equal(product.package_version, '0.8.1');
 assert.match(product.packed_tarball_sha256, /^[a-f0-9]{64}$/);
 assert.equal(Number.isInteger(product.packed_tarball_bytes) && product.packed_tarball_bytes > 0, true);
 assert.equal(product.exact_tarball_bound, true);

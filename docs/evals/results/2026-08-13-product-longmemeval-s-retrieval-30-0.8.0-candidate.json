@@ -1,0 +1,889 @@
+{
+  "schema": "pulse.product_memory_benchmark_result.v1",
+  "measured_at": "2026-08-13T16:45:06.062Z",
+  "product": {
+    "package": "@zbs-gg/pulse",
+    "version": "0.8.0",
+    "npm_archive_sha256": "0e576eeedbd72b0a2c21823c6a72b07c3065a6bb15fd58ea404a47d09f85224d",
+    "release_epoch": 34,
+    "daemon_sha256": "60b3da2884641b467d47ea5c6e20b461128eb91f60b635fa4d0de1ff438887a6",
+    "embedder": "bge-m3",
+    "path": "pulse_memory -> Personal daemon -> automatic prompt context",
+    "compositor": "source_candidate",
+    "compositor_sha256": "65da2f741f783c798554487552e630693ad21cdc9471eb94e55fe524bc0616ae"
+  },
+  "suite": {
+    "id": "longmemeval-s-retrieval-30",
+    "source_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "cases": 30,
+    "source_items": 1804,
+    "stored_items": 1792,
+    "hit_queries": 30,
+    "silence_queries": 0,
+    "excluded": [
+      {
+        "cases": 470,
+        "reason": "bounded_stratified_retrieval_run"
+      },
+      {
+        "sessions_per_case": "all_answer_sessions_plus_4_distractor_sessions",
+        "reason": "oracle_extraction_ceiling_not_end_to_end_answer_accuracy"
+      }
+    ]
+  },
+  "writing": {
+    "elapsed_ms": 87767.8,
+    "calls": 607,
+    "stored_items": 1792,
+    "rejected_items": 12,
+    "rejected_ids": [
+      "07b6f563:sharegpt_OQxs4BU_0:3",
+      "07b6f563:sharegpt_hEh3QCG_0:0",
+      "07b6f563:sharegpt_hEh3QCG_0:1",
+      "0bc8ad92:ultrachat_349938:8",
+      "0bc8ad92:ultrachat_349938:9",
+      "0bc8ad92:756a4a02_2:0",
+      "0bc8ad92:756a4a02_2:4",
+      "0bc8ad92:756a4a02_2:5",
+      "0bc8ad92:756a4a02_2:6",
+      "0bc8ad92:756a4a02_2:7",
+      "0bc8ad92:756a4a02_2:8",
+      "0bc8ad92:756a4a02_2:9"
+    ]
+  },
+  "retrieval": {
+    "correct_hits": 30,
+    "expected_hits": 30,
+    "correct_silences": 0,
+    "expected_silences": 0,
+    "query_errors": 0,
+    "cold_ms": 63,
+    "warm_p50_ms": 58.5,
+    "warm_p95_ms": 76.8,
+    "maximum_context_bytes": 521,
+    "maximum_estimated_tokens": 131,
+    "by_category": {
+      "knowledge-update": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      },
+      "multi-session": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      },
+      "single-session-assistant": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      },
+      "single-session-preference": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      },
+      "single-session-user": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      },
+      "temporal-reasoning": {
+        "cases": 5,
+        "passed": 5,
+        "query_errors": 0
+      }
+    },
+    "cases": [
+      {
+        "case_id": "001be529",
+        "id": "001be529",
+        "category": "single-session-user",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "49cb5ada473f517c38c3ff2356f83404c4413feb2debc85def557cd1c0b700ec"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "da4ea2a5506f2693eae190d9360a1f31793c98a1adade51d93533a6f520ace1c",
+            "cosine": 0.6791790723800659,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 63,
+        "context_bytes": 520,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "0862e8bf",
+        "id": "0862e8bf",
+        "category": "single-session-user",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "84ccbf784b74213b97709b02488366dd5c030b35c7d7c827eb43dd7f89ec030b"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "96061e92f58e4bdcdee73df36183fe3ac64747c81c26f6c83aada8d2aabb1864",
+            "cosine": 0.6759915351867676,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 50.4,
+        "context_bytes": 343,
+        "estimated_tokens": 86,
+        "error_code": null
+      },
+      {
+        "case_id": "0862e8bf_abs",
+        "id": "0862e8bf_abs",
+        "category": "single-session-user",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "326dc0d89310fb62c2cf221cb6a21583e768f7336b96911ebe80b69adb465039"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "d2f483672c0239f6d7dd3c9ecee6deacbcd59185855625902a8b1c1a3bd67440",
+            "cosine": 0.5268199443817139,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 54.1,
+        "context_bytes": 343,
+        "estimated_tokens": 86,
+        "error_code": null
+      },
+      {
+        "case_id": "118b2229",
+        "id": "118b2229",
+        "category": "single-session-user",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "9c29424ea955d36f52cc2f000fdce2aa3f7b089d097956333cef304285787219"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "68519a9eca55c68c72658a2a1716aac3788c289859d46d6f5c3f14760fa37c9e",
+            "cosine": 0.6371882557868958,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 60.3,
+        "context_bytes": 242,
+        "estimated_tokens": 61,
+        "error_code": null
+      },
+      {
+        "case_id": "15745da0",
+        "id": "15745da0",
+        "category": "single-session-user",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "0dfe73237bf25e46c2260d9b1da4282c0271b75cca6744d2ca7151a79a7d833a"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "9a049b03f6fc40bfcf2f136320359257ed4af8513f71aa6fef47f17059bbae23",
+            "cosine": 0.7387031316757202,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 54.7,
+        "context_bytes": 377,
+        "estimated_tokens": 95,
+        "error_code": null
+      },
+      {
+        "case_id": "00ca467f",
+        "id": "00ca467f",
+        "category": "multi-session",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "95d8f97c85ab9113bc04b713e573e3933eb7ecf0c66eba716bac7f93605ae677"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "27e1615212f3c6ea846ed6c412df1361ce97f006ee20bb5aa2483a3b61d5cadd",
+            "cosine": 0.5298645496368408,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 51.4,
+        "context_bytes": 375,
+        "estimated_tokens": 94,
+        "error_code": null
+      },
+      {
+        "case_id": "0100672e",
+        "id": "0100672e",
+        "category": "multi-session",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "3cb5bab719032c44e1ab809fa8804f52471bc0b4d5b40f862d07967af326df5f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "2289b221b39605c3494e7290856218e931c00af556cf7a07827108193b276511",
+            "cosine": 0.6980535984039307,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 55.4,
+        "context_bytes": 516,
+        "estimated_tokens": 129,
+        "error_code": null
+      },
+      {
+        "case_id": "078150f1",
+        "id": "078150f1",
+        "category": "multi-session",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "d4eeb18402f20f9bf055ca846cd89b1143cff793426b645462f16e6b196c6a38"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "c498f3fe97c0df55ee8dea01a72572059b93f42d235a5e439e9c9a1654d6d4e1",
+            "cosine": 0.6605679988861084,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 64.3,
+        "context_bytes": 511,
+        "estimated_tokens": 128,
+        "error_code": null
+      },
+      {
+        "case_id": "099778bb",
+        "id": "099778bb",
+        "category": "multi-session",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "f4903af23f75087a74e137cef03ff2a7aad468b24d82b0919c8d00b8d8c2456d"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "ecac903ea62dc1d5446a88330af0a17ce89c7787e5aaf450113a4a426813e3cc",
+            "cosine": 0.6564859747886658,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 57,
+        "context_bytes": 519,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "09ba9854",
+        "id": "09ba9854",
+        "category": "multi-session",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "cdd2cb1152c4f79ea06279f09766802d317721f41e02a19d82d8f52c5b89b01d"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "1f09802c4beac758321ae8a9f94d752b0976c7d54baa6e511bba8a7374107bef",
+            "cosine": 0.7129174470901489,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 63.2,
+        "context_bytes": 255,
+        "estimated_tokens": 64,
+        "error_code": null
+      },
+      {
+        "case_id": "06878be2",
+        "id": "06878be2",
+        "category": "single-session-preference",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "dc7d0fffdf6513d65e72053ab82a99d155e7a7845524e38b5833e899e64f19c0"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "524148f24802f8c68974c2e1ecc8b8f47d0d60b7a0d1948951c050a25b5a8e59",
+            "cosine": 0.6287205219268799,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 61.4,
+        "context_bytes": 521,
+        "estimated_tokens": 131,
+        "error_code": null
+      },
+      {
+        "case_id": "06f04340",
+        "id": "06f04340",
+        "category": "single-session-preference",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "f85fbbc98af7eba170796c643d0a40d8e6da5fa2f3f269eaf5d11f0b66d3c7ad"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "00bebc5be79d19e1b8b3f250dc39aebfa9a054baf5f8d61380438d92394c476a",
+            "cosine": 0.5522826313972473,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 59.4,
+        "context_bytes": 518,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "07b6f563",
+        "id": "07b6f563",
+        "category": "single-session-preference",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "466b6727536f06f05f95dd4c82bb5b9b6d612ab5887216141eaddaafa95392f5"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "d536a8c1664fec0bc85615cf3cb2645871e8b2935c9642c534c67ac85315cd35",
+            "cosine": 0.6100499033927917,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 56.6,
+        "context_bytes": 305,
+        "estimated_tokens": 77,
+        "error_code": null
+      },
+      {
+        "case_id": "09d032c9",
+        "id": "09d032c9",
+        "category": "single-session-preference",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "2fea40018eee9b724b0347261e01b0b6419d257c59f5aa2c533586e500659981"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "74332c78b10e3ee51ac4a3c18ccc15c1b6c9807b3ca609969de5e3c361573dfa",
+            "cosine": 0.6180630326271057,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 63.7,
+        "context_bytes": 306,
+        "estimated_tokens": 77,
+        "error_code": null
+      },
+      {
+        "case_id": "0a34ad58",
+        "id": "0a34ad58",
+        "category": "single-session-preference",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "f95bf5ddfd1c4c226214add02117d6aeca4c26bc7f71ceaaeb950cd01021d346"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "93c3755d0c9030cd90f0e6eae6870a8497730f89b7fd0cf231adef048d2b524d",
+            "cosine": 0.6196416020393372,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 57.7,
+        "context_bytes": 286,
+        "estimated_tokens": 72,
+        "error_code": null
+      },
+      {
+        "case_id": "08f4fc43",
+        "id": "08f4fc43",
+        "category": "temporal-reasoning",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "9aceeb42d9bdb480d9e75ab0d89f9fc9e7877eddde3a981dcabcc8478fa7f13f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "80c39b8ca01cdfda142928ba683d503173017d52bfafacb118c62e34ec9bc693",
+            "cosine": 0.5055525898933411,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 60.4,
+        "context_bytes": 489,
+        "estimated_tokens": 123,
+        "error_code": null
+      },
+      {
+        "case_id": "0bb5a684",
+        "id": "0bb5a684",
+        "category": "temporal-reasoning",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "053851931a8fa86709433c7525f5dc942719f94806a7524c8a1a159a49db0eb9"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "51cfe39433c33d8144a4d4663e3834ca238ce78c5e38335c96a9301c5960ac0e",
+            "cosine": 0.7265517115592957,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 58.5,
+        "context_bytes": 520,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "0bc8ad92",
+        "id": "0bc8ad92",
+        "category": "temporal-reasoning",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "b909a221d0dc4b46fa5424ee9d290fb6feafb138f02d9484710d28f8b89eca6a"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "7f861bcee185de001377d79e08af62e94b1e7718e2470e08520c917f8d953602",
+            "cosine": 0.5976045727729797,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 57.8,
+        "context_bytes": 512,
+        "estimated_tokens": 128,
+        "error_code": null
+      },
+      {
+        "case_id": "0bc8ad93",
+        "id": "0bc8ad93",
+        "category": "temporal-reasoning",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "445936aba4f4718dd14a16876f79a7f28d0e192c3e1a1431afeb96143a41d987"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "0f0b82fae280ae9fec1905f029b6ee9a9c85bb6cc5151da6dafe38a7902a4a53",
+            "cosine": 0.6778163909912109,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 61.1,
+        "context_bytes": 521,
+        "estimated_tokens": 131,
+        "error_code": null
+      },
+      {
+        "case_id": "0db4c65d",
+        "id": "0db4c65d",
+        "category": "temporal-reasoning",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "b9cc6ac3d606d33170f864c33995a74a44050c2cfc186a83bd28d84de578b638"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "998bae6a40b82ac12dd182fbb3bd6bbbc49809216aa316afdda461dbb0a8e5df",
+            "cosine": 0.7355743646621704,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 74,
+        "context_bytes": 444,
+        "estimated_tokens": 111,
+        "error_code": null
+      },
+      {
+        "case_id": "01493427",
+        "id": "01493427",
+        "category": "knowledge-update",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "684a0ea05bcd2ab32e41ea78917dd119772b263b0edfd4363bd01862deba7435"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "53f4041ba0cc8ed13c5a119242af44e60105ea5e486e4e8e3153e770c09261bb",
+            "cosine": 0.7429193258285522,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 57.5,
+        "context_bytes": 486,
+        "estimated_tokens": 122,
+        "error_code": null
+      },
+      {
+        "case_id": "031748ae",
+        "id": "031748ae",
+        "category": "knowledge-update",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "9e457fd2342279ec7ccc62d2b43ba4b9e2d52d778bab724666d61b0e8a7be232"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "7611f1a57f80b0a87b4178e2e5f16bafa30dd0d9947d99f953c091d8c96abd0e",
+            "cosine": 0.7415918707847595,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 57.7,
+        "context_bytes": 372,
+        "estimated_tokens": 93,
+        "error_code": null
+      },
+      {
+        "case_id": "031748ae_abs",
+        "id": "031748ae_abs",
+        "category": "knowledge-update",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "77756a00a21f20fed3dfa6d0ad1008527a7d8891e738af7b21bab0cf95dd5571"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "81a4373c77b042b75ad630f0af56de33dd25ad692c31dab35aa77452c268a686",
+            "cosine": 0.720945417881012,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 56.2,
+        "context_bytes": 372,
+        "estimated_tokens": 93,
+        "error_code": null
+      },
+      {
+        "case_id": "06db6396",
+        "id": "06db6396",
+        "category": "knowledge-update",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "fe707ee6cff42fbfded8faad53056cf1a1264519b6e096582793e1754e77939a"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4cd468501fc1a553f49a7098424c51d2ed7f6d546266addcc16e50a008ee148c",
+            "cosine": 0.6333470940589905,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 53,
+        "context_bytes": 520,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "07741c44",
+        "id": "07741c44",
+        "category": "knowledge-update",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "49c6e840baf1a8f01b4da6c79251bfef10de75589c1964c3c69dd28ea8b11bfe"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "ad5ef4b29e148afd784de5373b210eb00879dfbf08922c96dc6ce4fc1e064fd9",
+            "cosine": 0.6729906797409058,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 54.2,
+        "context_bytes": 514,
+        "estimated_tokens": 129,
+        "error_code": null
+      },
+      {
+        "case_id": "0e5e2d1a",
+        "id": "0e5e2d1a",
+        "category": "single-session-assistant",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "d019ab4ccf29cfeb00b1d0d1176893e72d5fc77fca46da174d3bbd45d8a02627"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "6a27eece1c1658b237aede5c6c2b8af51d235ca08b2f7963b67d99caa7a12395",
+            "cosine": 0.829161524772644,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 76.8,
+        "context_bytes": 514,
+        "estimated_tokens": 129,
+        "error_code": null
+      },
+      {
+        "case_id": "1568498a",
+        "id": "1568498a",
+        "category": "single-session-assistant",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "af6f21c56af93ebd74cacdd15460bb248ba4a7db26f53c182f471936a8aa18cf"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "274e64235a5fb9590afabdced2d45045b161d75e5748c23d997295e3c8d4fa0f",
+            "cosine": 0.6255633234977722,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 63,
+        "context_bytes": 244,
+        "estimated_tokens": 61,
+        "error_code": null
+      },
+      {
+        "case_id": "16c90bf4",
+        "id": "16c90bf4",
+        "category": "single-session-assistant",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "7bf702603f59a73e3f2b6937b85ab4e3567372829a81ab08caf5d93bcda003ef"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "35ea9e03d5f2f4658cb5cc8276de93747154af7401732c9a208b4793706106b8",
+            "cosine": 0.6847723126411438,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 82.4,
+        "context_bytes": 518,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "18dcd5a5",
+        "id": "18dcd5a5",
+        "category": "single-session-assistant",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "e6da9a596520cf6336d456062c189760593479d87e25c088a1f4becaf4d2a0e0"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "30606ac3b4fd5c618ac4c6555ce007edd7fe73d75b685320aa56be211ebc4b40",
+            "cosine": 0.512774646282196,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 67.2,
+        "context_bytes": 519,
+        "estimated_tokens": 130,
+        "error_code": null
+      },
+      {
+        "case_id": "1903aded",
+        "id": "1903aded",
+        "category": "single-session-assistant",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "75e4882549e27d5cb9b81dc12eda4e2375a01a9f3e3192bf8b4ff54996f80e22"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "a4fd40788cd53f2f10dc480f6b73edc91a399144f79598869160dcdcb2a1ef58",
+            "cosine": 0.6502102017402649,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 74.5,
+        "context_bytes": 203,
+        "estimated_tokens": 51,
+        "error_code": null
+      }
+    ]
+  },
+  "storage": {
+    "npm_archive_bytes": 3327032,
+    "npm_unpacked_physical_bytes": 10776576,
+    "npm_installed_dependency_tree_physical_bytes": 25595904,
+    "npm_install_elapsed_ms": 823,
+    "shared_runtime_physical_bytes": 1032921088,
+    "shared_runtime_artifacts": {
+      "daemon": {
+        "sha256": "7748fa89a3feb60007c3dfb46655df6f8cdaa472901c5c1a7625cdc76c6b876f",
+        "physical_bytes": 15605760
+      },
+      "embedder-runtime": {
+        "sha256": "5a74017b95ab39266c75def93c4f0f2d5fc79fadeacf6524158295cf63239ec1",
+        "physical_bytes": 403472384
+      },
+      "model": {
+        "sha256": "1ef15999fb6c1b19528c5db8f2390e48a769d3c39d90599a9a987654bb53f809",
+        "physical_bytes": 586780672
+      },
+      "plugin-runtime": {
+        "sha256": "9ebe69ad68782aac8cb53bcd091ac1927f2fc9d3f196f8993a784e368c367f1d",
+        "physical_bytes": 27062272
+      }
+    },
+    "benchmark_vault_physical_bytes": 55144448,
+    "benchmark_database_logical_bytes": 39784448,
+    "database_counts": {
+      "events": 1790,
+      "capsules": 1790,
+      "emotions": 0,
+      "embeddings": 1790
+    }
+  },
+  "privacy": {
+    "query_persistence_checked": true,
+    "query_matches_before": 0,
+    "query_matches_after": 0,
+    "query_persistence_unchanged": true
+  }
+}

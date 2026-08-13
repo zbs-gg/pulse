@@ -1,0 +1,556 @@
+{
+  "schema": "pulse.product_memory_benchmark_result.v1",
+  "measured_at": "2026-08-13T16:33:21.412Z",
+  "product": {
+    "package": "@zbs-gg/pulse",
+    "version": "0.8.0",
+    "npm_archive_sha256": "0e576eeedbd72b0a2c21823c6a72b07c3065a6bb15fd58ea404a47d09f85224d",
+    "release_epoch": 34,
+    "daemon_sha256": "60b3da2884641b467d47ea5c6e20b461128eb91f60b635fa4d0de1ff438887a6",
+    "embedder": "bge-m3",
+    "path": "pulse_memory -> Personal daemon -> automatic prompt context"
+  },
+  "suite": {
+    "id": "own-v1",
+    "source_sha256": "7a63c0d299f8c22b48fe2970b4846611ba6e7bba295441d334f817e03243920f",
+    "stored_items": 16,
+    "hit_queries": 15,
+    "silence_queries": 5,
+    "excluded": [
+      {
+        "id": "q16",
+        "reason": "multi_fragment_dossier"
+      }
+    ]
+  },
+  "writing": {
+    "elapsed_ms": 1129.1,
+    "calls": 6,
+    "stored_items": 16
+  },
+  "retrieval": {
+    "correct_hits": 13,
+    "expected_hits": 15,
+    "correct_silences": 2,
+    "expected_silences": 5,
+    "query_errors": 0,
+    "cold_ms": 56.8,
+    "warm_p50_ms": 53.4,
+    "warm_p95_ms": 116.6,
+    "maximum_context_bytes": 522,
+    "maximum_estimated_tokens": 131,
+    "cases": [
+      {
+        "id": "q01",
+        "expectation": "hit",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 1,
+        "returned_digests": [
+          "1f9ca1d16d2128643ebd73f610fbc87db3adb33969acf8af80090107bd6f9021"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "19581e27de7ced00ff1ce50b2047e7a567c76b1cbaebabe5ef03f7c3017bb5b7",
+            "cosine": 0.6326034665107727,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 56.8,
+        "context_bytes": 328,
+        "estimated_tokens": 82,
+        "error_code": null
+      },
+      {
+        "id": "q02",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "1f9ca1d16d2128643ebd73f610fbc87db3adb33969acf8af80090107bd6f9021"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "19581e27de7ced00ff1ce50b2047e7a567c76b1cbaebabe5ef03f7c3017bb5b7",
+            "cosine": 0.6078134775161743,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 56.2,
+        "context_bytes": 328,
+        "estimated_tokens": 82,
+        "error_code": null
+      },
+      {
+        "id": "q03",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "ff14ae7d2acc290a2078d23db47aa10ad2f400e1bec337e179a260d7fdcd3ccb"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "8527a891e224136950ff32ca212b45bc93f69fbb801c3b1ebedac52775f99e61",
+            "cosine": 0.6502609252929688,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 52.7,
+        "context_bytes": 303,
+        "estimated_tokens": 76,
+        "error_code": null
+      },
+      {
+        "id": "q04",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "073d369388669e71f4791fd5b646d9cc4c25021be9f433fb0a8f4bdd2b48b1c7"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+            "cosine": 0.6013541221618652,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 49.8,
+        "context_bytes": 286,
+        "estimated_tokens": 72,
+        "error_code": null
+      },
+      {
+        "id": "q05",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "073d369388669e71f4791fd5b646d9cc4c25021be9f433fb0a8f4bdd2b48b1c7"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+            "cosine": 0.6214258670806885,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 55.9,
+        "context_bytes": 286,
+        "estimated_tokens": 72,
+        "error_code": null
+      },
+      {
+        "id": "q06",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "1a404bedbe54af4ec548e767120efc45e8adf41fdf24937341c0e910ae730f2f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5",
+            "cosine": 0.6039786338806152,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 63.9,
+        "context_bytes": 257,
+        "estimated_tokens": 65,
+        "error_code": null
+      },
+      {
+        "id": "q07",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "8bd581cdc38dc9fc51c820b2c18f5e2c49778306b595fafd4a42fae8c25010ca"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "e629fa6598d732768f7c726b4b621285f9c3b85303900aa912017db7617d8bdb",
+            "cosine": 0.5958569049835205,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 64.3,
+        "context_bytes": 279,
+        "estimated_tokens": 70,
+        "error_code": null
+      },
+      {
+        "id": "q08",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "26c10600e8dfa1adf40a17970bb8a826e3580d0b3192cf667947c8d3c3380ce2"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+            "cosine": 0.6024136543273926,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 50.9,
+        "context_bytes": 265,
+        "estimated_tokens": 67,
+        "error_code": null
+      },
+      {
+        "id": "q09",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "5476e01173107fcc4148dfb8954d1dc0ae7ecc800280de0641d1cbd2ba66a37a"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683",
+            "cosine": 0.6481594443321228,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 50.1,
+        "context_bytes": 268,
+        "estimated_tokens": 67,
+        "error_code": null
+      },
+      {
+        "id": "q10",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "68390ed0527179de2f9f6a247a5a6a6998a8291cb39d403fc1c8a0c864ca319f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4fc82b26aecb47d2868c4efbe3581732a3e7cbcc6c2efb32062c08170a05eeb8",
+            "cosine": 0.7152611613273621,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 54.8,
+        "context_bytes": 272,
+        "estimated_tokens": 68,
+        "error_code": null
+      },
+      {
+        "id": "q11",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "6333e4dd39d69fa8b00c51e99380242af436cbb008023159dd1b9b0e9bf02f7c"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+            "cosine": 0.6581979393959045,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 55.8,
+        "context_bytes": 293,
+        "estimated_tokens": 74,
+        "error_code": null
+      },
+      {
+        "id": "q12",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "16139f65c62ebe710dde3da99faeaef7b522a81d493c20c0e5a2ee79adc0f858"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3",
+            "cosine": 0.6815560460090637,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 51.9,
+        "context_bytes": 295,
+        "estimated_tokens": 74,
+        "error_code": null
+      },
+      {
+        "id": "q13",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 2,
+        "returned_digests": [
+          "d3ce16887db16473b039accfa7c8b69857780e44491a44f255d269fa6c3f33bc",
+          "1a404bedbe54af4ec548e767120efc45e8adf41fdf24937341c0e910ae730f2f"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278",
+            "cosine": 0.4397667646408081,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5",
+            "cosine": 0.4256440997123718,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 53.1,
+        "context_bytes": 418,
+        "estimated_tokens": 105,
+        "error_code": null
+      },
+      {
+        "id": "q14",
+        "expectation": "hit",
+        "passed": true,
+        "expected_rank": 1,
+        "returned_count": 1,
+        "returned_digests": [
+          "8bd581cdc38dc9fc51c820b2c18f5e2c49778306b595fafd4a42fae8c25010ca"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "e629fa6598d732768f7c726b4b621285f9c3b85303900aa912017db7617d8bdb",
+            "cosine": 0.6148580312728882,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 54.1,
+        "context_bytes": 279,
+        "estimated_tokens": 70,
+        "error_code": null
+      },
+      {
+        "id": "q15",
+        "expectation": "hit",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 1,
+        "returned_digests": [
+          "347cd77ce8bb82ebe95bea51e9f62983816ca050dde806223a09d7f3ba3a0765"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+            "cosine": 0.47944337129592896,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 47.6,
+        "context_bytes": 330,
+        "estimated_tokens": 83,
+        "error_code": null
+      },
+      {
+        "id": "silence-01",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "2f539eb159ca0d3c55c5c0f69958ced2901dad52676f074ac121b7ecc05d5e72",
+          "8279d3065735144c5e0b1f5d98fe32f75e88720cc8a30bcb22554fca109e4eb2"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "6b51d431df5d7f141cbececcf79edf3dd861c3b4069f0b11661a3eefacbba918",
+            "cosine": 0.37180423736572266,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9",
+            "cosine": 0.3577998876571655,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 49.2,
+        "context_bytes": 522,
+        "estimated_tokens": 131,
+        "error_code": null
+      },
+      {
+        "id": "silence-02",
+        "expectation": "silence",
+        "passed": true,
+        "expected_rank": null,
+        "returned_count": 0,
+        "returned_digests": [],
+        "selected_evidence": [],
+        "elapsed_ms": 53.4,
+        "context_bytes": 0,
+        "estimated_tokens": 0,
+        "error_code": null
+      },
+      {
+        "id": "silence-03",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "7d70b17e0e675ed9e143bb04122628390a99f52a042c2da9f43d9d8a9dc708f0",
+          "4f70927259ad4598b0c87fe79755ad067a7e40952fd8216599370b907ee8638c"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
+            "cosine": 0.3802095353603363,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+            "cosine": 0.36074912548065186,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 51.3,
+        "context_bytes": 455,
+        "estimated_tokens": 114,
+        "error_code": null
+      },
+      {
+        "id": "silence-04",
+        "expectation": "silence",
+        "passed": false,
+        "expected_rank": null,
+        "returned_count": 2,
+        "returned_digests": [
+          "5476e01173107fcc4148dfb8954d1dc0ae7ecc800280de0641d1cbd2ba66a37a",
+          "073d369388669e71f4791fd5b646d9cc4c25021be9f433fb0a8f4bdd2b48b1c7"
+        ],
+        "selected_evidence": [
+          {
+            "id_digest": "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683",
+            "cosine": 0.35565701127052307,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          },
+          {
+            "id_digest": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+            "cosine": 0.35125553607940674,
+            "direct_capsule": true,
+            "dense": true,
+            "lexical": true
+          }
+        ],
+        "elapsed_ms": 116.6,
+        "context_bytes": 439,
+        "estimated_tokens": 110,
+        "error_code": null
+      },
+      {
+        "id": "silence-05",
+        "expectation": "silence",
+        "passed": true,
+        "expected_rank": null,
+        "returned_count": 0,
+        "returned_digests": [],
+        "selected_evidence": [],
+        "elapsed_ms": 68.7,
+        "context_bytes": 0,
+        "estimated_tokens": 0,
+        "error_code": null
+      }
+    ]
+  },
+  "storage": {
+    "npm_archive_bytes": 3327032,
+    "npm_unpacked_physical_bytes": 10776576,
+    "npm_installed_dependency_tree_physical_bytes": 25595904,
+    "npm_install_elapsed_ms": 941.7,
+    "shared_runtime_physical_bytes": 1032921088,
+    "shared_runtime_artifacts": {
+      "daemon": {
+        "sha256": "7748fa89a3feb60007c3dfb46655df6f8cdaa472901c5c1a7625cdc76c6b876f",
+        "physical_bytes": 15605760
+      },
+      "embedder-runtime": {
+        "sha256": "5a74017b95ab39266c75def93c4f0f2d5fc79fadeacf6524158295cf63239ec1",
+        "physical_bytes": 403472384
+      },
+      "model": {
+        "sha256": "1ef15999fb6c1b19528c5db8f2390e48a769d3c39d90599a9a987654bb53f809",
+        "physical_bytes": 586780672
+      },
+      "plugin-runtime": {
+        "sha256": "9ebe69ad68782aac8cb53bcd091ac1927f2fc9d3f196f8993a784e368c367f1d",
+        "physical_bytes": 27062272
+      }
+    },
+    "benchmark_vault_physical_bytes": 6545408,
+    "benchmark_database_logical_bytes": 1191936,
+    "database_counts": {
+      "events": 16,
+      "capsules": 16,
+      "emotions": 0,
+      "embeddings": 16
+    }
+  },
+  "privacy": {
+    "query_persistence_checked": true,
+    "query_matches_before": 0,
+    "query_matches_after": 0,
+    "query_persistence_unchanged": true
+  }
+}

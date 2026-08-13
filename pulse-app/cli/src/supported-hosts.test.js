@@ -114,7 +114,7 @@ test('Windows host discovery uses bounded native-adapter candidates and never PO
   });
   const detected = detectCodexCLI({
 		candidates: [codexPath], platformServices: services,
-		versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.8.0' }),
+		versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.8.1' }),
   });
   assert.equal(detected.available, true);
   assert.equal(detected.executable_path, codexPath);

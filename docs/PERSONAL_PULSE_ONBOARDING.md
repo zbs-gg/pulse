@@ -5,7 +5,7 @@ platforms follow after the Mac installation has been tested end to end.
 
 Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
 published on 7 August 2026 after a clean remote Mac installation. Personal
-0.8.0 was published under the npm `preview` tag on 12 August after clean
+0.8.1 was published under the npm `preview` tag on 14 August after clean
 installation and live owner-machine acceptance in Codex and Claude Code.
 Cursor live acceptance and production readiness remain pending; ordinary
 stable installation stays on 0.7.2.
