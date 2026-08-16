@@ -1,6 +1,6 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Local Personal memory for Codex, Claude Code, and Cursor.",
   "license": "AGPL-3.0-only",
   "author": "ZBS GG",
@@ -97,6 +97,7 @@
     "test:claude-product": "node scripts/claude-product-e2e.mjs",
     "eval:real-personal-memory": "node scripts/real-personal-memory-eval.mjs",
     "eval:product-memory": "node scripts/product-memory-benchmark.mjs",
+    "verify:preview-publication": "node scripts/verify-preview-publication.mjs",
     "verify:personal-package": "node scripts/verify-personal-package.mjs",
     "build:presence-helper": "node scripts/build-presence-helper.mjs",
     "build:embedder-runtime": "node scripts/build-embedder-runtime.mjs",

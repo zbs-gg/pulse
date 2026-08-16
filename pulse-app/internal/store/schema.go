@@ -31,7 +31,7 @@ type migrationPolicy struct {
 
 const (
 	firstPersonalMigrationVersion = 33
-	latestSchemaVersion           = 43
+	latestSchemaVersion           = 44
 )
 
 var postFoundationMigrationPolicies = map[int]migrationPolicy{
@@ -67,6 +67,7 @@ var postFoundationMigrationPolicies = map[int]migrationPolicy{
 		MinReaderVersion: 43,
 		MinWriterVersion: 43,
 	},
+	44: {StoreKinds: map[StoreKind]bool{StoreKindPersonal: true}, MinReaderVersion: 44, MinWriterVersion: 44},
 }
 
 func loadMigrationSet(fsys fs.FS) ([]migrationDescriptor, error) {

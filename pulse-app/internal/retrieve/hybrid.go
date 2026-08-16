@@ -649,6 +649,10 @@ type RetrieveRequest struct {
 	// PersonalScope is derived server-side from a verified workspace binding.
 	// Nil preserves Local Preview's historical unscoped retrieval.
 	PersonalScope *store.PersonalMemoryScopeSnapshot
+	// CapsuleFirst is used by automatic prompt memory. It avoids the global
+	// archive BM25 expansion and instead requires lexical corroboration of the
+	// already scope-fenced dense archive candidates when no capsule is ready.
+	CapsuleFirst bool
 	// GraphMode enables temporal entity-graph retrieval as an EXTRA RRF input
 	// (graph-as-recall-injector). "" = OFF (default; behaviour unchanged).
 	// "anchored" = entity-anchored events; "walk" = + typed relation walk.
@@ -869,7 +873,11 @@ func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 		decision = RouteDecision{Mode: mode, Confidence: 1.0, Classifier: "forced"}
 	}
 
-	qVec, err := e.embedQuery(ctx, req.Query)
+	denseQuery := req.Query
+	if req.CapsuleFirst {
+		denseQuery = promptDenseQuery(req.Query)
+	}
+	qVec, err := e.embedQuery(ctx, denseQuery)
 	if err != nil {
 		return nil, fmt.Errorf("retrieve embed: %w", err)
 	}
@@ -877,29 +885,94 @@ func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	if err != nil {
 		return nil, fmt.Errorf("retrieve direct capsules: %w", err)
 	}
+	directCandidateLimit := topK * 4
+	if directCandidateLimit < 16 {
+		directCandidateLimit = 16
+	}
+	// Forty-eight candidates give the final ranker twice as much room as the
+	// largest prompt result. A wider shortlist did not improve full-memory recall
+	// and only raised latency, so keep the automatic path bounded here.
+	if directCandidateLimit > 48 {
+		directCandidateLimit = 48
+	}
+	var directLexicalIDs []int64
+	if e.store != nil {
+		directLexicalIDs, _ = BM25CapsuleSearchScoped(
+			ctx, e.store.DB(), req.Query, directCandidateLimit, req.PersonalScope,
+		)
+	}
 
 	e.mu.RLock()
 	directCapsuleLimit := topK
-	if directCapsuleLimit > 4 {
-		directCapsuleLimit = 4
+	if directCapsuleLimit > 48 {
+		directCapsuleLimit = 48
 	}
-	directCapsuleIDs := e.retrieveFactualEventsEligible(qVec, directCapsuleLimit, directCapsuleEligible)
+	directDenseIDs := e.retrieveFactualEventsEligible(qVec, directCandidateLimit, directCapsuleEligible)
+	directByID := make(map[int64]promptCapsuleCandidate, len(directDenseIDs)+len(directLexicalIDs))
+	for _, id := range directDenseIDs {
+		index := sort.Search(len(e.eventIDs), func(i int) bool { return e.eventIDs[i] >= id })
+		if index < len(e.eventIDs) && e.eventIDs[index] == id {
+			directByID[id] = promptCapsuleCandidate{
+				id: id, text: e.eventTexts[index], cosine: float64(dotF32(qVec, e.eventVecs[index])), daysAgo: e.eventDays[index],
+			}
+		}
+	}
+	for rank, id := range directLexicalIDs {
+		candidate, exists := directByID[id]
+		if !exists {
+			index := sort.Search(len(e.eventIDs), func(i int) bool { return e.eventIDs[i] >= id })
+			if index >= len(e.eventIDs) || e.eventIDs[index] != id {
+				continue
+			}
+			candidate = promptCapsuleCandidate{
+				id: id, text: e.eventTexts[index], cosine: float64(dotF32(qVec, e.eventVecs[index])), daysAgo: e.eventDays[index],
+			}
+		}
+		candidate.lexicalRank = rank + 1
+		directByID[id] = candidate
+	}
+	directCandidates := make([]promptCapsuleCandidate, 0, len(directByID))
+	promptSupportedDirect := make(map[int64]struct{}, len(directByID))
+	presupposedEventTerms := promptPresupposedEventTerms(req.Query)
+	for _, candidate := range directByID {
+		if req.CapsuleFirst && !promptCapsuleSupportsPresupposedEvent(presupposedEventTerms, candidate.text) {
+			continue
+		}
+		directCandidates = append(directCandidates, candidate)
+		promptSupportedDirect[candidate.id] = struct{}{}
+	}
+	directCapsuleIDs := rankPromptCapsules(req.Query, directCandidates, directCapsuleLimit)
+	directCapsuleReady := false
+	for _, candidate := range directCandidates {
+		if promptCapsuleAccepted(candidate) {
+			directCapsuleReady = true
+			break
+		}
+	}
 
 	var cosineIDs []int64
 	var breakdowns map[int64]ScoreBreakdown
-	switch mode {
-	case ModeFactual:
-		cosineIDs = e.retrieveFactualEligible(qVec, topK, eligible)
-	case ModeChain:
-		cosineIDs = e.retrieveChainEligible(qVec, req.Query, topK, req.UserState, eligible)
-	default: // empathic + unknown
-		cosineIDs, breakdowns = e.retrieveEmpathicScoredEligible(qVec, req.Query, topK, req.UserState, eligible)
+	if req.CapsuleFirst && directCapsuleReady {
+		// Automatic prompt memory never mixes archive rows into an accepted
+		// capsule result. Reuse the already scope-fenced dense shortlist instead
+		// of scanning the same event vectors a second time for an archive ranking
+		// that will be discarded below.
+		cosineIDs = directDenseIDs
+	} else {
+		switch mode {
+		case ModeFactual:
+			cosineIDs = e.retrieveFactualEligible(qVec, topK, eligible)
+		case ModeChain:
+			cosineIDs = e.retrieveChainEligible(qVec, req.Query, topK, req.UserState, eligible)
+		default: // empathic + unknown
+			cosineIDs, breakdowns = e.retrieveEmpathicScoredEligible(qVec, req.Query, topK, req.UserState, eligible)
+		}
 	}
 	denseSet := make(map[int64]struct{}, len(cosineIDs))
 	for _, id := range cosineIDs {
 		denseSet[id] = struct{}{}
 	}
-	for _, id := range directCapsuleIDs {
+	for _, id := range directDenseIDs {
 		denseSet[id] = struct{}{}
 	}
 
@@ -920,7 +993,14 @@ func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	// surfaceability) — isolate the semantic ranker, like a dedicated fact store.
 	// Empathic/chain keep the full hybrid fusion + surfaceability.
 	lexicalSet := map[int64]struct{}{}
-	if mode != ModeFactual && e.store != nil {
+	for _, id := range directLexicalIDs {
+		lexicalSet[id] = struct{}{}
+	}
+	// A relevant active capsule is the primary prompt-memory source and is never
+	// mixed with archive rows. Non-prompt callers retain the global archive BM25
+	// fallback when no capsule clears the host gate. Capsule-first callers use
+	// the scope-fenced dense candidates plus cheap lexical corroboration below.
+	if mode != ModeFactual && e.store != nil && !directCapsuleReady && !req.CapsuleFirst {
 		bm25Query := req.Query
 		// The legacy local expander snapshots the whole graph vocabulary at
 		// helper startup and cannot accept a per-project eligibility fence.
@@ -952,11 +1032,23 @@ func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 			ids = RRFFuse(lists, topK, 60)
 		}
 	}
-	// Curated capsules are the primary prompt-memory source. Reserve at most
-	// four result slots for their own semantic ranking before archive events;
-	// the host still applies its relevance threshold and falls back to archive
+	// Curated capsules are the primary prompt-memory source. Put their bounded
+	// semantic ranking before archive events; the host applies the final byte
+	// budget and relevance threshold, then falls back to corroborated archive
 	// rows only when no capsule clears it.
 	ids = preferCandidateIDs(directCapsuleIDs, ids, topK)
+	if req.CapsuleFirst && len(presupposedEventTerms) > 0 {
+		filtered := make([]int64, 0, len(ids))
+		for _, id := range ids {
+			if _, direct := directCapsuleEligible[id]; direct {
+				if _, supported := promptSupportedDirect[id]; !supported {
+					continue
+				}
+			}
+			filtered = append(filtered, id)
+		}
+		ids = filtered
+	}
 	// A rare literal name can be buried below generic question words in the
 	// global BM25 window. Corroborate the already scope-fenced dense candidates
 	// against their own FTS rows in every mode. Factual mode keeps its pure
@@ -973,6 +1065,13 @@ func (e *Engine) retrieve(ctx context.Context, req RetrieveRequest) (*RetrieveRe
 	var surfaceability SurfaceabilityAction
 	if mode != ModeFactual {
 		ids, surfaceability = e.applyFragileSurfaceabilityEligible(ids, topK, emotionRole, eligible)
+	}
+	// Legacy empathic surfaceability may reorder archive events, but automatic
+	// prompt memory has already ranked active capsules for the actual question.
+	// Reassert that bounded capsule order so a word such as "state" cannot make
+	// generic emotional salience bury a concrete geographic answer.
+	if req.CapsuleFirst {
+		ids = preferCandidateIDs(directCapsuleIDs, ids, topK)
 	}
 
 	// Access-frequency salience re-rank (Phase B, default-off, post-scoring):

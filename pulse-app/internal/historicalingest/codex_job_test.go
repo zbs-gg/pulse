@@ -3,6 +3,7 @@ package historicalingest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,58 @@ func TestCodexSourceStoreFreezesExactJobAndRehydratesPathFreeEvidence(t *testing
 	}
 	if _, _, err := reopened.Load(prepared.Units[0]); !errors.Is(err, ErrCodexPrefixStale) {
 		t.Fatalf("prefix mutation error = %v, want stale prefix", err)
+	}
+}
+
+func TestCodexHistoricalImportUsesBoundedExhaustiveAtomicMemoryUnits(t *testing.T) {
+	sourceRoot := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	records := make([]map[string]any, 0, 12)
+	for index := 0; index < 12; index++ {
+		records = append(records, messageRecord(
+			fmt.Sprintf("message-%d", index),
+			"2026-07-20T01:01:00Z",
+			fmt.Sprintf("Fact %d: %s", index, strings.Repeat("durable detail ", 320)),
+		))
+	}
+	writeCodexSession(t, sourceRoot, "root-b", "", "2026-07-20T01:00:00Z", records...)
+	store, err := NewCodexSourceStore(CodexSourceStoreConfig{
+		RootDir: filepath.Join(t.TempDir(), "private-index"), Key: []byte(strings.Repeat("s", 32)), SourceRoots: []string{sourceRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := store.Prepare("job_0123456789abcdef", CodexPrepareOptions{
+		RootLimit: 1, Cutoff: time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Units) < 2 {
+		t.Fatalf("default import collapsed detailed history into %d unit", len(prepared.Units))
+	}
+	for _, unit := range prepared.Units {
+		if unit.EvidenceBytes > defaultCodexChunkBytes {
+			t.Fatalf("unit bytes=%d, max=%d", unit.EvidenceBytes, defaultCodexChunkBytes)
+		}
+	}
+	prompt, _, err := store.Load(prepared.Units[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"Extract exhaustively", "one independently retrievable fact", "Merge truly duplicate statements", "Pulse is atomic memory",
+		"human-readable image description", "Resolve an unambiguous short reply", "coverage pass over every evidence record",
+		"Resolve unambiguous relative time", "next month\" means September 2023", "last year\" means 2022",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("historical prompt omits %q", required)
+		}
+	}
+	if !strings.Contains(prompt, "do not emit separate people, project, or relationship objects") {
+		t.Fatal("historical prompt did not keep Atlas graph material out of Pulse")
 	}
 }
 

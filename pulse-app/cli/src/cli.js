@@ -168,7 +168,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.8.1';
+const PREVIEW_VERSION = '0.8.2';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -2227,7 +2227,7 @@ function codexMemoryDeliveryObserved(runtime, binding) {
 		: undefined;
 	return record?.host === 'codex' &&
 		record.repository_id === binding.workspace.repository_id &&
-		Number.isSafeInteger(record.result_count) && record.result_count >= 0 && record.result_count <= 4 &&
+		Number.isSafeInteger(record.result_count) && record.result_count >= 0 && record.result_count <= 24 &&
 		/^[a-f0-9]{64}$/.test(record.result_digest ?? '') &&
 		typeof record.recalled_at === 'string' && !Number.isNaN(Date.parse(record.recalled_at));
 }

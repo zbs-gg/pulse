@@ -180,6 +180,151 @@ SELECT event_id, MIN(score) AS best_score
 	return ids, nil
 }
 
+// BM25CapsuleSearchScoped ranks only active memory capsules. The scope fence is
+// applied inside the FTS query, before LIMIT, so a foreign project or archive
+// event cannot crowd a usable Personal capsule out of the lexical window.
+func BM25CapsuleSearchScoped(
+	ctx context.Context,
+	db *sql.DB,
+	query string,
+	topK int,
+	scope *store.PersonalMemoryScopeSnapshot,
+) ([]int64, error) {
+	if db == nil || strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	matchExpr := buildFTSCorroborationMatch(query)
+	if matchExpr == "" {
+		return nil, nil
+	}
+	if topK <= 0 {
+		topK = 10
+	}
+	querySQL := `
+SELECT fts.rowid, bm25(events_fts)
+  FROM events_fts fts
+  JOIN memory_capsules capsule ON capsule.event_id=fts.rowid
+ WHERE events_fts MATCH ?
+   AND capsule.status='active'
+ ORDER BY bm25(events_fts), fts.rowid
+ LIMIT ?`
+	args := []any{matchExpr, topK}
+	if scope != nil {
+		querySQL = `
+SELECT fts.rowid, bm25(events_fts)
+  FROM events_fts fts
+  JOIN memory_capsules capsule ON capsule.event_id=fts.rowid
+  JOIN private_memory_objects object ON object.object_id=capsule.id
+ WHERE events_fts MATCH ?
+   AND capsule.status='active'
+   AND object.lifecycle='active'
+   AND (
+       object.memory_scope='personal_global' OR
+       (object.memory_scope='project' AND object.project_namespace_id=?)
+   )
+ ORDER BY bm25(events_fts), fts.rowid
+ LIMIT ?`
+		args = []any{matchExpr, scope.ProjectNamespaceID, topK}
+	}
+	rows, err := db.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("BM25 capsule query (%q): %w", matchExpr, err)
+	}
+	defer rows.Close()
+	type capsuleHit struct {
+		id      int64
+		bm25    float64
+		overlap int
+	}
+	queryTerms := distinctiveTerms(query)
+	hits := make([]capsuleHit, 0, topK)
+	for rows.Next() {
+		var id int64
+		var score float64
+		if err := rows.Scan(&id, &score); err != nil {
+			return nil, err
+		}
+		hits = append(hits, capsuleHit{id: id, bm25: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+	ids := make([]int64, len(hits))
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(hits)), ",")
+	args = args[:0]
+	for i, hit := range hits {
+		ids[i] = hit.id
+		args = append(args, hit.id)
+	}
+	textRows, err := db.QueryContext(ctx,
+		`SELECT rowid, title || ' ' || description FROM events WHERE rowid IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	texts := make(map[int64]string, len(hits))
+	for textRows.Next() {
+		var id int64
+		var text string
+		if err := textRows.Scan(&id, &text); err != nil {
+			textRows.Close()
+			return nil, err
+		}
+		texts[id] = text
+	}
+	if err := textRows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range hits {
+		memoryTerms := distinctiveTerms(texts[hits[index].id])
+		for term := range queryTerms {
+			if _, ok := memoryTerms[term]; ok {
+				hits[index].overlap++
+			}
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].overlap != hits[j].overlap {
+			return hits[i].overlap > hits[j].overlap
+		}
+		if hits[i].bm25 != hits[j].bm25 {
+			return hits[i].bm25 < hits[j].bm25
+		}
+		return hits[i].id < hits[j].id
+	})
+	for index, hit := range hits {
+		ids[index] = hit.id
+	}
+	return ids, nil
+}
+
+func distinctiveTerms(value string) map[string]struct{} {
+	terms := make(map[string]struct{})
+	field := strings.Builder{}
+	flush := func() {
+		term := strings.ToLower(strings.TrimSpace(field.String()))
+		field.Reset()
+		if len([]rune(term)) < 4 {
+			return
+		}
+		if _, stopped := corroborationStopwords[term]; stopped {
+			return
+		}
+		terms[term] = struct{}{}
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			field.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return terms
+}
+
 // buildFTSMatch turns a free-text query into an FTS5 MATCH expression.
 // Splits on non-letter/digit, drops short tokens, wraps each remaining
 // token in double quotes with a trailing '*' prefix marker, joins with

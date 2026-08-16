@@ -62,6 +62,10 @@ test('public package audit rejects repository archives, personal paths, emails, 
     ].join('\n'));
     assert.doesNotThrow(() => auditPublicPackageRoot(packageRoot));
 
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"dev"}\n');
+    assert.throws(() => auditPublicPackageRoot(packageRoot), /public package identity/);
+    writeFileSync(join(packageRoot, 'package.json'), '{"name":"@zbs-gg/pulse","version":"0.8.1"}\n');
+
     mkdirSync(join(packageRoot, 'docs'), { recursive: true });
     writeFileSync(join(packageRoot, 'docs', 'internal.md'), 'internal plan\n');
     assert.throws(() => auditPublicPackageRoot(packageRoot), /forbidden package path/);
@@ -146,7 +150,8 @@ test('release verification includes the scanned archive and isolated native inst
 	assert.match(makefile, /verify:[\s\S]*test:personal-clean-room[\s\S]*test:personal-interruption[\s\S]*test:personal-multiharness[\s\S]*test:personal-consolidation-report[\s\S]*test:codex-product/);
   assert.match(makefile, /^personal-package-verify:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent verify:personal-package/m);
   assert.match(makefile, /^personal-native-packed-e2e:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent test:personal-native-packed/m);
-  assert.match(makefile, /^release-verify: verify personal-package-verify personal-native-packed-e2e/m);
+  assert.match(makefile, /^preview-publication-verify:.*\n\tcd \$\(CLI_DIR\) && \$\(NPM\) run --silent verify:preview-publication/m);
+  assert.match(makefile, /^release-verify: verify preview-publication-verify personal-package-verify personal-native-packed-e2e/m);
 
   const packageJSON = JSON.parse(readFileSync(join(root, 'pulse-app', 'cli', 'package.json'), 'utf8'));
   assert.equal(
@@ -329,15 +334,18 @@ test('npm publication runs the repository release gate before preparing package 
 
   const workflow = readFileSync(join(root, '.github', 'workflows', 'publish-npm.yml'), 'utf8');
   assert.match(workflow, /runs-on: macos-15/);
-  assert.match(workflow, /EXPECTED_VERSION: '0\.8\.1'/);
-  assert.match(workflow, /default: false/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.1\/epoch-35\/catalog\/artifact-set\.json/);
-  assert.match(workflow, /pulse-personal-releases-zbs\.storage\.googleapis\.com\/pulse\/0\.8\.1\/catalog\/snapshot\.json/);
+  assert.match(workflow, /verify-preview-publication\.mjs/);
+  assert.match(workflow, /PREVIEW_PUBLICATION\.json|publication\.json/);
+  assert.match(workflow, /publish_npm:/);
+  assert.match(workflow, /publish_github_release:/);
+  assert.match(workflow, /test "\$RELEASE_CONFIRMATION" = 'release @zbs-gg\/pulse preview'/);
   assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
   assert.match(workflow, /init codex --only codex --yes --json/);
   assert.match(workflow, /r\.outcome!=="ready"/);
-  assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish/);
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish_npm/);
   assert.match(workflow, /--tag preview --provenance/);
+  assert.match(workflow, /gh release create "\$EXPECTED_GITHUB_TAG"/);
+  assert.match(workflow, /--prerelease/);
 
 });
 

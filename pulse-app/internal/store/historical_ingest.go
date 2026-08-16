@@ -146,7 +146,7 @@ func historicalMaterialSummary(item historicalingest.MaterialItem) string {
 		}
 		return strings.TrimSpace(item.Payload.Summary)
 	case historicalingest.MaterialKindAssertion:
-		return strings.TrimSpace(item.Payload.SubjectID + " " + item.Payload.Predicate + " " + item.Payload.ObjectValue)
+		return strings.TrimSpace(item.Payload.ObjectValue)
 	case historicalingest.MaterialKindPerson, historicalingest.MaterialKindProject:
 		if item.Payload.Summary != "" {
 			return strings.TrimSpace(item.Payload.Name + " — " + item.Payload.Summary)
@@ -261,11 +261,11 @@ func (s *Store) persistHistoricalWriteSet(source historicalingest.ApplySource, s
 	_, err = tx.Exec(`
 		INSERT OR IGNORE INTO historical_ingest_jobs(
 		  job_id, store_id, state, root_limit, cutoff_at, source_snapshot_digest,
-		  parser_version, scrubber_version, prompt_version, schema_digest, model_id, model_effort,
+		  parser_version, scrubber_version, prompt_version, schema_digest, model_id, model_effort, execution_model_id,
 		  current_revision, current_manifest_digest, created_at, updated_at)
-		VALUES (?, ?, 'approval_ready', 50, ?, ?, ?, 'historical_scrubber_v1', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, 'approval_ready', 50, ?, ?, ?, 'historical_scrubber_v1', ?, ?, 'gpt-5.6-luna', ?, ?, ?, ?, ?, ?)`,
 		set.JobID, s.storeID, source.Snapshot.Cutoff.UTC().Format(time.RFC3339Nano), source.Snapshot.Digest,
-		set.ParserVersion, set.PromptVersion, set.SchemaDigest, set.ModelID, set.ModelEffort,
+		set.ParserVersion, set.PromptVersion, set.SchemaDigest, set.ModelEffort, set.ModelID,
 		set.Revision, set.ManifestDigest, now, now)
 	if err != nil {
 		return err

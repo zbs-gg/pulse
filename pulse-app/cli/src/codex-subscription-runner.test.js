@@ -4,10 +4,11 @@ import test from 'node:test';
 
 import {
   CODEX_DISABLED_FEATURES,
-  CODEX_LUNA_MODEL,
+  CODEX_MEMORY_MODEL,
   buildCodexExecArgs,
   classifyCodexFailure,
   codexSubscriptionContractDigest,
+  historicalCoverageRepairPrompt,
   offlineCodexPreflight,
   parseCodexEventStream,
   runHistoricalIngestUnit,
@@ -44,7 +45,8 @@ function successfulEvents(usage = {}) {
   ].join('\n');
 }
 
-test('runner pins Luna low, isolation flags, closed schema, and every qualified tool disable', () => {
+test('runner pins the qualified memory model at low effort with a closed tool surface', () => {
+  assert.equal(codexSubscriptionContractDigest(), '85500cf5d6894d1b843e8e2e8fe1c1e2639653591fc43bffcd8ae22edc4b58a4');
   const args = buildCodexExecArgs({
     cwd: '/private/stage',
     schemaPath: '/private/schema.json',
@@ -57,7 +59,7 @@ test('runner pins Luna low, isolation flags, closed schema, and every qualified 
   assert.ok(args.includes('--strict-config'));
   assert.ok(args.includes('--skip-git-repo-check'));
   assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
-  assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', CODEX_LUNA_MODEL]);
+  assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', CODEX_MEMORY_MODEL]);
   assert.ok(args.includes('model_reasoning_effort="low"'));
   assert.ok(args.includes('approval_policy="never"'));
   assert.ok(args.includes('web_search="disabled"'));
@@ -86,8 +88,8 @@ test('missing default auth file falls back to native Codex credential authority 
     ready: true,
     live_model_qualified: true,
     auth: 'chatgpt',
-    cli_version: 'codex-cli 0.144.6',
-    model: CODEX_LUNA_MODEL,
+    cli_version: 'codex-cli 0.147.0-alpha.6.6',
+    model: CODEX_MEMORY_MODEL,
     effort: 'low',
     contract_digest: codexSubscriptionContractDigest(),
   };
@@ -146,18 +148,18 @@ test('explicit missing auth file never falls back to native credentials', async 
   assert.equal(invoked, false);
 });
 
-test('offline preflight proves only pinned local CLI, ChatGPT auth, Luna catalog, and disabled features', async () => {
+test('offline preflight proves only pinned local CLI, ChatGPT auth, memory-model catalog, and disabled features', async () => {
   const calls = [];
   const run = async (_command, args) => {
     calls.push(args);
-    if (args[0] === '--version') return { status: 0, stdout: 'codex-cli 0.144.6\n', stderr: '' };
+    if (args[0] === '--version') return { status: 0, stdout: 'codex-cli 0.147.0-alpha.6.6\n', stderr: '' };
     if (args[0] === 'login') return { status: 0, stdout: 'Logged in using ChatGPT\n', stderr: '' };
     if (args.includes('features')) {
       return { status: 0, stdout: CODEX_DISABLED_FEATURES.map((name) => `${name} stable false`).join('\n'), stderr: '' };
     }
     return {
       status: 0,
-      stdout: JSON.stringify({ models: [{ slug: CODEX_LUNA_MODEL, supported_reasoning_levels: [{ effort: 'low' }], tool_mode: 'code_mode_only' }] }),
+      stdout: JSON.stringify({ models: [{ slug: CODEX_MEMORY_MODEL, supported_reasoning_levels: [{ effort: 'low' }], tool_mode: 'code_mode_only' }] }),
       stderr: '',
     };
   };
@@ -168,7 +170,7 @@ test('offline preflight proves only pinned local CLI, ChatGPT auth, Luna catalog
   assert.equal(calls.length, 4);
 });
 
-test('offline preflight rejects API env, stale auth, changed CLI, missing Luna, and an enabled capability', async () => {
+test('offline preflight rejects API env, stale auth, changed CLI, missing model, and an enabled capability', async () => {
   await assert.rejects(() => offlineCodexPreflight({ run: async () => ({ status: 0, stdout: '', stderr: '' }), env: { OPENAI_API_KEY: 'x' } }), /api_environment_present/);
   const fixtures = {
     version: { status: 0, stdout: 'codex-cli 0.145.0', stderr: '' },
@@ -179,10 +181,10 @@ test('offline preflight rejects API env, stale auth, changed CLI, missing Luna, 
   for (const [failure, replacement] of Object.entries(fixtures)) {
     let step = 0;
     const normal = [
-      { status: 0, stdout: 'codex-cli 0.144.6', stderr: '' },
+      { status: 0, stdout: 'codex-cli 0.147.0-alpha.6.6', stderr: '' },
       { status: 0, stdout: 'Logged in using ChatGPT', stderr: '' },
       { status: 0, stdout: CODEX_DISABLED_FEATURES.map((name) => `${name} stable false`).join('\n'), stderr: '' },
-      { status: 0, stdout: JSON.stringify({ models: [{ slug: CODEX_LUNA_MODEL, supported_reasoning_levels: [{ effort: 'low' }] }] }), stderr: '' },
+      { status: 0, stdout: JSON.stringify({ models: [{ slug: CODEX_MEMORY_MODEL, supported_reasoning_levels: [{ effort: 'low' }] }] }), stderr: '' },
     ];
     const at = { version: 0, login: 1, features: 2, models: 3 }[failure];
     normal[at] = replacement;
@@ -199,6 +201,16 @@ test('event parser requires one clean terminal turn and rejects any tool activit
     JSON.stringify({ type: 'item.completed', item: { type: 'plan', text: 'synthetic plan metadata' } }),
     JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }),
   ].join('\n')).usage.input_tokens, 1);
+  assert.deepEqual(parseCodexEventStream([
+    JSON.stringify({ type: 'thread.started', thread_id: 'thread_1' }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.' } }),
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }),
+  ].join('\n')).usage.input_tokens, 1);
+  assert.throws(() => parseCodexEventStream([
+    JSON.stringify({ type: 'thread.started', thread_id: 'thread_1' }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'error', message: 'different error' } }),
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }),
+  ].join('\n')), /tool_activity/);
   const tool = [
     JSON.stringify({ type: 'thread.started', thread_id: 'thread_1' }),
     JSON.stringify({ type: 'item.started', item: { type: 'command_execution', command: 'pwd' } }),
@@ -245,9 +257,28 @@ test('Codex output schema stays closed without unsupported conditionals and norm
   const schema = JSON.parse(codexHistoricalIngestOutputSchemaBytes());
   assert.equal(JSON.stringify(schema).includes('allOf'), false);
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.$defs.payload.required.sort(), Object.keys(schema.$defs.payload.properties).sort());
+  assert.deepEqual(schema.$defs.atom.required.sort(), Object.keys(schema.$defs.atom.properties).sort());
+  assert.deepEqual(schema.$defs.atom.properties.kind.enum, [
+    'fact', 'preference', 'event', 'decision', 'correction', 'open_question', 'project_state', 'emotion',
+  ]);
   const value = manifest({ items: [] });
   assert.deepEqual(normalizeCodexHistoricalIngestManifest(value), value);
+  const atom = manifest({ items: [{
+    kind: 'preference', summary: 'Nikita prefers exact atomic memory.',
+    source_ids: ['r:1'],
+    emotion_label: null, emotion_intensity: null,
+  }] });
+  const normalizedAtom = normalizeCodexHistoricalIngestManifest(atom, { sourceRefsByLocator: new Map([[
+    'r:1', {
+      timestamp: '2026-07-22T00:00:00Z',
+      ref: { alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' },
+    },
+  ]]) });
+  assert.equal(normalizedAtom.items[0].kind, 'assertion');
+  assert.deepEqual(normalizedAtom.items[0].payload, {
+    subject_id: 'memory_subject', predicate: 'preference', object_value: 'Nikita prefers exact atomic memory.',
+  });
+  assert.deepEqual(assertHistoricalIngestManifest(normalizedAtom), normalizedAtom);
   const withIncompleteConditionalItem = manifest({ items: [
     {
       candidate_id: 'candidate_0123456789abcdef', kind: 'assertion', confidence: 0.7, privacy: 'private',
@@ -269,6 +300,30 @@ test('Codex output schema stays closed without unsupported conditionals and norm
     },
   ] });
   assert.deepEqual(normalizeCodexHistoricalIngestManifest(withIncompleteConditionalItem).items.map((item) => item.candidate_id), ['candidate_fedcba9876543210']);
+});
+
+test('Codex historical extraction keeps graph nodes out of atomic Pulse memory', () => {
+  const graphItems = manifest({ items: [
+    {
+      candidate_id: 'candidate_1111111111111111', kind: 'person', confidence: 0.9, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z' },
+      scope: { kind: 'global' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:1' }],
+      payload: { entity_type: 'person', name: 'Nikita Shilov' },
+    },
+    {
+      candidate_id: 'candidate_2222222222222222', kind: 'relation', confidence: 0.9, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z' },
+      scope: { kind: 'global' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:2' }],
+      payload: { subject_id: 'nikita', predicate: 'works_on', object_id: 'pulse' },
+    },
+    {
+      candidate_id: 'candidate_3333333333333333', kind: 'assertion', confidence: 0.9, privacy: 'private',
+      epistemic_status: 'explicit', derivation: 'direct', valid_time: { from: '2026-07-22T00:00:00Z' },
+      scope: { kind: 'global' }, source_refs: [{ alias: 'source_0123456789abcdef', prefix_digest: digest, record_locator: 'r:3' }],
+      payload: { subject_id: 'nikita', predicate: 'prefers', object_value: 'atomic memory' },
+    },
+  ] });
+  assert.deepEqual(normalizeCodexHistoricalIngestManifest(graphItems).items.map((item) => item.kind), ['assertion']);
 });
 
 test('Codex normalization discards an invalid optional end time before canonical validation', () => {
@@ -312,8 +367,8 @@ test('unit run sends evidence only on stdin and returns a content-free receipt',
     ready: true,
     live_model_qualified: true,
     auth: 'chatgpt',
-    cli_version: 'codex-cli 0.144.6',
-    model: CODEX_LUNA_MODEL,
+    cli_version: 'codex-cli 0.147.0-alpha.6.6',
+    model: CODEX_MEMORY_MODEL,
     effort: 'low',
     contract_digest: codexSubscriptionContractDigest(),
   };
@@ -336,12 +391,77 @@ test('unit run sends evidence only on stdin and returns a content-free receipt',
   });
   assert.equal(observed.stdin, 'bounded private evidence');
   assert.equal(observed.args.at(-1), 'trusted instructions');
-  assert.equal(result.model, CODEX_LUNA_MODEL);
+  assert.equal(result.model, CODEX_MEMORY_MODEL);
   assert.equal(result.output_digest.length, 64);
   assert.equal(result.source_snapshot_digest, digest);
   assert.equal(result.item_count, 0);
   assert.equal(result.usage.input_tokens, 100);
   assert.doesNotMatch(JSON.stringify(result), /bounded private evidence|trusted instructions|\/private\//);
+});
+
+test('unit run repairs only evidence records omitted by the primary extraction', async () => {
+  const qualification = {
+    ready: true,
+    live_model_qualified: true,
+    auth: 'chatgpt',
+    cli_version: 'codex-cli 0.147.0-alpha.6.6',
+    model: CODEX_MEMORY_MODEL,
+    effort: 'low',
+    contract_digest: codexSubscriptionContractDigest(),
+  };
+  const evidence = JSON.stringify({
+    sources: [{ alias: 'source_0123456789abcdef', prefix_digest: digest }],
+    records: [
+      { source_alias: 'source_0123456789abcdef', locator: 'r:1', timestamp: '2026-07-22T00:00:00Z', text: 'first' },
+      { source_alias: 'source_0123456789abcdef', locator: 'r:2', timestamp: '2026-07-23T00:00:00Z', text: 'second' },
+    ],
+  });
+  const output = (summary, source) => manifest({ items: [{
+    kind: 'fact', summary, source_ids: [source], emotion_label: null, emotion_intensity: null,
+  }] });
+  const prompts = [];
+  let accepted;
+  const result = await runHistoricalIngestUnit({
+    prompt: 'trusted instructions',
+    evidence,
+    expectedJobID: 'job_0123456789abcdef',
+    expectedSnapshotDigest: digest,
+    egressAuthorized: true,
+    qualification,
+    authFile: '/private/source/auth.json',
+    invoke: async (request) => {
+      prompts.push(request.args.at(-1));
+      const value = prompts.length === 1 ? output('First durable fact.', 'r:1') : manifest({ items: [
+        { kind: 'fact', summary: 'Second durable fact.', source_ids: ['r:2'], emotion_label: null, emotion_intensity: null },
+        { kind: 'fact', summary: 'Repeated non-target fact.', source_ids: ['r:1'], emotion_label: null, emotion_intensity: null },
+      ] });
+      await writeFile(request.outputPath, JSON.stringify(value), { mode: 0o600 });
+      return {
+        status: 0, signal: null,
+        stdout: successfulEvents({ input_tokens: prompts.length === 1 ? 100 : 60 }), stderr: '',
+      };
+    },
+    copyAuth: async () => {},
+    preflight: async () => ({ ...qualification, live_model_qualified: false }),
+    acceptResult: async (value) => { accepted = value; },
+  });
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0], 'trusted instructions');
+  assert.match(prompts[1], /following evidence records: \["r:2"\]/);
+  assert.doesNotMatch(prompts[1], /first|second/);
+  assert.deepEqual(accepted.items.map((item) => item.payload.object_value), [
+    'First durable fact.', 'Second durable fact.',
+  ]);
+  assert.equal(result.item_count, 2);
+  assert.equal(result.usage.input_tokens, 160);
+  assert.equal(result.output_digest.length, 64);
+});
+
+test('coverage repair prompt carries locators but never source content', () => {
+  const prompt = historicalCoverageRepairPrompt('trusted instructions', ['r:2', 'D15:7']);
+  assert.match(prompt, /\["r:2","D15:7"\]/);
+  assert.doesNotMatch(prompt, /private evidence|conversation text/);
+  assert.throws(() => historicalCoverageRepairPrompt('trusted', ['bad locator']), /coverage_repair_prompt_invalid/);
 });
 
 test('unit run refuses missing consent and does not invoke Codex', async () => {

@@ -11,6 +11,11 @@ full conversation, or send Personal memory to a cloud server.
 > acceptance and production readiness remain pending. Use 0.7.2 for the stable
 > installation or select `@preview` explicitly to try 0.8.1.
 
+The repository now contains an unreleased 0.8.2 candidate. It expands
+historical import and returns up to four short, distinct memories for a
+question. It is not the package currently served by npm and must pass the
+signed release flow before the `preview` tag can move.
+
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
 preserved in a verified encrypted external archive. On 2026-08-12, installed
@@ -43,6 +48,14 @@ sampled questions, but that is an oracle retrieval ceiling, not official answer
 accuracy. The existing emotional benchmark mostly tests hidden user state,
 biometrics, and graph traversal that Pulse never receives; only 5 of its 35
 questions currently test the Personal product. [Current benchmark report](./docs/evals/2026-08-14-product-memory-benchmarks.md).
+
+The unreleased 0.8.2 candidate was also run end to end on all 1,535 eligible
+LoCoMo questions with the same GPT-5.4 low extraction, answering, and judging
+model used for equal-model Mem0. It scored 1,230 correct answers (80.13%) versus
+Mem0's 1,231 (80.20%), up from the previous Pulse baseline of 959 (62.48%).
+Median context was 120 estimated tokens, maximum context 198, and warm p95
+retrieval 70.8 ms. This is strong development evidence but not a published
+0.8.1 claim. [Full candidate result](./docs/evals/2026-08-16-full-locomo-candidate.md).
 
 A separate remote Claude Chat experiment passed on 2026-08-11 against an
 isolated hosted store containing 21 memories. Automatic recall required a
@@ -201,4 +214,4 @@ confirmed weak-capsule noise path; raw-history recall and Cursor acceptance
 remain pending product limits. A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
 is not Personal sync or a supported install. Version 0.8 is not the stable
-default or production ready.
+default or production ready. The repository's 0.8.2 candidate is unreleased.

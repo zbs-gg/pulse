@@ -31,6 +31,7 @@ function catalogFixture(t, targets = [
   writeFileSync(snapshotPath, 'fixture:snapshot\n', { mode: 0o600 });
   const artifactSetPath = join(root, 'pulse', '0.8.1', 'epoch-9', 'catalog', 'artifact-set.json');
   writeFileSync(artifactSetPath, `${JSON.stringify({ payload: {
+    release: { epoch: 9, package: '@zbs-gg/pulse', version: '0.8.1' },
     targets: Object.fromEntries(targets.map((target) => [target, {}])),
   } })}\n`, { mode: 0o600 });
   writeFileSync(join(root, 'catalog-build-receipt.json'), `${JSON.stringify({
@@ -42,6 +43,7 @@ function catalogFixture(t, targets = [
     snapshot_digest: digest(readFileSync(snapshotPath)),
     target_count: targets.length,
     target_ids: targets,
+    version: '0.8.1',
   })}\n`, { mode: 0o600 });
   return resolve(root);
 }

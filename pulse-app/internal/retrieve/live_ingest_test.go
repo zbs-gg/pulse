@@ -244,6 +244,55 @@ func TestRetrieveReservesPrimarySlotsForDirectCapsules(t *testing.T) {
 	}
 }
 
+func TestCapsuleFirstRejectsARealMemoryAboutTheWrongClaimedEvent(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "claimed-event.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB().Exec(`
+		INSERT INTO events(id,title,description,ts) VALUES
+		  (1,'Mara launch relief','Mara felt relieved after the client moved the launch to next month.',?);
+		INSERT INTO event_embeddings(event_id,model,dim,vector_json,text_source) VALUES
+		  (1,'fake-embed',2,'[1,0]','Mara felt relieved after the client moved the launch to next month.');
+		INSERT INTO memory_capsules(
+		  id,schema_version,source_host,conversation_scope,source_timestamp,kind,
+		  redacted_summary,confidence,evidence_hint,privacy_tier,retention,tags,
+		  created_at,status,event_id
+		) VALUES (
+		  'capsule_mara','pulse.memory_capsule.v1','codex','current_turn',?,'project_state',
+		  'Mara felt relieved after the client moved the launch to next month.',1,
+		  'current_turn','normal','project','[]',?,'active',1
+		)`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Config{Store: s, Embedder: &fixedQueryEmbedder{}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongEvent, err := engine.Retrieve(context.Background(), RetrieveRequest{
+		Query: "How did Mara feel after completing a marathon?", Mode: ModeFactual, TopK: 4, CapsuleFirst: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrongEvent.EventIDs) != 0 {
+		t.Fatalf("wrong event returned ids=%v", wrongEvent.EventIDs)
+	}
+
+	matchingEvent, err := engine.Retrieve(context.Background(), RetrieveRequest{
+		Query: "How does Mara feel about the launch schedule?", Mode: ModeFactual, TopK: 4, CapsuleFirst: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(matchingEvent.EventIDs); got != "[1]" {
+		t.Fatalf("matching event ids=%s, want [1]", got)
+	}
+}
+
 func TestEmbedderReadyUsesLiveHelperHealthWhenAvailable(t *testing.T) {
 	health := &healthAwareEmbedder{ready: true}
 	engine := New(Config{Embedder: health})

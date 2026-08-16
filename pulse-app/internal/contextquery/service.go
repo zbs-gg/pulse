@@ -98,6 +98,7 @@ func (s *Service) Query(ctx context.Context, req ContextQueryRequest) (*ContextR
 		UserState:     effectiveState,
 		GraphMode:     graphMode,
 		PersonalScope: req.PersonalScope,
+		CapsuleFirst:  true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("context query retrieve: %w", err)

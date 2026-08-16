@@ -84,7 +84,7 @@ func TestWriteSetRoundTripRejectsTargetDrift(t *testing.T) {
 		Schema: WriteSetSchemaV1, JobID: "job_0123456789abcdef", Revision: 2,
 		ManifestDigest: strings.Repeat("a", 64), SourceSnapshotDigest: strings.Repeat("b", 64),
 		SchemaDigest: strings.Repeat("c", 64), RunnerContractDigest: strings.Repeat("d", 64),
-		ParserVersion: "parser_v1", PromptVersion: "prompt_v1", ModelID: "gpt-5.6-luna", ModelEffort: "low",
+		ParserVersion: "parser_v1", PromptVersion: "prompt_v1", ModelID: HistoricalMemoryModelID, ModelEffort: "low",
 		DestinationStoreID: "store_personal_apply", DestinationGeneration: 4,
 		DestinationBindingDigest: strings.Repeat("e", 64), RepositoryID: "repository_apply",
 		PolicyEpoch: 2, ResolverEpoch: 3, MaterializerVersion: MaterializerVersionV1, DedupVersion: DedupVersionV1,

@@ -180,7 +180,7 @@ func (s *Server) memoryHomeHistoricalReview() memoryHomeHistoricalReview {
 func historicalReviewStateCopy(state historicalingest.JobState, remaining int) (string, string) {
 	switch state {
 	case historicalingest.JobAwaitingEgress:
-		return "Your snapshot is frozen", "Nothing has been sent to a model. Review the exact cohort below, then authorize this snapshot for GPT-5.6 Luna through your Codex subscription."
+		return "Your snapshot is frozen", "Nothing has been sent to a model. Review the exact cohort below, then authorize this snapshot for GPT-5.4 through your Codex subscription."
 	case historicalingest.JobManifestReady:
 		if remaining > 0 {
 			return "Review needed", fmt.Sprintf("%d blocking candidate(s) still need an explicit keep or exclude decision.", remaining)

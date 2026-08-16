@@ -1,0 +1,26 @@
+{
+  "schema": "pulse.preview_publication.v1",
+  "package": "@zbs-gg/pulse",
+  "version": "0.8.1",
+  "release_epoch": 35,
+  "npm_tag": "preview",
+  "archive": {
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/npm/epoch-35-final/zbs-gg-pulse-0.8.1.tgz",
+    "sha256": "a121011028e5377398dc04e282a7ce8ef231f05de49f034b220d1b40e7160cb3",
+    "tree_sha256": "0901e5c9db26abdb54ffac43f9293f3b6766e818206c34cedb85bdba310055ea"
+  },
+  "artifact_set": {
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/epoch-35/catalog/artifact-set.json",
+    "sha256": "f4b4efed35f2897888577e3a654a1341033eb8639d505fbc8bfad9768069e02f"
+  },
+  "snapshot": {
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/catalog/snapshot.json",
+    "sha256": "6ee4024b6c7ce6647f15723f28bd922d6f5897f08f0f9042af6f153bd25b5cb7"
+  },
+  "github": {
+    "tag": "v0.8.1",
+    "title": "Pulse Personal 0.8.1 preview",
+    "prerelease": true,
+    "notes": "docs/releases/v0.8.1.md"
+  }
+}

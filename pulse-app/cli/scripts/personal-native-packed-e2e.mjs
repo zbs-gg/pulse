@@ -24,6 +24,7 @@ import { buildAndInstallTargetFixture } from './target-release-fixture.mjs';
 
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const appRoot = resolve(cliRoot, '..');
+const packageVersion = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version;
 
 function run(command, args, { cwd, env, input, statuses = [0], timeout = 120_000 } = {}) {
   const result = spawnSync(command, args, {
@@ -676,7 +677,7 @@ try {
   assert.equal(installResult.host_status.hosts[0].verified, false);
   assert.equal(installResult.host_status.hosts[0].reload_required, true);
   const pluginRoot = installedPluginRoot(codexHome);
-  assert.equal(basename(pluginRoot), '0.8.1');
+  assert.equal(basename(pluginRoot), packageVersion);
 
   const { binding, runtime } = installedRuntime(baseEnv.PULSE_BINDING_REGISTRY_PATH, workspace, {
     publicKeyPath: baseEnv.PULSE_BINDING_PUBLIC_KEY_PATH,

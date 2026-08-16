@@ -26,7 +26,7 @@ function status(state, overrides = {}) {
   };
 }
 
-test('ingest freezes exact roots, opens Home consent, qualifies Luna, and returns a dry run', async () => {
+test('ingest freezes exact roots, opens Home consent, qualifies the memory model, and returns a dry run', async () => {
   const calls = [];
   const output = [];
   let opened = 0;

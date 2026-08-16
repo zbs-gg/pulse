@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const memoryActivitySchema = "pulse.memory_activity.v1"
+const (
+	memoryActivitySchema     = "pulse.memory_activity.v1"
+	memoryRecallMaximumItems = 24
+)
 
 var memoryActivityDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
@@ -51,7 +54,7 @@ func readMemoryActivity(path string) (memoryActivitySnapshot, error) {
 	}
 	for host, activity := range value.Hosts {
 		if (host != "codex" && host != "claude-code") || activity.Host != host ||
-			activity.RepositoryID == "" || activity.ResultCount < 0 || activity.ResultCount > 4 ||
+			activity.RepositoryID == "" || activity.ResultCount < 0 || activity.ResultCount > memoryRecallMaximumItems ||
 			!memoryActivityDigest.MatchString(activity.ResultDigest) ||
 			activity.RecalledAt == "" || (time.Time{}).Equal(mustParseActivityTime(activity.RecalledAt)) {
 			return memoryActivitySnapshot{}, fmt.Errorf("memory activity file is invalid")

@@ -21,7 +21,7 @@ All three workflows are manual, main-bound, protected by separate GitHub
 Environments, retain content-free evidence for 30 days, and never publish npm
 bytes.
 
-## Preview
+## Preview publication
 
 After a successful `Seal production candidate` run on `main`, GitHub
 automatically starts `Stage npm preview` for that exact run, source commit, and
@@ -32,8 +32,27 @@ and npm Trusted Publisher OIDC. It runs
 inspect and approve the staged bytes with npm 2FA. Long-lived npm publication
 tokens are forbidden.
 
-The trusted publisher must be restricted to repository `zbs-gg/pulse`,
-workflow `stage-npm-preview.yml`, and environment `npm-preview`.
+The trusted publisher must be restricted to repository `zbs-gg/pulse` and the
+reviewed publication workflow.
+
+For the current Apple Silicon preview, `docs/release/PREVIEW_PUBLICATION.json`
+is the single reviewed publication descriptor. It binds the package version,
+signed epoch, exact archive and tree digests, artifact set, snapshot, and
+GitHub prerelease notes. `npm run verify:preview-publication` refuses stale
+README, llms, PRODUCT, installation documents, changelog, plugin versions, or
+signed release metadata.
+
+`.github/workflows/publish-npm.yml` downloads only those reviewed bytes,
+installs them on a clean Apple Silicon runner, publishes the npm `preview` tag
+through trusted publishing when requested, downloads the public registry bytes
+again, and then creates the matching GitHub prerelease with the same archive
+and checksum. The typed confirmation is required for either external change.
+Running only one publication step is recoverable: a later run verifies the
+already-public bytes before creating the missing counterpart.
+
+The staged multi-target Gold path below remains separate from this bounded
+Apple Silicon preview. It is required before moving unchanged bytes to npm
+`latest`; a preview prerelease is not a Gold support claim.
 
 ## Public soak and Gold
 

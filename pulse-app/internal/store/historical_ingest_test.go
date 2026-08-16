@@ -62,12 +62,24 @@ func historicalApplyFixture(t *testing.T) (*Store, historicalingest.ApplySource,
 		},
 		Contract: historicalingest.RunnerContract{
 			Digest: strings.Repeat("d", 64), SchemaDigest: historicalingest.SchemaDigest(),
-			ModelID: "gpt-5.6-luna", ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1,
+			ModelID: historicalingest.HistoricalMemoryModelID, ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1,
 			PromptVersion: "historical_prompt_v1",
 		},
 		Dispositions: map[string]historicalingest.ReviewDisposition{item.CandidateID: historicalingest.ReviewKept},
 	}
 	return vault, source, binding, repository
+}
+
+func TestHistoricalAssertionUsesHumanReadableFactWithoutOpaquePrefix(t *testing.T) {
+	item := historicalingest.MaterialItem{
+		Kind: historicalingest.MaterialKindAssertion,
+		Payload: historicalingest.MaterialPayload{
+			SubjectID: "person_melanie", Predicate: "painted", ObjectValue: "Melanie and her kids painted a sunset with a palm tree.",
+		},
+	}
+	if got := historicalMaterialSummary(item); got != "Melanie and her kids painted a sunset with a palm tree." {
+		t.Fatalf("summary=%q", got)
+	}
 }
 
 func TestHistoricalApplyCompilesBacksUpCommitsAndReplaysExactly(t *testing.T) {

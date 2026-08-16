@@ -13,6 +13,10 @@ ready. It has no Team server, cloud synchronization, or shared-memory command.
 Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
 reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
 
+The repository contains an unreleased 0.8.2 candidate. It expands historical
+import and retrieves up to four short, distinct memories within the existing
+context budget. It is not the package currently served by npm.
+
 ## Users
 
 Pulse Personal is for people who work across coding AI programs and do not want
@@ -91,6 +95,16 @@ valid product score: 30 of its 35 questions depend on hidden state, biometrics,
 or Atlas-like graph traversal that Pulse does not receive. It must be rebuilt
 before it can be used for product comparison.
 
+The unreleased 0.8.2 candidate completed the full 1,535-question LoCoMo path
+with GPT-5.4 low used for extraction, answering, and judging. It scored 1,230
+correct answers (80.13%), compared with 1,231 (80.20%) for equal-model Mem0 and
+959 (62.48%) for the previous Pulse baseline. Median context was 120 estimated
+tokens, maximum context 198, and warm retrieval p95 70.8 ms. The candidate
+improved Pulse substantially but did not meet its predeclared 82% and
+beat-Mem0 acceptance target. This is development evidence rather than a
+published 0.8.1 capability claim. Details are in
+`docs/evals/2026-08-16-full-locomo-candidate.md`.
+
 On 2026-08-11, a separate Claude Chat experiment automatically recalled the
 exact `LUNA-724-PURPLE` marker from an isolated hosted store of 21 memories.
 Claude also called Pulse once for an unrelated question without mixing memory
@@ -141,3 +155,4 @@ started on 2026-08-12. It is not production ready.
 Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.
+The repository's 0.8.2 candidate is unreleased.

@@ -2,6 +2,26 @@
 
 All notable changes to Pulse.
 
+## 0.8.2 — Unreleased
+
+- Expanded bounded historical-memory extraction and review metadata.
+- Return up to four short, distinct memory capsules within the existing
+  2,400-byte context limit.
+- Added reproducible product-memory extraction, answering, and benchmark
+  adapters used by the full LoCoMo development run.
+- Added one versioned preview-publication descriptor and a CI gate that binds
+  documentation, signed artifacts, npm bytes, and the GitHub prerelease.
+
+## 0.8.1 — 2026-08-14
+
+- Removed a noisy recall path in which a weak direct capsule could fall
+  through to the looser archive threshold.
+- Added a reproducible installed-product memory benchmark and published its
+  bounded aggregate evidence without changing the stable `latest` release.
+- Published the exact Apple Silicon package under npm `preview`; Codex and
+  Claude Code owner-machine acceptance passed, while Cursor and production
+  readiness remain pending.
+
 ## 0.8.0 — 2026-08-12
 
 - Added temporary prompt-time recall that stays silent on weak matches and

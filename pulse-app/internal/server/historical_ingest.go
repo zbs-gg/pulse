@@ -18,7 +18,7 @@ import (
 
 const historicalIngestRequestMaxBytes = 5 << 20
 
-const codexSubscriptionRunnerContractDigestV1 = "02bfe327fb6e958c05e28b84f2bfd66534d235e12f0c9e9ee8d5c357571232bc"
+const codexSubscriptionRunnerContractDigestV2 = "85500cf5d6894d1b843e8e2e8fe1c1e2639653591fc43bffcd8ae22edc4b58a4"
 
 var codexHistoricalSessionIDPattern = regexp.MustCompile(`^[a-f0-9-]{16,64}$`)
 
@@ -103,9 +103,9 @@ func (s *Server) handleHistoricalIngestStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	contract := historicalingest.RunnerContract{
-		Digest: codexSubscriptionRunnerContractDigestV1, SchemaDigest: historicalingest.SchemaDigest(),
-		ModelID: "gpt-5.6-luna", ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1,
-		PromptVersion: "historical_prompt_v1",
+		Digest: codexSubscriptionRunnerContractDigestV2, SchemaDigest: historicalingest.SchemaDigest(),
+		ModelID: historicalingest.HistoricalMemoryModelID, ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1,
+		PromptVersion: historicalingest.HistoricalPromptVersionV5,
 	}
 	status, err := manager.StartJobAwaitingEgress(jobID, prepared.Snapshot, prepared.Units, contract)
 	if err != nil {

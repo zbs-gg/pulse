@@ -70,7 +70,7 @@ func newHistoricalIngestServer(t *testing.T, evidence string) (*httptest.Server,
 		}},
 	}
 	contract := historicalingest.RunnerContract{
-		Digest: strings.Repeat("d", 64), SchemaDigest: historicalingest.SchemaDigest(), ModelID: "gpt-5.6-luna",
+		Digest: strings.Repeat("d", 64), SchemaDigest: historicalingest.SchemaDigest(), ModelID: historicalingest.HistoricalMemoryModelID,
 		ModelEffort: "low", ParserVersion: historicalingest.CodexParserVersionV1, PromptVersion: "historical_prompt_v1",
 	}
 	if _, err := manager.StartJob("job_0123456789abcdef", snapshot, []historicalingest.WorkUnit{unit}, contract); err != nil {
@@ -180,7 +180,7 @@ func TestHistoricalIngestStartFreezesCodexCohortAndWaitsForHomeEgressConsent(t *
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if status.State != historicalingest.JobAwaitingEgress || status.SourceRootCount != 1 || status.EgressAuthorized || status.RunnerContract != codexSubscriptionRunnerContractDigestV1 {
+	if status.State != historicalingest.JobAwaitingEgress || status.SourceRootCount != 1 || status.EgressAuthorized || status.RunnerContract != codexSubscriptionRunnerContractDigestV2 {
 		t.Fatalf("start status=%+v", status)
 	}
 	blocked := pulseJSON(t, ts, http.MethodPost, "/memory/historical-ingest/jobs/"+status.JobID+"/lease", map[string]any{})

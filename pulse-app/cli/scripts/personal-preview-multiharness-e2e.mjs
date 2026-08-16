@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptRoot, '..');
+const packageVersion = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version;
 const HOSTS = ['claude-code', 'codex', 'cursor'];
 
 function run(command, args, options = {}) {
@@ -182,7 +183,7 @@ try {
   const packedRoot = packed.packageRoot;
   const packedPackageJSON = JSON.parse(readFileSync(join(packedRoot, 'package.json'), 'utf8'));
   assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
-  assert.equal(packedPackageJSON.version, '0.8.1');
+  assert.equal(packedPackageJSON.version, packageVersion);
   const { buildPersonalInstallPlan } = await import(pathToFileURL(join(packedRoot, 'src', 'install-plan.js')));
   const { runPersonalInstall } = await import(pathToFileURL(join(packedRoot, 'src', 'personal-install.js')));
   const { unassignedAssignmentTurnRef } = await import(

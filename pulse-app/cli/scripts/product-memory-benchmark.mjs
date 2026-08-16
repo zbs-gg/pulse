@@ -30,6 +30,11 @@ const SILENCE_QUERIES = [
   ['silence-03', 'Explain why the sky looks blue in one sentence.'],
   ['silence-04', 'Give me a simple recipe for banana pancakes.'],
   ['silence-05', 'What is the capital of New Zealand?'],
+  ['silence-06', 'Convert 37 degrees Celsius to Fahrenheit.'],
+  ['silence-07', 'Write a regular expression that matches a six digit postal code.'],
+  ['silence-08', 'What causes ocean tides?'],
+  ['silence-09', 'Name three common ingredients in hummus.'],
+  ['silence-10', 'How do I center a div with modern CSS?'],
 ];
 const LOCAL_COMPOSITOR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'product-compositor.js');
 
@@ -41,7 +46,8 @@ function parseArgs(argv) {
   const out = { package_version: DEFAULT_PACKAGE_VERSION, keep_workdir: false };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
-    if (name === '--keep-workdir' || name === '--candidate-compositor') {
+    if (name === '--keep-workdir' || name === '--candidate-compositor' ||
+        name === '--compatible-active-runtime') {
       out[name.slice(2).replaceAll('-', '_')] = true;
       continue;
     }
@@ -52,10 +58,24 @@ function parseArgs(argv) {
     index += 1;
   }
   if (![
-    'own-v1', 'emobench-v3-product', 'longmemeval-s-retrieval-30', 'locomo-retrieval',
+    'own-v1', 'emobench-v3-product', 'longmemeval-s-retrieval-30', 'longmemeval-atoms',
+    'locomo-retrieval', 'locomo-atoms', 'emobench-atoms',
   ].includes(out.suite)) fail('benchmark_suite_invalid');
   for (const name of ['dataset', 'output']) {
     if (!isAbsolute(out[name] ?? '') || resolve(out[name]) !== out[name]) fail('benchmark_path_invalid', name);
+  }
+  if (out.e2e_input !== undefined && (!isAbsolute(out.e2e_input) || resolve(out.e2e_input) !== out.e2e_input)) {
+    fail('benchmark_path_invalid', 'e2e_input');
+  }
+  if (out.candidate_daemon !== undefined &&
+      (!isAbsolute(out.candidate_daemon) || resolve(out.candidate_daemon) !== out.candidate_daemon ||
+       !existsSync(out.candidate_daemon) || !lstatSync(out.candidate_daemon).isFile() ||
+       lstatSync(out.candidate_daemon).isSymbolicLink())) {
+    fail('benchmark_path_invalid', 'candidate_daemon');
+  }
+  if (out.max_questions !== undefined) {
+    out.max_questions = Number(out.max_questions);
+    if (!Number.isSafeInteger(out.max_questions) || out.max_questions < 1) fail('benchmark_max_questions_invalid');
   }
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(out.package_version)) fail('benchmark_version_invalid');
   return out;
@@ -173,7 +193,7 @@ function loadOwnSuite(path) {
   }
   return {
     cases: [{ id: 'own', items: [...items.values()], queries, batch_size: 3 }],
-    excluded: [{ id: 'q16', reason: 'multi_fragment_dossier' }],
+    excluded: [],
   };
 }
 
@@ -288,6 +308,8 @@ function loadLongMemEvalSuite(path) {
         expectation: 'hit',
         expected_ids: expectedIDs,
         category: entry.question_type,
+        gold_answer: String(entry.answer ?? ''),
+        question_date: String(entry.question_date ?? ''),
       }],
     };
   });
@@ -348,6 +370,10 @@ function loadLoCoMoSuite(path) {
       }
     }
     const queries = [];
+    const datedSessions = numericSessionEntries(sample.conversation)
+      .map(([sessionName]) => String(sample.conversation[`${sessionName}_date_time`] ?? ''))
+      .filter(Boolean);
+    const referenceDate = datedSessions.at(-1) ?? '';
     for (let index = 0; index < sample.qa.length; index += 1) {
       const qa = sample.qa[index];
       if (![1, 2, 3, 4].includes(qa?.category) || typeof qa.question !== 'string' || !Array.isArray(qa.evidence)) continue;
@@ -367,6 +393,8 @@ function loadLoCoMoSuite(path) {
         expectation: 'hit',
         expected_ids: existing,
         category: String(qa.category),
+        gold_answer: String(qa.answer ?? ''),
+        reference_date: referenceDate,
       });
     }
     return { id: sample.sample_id, items, queries, batch_size: 3 };
@@ -382,11 +410,149 @@ function loadLoCoMoSuite(path) {
   };
 }
 
+function loadExtractedLoCoMoSuite(path) {
+  const document = readJSON(path, 'benchmark_dataset_invalid', 512 * 1024 * 1024);
+  if (document?.schema !== 'pulse.benchmark_extracted_memory.v1' || document.suite !== 'locomo' ||
+      !Array.isArray(document.cases)) fail('benchmark_dataset_invalid');
+  const cases = document.cases.map((entry) => {
+    if (typeof entry?.id !== 'string' || !Array.isArray(entry.items) || !Array.isArray(entry.queries)) {
+      fail('benchmark_dataset_invalid');
+    }
+    const itemIDs = new Set();
+    const items = entry.items.map((item) => {
+      if (typeof item?.id !== 'string' || itemIDs.has(item.id) || typeof item.summary !== 'string' ||
+          item.summary.trim() === '' || [...item.summary].length > 400 || !Array.isArray(item.source_ids)) {
+        fail('benchmark_dataset_item_invalid');
+      }
+      itemIDs.add(item.id);
+      return {
+        id: item.id, kind: productKind(item.kind), scope: 'project', summary: item.summary,
+        source_ids: item.source_ids,
+      };
+    });
+    const queries = entry.queries.map((query) => {
+      if (typeof query?.id !== 'string' || typeof query.query !== 'string' || !Array.isArray(query.expected_ids) ||
+          query.expected_ids.some((id) => !itemIDs.has(id))) fail('benchmark_dataset_query_invalid');
+      return {
+        id: query.id,
+        query: query.query,
+        expectation: 'hit',
+        expected_ids: query.expected_ids,
+        category: String(query.category),
+        gold_answer: String(query.gold_answer ?? ''),
+        reference_date: String(query.reference_date ?? ''),
+        evidence_ids: query.evidence_ids ?? [],
+      };
+    });
+    return { id: entry.id, items, queries, batch_size: 3 };
+  });
+  return {
+    cases,
+    excluded: [{ reason: 'model_extracted_atomic_memory_product_path' }],
+    extraction: document.extraction,
+  };
+}
+
+function loadExtractedLongMemEvalSuite(path) {
+  const document = readJSON(path, 'benchmark_dataset_invalid', 512 * 1024 * 1024);
+  if (document?.schema !== 'pulse.benchmark_extracted_memory.v1' || document.suite !== 'longmemeval' ||
+      !Array.isArray(document.cases)) fail('benchmark_dataset_invalid');
+  const cases = document.cases.map((entry) => {
+    if (typeof entry?.id !== 'string' || !Array.isArray(entry.items) || !Array.isArray(entry.queries) ||
+        entry.queries.length !== 1) fail('benchmark_dataset_invalid');
+    const itemIDs = new Set();
+    const items = entry.items.map((item) => {
+      if (typeof item?.id !== 'string' || itemIDs.has(item.id) || typeof item.summary !== 'string' ||
+          item.summary.trim() === '' || [...item.summary].length > 400 || !Array.isArray(item.source_ids)) {
+        fail('benchmark_dataset_item_invalid');
+      }
+      itemIDs.add(item.id);
+      return {
+        id: item.id, kind: productKind(item.kind), scope: 'project', summary: item.summary,
+        source_ids: item.source_ids,
+      };
+    });
+    const queries = entry.queries.map((query) => {
+      if (typeof query?.id !== 'string' || typeof query.query !== 'string' || !Array.isArray(query.expected_ids) ||
+          query.expected_ids.some((id) => !itemIDs.has(id))) fail('benchmark_dataset_query_invalid');
+      return {
+        id: query.id, query: query.query, expectation: 'hit', expected_ids: query.expected_ids,
+        category: String(query.category), gold_answer: String(query.gold_answer ?? ''),
+        question_date: String(query.question_date ?? ''), evidence_ids: query.evidence_ids ?? [],
+      };
+    });
+    return { id: entry.id, items, queries, batch_size: 3 };
+  });
+  return {
+    cases, excluded: [{ reason: 'model_extracted_atomic_memory_product_path' }], extraction: document.extraction,
+  };
+}
+
+function loadExtractedEmoBenchSuite(path) {
+  const document = readJSON(path, 'benchmark_dataset_invalid', 64 * 1024 * 1024);
+  if (document?.schema !== 'pulse.benchmark_extracted_memory.v1' || document.suite !== 'emobench' ||
+      !Array.isArray(document.cases)) fail('benchmark_dataset_invalid');
+  const cases = document.cases.map((entry) => {
+    if (typeof entry?.id !== 'string' || !new Set(['development', 'holdout']).has(entry.split) ||
+        !Array.isArray(entry.items) || !Array.isArray(entry.queries)) fail('benchmark_dataset_invalid');
+    const itemIDs = new Set();
+    const items = entry.items.map((item) => {
+      if (typeof item?.id !== 'string' || itemIDs.has(item.id) || typeof item.summary !== 'string' ||
+          item.summary.trim() === '' || [...item.summary].length > 400 || !Array.isArray(item.source_ids)) {
+        fail('benchmark_dataset_item_invalid');
+      }
+      itemIDs.add(item.id);
+      return {
+        id: item.id, kind: productKind(item.kind), scope: 'project', summary: item.summary,
+        source_ids: item.source_ids,
+      };
+    });
+    const queries = entry.queries.map((query) => {
+      if (typeof query?.id !== 'string' || typeof query.query !== 'string' ||
+          typeof query.gold_answer !== 'string' || query.split !== entry.split ||
+          !new Set(['positive', 'negative']).has(query.query_kind) ||
+          !new Set(['hit', 'silence']).has(query.expectation) || !Array.isArray(query.expected_ids) ||
+          query.expected_ids.some((id) => !itemIDs.has(id)) ||
+          (query.query_kind === 'positive') !== (query.expectation === 'hit')) {
+        fail('benchmark_dataset_query_invalid');
+      }
+      return {
+        id: query.id, query: query.query, expectation: query.expectation,
+        expected_ids: query.expected_ids, category: query.category,
+        gold_answer: query.gold_answer, split: query.split, query_kind: query.query_kind,
+      };
+    });
+    return { id: entry.id, items, queries, batch_size: 3 };
+  });
+  return {
+    cases,
+    excluded: [{ reason: 'synthetic_fixed_development_and_holdout_without_hidden_labels_in_search' }],
+    extraction: document.extraction,
+  };
+}
+
 function loadSuite(options) {
   if (options.suite === 'own-v1') return loadOwnSuite(options.dataset);
   if (options.suite === 'emobench-v3-product') return loadEmoBenchSuite(options.dataset);
   if (options.suite === 'longmemeval-s-retrieval-30') return loadLongMemEvalSuite(options.dataset);
+  if (options.suite === 'longmemeval-atoms') return loadExtractedLongMemEvalSuite(options.dataset);
+  if (options.suite === 'locomo-atoms') return loadExtractedLoCoMoSuite(options.dataset);
+  if (options.suite === 'emobench-atoms') return loadExtractedEmoBenchSuite(options.dataset);
   return loadLoCoMoSuite(options.dataset);
+}
+
+function limitSuite(suite, maximum) {
+  if (maximum === undefined) return suite;
+  let remaining = maximum;
+  return {
+    ...suite,
+    cases: suite.cases.map((entry) => {
+      const queries = entry.queries.slice(0, Math.max(0, remaining));
+      remaining -= queries.length;
+      return { ...entry, queries };
+    }).filter((entry) => entry.queries.length > 0),
+    excluded: [...suite.excluded, { cases: 'remaining', reason: `bounded_to_${maximum}_questions` }],
+  };
 }
 
 async function freePort() {
@@ -448,7 +614,7 @@ async function resolvePublishedPackage(root, version) {
   };
 }
 
-function activeReleaseProof(packageRoot, version) {
+function activeReleaseProof(packageRoot, version, { compatibleActiveRuntime = false } = {}) {
   const pulseRoot = join(process.env.HOME ?? '', '.pulse');
   const activation = readJSON(join(pulseRoot, 'runtime', 'product-daemon.json'), 'benchmark_activation_invalid');
   const activeSet = readJSON(join(pulseRoot, 'artifacts', 'active-release.json'), 'benchmark_release_set_invalid');
@@ -456,23 +622,44 @@ function activeReleaseProof(packageRoot, version) {
   const payload = envelope?.payload;
   const target = payload?.targets?.[`${process.platform}-${process.arch}`]?.artifacts;
   const common = payload?.common_artifacts;
-  if (process.platform !== 'darwin' || process.arch !== 'arm64' || activation.release_version !== version ||
-      activeSet.version !== version || activeSet.epoch !== activation.release_epoch ||
-      payload?.release?.version !== version || payload.release.epoch !== activation.release_epoch ||
+  const packageIdentityValid = process.platform === 'darwin' && process.arch === 'arm64' &&
+      payload?.release?.version === version && Number.isSafeInteger(payload?.release?.epoch);
+  const exactActivation = activation.release_version === version && activeSet.version === version &&
+      activeSet.epoch === activation.release_epoch && payload?.release?.epoch === activation.release_epoch;
+  const compatibleActivation = compatibleActiveRuntime && !exactActivation &&
+      target?.daemon?.sha256 === activation.daemon_artifact_sha256 &&
+      target?.['embedder-runtime']?.sha256 === activation.embedder_runtime_artifact_sha256 &&
+      common?.model?.sha256 === activation.model_artifact_sha256;
+  if (!packageIdentityValid || (!exactActivation && !compatibleActivation) ||
       target?.daemon?.sha256 !== activation.daemon_artifact_sha256 ||
       target?.['embedder-runtime']?.sha256 !== activation.embedder_runtime_artifact_sha256 ||
       common?.model?.sha256 !== activation.model_artifact_sha256 ||
-      common?.['plugin-runtime']?.sha256 !== activation.plugin_runtime_artifact_sha256 ||
+      (exactActivation && common?.['plugin-runtime']?.sha256 !== activation.plugin_runtime_artifact_sha256) ||
       sha256File(activation.daemon_path) !== activation.daemon_digest) {
     fail('benchmark_release_identity_mismatch');
   }
-  const required = ['daemon', 'embedder-runtime', 'model', 'plugin-runtime'];
+  const required = exactActivation
+    ? ['daemon', 'embedder-runtime', 'model', 'plugin-runtime']
+    : ['daemon', 'embedder-runtime', 'model'];
   const activePaths = required.map((kind) => activeSet.activations?.[kind]?.version_path);
   if (activePaths.some((path) => typeof path !== 'string' || !isAbsolute(path) || !existsSync(path))) {
     fail('benchmark_release_artifact_missing');
   }
   return {
-    activation,
+    activation: exactActivation ? activation : {
+      ...activation,
+      release_epoch: payload.release.epoch,
+      release_version: version,
+    },
+    runtime_proof: exactActivation ? {
+      kind: 'exact_active_release', active_version: activation.release_version,
+      active_epoch: activation.release_epoch,
+    } : {
+      kind: 'published_package_with_byte_identical_active_native_artifacts',
+      active_version: activation.release_version,
+      active_epoch: activation.release_epoch,
+      unused_package_artifact: 'plugin-runtime',
+    },
     active_runtime_physical_bytes: activePaths.reduce((sum, path) => sum + physicalTreeBytes(path), 0),
     artifacts: Object.fromEntries(required.map((kind, index) => [kind, {
       sha256: activeSet.activations[kind].sha256,
@@ -572,7 +759,7 @@ async function waitForDaemon(baseURL, secret, state) {
   fail('benchmark_daemon_not_ready', detail);
 }
 
-async function startDaemon({ releaseProof, authority, packageRoot }) {
+async function startDaemon({ releaseProof, authority, packageRoot, candidateDaemon }) {
   const resolved = authority.resolved;
   const vault = resolved.personal.data_dir;
   mkdirSync(vault, { recursive: true, mode: 0o700 });
@@ -601,7 +788,8 @@ async function startDaemon({ releaseProof, authority, packageRoot }) {
     PULSE_MANAGED_EMBEDDER_CONFIG: embedderConfig,
     ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '', COHERE_API_KEY: '',
   };
-  const child = spawn(releaseProof.activation.daemon_path, ['-data-dir', vault, '-addr', `127.0.0.1:${port}`], {
+  const daemonPath = candidateDaemon ?? releaseProof.activation.daemon_path;
+  const child = spawn(daemonPath, ['-data-dir', vault, '-addr', `127.0.0.1:${port}`], {
     env, stdio: ['ignore', 'pipe', 'pipe'], detached: false,
   });
   const state = { closed: false, stderr: '' };
@@ -850,6 +1038,8 @@ async function querySuite({ suite, runtime, authority, packageRoot, compositorPa
       category: item.category ?? null,
       expectation: item.expectation,
       passed,
+      expected_candidate_count: item.expected_ids.length,
+      retrieval_expected_hit: expectedRank >= 0,
       expected_rank: expectedRank < 0 ? null : expectedRank + 1,
       returned_count: returned.length,
       returned_digests: returned.map((summary) => sha256(summary)),
@@ -858,6 +1048,15 @@ async function querySuite({ suite, runtime, authority, packageRoot, compositorPa
       context_bytes: Buffer.byteLength(context, 'utf8'),
       estimated_tokens: Math.ceil(Buffer.byteLength(context, 'utf8') / 4),
       error_code: errorCode,
+      _e2e: {
+        question: item.query,
+        gold_answer: item.gold_answer ?? null,
+        split: item.split ?? null,
+        query_kind: item.query_kind ?? null,
+        question_date: item.question_date ?? null,
+        reference_date: item.reference_date ?? null,
+        context,
+      },
     });
   }
   return results;
@@ -912,6 +1111,7 @@ function aggregateResult({ options, packageProof, releaseProof, suite, writes, r
       path: 'pulse_memory -> Personal daemon -> automatic prompt context',
       compositor: options.candidate_compositor ? 'source_candidate' : 'published_package',
       compositor_sha256: sha256File(compositorPath),
+      runtime_proof: releaseProof.runtime_proof,
     },
     suite: {
       id: options.suite,
@@ -927,6 +1127,9 @@ function aggregateResult({ options, packageProof, releaseProof, suite, writes, r
     retrieval: {
       correct_hits: hits.filter((item) => item.passed).length,
       expected_hits: hits.length,
+      evidence_unlinked_hits: hits.filter((item) => item.expected_candidate_count === 0).length,
+      retrieval_misses_with_stored_evidence: hits.filter((item) =>
+        item.expected_candidate_count > 0 && !item.retrieval_expected_hit).length,
       correct_silences: silences.filter((item) => item.passed).length,
       expected_silences: silences.length,
       query_errors: results.filter((item) => item.error_code !== null).length,
@@ -936,7 +1139,7 @@ function aggregateResult({ options, packageProof, releaseProof, suite, writes, r
       maximum_context_bytes: Math.max(0, ...results.map((item) => item.context_bytes)),
       maximum_estimated_tokens: Math.max(0, ...results.map((item) => item.estimated_tokens)),
       by_category: byCategory,
-      cases: results,
+      cases: results.map(({ _e2e, ...item }) => item),
     },
     storage: {
       npm_archive_bytes: packageProof.archive_bytes,
@@ -962,7 +1165,7 @@ function aggregateResult({ options, packageProof, releaseProof, suite, writes, r
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
-  const suite = loadSuite(options);
+  const suite = limitSuite(loadSuite(options), options.max_questions);
   const root = mkdtempSync(join(tmpdir(), 'pulse-product-benchmark-'));
   chmodSync(root, 0o700);
   let runtime;
@@ -973,10 +1176,15 @@ export async function main(argv = process.argv.slice(2)) {
     }));
     for (const workspace of workspaces) initializeRepository(workspace.path);
     const packageProof = await resolvePublishedPackage(root, options.package_version);
-    const releaseProof = activeReleaseProof(packageProof.root, options.package_version);
+    const releaseProof = activeReleaseProof(packageProof.root, options.package_version, {
+      compatibleActiveRuntime: options.compatible_active_runtime === true,
+    });
     const port = await freePort();
     const authority = await createFixtureAuthority({ root, workspaces, port, packageRoot: packageProof.root });
-    runtime = await startDaemon({ releaseProof, authority, packageRoot: packageProof.root });
+    runtime = await startDaemon({
+      releaseProof, authority, packageRoot: packageProof.root,
+      candidateDaemon: options.candidate_daemon,
+    });
     const queriesPath = join(root, 'queries.txt');
     writeFileSync(queriesPath, `${suite.cases.flatMap((item) => item.queries).map((item) => item.query).join('\n')}\n`, {
       mode: 0o600, flag: 'wx',
@@ -1014,6 +1222,31 @@ export async function main(argv = process.argv.slice(2)) {
       options, packageProof, releaseProof, suite, writes, results, runtime, compositorPath,
       persistence: { available: before.available && after.available, before, after },
     });
+    if (options.e2e_input) {
+      atomicWriteJSON(options.e2e_input, {
+        schema: 'pulse.product_memory_e2e_input.v1',
+        suite: options.suite,
+        source_sha256: sha256File(options.dataset),
+        product: result.product,
+        cases: results.map((item) => ({
+          question_id: item.id,
+          case_id: item.case_id,
+          category: item.category,
+          question: item._e2e.question,
+          gold_answer: item._e2e.gold_answer,
+          split: item._e2e.split,
+          query_kind: item._e2e.query_kind,
+          question_date: item._e2e.question_date,
+          reference_date: item._e2e.reference_date,
+          memories: parseContext(item._e2e.context),
+          evidence_linked_candidate_count: item.expected_candidate_count,
+          retrieval_expected_hit: item.retrieval_expected_hit,
+          context_bytes: item.context_bytes,
+          estimated_tokens: item.estimated_tokens,
+          retrieval_error: item.error_code,
+        })),
+      });
+    }
     atomicWriteJSON(options.output, result);
     process.stdout.write(`${JSON.stringify({
       status: 'completed',

@@ -13,6 +13,10 @@ Claude question still surfaced an unrelated old memory, so this remains a
 dogfood candidate rather than a release claim. Cursor live acceptance remains
 pending. The stable published install remains 0.7.2.
 
+The repository also contains an unreleased 0.8.2 candidate with expanded
+historical import and bounded retrieval of up to four distinct short memories.
+It is not the package currently served by the npm `preview` tag.
+
 The first frozen large-vault baseline on 2026-08-12 did not pass its combined
 practical bar: published 0.8.0 found 34 of 40 expected memories, stayed silent
 in 7 of 10 unrelated controls, and returned two internal query errors. Warm p95
@@ -30,6 +34,14 @@ recalled an official answer turn in every case, but is an oracle retrieval
 ceiling rather than official answer accuracy. Only 5 of 35 existing EmoBench
 questions currently exercise the actual Pulse Personal contract. Details:
 docs/evals/2026-08-14-product-memory-benchmarks.md.
+
+On the full 1,535-question LoCoMo run, the unreleased 0.8.2 candidate scored
+1,230 correct answers (80.13%) against 1,231 (80.20%) for equal-model Mem0,
+using GPT-5.4 low for extraction, answering, and judging. The previous Pulse
+baseline was 959 (62.48%). Median context was 120 estimated tokens, maximum
+198, and warm retrieval p95 70.8 ms. This is development evidence, not a claim
+about published 0.8.1. Details:
+docs/evals/2026-08-16-full-locomo-candidate.md.
 
 A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
 an isolated hosted store of 21 memories. It required an account-level
@@ -126,3 +138,4 @@ fail-open operation; one-day owner-machine dogfood started in those two hosts
 on 2026-08-12; broad ambiguous questions remain under observation and Cursor
 acceptance is pending; separate Claude Chat remote recall passed with a visible
 per-message tool call and no Personal sync; not the stable default or production ready.
+The repository's 0.8.2 candidate is unreleased.

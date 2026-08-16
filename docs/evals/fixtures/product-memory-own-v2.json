@@ -1,0 +1,36 @@
+{
+  "items": [
+    {"id":"m01","kind":"decision","text":"Pulse stores an emotional moment as a separate memory item, never as a field inside a decision."},
+    {"id":"m02","kind":"preference","text":"Technical reports should use short conclusion headlines followed by one explanatory paragraph."},
+    {"id":"m03","kind":"correction","text":"The installable Personal repository is pulse-personal; the Garden pulse directory is only the workspace entry point."},
+    {"id":"m04","kind":"project_state","text":"Pulse is atomic memory; Atlas owns the graph of people, projects, events, and relationships."},
+    {"id":"m05","kind":"project_state","text":"A Pulse release candidate cannot be published until the same archive passes installation on a separate physical Apple Silicon Mac."},
+    {"id":"m06","kind":"decision","text":"Claude Mem remains disabled, but its database is retained as a migration source and must not be deleted."},
+    {"id":"m07","kind":"preference","text":"A normal memory lookup should happen automatically without asking the person to type a recall command."},
+    {"id":"m08","kind":"project_state","text":"Project memories may surface only inside their verified Git repository; personal memories may cross projects."},
+    {"id":"m09","kind":"decision","text":"When Pulse is unavailable, terminal, files, cancellation, and session completion must continue without a retry turn."},
+    {"id":"m10","kind":"preference","text":"A useful memory answer should stay within 600 tokens in ordinary cases and omit weakly relevant material."},
+    {"id":"m11","kind":"correction","text":"Cursor is outside the current release focus; the active product acceptance covers Codex and Claude Code."},
+    {"id":"m12","kind":"project_state","text":"The migration preview reported 68480 unique events, 5986 emotional marks, 55 capsules, and zero conflicts."},
+    {"id":"m13","kind":"decision","text":"The active Personal database must never be rebuilt or migrated during benchmark runs; benchmarks use a temporary copy."},
+    {"id":"m14","kind":"preference","text":"Benchmark quality is judged by correct final answers, not merely by whether a gold evidence row appears in retrieval."},
+    {"id":"m15","kind":"project_state","text":"Memory Home may prove that Pulse delivered context, but it cannot prove that the language model used that context."}
+  ],
+  "queries": [
+    {"id":"q01","query":"How should an emotion be attached when saving a project decision?","expected_item_id":"m01"},
+    {"id":"q02","query":"What format makes a technical status update easiest to understand?","expected_item_id":"m02"},
+    {"id":"q03","query":"Which folder is the actual Personal product repository rather than the workspace doorway?","expected_item_id":"m03"},
+    {"id":"q04","query":"Which product should represent relationships between people and projects?","expected_item_id":"m04"},
+    {"id":"q05","query":"What physical installation must succeed before changing the public release status?","expected_item_id":"m05"},
+    {"id":"q06","query":"What should happen to the old Claude Mem database?","expected_item_id":"m06"},
+    {"id":"q07","query":"Should a person have to explicitly ask the AI to remember previous context?","expected_item_id":"m07"},
+    {"id":"q08","query":"Can a repository-specific decision appear while working in another repository?","expected_item_id":"m08"},
+    {"id":"q09","query":"What should still work when the memory service is stopped?","expected_item_id":"m09"},
+    {"id":"q10","query":"How much memory context is acceptable for an ordinary question?","expected_item_id":"m10"},
+    {"id":"q11","query":"Which editor integration is deliberately not part of the current acceptance?","expected_item_id":"m11"},
+    {"id":"q12","query":"How many emotional marks were produced by the migration preview?","expected_item_id":"m12"},
+    {"id":"q13","query":"May the benchmark modify the live Personal database?","expected_item_id":"m13"},
+    {"id":"q14","query":"What determines whether a memory benchmark answer passes?","expected_item_id":"m14"},
+    {"id":"q15","query":"Does the status screen know whether the model actually relied on delivered memory?","expected_item_id":"m15"}
+  ]
+}
