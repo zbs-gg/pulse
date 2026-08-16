@@ -1,6 +1,6 @@
-# Pulse Personal 0.8.1
+# Pulse Personal 0.8.2
 
-Version 0.8.1 is published under the npm `preview` tag. It is not the stable
+Version 0.8.2 is published under the npm `preview` tag. It is not the stable
 default or production ready. The owner-machine migration passed on 2026-08-09, and
 its old sources are preserved in a verified encrypted external archive. Fresh
 Codex and Claude Code checks demonstrated recall, one-call writing, project
@@ -8,14 +8,11 @@ boundaries, irrelevant-query silence, and fail-open host work. On 2026-08-16,
 however, the installed epoch 34 daemon still reported BGE-M3 ready while
 ordinary queries timed out. A five-second semantic probe loaded the intact
 model and the same Hermes query then returned relevant candidates in 496 ms.
-Daily-use acceptance is incomplete until newly signed 0.8.2 bytes pass cold and
-warm semantic queries plus normal recall and writing in both hosts. The stable
-published install remains 0.7.2.
-
-The repository also contains an unreleased 0.8.2 candidate with expanded
-historical import, bounded retrieval of up to four distinct short memories,
-caller-cancellation isolation, and a Doctor check that performs a real semantic
-query. It is not the package currently served by the npm `preview` tag.
+Daily-use acceptance is incomplete until the exact public 0.8.2 bytes are
+installed on the owner Mac and pass cold and warm semantic queries plus normal
+recall and writing in both hosts. The publication workflow itself installs the
+archive on a clean Apple Silicon runner and requires a real semantic query. The
+stable published install remains 0.7.2.
 
 The first frozen large-vault baseline on 2026-08-12 did not pass its combined
 practical bar: published 0.8.0 found 34 of 40 expected memories, stayed silent
@@ -35,12 +32,12 @@ ceiling rather than official answer accuracy. Only 5 of 35 existing EmoBench
 questions currently exercise the actual Pulse Personal contract. Details:
 docs/evals/2026-08-14-product-memory-benchmarks.md.
 
-On the full 1,535-question LoCoMo run, the unreleased 0.8.2 candidate scored
+On the full 1,535-question LoCoMo run, the 0.8.2 preview candidate scored
 1,230 correct answers (80.13%) against 1,231 (80.20%) for equal-model Mem0,
 using GPT-5.4 low for extraction, answering, and judging. The previous Pulse
 baseline was 959 (62.48%). Median context was 120 estimated tokens, maximum
-198, and warm retrieval p95 70.8 ms. This is development evidence, not a claim
-about published 0.8.1. Details:
+198, and warm retrieval p95 70.8 ms. This is development evidence, not a
+production-readiness claim. Details:
 docs/evals/2026-08-16-full-locomo-candidate.md.
 
 A separate Claude Chat remote-connector experiment passed on 2026-08-11 with
@@ -56,10 +53,10 @@ public package `@zbs-gg/pulse` contains only Personal: no shared-memory server,
 cloud synchronization, team command, device key, or shared database is shipped.
 
 Version 0.7.2 is the stable public release for Macs with Apple Silicon. Version
-0.8.1 is a public preview for the same target. The exact 0.8.1 archive passed a
-clean Apple Silicon installation before publication. The npm `latest` tag
-resolves to 0.7.2 and `preview` resolves to 0.8.1. Other operating systems are
-not public support claims yet.
+0.8.2 is a public preview for the same target. Its publication gate installs
+the exact archive and performs a real semantic query on a clean Apple Silicon
+runner. The npm `latest` tag resolves to 0.7.2 and `preview` resolves to 0.8.2.
+Other operating systems are not public support claims yet.
 
 Before installation, inspect README.md, AGENTS.md, and
 docs/SECURITY_INSTALL_CHECKLIST.md. Explain what will be written and ask for
@@ -130,13 +127,10 @@ or the npm package. Do not infer that the presence of 0.8 code proves a real
 three-person pilot, fresh-session acceptance, or a published emotional-memory
 feature.
 
-Status: Personal 0.8.1 is published as an npm preview, but its clean-install
-gate did not make a real semantic query. On 2026-08-16 installed epoch 34 could
-report BGE-M3 ready while cold queries timed out; a five-second probe loaded
-the intact model and restored relevant Hermes retrieval. Earlier Codex and
-Claude Code checks remain useful evidence, but the one-day acceptance is not
-complete. Signed 0.8.2 must pass real cold and warm semantic queries plus host
-recall and writing. Cursor remains pending; separate Claude Chat remote recall
-used a visible per-message tool call and no Personal sync. This is not the
-stable default or production ready.
-The repository's 0.8.2 candidate is unreleased.
+Status: Personal 0.8.2 is the npm preview and its publication gate includes a
+real semantic query. The owner Mac still runs epoch 34 from 0.8.0; on
+2026-08-16 it could report BGE-M3 ready while cold queries timed out. The
+one-day acceptance is not complete until the exact public 0.8.2 bytes pass host
+recall and writing in Codex and Claude Code. Cursor remains pending; separate
+Claude Chat remote recall used a visible per-message tool call and no Personal
+sync. This is not the stable default or production ready.

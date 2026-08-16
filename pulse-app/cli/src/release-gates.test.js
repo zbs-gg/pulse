@@ -183,6 +183,11 @@ test('release verification includes the scanned archive and isolated native inst
     packageJSON.scripts?.['verify:personal-package'],
     'node scripts/verify-personal-package.mjs',
   );
+	const packageVerifier = readFileSync(
+		join(root, 'pulse-app', 'cli', 'scripts', 'verify-personal-package.mjs'), 'utf8',
+	);
+	assert.match(packageVerifier, /manifest\.version !== sourceManifest\.version/);
+	assert.doesNotMatch(packageVerifier, /manifest\.version !== ['"]0\.8\./);
 	const productE2E = readFileSync(join(root, 'pulse-app', 'cli', 'scripts', 'codex-product-e2e.mjs'), 'utf8');
 	assert.match(productE2E, /PULSE_CODEX_E2E_REAL_RELEASE_MANIFEST/);
 	assert.match(productE2E, /PULSE_CODEX_E2E_REAL_RELEASE_ROOT/);

@@ -2,21 +2,20 @@
 
 Pulse is memory for AI tools. It gives Codex and Claude Code the knowledge they
 need at the moment they need it, and stays silent when nothing relevant is
-found. Version `0.8.1` can also remember emotions attached to a specific
+found. Version `0.8.2` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
-> **0.8.1 is published as an npm preview, not as the stable default.** Its
-> signed daemon can leave a cold BGE-M3 search unavailable after a short or
-> cancelled request while still reporting itself ready. Use 0.7.2 for the
-> stable installation; 0.8.1 is preserved as development evidence, not the
-> candidate recommended for daily use.
+> **0.8.2 is the npm preview, not the stable default.** Its release flow
+> installs the exact archive on a clean Apple Silicon runner and makes a real
+> BGE-M3 semantic query before publication. Use 0.7.2 for the stable
+> installation. Version 0.8.1 remains preserved as evidence of the cold-search
+> defect that 0.8.2 fixes.
 
-The repository now contains an unreleased 0.8.2 candidate. It expands
-historical import, returns up to four short, distinct memories, keeps the
-embedder protocol intact after a cancelled caller, and makes Doctor prove a
-real semantic query. It is not the package currently served by npm and must
-pass the signed release flow before the `preview` tag can move.
+Version 0.8.2 expands historical import, returns up to four short, distinct
+memories, keeps the embedder protocol intact after a cancelled caller, and
+makes Doctor prove a real semantic query. Owner-machine daily-use acceptance
+still requires installing these exact public bytes in Codex and Claude Code.
 
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
@@ -27,8 +26,8 @@ live check on 2026-08-16 exposed the missing reliability gate: the installed
 epoch 34 daemon reported BGE-M3 ready while ordinary queries timed out. A
 five-second semantic probe loaded the intact local model and the Hermes query
 then returned relevant candidates in 496 ms. Daily-use acceptance therefore
-remains incomplete until newly signed 0.8.2 bytes pass the same cold and warm
-query checks in both hosts.
+remains incomplete until the signed 0.8.2 bytes are activated and pass the same
+cold and warm query checks in both hosts on the owner machine.
 
 The first frozen large-vault baseline on 2026-08-12 did not pass its combined
 practical bar. On a copy containing 76,795 real events, published `0.8.0` found
@@ -49,13 +48,13 @@ accuracy. The existing emotional benchmark mostly tests hidden user state,
 biometrics, and graph traversal that Pulse never receives; only 5 of its 35
 questions currently test the Personal product. [Current benchmark report](./docs/evals/2026-08-14-product-memory-benchmarks.md).
 
-The unreleased 0.8.2 candidate was also run end to end on all 1,535 eligible
+The 0.8.2 preview candidate was also run end to end on all 1,535 eligible
 LoCoMo questions with the same GPT-5.4 low extraction, answering, and judging
 model used for equal-model Mem0. It scored 1,230 correct answers (80.13%) versus
 Mem0's 1,231 (80.20%), up from the previous Pulse baseline of 959 (62.48%).
 Median context was 120 estimated tokens, maximum context 198, and warm p95
-retrieval 70.8 ms. This is strong development evidence but not a published
-0.8.1 claim. [Full candidate result](./docs/evals/2026-08-16-full-locomo-candidate.md).
+retrieval 70.8 ms. This is strong development evidence, not a production
+readiness claim. [Full candidate result](./docs/evals/2026-08-16-full-locomo-candidate.md).
 
 A separate remote Claude Chat experiment passed on 2026-08-11 against an
 isolated hosted store containing 21 memories. Automatic recall required a
@@ -72,11 +71,11 @@ with the local Personal 0.8 vault and is not part of the published install.
 ## Install
 
 Version `0.7.2` remains the stable release for Macs with Apple Silicon. Version
-`0.8.1` is published under the npm `preview` tag for the same public target.
-Its exact archive passed installation on a clean Apple Silicon GitHub runner
-before publication. Intel Mac, Windows, and Linux are not public support claims
-yet; fixture and packaging checks on those targets do not replace live product
-acceptance.
+`0.8.2` is published under the npm `preview` tag for the same public target.
+Its exact archive must pass installation and a real semantic query on a clean
+Apple Silicon GitHub runner before publication. Intel Mac, Windows, and Linux
+are not public support claims yet; fixture and packaging checks on those
+targets do not replace live product acceptance.
 
 Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The current published Personal installation is:
@@ -203,15 +202,13 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: Personal 0.8.1 is published under the npm `preview` tag, but its
-clean-install gate did not make a real semantic query. Installed epoch 34
-passed narrower migration, recall, write, project-boundary, silence, and
-fail-open checks, then exposed a cold-search failure while still reporting
-itself ready. The one-day Codex and Claude Code acceptance is therefore not
-complete. Signed 0.8.2 must pass real cold and warm semantic queries plus host
-recall and writing. Version 0.8.1 removes the confirmed weak-capsule noise
-path; raw-history recall and Cursor acceptance remain pending product limits.
+Status: Personal 0.8.2 is the npm preview and its publication gate includes a
+real semantic query. The owner Mac still runs epoch 34 from 0.8.0, which exposed
+a cold-search failure while reporting itself ready. The one-day Codex and
+Claude Code acceptance is therefore not complete until exact public 0.8.2 bytes
+are installed and pass real recall and writing. Raw-history recall and Cursor
+acceptance remain pending product limits.
 A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
 is not Personal sync or a supported install. Version 0.8 is not the stable
-default or production ready. The repository's 0.8.2 candidate is unreleased.
+default or production ready.

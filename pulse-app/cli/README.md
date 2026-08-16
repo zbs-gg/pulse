@@ -1,17 +1,15 @@
 # @zbs-gg/pulse
 
-The package source for the unreleased Pulse Personal 0.8.2 candidate. It
+The package source for the Pulse Personal 0.8.2 preview. It
 installs one local memory engine,
 Memory Home, and local connections for Codex, Claude Code, and Cursor. Emotional
 memory stays local, describes a moment rather than a personality, and can be
 confirmed, corrected, or deleted separately from the event.
 
-Personal 0.8.1 remains the published preview, not the stable default. A later
-owner-machine check found that its signed daemon could report BGE-M3 ready
-while cold semantic queries timed out, so daily-use and Cursor acceptance
-remain pending. The npm `latest` tag remains on 0.7.2. This 0.8.2 source must
-complete the signed release flow, including a real semantic query, before the
-`preview` tag moves.
+Personal 0.8.2 is the preview, not the stable default. Its release flow installs
+the exact archive on a clean Apple Silicon runner and makes a real BGE-M3
+semantic query before publication. Owner-machine daily-use and Cursor
+acceptance remain pending. The npm `latest` tag remains on 0.7.2.
 
 ```bash
 npx -y @zbs-gg/pulse@preview init codex
@@ -43,5 +41,4 @@ Disconnect with `pulse disconnect codex`, `pulse disconnect claude-code`, or
 `pulse disconnect cursor`. Remove all local Pulse memory only with the separate
 confirmed command `pulse wipe --confirm "wipe pulse memory"`.
 
-License: AGPL-3.0-only. Status: 0.8.2 candidate unreleased; Personal 0.8.1
-preview published; stable remains 0.7.2.
+License: AGPL-3.0-only. Status: Personal 0.8.2 preview; stable remains 0.7.2.

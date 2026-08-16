@@ -5,11 +5,10 @@ platforms follow after the Mac installation has been tested end to end.
 
 Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
 published on 7 August 2026 after a clean remote Mac installation. Personal
-0.8.1 was published under the npm `preview` tag on 14 August after a clean
-installation and narrow owner-machine checks. A later cold-search failure
-showed that the gate had only checked retrieval metadata, not a real semantic
-query. Daily-use, Cursor, and production acceptance remain pending; ordinary
-stable installation stays on 0.7.2.
+0.8.2 is published under the npm `preview` tag. Its publication workflow
+installs the exact archive on a clean Apple Silicon runner and requires a real
+semantic query. Daily-use, Cursor, and production acceptance remain pending;
+ordinary stable installation stays on 0.7.2.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.

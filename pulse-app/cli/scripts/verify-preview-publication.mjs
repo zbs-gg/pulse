@@ -47,7 +47,8 @@ export function verifyPreviewPublication(root = repositoryRoot) {
     publication.archive?.sha256, publication.archive?.tree_sha256,
     publication.artifact_set?.sha256, publication.snapshot?.sha256,
   ]) if (!SHA256.test(value ?? '')) fail('preview_publication_digest_invalid');
-  if (!exactReleaseURL(publication.archive?.url, version, `npm/epoch-${epoch}-final/zbs-gg-pulse-${version}.tgz`) ||
+  const archiveDigestPrefix = publication.archive.sha256.slice(0, 12);
+  if (!exactReleaseURL(publication.archive?.url, version, `npm/epoch-${epoch}-final-${archiveDigestPrefix}/zbs-gg-pulse-${version}.tgz`) ||
       !exactReleaseURL(publication.artifact_set?.url, version, `epoch-${epoch}/catalog/artifact-set.json`) ||
       !exactReleaseURL(publication.snapshot?.url, version, 'catalog/snapshot.json')) {
     fail('preview_publication_url_invalid');

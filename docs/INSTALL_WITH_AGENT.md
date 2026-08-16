@@ -1,15 +1,15 @@
 # Install Pulse With Your AI Agent
 
-> Personal 0.8.1 is published under the npm `preview` tag, but its signed
-> daemon has a known cold-search readiness defect. Use `@zbs-gg/pulse@0.7.2`
-> for the stable installation; select `@preview` only to inspect that preview.
+> Personal 0.8.2 is published under the npm `preview` tag. Use
+> `@zbs-gg/pulse@0.7.2` for the stable installation; select `@preview`
+> deliberately because owner-machine daily-use acceptance is still pending.
 
 The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
 and was published to npm on 7 August 2026.
-The exact 0.8.1 preview archive passed a clean Apple Silicon installation in
-the publication workflow on 14 August 2026, but that gate checked metadata and
-did not make a real semantic query. Daily-use and production acceptance remain
-pending.
+The 0.8.2 publication workflow installs the exact preview archive on a clean
+Apple Silicon runner and requires a real BGE-M3 semantic query. Daily-use and
+production acceptance still require the owner-machine Codex and Claude Code
+cycle.
 
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real
