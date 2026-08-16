@@ -2,11 +2,13 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const productE2E = resolve(scriptRoot, 'codex-product-e2e.mjs');
+const packageVersion = JSON.parse(readFileSync(resolve(scriptRoot, '..', 'package.json'), 'utf8')).version;
 
 const result = spawnSync(process.execPath, [productE2E], {
   cwd: resolve(scriptRoot, '..'),
@@ -34,7 +36,7 @@ assert.equal(product.system_python_exposed, false);
 assert.equal(product.personal_only_package, true);
 assert.equal(product.external_publication_performed, false);
 assert.equal(product.full_retrieval, true);
-assert.equal(product.package_version, '0.8.1');
+assert.equal(product.package_version, packageVersion);
 assert.match(product.packed_tarball_sha256, /^[a-f0-9]{64}$/);
 assert.equal(Number.isInteger(product.packed_tarball_bytes) && product.packed_tarball_bytes > 0, true);
 assert.equal(product.exact_tarball_bound, true);

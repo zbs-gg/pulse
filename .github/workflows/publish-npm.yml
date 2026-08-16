@@ -1,36 +1,42 @@
-name: Publish Pulse Personal to npm
+name: Publish Pulse Personal preview
 
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        description: Publish the tested package to npm after the Mac install succeeds
+      publish_npm:
+        description: Publish the verified archive to the npm preview tag
         required: true
         default: false
         type: boolean
+      publish_github_release:
+        description: Create the matching GitHub prerelease from the same archive
+        required: true
+        default: false
+        type: boolean
+      confirmation:
+        description: Type "release @zbs-gg/pulse preview" when either publication is enabled
+        required: false
+        type: string
 
 concurrency:
-  group: publish-pulse-personal-to-npm
+  group: publish-pulse-personal-preview
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
   publish:
-    name: Publish the reviewed Personal package
+    name: Verify and publish one Personal preview
     if: github.repository == 'zbs-gg/pulse'
     runs-on: macos-15
     timeout-minutes: 35
     env:
-      EXPECTED_PACKAGE: '@zbs-gg/pulse'
-      EXPECTED_VERSION: '0.8.1'
-      EXPECTED_ARCHIVE_SHA256: a121011028e5377398dc04e282a7ce8ef231f05de49f034b220d1b40e7160cb3
-      EXPECTED_TREE_SHA256: 0901e5c9db26abdb54ffac43f9293f3b6766e818206c34cedb85bdba310055ea
-      EXPECTED_ARTIFACT_SET_SHA256: f4b4efed35f2897888577e3a654a1341033eb8639d505fbc8bfad9768069e02f
-      EXPECTED_SNAPSHOT_SHA256: 6ee4024b6c7ce6647f15723f28bd922d6f5897f08f0f9042af6f153bd25b5cb7
       EXPECTED_NODE_SHA256: 55a772a600b7bdafb4b35945b3935090e27aff9934b4c11b281220fcd99139d7
+      PUBLISH_NPM: ${{ inputs.publish_npm }}
+      PUBLISH_GITHUB_RELEASE: ${{ inputs.publish_github_release }}
+      RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
     steps:
       - name: Check out the exact commit without helper actions
         shell: bash
@@ -63,7 +69,35 @@ jobs:
           test -z "${NODE_AUTH_TOKEN:-}"
           test -z "${NPM_TOKEN:-}"
 
-      - name: Build and inspect the package
+      - name: Bind package, docs, signed release, npm bytes, and GitHub notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node pulse-app/cli/scripts/verify-preview-publication.mjs > "$RUNNER_TEMP/publication.json"
+          export_value() {
+            local name="$1" query="$2" value
+            value="$(jq -er "$query" "$RUNNER_TEMP/publication.json")"
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+          }
+          export_value EXPECTED_PACKAGE .package
+          export_value EXPECTED_VERSION .version
+          export_value EXPECTED_EPOCH .release_epoch
+          export_value EXPECTED_ARCHIVE_URL .archive_url
+          export_value EXPECTED_ARCHIVE_SHA256 .archive_sha256
+          export_value EXPECTED_TREE_SHA256 .archive_tree_sha256
+          export_value EXPECTED_ARTIFACT_SET_URL .artifact_set_url
+          export_value EXPECTED_ARTIFACT_SET_SHA256 .artifact_set_sha256
+          export_value EXPECTED_SNAPSHOT_URL .snapshot_url
+          export_value EXPECTED_SNAPSHOT_SHA256 .snapshot_sha256
+          export_value EXPECTED_GITHUB_TAG .github_tag
+          export_value EXPECTED_GITHUB_TITLE .github_title
+          export_value EXPECTED_GITHUB_NOTES .github_notes
+          if test "$PUBLISH_NPM" = true || test "$PUBLISH_GITHUB_RELEASE" = true; then
+            test "$GITHUB_REF" = refs/heads/main
+            test "$RELEASE_CONFIRMATION" = 'release @zbs-gg/pulse preview'
+          fi
+
+      - name: Download and inspect the exact reviewed archive
         working-directory: pulse-app/cli
         shell: bash
         env:
@@ -74,28 +108,22 @@ jobs:
           test "$(uname -m)" = arm64
           test "$(node -p "require('./package.json').name")" = "$EXPECTED_PACKAGE"
           test "$(node -p "require('./package.json').version")" = "$EXPECTED_VERSION"
-          if npm view "$EXPECTED_PACKAGE@$EXPECTED_VERSION" version >/dev/null 2>&1; then
-            echo "$EXPECTED_PACKAGE@$EXPECTED_VERSION is already published"
-            exit 1
-          fi
 
           expected_manifest="$RUNNER_TEMP/personal-preview-manifest.json"
           expected_snapshot="$RUNNER_TEMP/personal-release-snapshot.json"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$expected_manifest" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/epoch-35/catalog/artifact-set.json
+            --output "$expected_manifest" "$EXPECTED_ARTIFACT_SET_URL"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$expected_snapshot" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/catalog/snapshot.json
+            --output "$expected_snapshot" "$EXPECTED_SNAPSHOT_URL"
           test "$(shasum -a 256 "$expected_manifest" | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
           test "$(shasum -a 256 "$expected_snapshot" | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
+
           package_dir="$RUNNER_TEMP/pulse-package"
           unpack_dir="$RUNNER_TEMP/pulse-unpacked"
           mkdir -p "$package_dir" "$unpack_dir"
-          archive="$package_dir/zbs-gg-pulse-0.8.1.tgz"
+          archive="$package_dir/zbs-gg-pulse-$EXPECTED_VERSION.tgz"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$archive" \
-            https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/npm/epoch-35-final/zbs-gg-pulse-0.8.1.tgz
+            --output "$archive" "$EXPECTED_ARCHIVE_URL"
           test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$unpack_dir"
           cmp "$expected_manifest" "$unpack_dir/package/release/personal-preview-manifest.json"
@@ -106,15 +134,13 @@ jobs:
           import { createHash } from 'node:crypto';
           import { lstatSync, readdirSync, readFileSync } from 'node:fs';
           import { join, relative } from 'node:path';
-
           const root = process.argv[2];
           const files = [];
           const walk = (directory) => {
             for (const name of readdirSync(directory).sort()) {
               const path = join(directory, name);
               const stat = lstatSync(path);
-              if (stat.isDirectory()) walk(path);
-              else files.push(path);
+              if (stat.isDirectory()) walk(path); else files.push(path);
             }
           };
           walk(root);
@@ -132,8 +158,6 @@ jobs:
           NODE
           )"
           test "$tree_sha256" = "$EXPECTED_TREE_SHA256"
-          echo "Package content SHA-256: $tree_sha256"
-          shasum -a 256 "$archive"
           echo "PULSE_NPM_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Install the exact archive on a clean Mac
@@ -156,9 +180,64 @@ jobs:
             > "$RUNNER_TEMP/pulse-install.json"
           node -e 'const r=require(process.argv[1]); if (r.outcome!=="ready" || r.reason_code!=="installed" || r.host_status?.hosts?.[0]?.installed!==true) process.exit(1)' \
             "$RUNNER_TEMP/pulse-install.json"
+          set +e
+          (cd "$workspace" && HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" doctor codex --json) \
+            > "$RUNNER_TEMP/pulse-doctor.json"
+          set -e
+          jq -e '.checks.retrieval.ok == true and (.checks.retrieval.detail | startswith("full retrieval via bge-m3; semantic retrieval answered in "))' \
+            "$RUNNER_TEMP/pulse-doctor.json" >/dev/null
+
+      - name: Detect an existing exact npm publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npm view "$EXPECTED_PACKAGE@$EXPECTED_VERSION" version >/dev/null 2>&1; then
+            echo 'PULSE_NPM_ALREADY_PUBLISHED=true' >> "$GITHUB_ENV"
+          else
+            echo 'PULSE_NPM_ALREADY_PUBLISHED=false' >> "$GITHUB_ENV"
+          fi
 
       - name: Publish through GitHub trusted publishing
-        if: github.ref == 'refs/heads/main' && inputs.publish
+        if: github.ref == 'refs/heads/main' && inputs.publish_npm && env.PULSE_NPM_ALREADY_PUBLISHED != 'true'
         working-directory: pulse-app/cli
         shell: bash
         run: npm publish "$PULSE_NPM_ARCHIVE" --ignore-scripts --access public --tag preview --provenance
+
+      - name: Verify exact public npm bytes
+        if: inputs.publish_npm || inputs.publish_github_release || env.PULSE_NPM_ALREADY_PUBLISHED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$RUNNER_TEMP/npm-registry"
+          mkdir -p "$registry"
+          npm pack "$EXPECTED_PACKAGE@$EXPECTED_VERSION" --ignore-scripts --pack-destination "$registry" --silent
+          published=("$registry"/*.tgz)
+          test "${#published[@]}" = 1
+          test "$(shasum -a 256 "${published[0]}" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
+
+      - name: Create the matching GitHub prerelease
+        if: github.ref == 'refs/heads/main' && inputs.publish_github_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checksums="$RUNNER_TEMP/SHA256SUMS"
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "zbs-gg-pulse-$EXPECTED_VERSION.tgz" > "$checksums"
+          if gh release view "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/$EXPECTED_GITHUB_TAG:refs/tags/$EXPECTED_GITHUB_TAG" --force
+            test "$(git rev-list -n 1 "$EXPECTED_GITHUB_TAG")" = "$GITHUB_SHA"
+            existing="$RUNNER_TEMP/existing-release"
+            mkdir -p "$existing"
+            gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "zbs-gg-pulse-$EXPECTED_VERSION.tgz" --dir "$existing"
+            test "$(shasum -a 256 "$existing/zbs-gg-pulse-$EXPECTED_VERSION.tgz" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
+          else
+            gh release create "$EXPECTED_GITHUB_TAG" \
+              "$PULSE_NPM_ARCHIVE#zbs-gg-pulse-$EXPECTED_VERSION.tgz" \
+              "$checksums#SHA256SUMS" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$EXPECTED_GITHUB_TITLE" \
+              --notes-file "$EXPECTED_GITHUB_NOTES" \
+              --prerelease

@@ -16,10 +16,13 @@ const RESUME_SECTIONS = Object.freeze([
 export const PERSONAL_AUTO_CAPTURE_CONTEXT = `
 Pulse memory works silently inside this normal turn. Call pulse_memory once only when the work produced a durable decision, preference, open question, project state, correction, or emotional moment; otherwise do not call it. Use personal scope only for context that should follow the person across projects, and project for project-only decisions. Save a short paraphrase, never raw wording, secrets, credentials, paths, transcripts, temporary instructions, or test controls. Mark inferred emotion as inferred. Do not announce routine saving, add a second reply, or retry after a failure.`;
 
-const PROMPT_RECALL_CAPSULE_MIN_COSINE = 0.45;
+const PROMPT_RECALL_CAPSULE_MIN_COSINE = 0.47;
+const PROMPT_RECALL_CAPSULE_LEXICAL_MIN_COSINE = 0.45;
 const PROMPT_RECALL_ARCHIVE_MIN_COSINE = 0.32;
 const PROMPT_RECALL_MAX_BYTES = 2400;
 const PROMPT_RECALL_MAX_SUMMARY_CHARS = 400;
+const PROMPT_RECALL_QUERY_ITEMS = 12;
+const PROMPT_RECALL_MAX_ITEMS = 4;
 
 function boundedPromptSummary(value) {
   const normalized = value.replaceAll(/\s+/g, ' ').trim();
@@ -29,7 +32,55 @@ function boundedPromptSummary(value) {
   return `${(wordBoundary >= 320 ? clipped.slice(0, wordBoundary) : clipped).trimEnd()}…`;
 }
 
-function promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine) {
+function summaryTerms(value) {
+  return new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
+}
+
+function nearDuplicateSummary(left, right) {
+  const normalizedLeft = left.replaceAll(/\s+/g, ' ').trim().toLocaleLowerCase();
+  const normalizedRight = right.replaceAll(/\s+/g, ' ').trim().toLocaleLowerCase();
+  if (normalizedLeft === normalizedRight) return true;
+  const leftTerms = summaryTerms(normalizedLeft);
+  const rightTerms = summaryTerms(normalizedRight);
+  if (leftTerms.size === 0 || rightTerms.size === 0) return false;
+  let shared = 0;
+  for (const term of leftTerms) {
+    if (rightTerms.has(term)) shared += 1;
+  }
+  const smaller = Math.min(leftTerms.size, rightTerms.size);
+  return smaller >= 4 && shared >= 4 && shared / smaller >= 0.85;
+}
+
+function candidateEpisodeKey(event, summary) {
+  const evidenceIDs = Array.isArray(event?.evidence_ids)
+    ? [...new Set(event.evidence_ids.map((value) => String(value)).filter(Boolean))].sort()
+    : [];
+  if (evidenceIDs.length > 0) return `evidence:${evidenceIDs.join(',')}`;
+  const dates = [...new Set(summary.match(/\b(?:19|20)\d{2}(?:-\d{2}(?:-\d{2})?)?\b/g) ?? [])].sort();
+  return dates.length > 0 ? `date:${dates.join(',')}` : null;
+}
+
+function diversePromptCandidates(candidates, limit) {
+  const selected = [];
+  const selectedEpisodes = new Set();
+  const accept = (candidate, requireNewEpisode) => {
+    if (selected.length >= limit || selected.includes(candidate) ||
+        selected.some((item) => nearDuplicateSummary(item.summary, candidate.summary))) return;
+    if (requireNewEpisode && candidate.episodeKey !== null && selectedEpisodes.has(candidate.episodeKey)) return;
+    selected.push(candidate);
+    if (candidate.episodeKey !== null) selectedEpisodes.add(candidate.episodeKey);
+  };
+  for (const candidate of candidates) accept(candidate, true);
+  for (const candidate of candidates) accept(candidate, false);
+  return selected;
+}
+
+function promptMemoryLines(
+  result,
+  capsuleMinimumCosine,
+  capsuleLexicalMinimumCosine,
+  archiveMinimumCosine,
+) {
   const events = Array.isArray(result?.events) ? result.events : [];
   const breakdowns = result?.trace?.retrieval?.score_breakdowns;
   const evidence = result?.trace?.retrieval?.candidate_evidence;
@@ -39,27 +90,36 @@ function promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine) {
   const archive = [];
   for (const event of events) {
     const cosine = Number(breakdowns[String(event?.id)]?.cosine ?? breakdowns[event?.id]?.cosine);
-    const candidate = evidence[String(event?.id)] ?? evidence[event?.id];
+    const evidenceCandidate = evidence[String(event?.id)] ?? evidence[event?.id];
     const summary = typeof event?.summary === 'string' && event.summary.trim() !== ''
       ? event.summary.trim()
       : typeof event?.title === 'string' ? event.title.trim() : '';
     if (!Number.isFinite(cosine) || summary === '') continue;
-    const line = `- ${boundedPromptSummary(summary)}`;
-    const hybridAgreement = candidate?.dense === true && candidate?.lexical === true;
-    if (candidate?.direct_capsule === true) {
-      if (cosine >= capsuleMinimumCosine) direct.push(line);
+    const bounded = boundedPromptSummary(summary);
+    const promptCandidate = {
+      line: `- ${bounded}`,
+      summary: bounded,
+      episodeKey: candidateEpisodeKey(event, bounded),
+    };
+    const hybridAgreement = evidenceCandidate?.dense === true && evidenceCandidate?.lexical === true;
+    if (evidenceCandidate?.direct_capsule === true) {
+      const minimum = hybridAgreement ? capsuleLexicalMinimumCosine : capsuleMinimumCosine;
+      if (cosine >= minimum) direct.push(promptCandidate);
     } else if (cosine >= archiveMinimumCosine && hybridAgreement) {
-      archive.push(line);
+      archive.push(promptCandidate);
     }
   }
-  if (direct.length > 0) return direct.slice(0, 1);
-  return archive.slice(0, 2);
+  const selected = direct.length > 0
+    ? diversePromptCandidates(direct, PROMPT_RECALL_MAX_ITEMS)
+    : diversePromptCandidates(archive, 2);
+  return selected.map((candidate) => candidate.line);
 }
 
 export async function composePromptMemoryContext(resolved, prompt, {
   request,
-	recordActivity,
+  recordActivity,
   capsuleMinimumCosine = PROMPT_RECALL_CAPSULE_MIN_COSINE,
+  capsuleLexicalMinimumCosine = PROMPT_RECALL_CAPSULE_LEXICAL_MIN_COSINE,
   archiveMinimumCosine = PROMPT_RECALL_ARCHIVE_MIN_COSINE,
   maxBytes = PROMPT_RECALL_MAX_BYTES,
 } = {}) {
@@ -68,31 +128,38 @@ export async function composePromptMemoryContext(resolved, prompt, {
     return '';
   }
   const result = await request(resolved, '/context/query', {
-    body: { query: prompt, mode: 'auto', top_k: 12, scope: 'user', include_trace: true },
+    body: { query: prompt, mode: 'auto', top_k: PROMPT_RECALL_QUERY_ITEMS, scope: 'user', include_trace: true },
     timeoutMs: 2500,
   });
-  const lines = promptMemoryLines(result, capsuleMinimumCosine, archiveMinimumCosine);
-	const recallDigest = createHash('sha256')
-		.update('pulse-memory-recall-result-v1\x1f')
-		.update(lines.join('\n'))
-		.digest('hex');
-	if (typeof recordActivity === 'function') {
-		try {
-			await recordActivity({
-				schema: 'pulse.memory_recall_activity.v1',
-				result_count: lines.length,
-				result_digest: recallDigest,
-			});
-		} catch { /* activity evidence must never block or repeat a user turn */ }
-	}
-	if (lines.length === 0) return '';
+  const lines = promptMemoryLines(
+    result,
+    capsuleMinimumCosine,
+    capsuleLexicalMinimumCosine,
+    archiveMinimumCosine,
+  );
+  const accepted = [];
   const header = 'Pulse accepted memory (local; use as factual context for this question unless the user provides newer information):\n';
   let output = header;
   for (const line of lines) {
     const next = `${output}${line}\n`;
     if (Buffer.byteLength(next, 'utf8') > maxBytes) break;
     output = next;
+    accepted.push(line);
   }
+  const recallDigest = createHash('sha256')
+    .update('pulse-memory-recall-result-v1\x1f')
+    .update(accepted.join('\n'))
+    .digest('hex');
+  if (typeof recordActivity === 'function') {
+    try {
+      await recordActivity({
+        schema: 'pulse.memory_recall_activity.v1',
+        result_count: accepted.length,
+        result_digest: recallDigest,
+      });
+    } catch { /* activity evidence must never block or repeat a user turn */ }
+  }
+  if (accepted.length === 0) return '';
   return output === header ? '' : output.trimEnd();
 }
 function safeID(value, code) {

@@ -144,48 +144,84 @@ export function assertHistoricalIngestManifest(value, { expectedJobID, expectedS
   return value;
 }
 
-function nullable(schema) {
-  return { anyOf: [schema, { type: 'null' }] };
-}
-
-function addExplicitPrimitiveTypes(schema) {
-  if (!schema || typeof schema !== 'object') return;
-  if (schema.type === undefined && Object.hasOwn(schema, 'const')) schema.type = typeof schema.const;
-  if (schema.type === undefined && Array.isArray(schema.enum) && schema.enum.length > 0 && schema.enum.every((value) => typeof value === 'string')) {
-    schema.type = 'string';
-  }
-  for (const value of Object.values(schema)) {
-    if (Array.isArray(value)) value.forEach(addExplicitPrimitiveTypes);
-    else addExplicitPrimitiveTypes(value);
-  }
-}
-
-// Codex Structured Outputs rejects JSON Schema conditionals and requires every
-// object property to be listed in required. This schema is derived from the
-// canonical artifact and stays closed; the canonical validator below remains
-// authoritative for cross-field and material-kind rules.
+// The canonical manifest remains unchanged, but the model sees only Pulse's
+// atomic memory contract. Graph-shaped material is neither requested nor
+// accepted. Normalization below converts these atoms into the canonical review
+// manifest before the existing validator and apply path see them.
 export function codexHistoricalIngestOutputSchemaBytes() {
-  const schema = structuredClone(historicalIngestSchema());
-  schema.$id = 'https://zbs.gg/schemas/pulse/historical-ingest/codex-output/v1';
-  schema.title = 'Pulse Historical Ingest Codex Output v1';
-  const scopeSchema = schema.$defs.scope;
-  delete scopeSchema.allOf;
-  scopeSchema.required = Object.keys(scopeSchema.properties);
-  scopeSchema.properties.project_id = nullable(scopeSchema.properties.project_id);
-  const timeSchema = schema.$defs.validTime;
-  timeSchema.required = Object.keys(timeSchema.properties);
-  timeSchema.properties.to = nullable(timeSchema.properties.to);
-  const payloadSchema = schema.$defs.payload;
-  payloadSchema.required = Object.keys(payloadSchema.properties);
-  for (const [key, value] of Object.entries(payloadSchema.properties)) payloadSchema.properties[key] = nullable(value);
-  delete schema.$defs.materialItem.allOf;
-  addExplicitPrimitiveTypes(schema);
+  const nullable = (schema) => ({ anyOf: [schema, { type: 'null' }] });
+  const schema = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'https://zbs.gg/schemas/pulse/historical-ingest/codex-atoms/v2',
+    title: 'Pulse Historical Atomic Memory Output v2',
+    type: 'object', additionalProperties: false,
+    required: ['schema_version', 'job_id', 'revision', 'source_snapshot_digest', 'items'],
+    properties: {
+      schema_version: { type: 'string', const: SCHEMA_VERSION },
+      job_id: { type: 'string', pattern: '^job_[a-f0-9]{16,64}$' },
+      revision: { type: 'integer', minimum: 1 },
+      source_snapshot_digest: { $ref: '#/$defs/digest' },
+      items: { type: 'array', maxItems: 10000, items: { $ref: '#/$defs/atom' } },
+    },
+    $defs: {
+      digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      atom: {
+        type: 'object', additionalProperties: false,
+        required: ['kind', 'summary', 'source_ids', 'emotion_label', 'emotion_intensity'],
+        properties: {
+          kind: { type: 'string', enum: ['fact', 'preference', 'event', 'decision', 'correction', 'open_question', 'project_state', 'emotion'] },
+          summary: { type: 'string', minLength: 1, maxLength: 400 },
+          source_ids: { type: 'array', minItems: 1, maxItems: 512, items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$' } },
+          emotion_label: nullable({ type: 'string', minLength: 1, maxLength: 64 }),
+          emotion_intensity: nullable({ type: 'number', minimum: 0, maximum: 1 }),
+        },
+      },
+    },
+  };
   return Buffer.from(`${JSON.stringify(schema)}\n`);
 }
 
-export function normalizeCodexHistoricalIngestManifest(value) {
+function atomMaterial(item, sourceRefsByLocator) {
+  if (!item || typeof item.summary !== 'string' || item.summary.length < 1 || item.summary.length > 400) return null;
+  if (!(sourceRefsByLocator instanceof Map) || !Array.isArray(item.source_ids) || item.source_ids.length < 1) return null;
+  const sources = [...new Set(item.source_ids)].map((locator) => sourceRefsByLocator.get(locator));
+  if (sources.some((source) => !source?.ref || typeof source.timestamp !== 'string')) return null;
+  const inferredEmotion = item.kind === 'emotion';
+  const base = {
+    candidate_id: `candidate_${createHash('sha256').update(canonicalJSON({
+      kind: item.kind, summary: item.summary, source_ids: [...new Set(item.source_ids)].sort(),
+    })).digest('hex')}`,
+    confidence: inferredEmotion ? 0.7 : 1,
+    privacy: 'private',
+    epistemic_status: inferredEmotion ? 'hypothesis' : 'explicit',
+    derivation: inferredEmotion ? 'inferred' : 'direct',
+    valid_time: { from: sources.map((source) => source.timestamp).sort()[0] },
+    scope: { kind: 'unassigned' },
+    source_refs: structuredClone(sources.map((source) => source.ref)),
+  };
+  switch (item.kind) {
+  case 'decision': return { ...base, kind: 'decision', payload: { summary: item.summary } };
+  case 'event': return { ...base, kind: 'event', payload: { title: item.summary, summary: item.summary } };
+  case 'open_question': return { ...base, kind: 'continuity', payload: { summary: item.summary, continuity_status: 'open' } };
+  case 'project_state': return { ...base, kind: 'state', payload: { state_kind: 'project_state', summary: item.summary } };
+  case 'emotion':
+    if (typeof item.emotion_label !== 'string' || typeof item.emotion_intensity !== 'number') return null;
+    return { ...base, kind: 'state', payload: { state_kind: item.emotion_label, summary: item.summary, intensity: item.emotion_intensity } };
+  case 'fact':
+  case 'preference':
+  case 'correction':
+    return { ...base, kind: 'assertion', payload: { subject_id: 'memory_subject', predicate: item.kind, object_value: item.summary } };
+  default: return null;
+  }
+}
+
+export function normalizeCodexHistoricalIngestManifest(value, { sourceRefsByLocator } = {}) {
   const normalized = structuredClone(value);
   if (!normalized || !Array.isArray(normalized.items)) return normalized;
+  if (normalized.items.some((item) => Object.hasOwn(item ?? {}, 'summary'))) {
+    normalized.items = normalizeDuplicateCandidateIDs(normalized.items.map((item) => atomMaterial(item, sourceRefsByLocator)).filter(Boolean));
+    return normalized;
+  }
   for (const item of normalized.items) {
     if (item?.scope?.project_id === null) delete item.scope.project_id;
     if (item?.valid_time && Object.hasOwn(item.valid_time, 'to')) {
@@ -207,9 +243,44 @@ export function normalizeCodexHistoricalIngestManifest(value) {
     }
   }
   normalized.items = normalizeDuplicateCandidateIDs(
-    normalized.items.filter((item) => payloadIsCanonical(item?.payload, item?.kind)),
+    normalized.items.filter((item) =>
+      !new Set(['person', 'project', 'relation']).has(item?.kind) &&
+      payloadIsCanonical(item?.payload, item?.kind)),
   );
   return normalized;
+}
+
+export function historicalCoverageRepairLocators(manifest, evidenceLocators) {
+  assertHistoricalIngestManifest(manifest);
+  if (!Array.isArray(evidenceLocators) || evidenceLocators.some((item) =>
+    typeof item !== 'string' || !OPAQUE_LOCATOR.test(item))) fail('coverage_repair_locators');
+  const covered = new Set(manifest.items.flatMap((item) =>
+    item.source_refs.map((ref) => ref.record_locator)));
+  return [...new Set(evidenceLocators)].filter((locator) => !covered.has(locator));
+}
+
+export function mergeHistoricalCoverageRepair(primary, repair, targetLocators) {
+  assertHistoricalIngestManifest(primary);
+  assertHistoricalIngestManifest(repair, {
+    expectedJobID: primary.job_id,
+    expectedSnapshotDigest: primary.source_snapshot_digest,
+  });
+  if (!Array.isArray(targetLocators) || targetLocators.length < 1 || targetLocators.some((item) =>
+    typeof item !== 'string' || !OPAQUE_LOCATOR.test(item))) fail('coverage_repair_locators');
+  const targets = new Set(targetLocators);
+  const repairItems = repair.items.filter((item) =>
+    item.source_refs.some((ref) => targets.has(ref.record_locator)));
+  const merged = {
+    schema_version: primary.schema_version,
+    job_id: primary.job_id,
+    revision: primary.revision,
+    source_snapshot_digest: primary.source_snapshot_digest,
+    items: normalizeDuplicateCandidateIDs([...primary.items, ...repairItems]),
+  };
+  return assertHistoricalIngestManifest(merged, {
+    expectedJobID: primary.job_id,
+    expectedSnapshotDigest: primary.source_snapshot_digest,
+  });
 }
 
 function canonicalJSON(value) {
@@ -281,4 +352,3 @@ export function contentFreeUnitReceipt({ manifest, outputDigest, usage, model, e
     usage: Object.freeze({ ...usage }),
   });
 }
-import { historicalIngestSchema } from './historical-ingest-schema.js';

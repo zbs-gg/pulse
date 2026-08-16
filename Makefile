@@ -26,7 +26,7 @@ PULSE_ADDR    ?= 127.0.0.1:18789
 VERIFY_LOG    ?= $(HOME)/.claude/verify-log.jsonl
 
 .DEFAULT_GOAL := help
-.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test native-universal-contract verify personal-consolidation-report-e2e personal-native-packed-e2e personal-package-verify personal-real-mlx-release personal-preview-attestation release-verify
+.PHONY: help build test run run-server clean lint fmt mcp-test mcp-build cli-test native-universal-contract verify personal-consolidation-report-e2e personal-native-packed-e2e personal-package-verify personal-real-mlx-release personal-preview-attestation preview-publication-verify release-verify
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -86,7 +86,10 @@ personal-package-verify: ## Pack, scan, install, and exercise the exact Personal
 personal-native-packed-e2e: ## Install the exact archive into an isolated native Personal runtime
 	cd $(CLI_DIR) && $(NPM) run --silent test:personal-native-packed
 
-release-verify: verify personal-package-verify personal-native-packed-e2e ## Reproducible Personal npm release gate
+preview-publication-verify: ## Bind version, signed epoch, docs, npm bytes, and GitHub prerelease notes
+	cd $(CLI_DIR) && $(NPM) run --silent verify:preview-publication
+
+release-verify: verify preview-publication-verify personal-package-verify personal-native-packed-e2e ## Reproducible Personal npm release gate
 
 verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-log.jsonl
 	@verify_data=$$(mktemp -d "$${TMPDIR:-/tmp}/pulse-verify.XXXXXX") || exit 1; \

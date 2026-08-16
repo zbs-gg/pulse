@@ -27,7 +27,7 @@ func TestMemoryRecallActivityStoresOnlyContentFreeProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/memory/activity/recall", strings.NewReader(
-		`{"schema":"pulse.memory_recall_activity.v1","result_count":1,"result_digest":"`+strings.Repeat("d", 64)+`"}`,
+		`{"schema":"pulse.memory_recall_activity.v1","result_count":12,"result_digest":"`+strings.Repeat("d", 64)+`"}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Pulse-Key", "secret")
@@ -50,7 +50,7 @@ func TestMemoryRecallActivityStoresOnlyContentFreeProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if activity.Hosts["codex"].RepositoryID != "repository_project_b" || activity.Hosts["codex"].ResultCount != 1 {
+	if activity.Hosts["codex"].RepositoryID != "repository_project_b" || activity.Hosts["codex"].ResultCount != 12 {
 		t.Fatalf("activity=%#v", activity)
 	}
 }

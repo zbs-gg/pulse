@@ -1,0 +1,266 @@
+{
+  "schema": "pulse.emotional_memory_benchmark.v1",
+  "description": "Synthetic conversations for testing emotional memory without exposing private source material or passing emotion labels to retrieval.",
+  "cases": [
+    {
+      "id": "dev-relief-after-delay",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-01-08T09:00:00Z", "speaker": "user", "text": "Mara said she felt panicked about Friday's launch deadline and barely slept." },
+        { "source_id": "R2", "date": "2026-01-09T16:00:00Z", "speaker": "user", "text": "The client moved Mara's launch to next month. Mara said her shoulders finally dropped and she could breathe again." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How does Mara now feel about the launch schedule?", "gold_answer": "Mara feels relieved because the deadline moved to next month; the earlier panic is no longer her current state.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "How did Mara feel after completing a marathon?", "gold_answer": "The memory does not say that Mara completed a marathon or how she felt about one." },
+        { "id": "unrelated", "kind": "negative", "question": "How many moons does Mars have?", "gold_answer": "Mars has two moons." }
+      ]
+    },
+    {
+      "id": "dev-inferred-pride",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-01-11T18:00:00Z", "speaker": "user", "text": "After Inez presented the prototype, the director called it the clearest demo of the quarter." },
+        { "source_id": "R2", "date": "2026-01-11T18:05:00Z", "speaker": "user", "text": "Inez kept rereading the message on the train home and could not stop smiling." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What emotional significance did the prototype presentation have for Inez?", "gold_answer": "Inez appeared proud and validated by the director's praise; this is inferred from her repeatedly rereading it and smiling.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Inez frightened by a house fire?", "gold_answer": "The memory contains no house fire and gives no basis for that emotion." },
+        { "id": "unrelated", "kind": "negative", "question": "What is the freezing point of water in Celsius?", "gold_answer": "Water freezes at 0 degrees Celsius under standard pressure." }
+      ]
+    },
+    {
+      "id": "dev-grief-boundary",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-02-02T10:00:00Z", "speaker": "user", "text": "Today is six years since Tomas's brother Leo died. Tomas said the anniversary still feels heavy." },
+        { "source_id": "R2", "date": "2026-02-02T10:02:00Z", "speaker": "user", "text": "Tomas asked people not to cheer him up with jokes today; quiet company is welcome." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How should someone support Tomas on Leo's anniversary?", "gold_answer": "Tomas is grieving and wants quiet company rather than jokes or forced cheering up.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Tomas delighted by a lottery win?", "gold_answer": "The memory says nothing about a lottery win or Tomas's reaction to one." },
+        { "id": "unrelated", "kind": "negative", "question": "Which planet is closest to the Sun?", "gold_answer": "Mercury is closest to the Sun." }
+      ]
+    },
+    {
+      "id": "dev-anger-repaired",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-02-10T12:00:00Z", "speaker": "user", "text": "Owen was furious when Ravi changed the agreed scope without asking." },
+        { "source_id": "R2", "date": "2026-02-12T15:00:00Z", "speaker": "user", "text": "Owen and Ravi talked through the scope change. Ravi apologized, restored the plan, and Owen said the anger had passed." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "Is Owen still angry with Ravi about the scope change?", "gold_answer": "No. Owen was angry, but after Ravi apologized and restored the plan, Owen said the anger had passed.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "How did Owen feel about selling his car?", "gold_answer": "The memory does not mention Owen selling a car or feeling anything about it." },
+        { "id": "unrelated", "kind": "negative", "question": "What gas do plants absorb from the air?", "gold_answer": "Plants absorb carbon dioxide." }
+      ]
+    },
+    {
+      "id": "dev-anxiety-before-scan",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-03-03T07:30:00Z", "speaker": "user", "text": "Nora's medical scan is tomorrow. She slept for only two hours and her hands keep shaking." },
+        { "source_id": "R2", "date": "2026-03-03T07:35:00Z", "speaker": "user", "text": "Nora said practical details about the appointment help more than vague reassurance." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What is Nora's emotional state before the scan, and what support does she prefer?", "gold_answer": "Nora appears highly anxious before the scan, inferred from severe sleeplessness and shaking; she prefers practical appointment details to vague reassurance.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Nora excited about buying a sailboat?", "gold_answer": "The memory contains no sailboat purchase or emotional reaction to one." },
+        { "id": "unrelated", "kind": "negative", "question": "What is 7 multiplied by 8?", "gold_answer": "7 multiplied by 8 is 56." }
+      ]
+    },
+    {
+      "id": "dev-joy-first-steps",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-03-14T19:00:00Z", "speaker": "user", "text": "Sam's daughter Lila took her first three steps today." },
+        { "source_id": "R2", "date": "2026-03-14T19:03:00Z", "speaker": "user", "text": "Sam cried, laughed, and called his parents immediately because he felt overwhelmingly happy." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "Why was today emotionally important for Sam?", "gold_answer": "Sam felt overwhelming joy because his daughter Lila took her first three steps.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Did Sam feel ashamed after losing a tennis match?", "gold_answer": "The memory does not mention a tennis match or shame about one." },
+        { "id": "unrelated", "kind": "negative", "question": "Who wrote Pride and Prejudice?", "gold_answer": "Jane Austen wrote Pride and Prejudice." }
+      ]
+    },
+    {
+      "id": "dev-guilt-repaired",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-03-20T08:00:00Z", "speaker": "user", "text": "Kei forgot Mira's birthday and said the mistake made him feel deeply guilty." },
+        { "source_id": "R2", "date": "2026-03-21T20:00:00Z", "speaker": "user", "text": "Kei apologized without excuses. Mira accepted it, and Kei said he still regretted the miss but felt much lighter." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How did Kei's feelings change after apologizing to Mira?", "gold_answer": "Kei moved from deep guilt to relief after Mira accepted the apology, although he still regretted forgetting the birthday.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "How did Kei react to graduating from law school?", "gold_answer": "The memory says nothing about Kei graduating from law school or reacting to it." },
+        { "id": "unrelated", "kind": "negative", "question": "What shape has three sides?", "gold_answer": "A triangle has three sides." }
+      ]
+    },
+    {
+      "id": "dev-overwhelm-needs-quiet",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-04-01T17:00:00Z", "speaker": "user", "text": "Priya has four deadlines and constant notifications this week. She said every new ping feels like another weight." },
+        { "source_id": "R2", "date": "2026-04-01T17:05:00Z", "speaker": "user", "text": "Priya blocked tomorrow morning with notifications off and asked colleagues not to schedule meetings then." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What is weighing on Priya, and what would help tomorrow?", "gold_answer": "Priya feels overwhelmed by deadlines and notifications; an interruption-free morning with no meetings would help.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Priya nervous about adopting a puppy?", "gold_answer": "The memory has no puppy adoption or emotion connected to one." },
+        { "id": "unrelated", "kind": "negative", "question": "What instrument has black and white keys?", "gold_answer": "A piano has black and white keys." }
+      ]
+    },
+    {
+      "id": "dev-trust-from-support",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-04-09T13:00:00Z", "speaker": "user", "text": "Luis was sick during the investor week, and Ren covered his meeting without being asked." },
+        { "source_id": "R2", "date": "2026-04-09T13:04:00Z", "speaker": "user", "text": "Luis said Ren's quiet help made him feel safe relying on the team for the first time." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What changed in Luis's relationship with the team during investor week?", "gold_answer": "Ren's unsolicited help made Luis feel supported and safe relying on the team, increasing his trust.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Did Luis resent Ren for canceling a holiday?", "gold_answer": "The memory says nothing about Ren canceling a holiday or Luis resenting it." },
+        { "id": "unrelated", "kind": "negative", "question": "What is the capital of Japan?", "gold_answer": "Tokyo is the capital of Japan." }
+      ]
+    },
+    {
+      "id": "dev-disappointment-with-hope",
+      "split": "development",
+      "records": [
+        { "source_id": "R1", "date": "2026-04-17T11:00:00Z", "speaker": "user", "text": "Asha was rejected from the Northbridge fellowship she had prepared for all winter." },
+        { "source_id": "R2", "date": "2026-04-17T11:06:00Z", "speaker": "user", "text": "Asha said the rejection hurt badly, but she saved the feedback and plans to apply again next year." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How is Asha holding the Northbridge rejection?", "gold_answer": "Asha is deeply disappointed, but also hopeful and determined enough to use the feedback and apply again next year.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "How did Asha feel after winning a cooking contest?", "gold_answer": "The memory contains no cooking contest or reaction to winning one." },
+        { "id": "unrelated", "kind": "negative", "question": "Which ocean is the largest?", "gold_answer": "The Pacific Ocean is the largest." }
+      ]
+    },
+    {
+      "id": "holdout-relief-found-cat",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-05-02T06:00:00Z", "speaker": "user", "text": "Elena's cat Miso disappeared overnight. Elena searched until dawn and said she was terrified." },
+        { "source_id": "R2", "date": "2026-05-02T09:00:00Z", "speaker": "user", "text": "A neighbor found Miso asleep in a garage. Elena said she could finally unclench her jaw and stop imagining the worst." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What is Elena's current emotional state about Miso?", "gold_answer": "Elena is relieved now that Miso was found safe; her earlier terror is no longer current.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Elena proud after publishing a novel?", "gold_answer": "The memory does not mention Elena publishing a novel or feeling proud about one." },
+        { "id": "unrelated", "kind": "negative", "question": "How many days are in a leap year?", "gold_answer": "A leap year has 366 days." }
+      ]
+    },
+    {
+      "id": "holdout-shame-softened",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-05-10T14:00:00Z", "speaker": "user", "text": "Dev sent the wrong figures during the all-hands meeting and wanted to disappear when everyone noticed." },
+        { "source_id": "R2", "date": "2026-05-10T15:30:00Z", "speaker": "user", "text": "Dev's manager called privately, said mistakes happen, and helped send a correction. Dev said the kindness stopped the spiral." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What did the manager's response change for Dev after the all-hands mistake?", "gold_answer": "Dev initially felt intense shame; the manager's private kindness and practical help softened it and stopped the emotional spiral.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Did Dev feel jealous about a sibling's wedding?", "gold_answer": "The memory has no sibling wedding or evidence of jealousy." },
+        { "id": "unrelated", "kind": "negative", "question": "What language is primarily spoken in Brazil?", "gold_answer": "Portuguese is primarily spoken in Brazil." }
+      ]
+    },
+    {
+      "id": "holdout-mixed-anticipation",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-05-18T20:00:00Z", "speaker": "user", "text": "Yuki signed the lease for a move to Kyoto in July." },
+        { "source_id": "R2", "date": "2026-05-18T20:04:00Z", "speaker": "user", "text": "Yuki has already mapped cafés and parks, but her stomach flips whenever she thinks about arriving without knowing anyone." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How does Yuki feel about moving to Kyoto?", "gold_answer": "Yuki feels excited anticipation mixed with nervousness and uncertainty about arriving without a social circle.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Yuki angry about losing a chess tournament?", "gold_answer": "The memory does not mention a chess tournament or anger about one." },
+        { "id": "unrelated", "kind": "negative", "question": "What do bees make?", "gold_answer": "Bees make honey." }
+      ]
+    },
+    {
+      "id": "holdout-loneliness-improving",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-06-01T21:00:00Z", "speaker": "user", "text": "Since starting remote work, Mateo sometimes goes three days without speaking to anyone and says the apartment feels painfully quiet." },
+        { "source_id": "R2", "date": "2026-06-08T18:00:00Z", "speaker": "user", "text": "Mateo joined a Wednesday coworking group. He still feels lonely on some evenings, but said the week no longer feels endless." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "Is Mateo's loneliness resolved by the coworking group?", "gold_answer": "No. The coworking group has eased Mateo's loneliness and made the week feel manageable, but lonely evenings still occur.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Mateo relieved after repairing a motorcycle?", "gold_answer": "The memory contains no motorcycle repair or reaction to one." },
+        { "id": "unrelated", "kind": "negative", "question": "At what temperature does water boil in Celsius at sea level?", "gold_answer": "Water boils at 100 degrees Celsius at sea level." }
+      ]
+    },
+    {
+      "id": "holdout-gratitude-care",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-06-14T03:00:00Z", "speaker": "user", "text": "During a frightening night in hospital, nurse Ana stayed after her shift to explain each alarm to Bo." },
+        { "source_id": "R2", "date": "2026-06-14T11:00:00Z", "speaker": "user", "text": "Bo wrote Ana a note saying her patience made him feel less alone and that he would remember it for years." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "Why is nurse Ana emotionally significant to Bo?", "gold_answer": "Bo feels lasting gratitude because Ana's patient explanations made a frightening hospital night feel less lonely.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Bo embarrassed by a speech at a wedding?", "gold_answer": "The memory says nothing about a wedding speech or embarrassment." },
+        { "id": "unrelated", "kind": "negative", "question": "Which animal is known for black and white stripes?", "gold_answer": "A zebra is known for black and white stripes." }
+      ]
+    },
+    {
+      "id": "holdout-frustration-to-pride",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-06-22T22:00:00Z", "speaker": "user", "text": "After the payment bug returned for the fourth time, Chen slammed the laptop shut and said he was done for the night." },
+        { "source_id": "R2", "date": "2026-06-23T10:00:00Z", "speaker": "user", "text": "Chen found the race condition the next morning, added the missing lock, and said he was proud he had not shipped another patch blindly." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "How did Chen's emotional state around the payment bug change?", "gold_answer": "Chen moved from intense frustration to pride after identifying the race condition and fixing it carefully rather than patching blindly.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Did Chen feel guilty about missing a flight?", "gold_answer": "The memory does not mention a missed flight or guilt about one." },
+        { "id": "unrelated", "kind": "negative", "question": "What is the opposite of north?", "gold_answer": "South is the opposite of north." }
+      ]
+    },
+    {
+      "id": "holdout-fear-grounding",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-07-03T12:00:00Z", "speaker": "user", "text": "Severe turbulence on the Oslo flight made Farah grip the seat until her fingers hurt." },
+        { "source_id": "R2", "date": "2026-07-03T12:05:00Z", "speaker": "user", "text": "Farah said naming five things she could see helped; being told that she was overreacting made the fear worse." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What helps Farah when she is frightened during a flight?", "gold_answer": "Farah experiences strong fear during turbulence. Sensory grounding helps, while dismissing the fear as overreaction makes it worse.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Farah joyful about opening a bakery?", "gold_answer": "The memory has no bakery opening or evidence of joy about one." },
+        { "id": "unrelated", "kind": "negative", "question": "Which metal is liquid at room temperature?", "gold_answer": "Mercury is liquid at room temperature." }
+      ]
+    },
+    {
+      "id": "holdout-disappointment-reframed",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-07-12T15:00:00Z", "speaker": "user", "text": "The band canceled the concert that Rosa and Nia had planned around for months. Rosa said she felt crushed." },
+        { "source_id": "R2", "date": "2026-07-12T16:00:00Z", "speaker": "user", "text": "Nia booked a small weekend trip instead. Rosa is still disappointed about the concert but now looks forward to having time together." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "Did the weekend trip erase Rosa's disappointment about the concert?", "gold_answer": "No. Rosa remains disappointed about the canceled concert, while also looking forward to the replacement trip with Nia.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Rosa anxious about taking a driving test?", "gold_answer": "The memory does not mention a driving test or anxiety about one." },
+        { "id": "unrelated", "kind": "negative", "question": "How many continents are there?", "gold_answer": "There are seven continents." }
+      ]
+    },
+    {
+      "id": "holdout-protective-anger",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-07-21T09:00:00Z", "speaker": "user", "text": "Alex became angry when a colleague asked the whole office for details about Alex's mother's treatment." },
+        { "source_id": "R2", "date": "2026-07-21T09:10:00Z", "speaker": "user", "text": "Alex said concern is welcome, but medical details about his mother must be asked privately and may remain unanswered." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What boundary matters when asking Alex about his mother's health?", "gold_answer": "Alex's anger protects a privacy boundary: concern is welcome, but medical details must be asked privately and Alex may decline to answer.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Was Alex surprised by receiving a scholarship?", "gold_answer": "The memory contains no scholarship or reaction to receiving one." },
+        { "id": "unrelated", "kind": "negative", "question": "What is the largest mammal?", "gold_answer": "The blue whale is the largest mammal." }
+      ]
+    },
+    {
+      "id": "holdout-calm-after-taxes",
+      "split": "holdout",
+      "records": [
+        { "source_id": "R1", "date": "2026-08-01T08:00:00Z", "speaker": "user", "text": "The unfinished tax filing had been sitting on June's desk for three weeks and waking her before dawn." },
+        { "source_id": "R2", "date": "2026-08-01T19:00:00Z", "speaker": "user", "text": "June submitted the return today, made tea, and said the apartment finally felt quiet again." }
+      ],
+      "questions": [
+        { "id": "positive", "kind": "positive", "question": "What changed for June after submitting the tax return?", "gold_answer": "June moved from persistent stress and disrupted sleep to relief and calm after submitting the return.", "evidence_ids": ["R1", "R2"] },
+        { "id": "unsupported", "kind": "negative", "question": "Did June feel disgusted after tasting spoiled soup?", "gold_answer": "The memory says nothing about spoiled soup or June's reaction to it." },
+        { "id": "unrelated", "kind": "negative", "question": "Which season follows spring?", "gold_answer": "Summer follows spring." }
+      ]
+    }
+  ]
+}

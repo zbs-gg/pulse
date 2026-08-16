@@ -42,6 +42,7 @@ import {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptDir, '..');
+const packageVersion = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version;
 const repoRoot = resolve(cliRoot, '..', '..');
 const pulseAppRoot = resolve(cliRoot, '..');
 const requireRealMLX = process.env.PULSE_CODEX_E2E_REQUIRE_REAL_MLX === '1';
@@ -236,7 +237,7 @@ async function prepareRealMLXInputs(root) {
 	const osVersion = run('/usr/bin/sw_vers', ['-productVersion']).stdout.trim();
 	const release = verifyReleaseManifestEnvelope(envelope, {
 		architecture: 'arm64', minimumAcceptedEpoch: envelope.payload.release.epoch,
-		now: new Date(), osVersion, packageVersion: '0.8.1', platform: 'darwin',
+			now: new Date(), osVersion, packageVersion: envelope.payload.release.version, platform: 'darwin',
 		trustedKeys: pinnedReleaseKeyring(realReleaseRoot),
 	});
 	const runtimeDescriptor = release.artifacts['embedder-runtime'];
@@ -344,7 +345,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	const packedPackageRoot = resolve(packedCLI, '..', '..');
 	const packedPackageJSON = JSON.parse(readFileSync(join(packedPackageRoot, 'package.json'), 'utf8'));
 	assert.equal(packedPackageJSON.name, '@zbs-gg/pulse');
-	assert.equal(packedPackageJSON.version, '0.8.1');
+	assert.equal(packedPackageJSON.version, packageVersion);
 	const publicPackageAudit = auditPublicPackageRoot(packedPackageRoot);
 	assert.equal(publicPackageAudit.content_free, true);
 	Object.assign(productEvidence, {

@@ -9,12 +9,14 @@ import {
   assertHistoricalIngestManifest,
   codexHistoricalIngestOutputSchemaBytes,
   contentFreeUnitReceipt,
+  historicalCoverageRepairLocators,
+  mergeHistoricalCoverageRepair,
   normalizeCodexHistoricalIngestManifest,
 } from './historical-ingest-protocol.js';
 
-export const CODEX_LUNA_MODEL = 'gpt-5.6-luna';
-export const CODEX_LUNA_EFFORT = 'low';
-export const QUALIFIED_CODEX_VERSION = 'codex-cli 0.144.6';
+export const CODEX_MEMORY_MODEL = 'gpt-5.4';
+export const CODEX_MEMORY_EFFORT = 'low';
+export const QUALIFIED_CODEX_VERSION = 'codex-cli 0.147.0-alpha.6.6';
 export const CODEX_DISABLED_FEATURES = Object.freeze([
   'shell_tool', 'unified_exec', 'code_mode_host', 'apps', 'plugins',
   'browser_use', 'browser_use_external', 'browser_use_full_cdp_access',
@@ -35,6 +37,8 @@ const AUTH = /(?:401|not logged in|authentication|unauthorized|login required)/i
 const MODEL = /(?:model[^\n]{0,80}(?:unavailable|unsupported|not found|does not exist)|unknown model)/i;
 const MAX_EVENT_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_PROMPT_BYTES = 32 * 1024;
+const DISABLED_CODE_MODE_NOTICE = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
 
 export class CodexSubscriptionRunnerError extends Error {
   constructor(code) {
@@ -46,6 +50,25 @@ export class CodexSubscriptionRunnerError extends Error {
 
 function fail(code) {
   throw new CodexSubscriptionRunnerError(code);
+}
+
+function evidenceSourceRefs(evidence) {
+  if (evidence === '') return new Map();
+  let value;
+  try { value = JSON.parse(evidence); } catch { fail('unit_input_invalid'); }
+  if (!Array.isArray(value?.sources) || !Array.isArray(value?.records)) fail('unit_input_invalid');
+  const prefixes = new Map(value.sources.map((source) => [source?.alias, source?.prefix_digest]));
+  const refs = new Map();
+  for (const record of value.records) {
+    const prefix = prefixes.get(record?.source_alias);
+    if (typeof record?.locator !== 'string' || typeof prefix !== 'string' || refs.has(record.locator) ||
+        typeof record.timestamp !== 'string' || Number.isNaN(Date.parse(record.timestamp))) fail('unit_input_invalid');
+    refs.set(record.locator, {
+      timestamp: record.timestamp,
+      ref: { alias: record.source_alias, prefix_digest: prefix, record_locator: record.locator },
+    });
+  }
+  return refs;
 }
 
 function featureDisableArgs() {
@@ -60,8 +83,8 @@ export function buildCodexExecArgs({ cwd, schemaPath, outputPath, prompt, creden
   return [
     'exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config',
     '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', cwd,
-    '--model', CODEX_LUNA_MODEL,
-    '--config', `model_reasoning_effort="${CODEX_LUNA_EFFORT}"`,
+    '--model', CODEX_MEMORY_MODEL,
+    '--config', `model_reasoning_effort="${CODEX_MEMORY_EFFORT}"`,
     '--config', 'approval_policy="never"',
     '--config', 'web_search="disabled"',
     ...(credentialStore === 'keyring' ? ['--config', 'cli_auth_credentials_store="keyring"'] : []),
@@ -99,12 +122,32 @@ function apiEnvironmentPresent(environment) {
 export function codexSubscriptionContractDigest() {
   return createHash('sha256').update(JSON.stringify({
     cli_version: QUALIFIED_CODEX_VERSION,
-    model: CODEX_LUNA_MODEL,
-    effort: CODEX_LUNA_EFFORT,
+    model: CODEX_MEMORY_MODEL,
+    effort: CODEX_MEMORY_EFFORT,
+    model_output_schema_sha256: createHash('sha256').update(codexHistoricalIngestOutputSchemaBytes()).digest('hex'),
     disabled_features: CODEX_DISABLED_FEATURES,
     sandbox: 'read-only',
     ephemeral: true,
+    coverage_repair: 'unreferenced_evidence_v1',
   })).digest('hex');
+}
+
+export function historicalCoverageRepairPrompt(prompt, targetLocators) {
+  if (typeof prompt !== 'string' || prompt.length < 1 || !Array.isArray(targetLocators) ||
+      targetLocators.length < 1 || targetLocators.some((item) =>
+        typeof item !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(item))) {
+    fail('coverage_repair_prompt_invalid');
+  }
+  const repair = `${prompt}\n\nCoverage repair pass. The primary extraction cited none of the following evidence records: ${JSON.stringify(targetLocators)}. Inspect those target records exhaustively. Use neighboring records only to resolve names, references, dates, and context. Emit memory only for durable concrete information in a target record that the primary pass could have missed. Omit greetings, questions that add no fact, generic encouragement, repeated wording, and unadopted advice. Every emitted item must cite at least one target locator. Do not emit a fact found only in a neighboring non-target record. Return the same closed JSON shape and exact identity fields requested above.`;
+  if (Buffer.byteLength(repair, 'utf8') > MAX_PROMPT_BYTES) fail('coverage_repair_prompt_too_large');
+  return repair;
+}
+
+function combinedUsage(values) {
+  const keys = ['input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens'];
+  return Object.freeze(Object.fromEntries(keys.map((key) => [key,
+    values.reduce((sum, value) => sum + Number(value?.[key] ?? 0), 0),
+  ])));
 }
 
 export async function offlineCodexPreflight({
@@ -142,17 +185,17 @@ export async function offlineCodexPreflight({
   } catch {
     fail('model_catalog_invalid');
   }
-  const luna = models.status === 0 && catalog?.models?.find((entry) => entry.slug === CODEX_LUNA_MODEL);
-  if (!luna || !luna.supported_reasoning_levels?.some((entry) => entry.effort === CODEX_LUNA_EFFORT)) fail('model_contract_missing');
+  const memoryModel = models.status === 0 && catalog?.models?.find((entry) => entry.slug === CODEX_MEMORY_MODEL);
+  if (!memoryModel || !memoryModel.supported_reasoning_levels?.some((entry) => entry.effort === CODEX_MEMORY_EFFORT)) fail('model_contract_missing');
   return Object.freeze({
     ready: true,
     live_model_qualified: false,
     auth: 'chatgpt',
     cli_version: QUALIFIED_CODEX_VERSION,
-    model: CODEX_LUNA_MODEL,
-    effort: CODEX_LUNA_EFFORT,
+    model: CODEX_MEMORY_MODEL,
+    effort: CODEX_MEMORY_EFFORT,
     contract_digest: codexSubscriptionContractDigest(),
-    model_tool_mode: luna.tool_mode ?? 'unknown',
+    model_tool_mode: memoryModel.tool_mode ?? 'unknown',
   });
 }
 
@@ -174,7 +217,9 @@ export function parseCodexEventStream(stdout) {
     if (event.type === 'turn.failed' || event.type === 'error') fail('turn_failed');
     if (event.type.startsWith('item.')) {
       const allowed = new Set(['agent_message', 'reasoning', 'plan', 'todo_list']);
-      if (!event.item || !allowed.has(event.item.type)) fail('tool_activity');
+      const disabledCodeModeNotice = event.type === 'item.completed' && event.item?.type === 'error' &&
+        event.item.message === DISABLED_CODE_MODE_NOTICE;
+      if (!disabledCodeModeNotice && (!event.item || !allowed.has(event.item.type))) fail('tool_activity');
     }
     if (event.type === 'turn.completed') {
       terminals += 1;
@@ -274,30 +319,65 @@ async function executeUnit({
     });
     if (!actualPreflight?.ready || actualPreflight.contract_digest !== codexSubscriptionContractDigest()) fail('preflight_contract_mismatch');
     if (requireLiveQualification && (!qualification?.live_model_qualified || qualification.contract_digest !== actualPreflight.contract_digest)) {
-      fail('luna_not_qualified');
+      fail('memory_model_not_qualified');
     }
     const schemaPath = path.join(tempRoot, 'schema.json');
-    const outputPath = path.join(tempRoot, 'output.json');
     await writeFile(schemaPath, codexHistoricalIngestOutputSchemaBytes(), { mode: 0o600, flag: 'wx' });
-    const args = buildCodexExecArgs({ cwd: stage, schemaPath, outputPath, prompt, credentialStore });
-		if (signal?.aborted) fail('runner_signaled');
-    const execution = await invoke({ command: codexPath, args, cwd: stage, env: childEnv, stdin: evidence, outputPath, signal });
-    if (execution.status !== 0 || execution.signal) fail(classifyCodexFailure(execution));
-    const events = parseCodexEventStream(execution.stdout);
-    const output = await readPrivateFile(outputPath, MAX_OUTPUT_BYTES);
-    let parsed;
+    let sourceRefsByLocator;
     try {
-      parsed = JSON.parse(output);
+      sourceRefsByLocator = evidenceSourceRefs(evidence);
     } catch {
-      fail('output_json_invalid');
+      // Legacy canonical test fixtures do not carry the product evidence
+      // envelope. Real historical units always do, and atom output below will
+      // still fail closed if its provenance cannot be resolved.
+      sourceRefsByLocator = null;
     }
-    const validated = assertHistoricalIngestManifest(normalizeCodexHistoricalIngestManifest(parsed), { expectedJobID, expectedSnapshotDigest });
+    const runPass = async (passPrompt, name) => {
+      const outputPath = path.join(tempRoot, `${name}.json`);
+      const args = buildCodexExecArgs({ cwd: stage, schemaPath, outputPath, prompt: passPrompt, credentialStore });
+			if (signal?.aborted) fail('runner_signaled');
+      const execution = await invoke({ command: codexPath, args, cwd: stage, env: childEnv, stdin: evidence, outputPath, signal });
+      if (execution.status !== 0 || execution.signal) fail(classifyCodexFailure(execution));
+      const events = parseCodexEventStream(execution.stdout);
+      const output = await readPrivateFile(outputPath, MAX_OUTPUT_BYTES);
+      let parsed;
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        fail('output_json_invalid');
+      }
+      const atomOutput = Array.isArray(parsed?.items) && parsed.items.some((item) => Object.hasOwn(item ?? {}, 'summary'));
+      if (atomOutput && sourceRefsByLocator === null) fail('unit_input_invalid');
+      const manifest = assertHistoricalIngestManifest(normalizeCodexHistoricalIngestManifest(parsed, {
+        sourceRefsByLocator: atomOutput ? sourceRefsByLocator : new Map(),
+      }), { expectedJobID, expectedSnapshotDigest });
+      return {
+        manifest,
+        outputDigest: createHash('sha256').update(output).digest('hex'),
+        usage: events.usage,
+      };
+    };
+    const primary = await runPass(prompt, 'primary-output');
+    let validated = primary.manifest;
+    let outputDigest = primary.outputDigest;
+    const usages = [primary.usage];
+    if (sourceRefsByLocator !== null && sourceRefsByLocator.size > 0) {
+      const targets = historicalCoverageRepairLocators(validated, [...sourceRefsByLocator.keys()]);
+      if (targets.length > 0) {
+        const repaired = await runPass(historicalCoverageRepairPrompt(prompt, targets), 'repair-output');
+        validated = mergeHistoricalCoverageRepair(validated, repaired.manifest, targets);
+        outputDigest = createHash('sha256').update(
+          `pulse-coverage-repair-v1\0${primary.outputDigest}\0${repaired.outputDigest}`,
+        ).digest('hex');
+        usages.push(repaired.usage);
+      }
+    }
     const receipt = contentFreeUnitReceipt({
       manifest: validated,
-      outputDigest: createHash('sha256').update(output).digest('hex'),
-      usage: events.usage,
-      model: CODEX_LUNA_MODEL,
-      effort: CODEX_LUNA_EFFORT,
+      outputDigest,
+      usage: combinedUsage(usages),
+      model: CODEX_MEMORY_MODEL,
+      effort: CODEX_MEMORY_EFFORT,
       cliVersion: QUALIFIED_CODEX_VERSION,
     });
     if (acceptResult !== undefined) {
@@ -336,7 +416,7 @@ export async function runHistoricalIngestUnit({
   });
 }
 
-export async function runSyntheticLunaCanary({
+export async function runSyntheticMemoryCanary({
   egressAuthorized = false,
   authFile,
   environment = process.env,
@@ -362,8 +442,8 @@ export async function runSyntheticLunaCanary({
     live_model_qualified: true,
     auth: 'chatgpt',
     cli_version: QUALIFIED_CODEX_VERSION,
-    model: CODEX_LUNA_MODEL,
-    effort: CODEX_LUNA_EFFORT,
+    model: CODEX_MEMORY_MODEL,
+    effort: CODEX_MEMORY_EFFORT,
     contract_digest: codexSubscriptionContractDigest(),
     canary_output_digest: receipt.output_digest,
     canary_usage: receipt.usage,

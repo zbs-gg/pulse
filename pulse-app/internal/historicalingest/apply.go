@@ -88,7 +88,7 @@ func (set WriteSet) Validate() error {
 		!hexDigestPattern.MatchString(set.DestinationBindingDigest) || !hexDigestPattern.MatchString(set.TargetVersionsDigest) ||
 		set.DestinationStoreID == "" || set.RepositoryID == "" || set.DestinationGeneration < 1 ||
 		set.PolicyEpoch < 0 || set.ResolverEpoch < 1 || set.MaterializerVersion != MaterializerVersionV1 ||
-		set.DedupVersion != DedupVersionV1 || set.ModelID != "gpt-5.6-luna" || set.ModelEffort != "low" ||
+		set.DedupVersion != DedupVersionV1 || !supportedHistoricalModel(set.ModelID) || set.ModelEffort != "low" ||
 		set.ParserVersion == "" || set.PromptVersion == "" || len(set.Items) == 0 {
 		return ErrApplyWriteSetInvalid
 	}

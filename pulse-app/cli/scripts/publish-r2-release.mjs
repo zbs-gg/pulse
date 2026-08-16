@@ -10,9 +10,8 @@ import { fileURLToPath } from 'node:url';
 
 import { pinnedReleaseKeyring, verifyPersonalReleaseArtifactSet } from '../src/release-manifest.js';
 
-const VERSION = '0.8.1';
-const EPOCH = 9;
 const SHA256 = /^[a-f0-9]{64}$/;
+const VERSION = /^\d+\.\d+\.\d+$/;
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const SNAPSHOT_CACHE = 'no-cache';
 const TARGETS = Object.freeze([
@@ -55,6 +54,13 @@ function catalogTargetIDs(artifactSet) {
   return targetIDs;
 }
 
+function releaseIdentity(artifactSet) {
+  const release = artifactSet?.payload?.release;
+  if (release?.package !== '@zbs-gg/pulse' || !VERSION.test(release?.version ?? '') ||
+      !Number.isSafeInteger(release?.epoch) || release.epoch < 1) fail('r2_release_catalog_invalid');
+  return Object.freeze({ epoch: release.epoch, version: release.version });
+}
+
 function verifyReleaseCatalog(artifactSetPath, snapshotPath, artifactSetDigest, snapshotDigest, trustedKeys) {
   let artifactSet;
   let snapshot;
@@ -62,13 +68,14 @@ function verifyReleaseCatalog(artifactSetPath, snapshotPath, artifactSetDigest, 
     artifactSet = JSON.parse(readFileSync(artifactSetPath, 'utf8'));
     snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
   } catch { fail('r2_release_catalog_invalid'); }
+  const { epoch, version } = releaseIdentity(artifactSet);
   for (const targetID of catalogTargetIDs(artifactSet)) {
     const [platform, architecture, libc] = targetID.split('-');
     let verified;
     try {
       verified = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
-        architecture, libc, minimumAcceptedEpoch: EPOCH, now: new Date(), osVersion: '26.2',
-        packageVersion: VERSION, platform, trustedKeys,
+        architecture, libc, minimumAcceptedEpoch: epoch, now: new Date(), osVersion: '26.2',
+        packageVersion: version, platform, trustedKeys,
       });
     } catch { fail('r2_release_catalog_invalid'); }
     if (verified.target_id !== targetID || verified.manifest_digest !== artifactSetDigest ||
@@ -83,9 +90,20 @@ export function releasePublicationObjects(catalogRoot, {
   if (typeof catalogRoot !== 'string' || !isAbsolute(catalogRoot) || resolve(catalogRoot) !== catalogRoot) {
     fail('r2_release_arguments_invalid');
   }
-  const artifactSetPath = resolve(catalogRoot, `pulse/${VERSION}/epoch-${EPOCH}/catalog/artifact-set.json`);
+  const receiptPath = join(catalogRoot, 'catalog-build-receipt.json');
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(receiptPath, 'utf8')); } catch { fail('r2_release_catalog_invalid'); }
+  if (receipt.schema !== 'pulse.personal_release_catalog_build.v3' ||
+      !VERSION.test(receipt.version ?? '') || !Number.isSafeInteger(receipt.release_epoch) || receipt.release_epoch < 1) {
+    fail('r2_release_catalog_invalid');
+  }
+  const version = receipt.version;
+  const epoch = receipt.release_epoch;
+  const artifactSetPath = resolve(catalogRoot, `pulse/${version}/epoch-${epoch}/catalog/artifact-set.json`);
   let artifactSet;
   try { artifactSet = JSON.parse(readFileSync(artifactSetPath, 'utf8')); } catch { fail('r2_release_catalog_invalid'); }
+  const identity = releaseIdentity(artifactSet);
+  if (identity.version !== version || identity.epoch !== epoch) fail('r2_release_catalog_invalid');
   const targetIDs = catalogTargetIDs(artifactSet);
   const immutable = [
     ['common/model.tar.gz', 'application/gzip'],
@@ -96,14 +114,14 @@ export function releasePublicationObjects(catalogRoot, {
     ]),
     ['catalog/artifact-set.json', 'application/json'],
   ].map(([suffix, contentType]) => {
-    const key = `pulse/${VERSION}/epoch-${EPOCH}/${suffix}`;
+    const key = `pulse/${version}/epoch-${epoch}/${suffix}`;
     const path = resolve(catalogRoot, key);
     if (relative(catalogRoot, path).startsWith('..')) fail('r2_release_input_unsafe');
     return Object.freeze({
       cacheControl: IMMUTABLE_CACHE, contentType, immutable: true, key, path, ...fileReceipt(path),
     });
   });
-  const snapshotKey = `pulse/${VERSION}/catalog/snapshot.json`;
+  const snapshotKey = `pulse/${version}/catalog/snapshot.json`;
   const snapshotPath = resolve(catalogRoot, snapshotKey);
   const snapshot = Object.freeze({
     cacheControl: SNAPSHOT_CACHE,
@@ -114,17 +132,14 @@ export function releasePublicationObjects(catalogRoot, {
     ...fileReceipt(snapshotPath),
   });
   assert.equal(immutable.length, 3 + targetIDs.length * 2);
-  const receiptPath = join(catalogRoot, 'catalog-build-receipt.json');
-  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
-  if (receipt.schema !== 'pulse.personal_release_catalog_build.v3' || receipt.release_epoch !== EPOCH ||
-      receipt.production_ready !== true || receipt.target_count !== targetIDs.length ||
+  if (receipt.production_ready !== true || receipt.target_count !== targetIDs.length ||
       JSON.stringify(receipt.target_ids) !== JSON.stringify(targetIDs) ||
       receipt.artifact_count !== 2 + targetIDs.length * 2 ||
       receipt.artifact_set_digest !== immutable.at(-1).sha256 ||
       receipt.snapshot_digest !== snapshot.sha256) fail('r2_release_catalog_invalid');
   if (typeof verifyCatalog !== 'function') fail('r2_release_arguments_invalid');
   verifyCatalog(immutable.at(-1).path, snapshot.path, immutable.at(-1).sha256, snapshot.sha256, trustedKeys);
-  return Object.freeze({ immutable: Object.freeze(immutable), snapshot });
+  return Object.freeze({ epoch, immutable: Object.freeze(immutable), snapshot, version });
 }
 
 function awsCommand(endpoint, args, { allowMissing = false } = {}) {
@@ -226,13 +241,14 @@ export async function publishR2SnapshotRefresh({
     artifactSet = JSON.parse(readFileSync(artifactSetPath, 'utf8'));
     snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
   } catch { fail('r2_snapshot_refresh_input_invalid'); }
+  const { epoch, version } = releaseIdentity(artifactSet);
   const verified = verifyPersonalReleaseArtifactSet(artifactSet, snapshot, {
-    architecture: 'arm64', minimumAcceptedEpoch: EPOCH, now: new Date(), osVersion: '26.2',
-    packageVersion: VERSION, platform: 'darwin', trustedKeys,
+    architecture: 'arm64', minimumAcceptedEpoch: epoch, now: new Date(), osVersion: '26.2',
+    packageVersion: version, platform: 'darwin', trustedKeys,
   });
   if (verified.manifest_digest !== artifactSetFile.sha256 ||
       verified.authority.snapshot_digest !== snapshotFile.sha256) fail('r2_snapshot_refresh_input_invalid');
-  const artifactSetKey = `pulse/${VERSION}/epoch-${EPOCH}/catalog/artifact-set.json`;
+  const artifactSetKey = `pulse/${version}/epoch-${epoch}/catalog/artifact-set.json`;
   const existing = await client.head(artifactSetKey);
   if (existing === null) fail('r2_snapshot_refresh_artifact_set_missing');
   const existingBytes = await client.get(artifactSetKey);
@@ -245,7 +261,7 @@ export async function publishR2SnapshotRefresh({
     cacheControl: SNAPSHOT_CACHE,
     contentType: 'application/json',
     immutable: false,
-    key: `pulse/${VERSION}/catalog/snapshot.json`,
+    key: `pulse/${version}/catalog/snapshot.json`,
     path: snapshotPath,
     sha256: snapshotFile.sha256,
   });
@@ -262,10 +278,10 @@ export async function publishR2SnapshotRefresh({
   return Object.freeze({
     artifact_set_digest: artifactSetFile.sha256,
     origin,
-    release_epoch: EPOCH,
+    release_epoch: epoch,
     schema: 'pulse.r2_snapshot_publication.v1',
     snapshot_digest: object.sha256,
-    version: VERSION,
+    version,
   });
 }
 
@@ -339,10 +355,10 @@ export async function publishR2Release({
     object_count: published.length,
     objects: published,
     origin,
-    release_epoch: EPOCH,
+    release_epoch: objects.epoch,
     schema: 'pulse.r2_release_publication.v1',
     snapshot_published_last: true,
-    version: VERSION,
+    version: objects.version,
   });
 }
 

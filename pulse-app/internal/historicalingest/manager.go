@@ -37,9 +37,15 @@ type RunnerContract struct {
 	PromptVersion string `json:"prompt_version"`
 }
 
+const HistoricalMemoryModelID = "gpt-5.4"
+
+func supportedHistoricalModel(modelID string) bool {
+	return modelID == HistoricalMemoryModelID || modelID == "gpt-5.6-luna"
+}
+
 func (contract RunnerContract) Validate() error {
 	if !hexDigestPattern.MatchString(contract.Digest) || !hexDigestPattern.MatchString(contract.SchemaDigest) ||
-		contract.ModelID != "gpt-5.6-luna" || contract.ModelEffort != "low" ||
+		!supportedHistoricalModel(contract.ModelID) || contract.ModelEffort != "low" ||
 		contract.ParserVersion == "" || len(contract.ParserVersion) > 128 || contract.PromptVersion == "" || len(contract.PromptVersion) > 128 {
 		return errors.New("historical ingest runner contract invalid")
 	}

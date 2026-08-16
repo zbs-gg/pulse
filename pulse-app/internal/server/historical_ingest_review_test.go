@@ -99,7 +99,7 @@ func TestHomeHistoricalEgressConsentBindsExactFrozenSnapshot(t *testing.T) {
 		t.Fatalf("unexpected consent view: %+v", home)
 	}
 	html, err := renderMemoryHomeHTML(memoryHomePage{Historical: home, CSRFToken: "csrf-test"})
-	if err != nil || !strings.Contains(html, "Authorize 1 Luna turns") || !strings.Contains(html, "cannot write memory") || !strings.Contains(html, "64 B normalized evidence") {
+	if err != nil || !strings.Contains(html, "Authorize 1 GPT-5.4 turns") || !strings.Contains(html, "cannot write memory") || !strings.Contains(html, "64 B normalized evidence") {
 		t.Fatalf("consent UI missing: err=%v html=%s", err, html)
 	}
 	session, err := srv.homeSessions.Create(testViewerSessionReadiness())

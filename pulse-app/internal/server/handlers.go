@@ -302,7 +302,7 @@ func (s *Server) handleMemoryRecallActivity(w http.ResponseWriter, r *http.Reque
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&request) != nil || request.Schema != "pulse.memory_recall_activity.v1" ||
-		request.ResultCount < 0 || request.ResultCount > 4 || !memoryActivityDigest.MatchString(request.ResultDigest) {
+		request.ResultCount < 0 || request.ResultCount > memoryRecallMaximumItems || !memoryActivityDigest.MatchString(request.ResultDigest) {
 		http.Error(w, "memory recall activity is invalid", http.StatusBadRequest)
 		return
 	}

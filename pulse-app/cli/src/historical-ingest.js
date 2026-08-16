@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { runSyntheticLunaCanary } from './codex-subscription-runner.js';
+import { CODEX_MEMORY_MODEL, runSyntheticMemoryCanary } from './codex-subscription-runner.js';
 import { runHistoricalIngestWorker } from './historical-ingest-worker.js';
 
 const JOB_ID = /^job_[a-f0-9]{16,64}$/;
@@ -64,7 +64,7 @@ function formatStatus(status) {
   return [
     `[pulse] History job ${status.job_id}: ${status.state}`,
     `[pulse] Snapshot: ${status.source_root_count} root trees · ${status.source_file_count} source prefixes · ${formatBytes(status.source_bytes)} captured`,
-    `[pulse] Model egress: ${status.total_units} isolated Luna turns · ${formatBytes(status.evidence_bytes)} normalized evidence`,
+    `[pulse] Model egress: ${status.total_units} isolated ${CODEX_MEMORY_MODEL} turns · ${formatBytes(status.evidence_bytes)} normalized evidence`,
     `[pulse] Progress: ${status.accepted_units}/${status.total_units} accepted · ${status.pending_units} pending · ${status.leased_units} active`,
     `[pulse] Subscription usage: ${usage.input_tokens ?? 0} input · ${usage.cached_input_tokens ?? 0} cached · ${usage.output_tokens ?? 0} output · ${usage.reasoning_tokens ?? 0} reasoning`,
     memoryState,
@@ -126,7 +126,7 @@ function stopWorkerReceipt(dataDir, jobID, { kill = process.kill } = {}) {
 
 async function runQualifiedWorker({ status, request, qualify, runWorker, dataDir, stdout }) {
   if (!RUNNABLE.has(status.state) || !status.egress_authorized) fail('historical_worker_not_authorized');
-  stdout('[pulse] Verifying GPT-5.6 Luna · low through your Codex/ChatGPT subscription…');
+  stdout(`[pulse] Verifying ${CODEX_MEMORY_MODEL} · low through your Codex/ChatGPT subscription…`);
   const qualification = await qualify({ egressAuthorized: true });
   if (!qualification?.live_model_qualified || qualification.contract_digest !== status.runner_contract_digest) {
     fail('historical_luna_qualification_failed');
@@ -155,7 +155,7 @@ export async function runHistoricalIngestCommand({
   dataDir,
   currentSessionID = process.env.CODEX_THREAD_ID,
   stdout = console.log,
-  qualify = runSyntheticLunaCanary,
+  qualify = runSyntheticMemoryCanary,
   runWorker = runHistoricalIngestWorker,
   waitForEgress = waitForHistoricalEgress,
   stopWorker = stopWorkerReceipt,
@@ -177,7 +177,7 @@ export async function runHistoricalIngestCommand({
       ...(currentSessionID ? { excluded_session_id: currentSessionID } : {}),
     }));
     stdout(formatStatus(status));
-    stdout('[pulse] Nothing has left this Mac. Memory Home will show exactly what Luna would receive.');
+    stdout(`[pulse] Nothing has left this Mac. Memory Home will show exactly what ${CODEX_MEMORY_MODEL} would receive.`);
     await openHome();
     const authorized = await waitForEgress({ jobID: status.job_id, request });
     if (TERMINAL.has(authorized.state)) return authorized;
@@ -196,11 +196,11 @@ export async function runHistoricalIngestCommand({
   }
   if (action === 'explain') {
     stdout(formatStatus(status));
-    stdout('[pulse] Source files are frozen by prefix digest. Only normalized, path-free records may reach Luna. The manifest remains a dry run until you finish review and approve the exact Backup & Import action in Memory Home; the CLI cannot apply it.');
+    stdout(`[pulse] Source files are frozen by prefix digest. Only normalized, path-free records may reach ${CODEX_MEMORY_MODEL}. The manifest remains a dry run until you finish review and approve the exact Backup & Import action in Memory Home; the CLI cannot apply it.`);
     return status;
   }
   if (action === 'usage') {
-    stdout(`[pulse] ${jobID}: ${JSON.stringify(status.usage ?? {})} · route=codex_chatgpt_subscription · model=gpt-5.6-luna · effort=low · api=false`);
+    stdout(`[pulse] ${jobID}: ${JSON.stringify(status.usage ?? {})} · route=codex_chatgpt_subscription · model=${CODEX_MEMORY_MODEL} · effort=low · api=false`);
     return status.usage ?? {};
   }
   if (action === 'home') {

@@ -261,7 +261,7 @@ test('composition returns only the structured IDs declared as included in render
   assert.equal(Object.isFrozen(result.manifest.object_ids), true);
 });
 
-test('prompt recall injects only the strongest capsule and bounds legacy summaries', async () => {
+test('prompt recall keeps at most four relevant capsules inside the byte budget', async () => {
   const output = await composePromptMemoryContext(resolved(), 'How should memory behave?', {
     request: async (_runtime, path, options) => {
       assert.equal(path, '/context/query');
@@ -294,10 +294,52 @@ test('prompt recall injects only the strongest capsule and bounds legacy summari
     },
   });
   assert.match(output, /Strong one/);
-  assert.doesNotMatch(output, /Weak noise|Strong two|Strong three|Strong four|Strong five/);
-  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 1);
+  assert.match(output, /Strong two|Strong three|Strong five/);
+  assert.doesNotMatch(output, /Weak noise|Strong four/);
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 4);
   assert.equal([...output.split('\n').find((line) => line.startsWith('- ')).slice(2)].length <= 400, true);
   assert.equal(Buffer.byteLength(output) <= 2400, true);
+});
+
+test('prompt recall uses at most four concise capsules inside the byte budget', async () => {
+  const events = Array.from({ length: 25 }, (_, index) => ({
+    id: index + 1, summary: `Relevant memory ${index + 1}.`,
+  }));
+  const score_breakdowns = Object.fromEntries(events.map(({ id }) => [id, { cosine: 0.8 }]));
+  const candidate_evidence = Object.fromEntries(events.map(({ id }) => [id, {
+    dense: true, lexical: true, direct_capsule: true,
+  }]));
+  const activity = [];
+  const output = await composePromptMemoryContext(resolved(), 'Relevant question', {
+    request: async () => ({ events, trace: { retrieval: { score_breakdowns, candidate_evidence } } }),
+    recordActivity: async (receipt) => activity.push(receipt),
+  });
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 4);
+  assert.equal(activity[0].result_count, 4);
+  assert.doesNotMatch(output, /Relevant memory 5|Relevant memory 25/);
+  assert.equal(Buffer.byteLength(output) <= 2400, true);
+});
+
+test('prompt recall prefers distinct episodes and removes near-duplicate summaries', async () => {
+  const events = [
+    { id: 1, summary: 'On 2026-01-01 Nik chose SQLite for local memory.', evidence_ids: [10] },
+    { id: 2, summary: 'Nik chose SQLite for local memory on 2026-01-01.', evidence_ids: [10] },
+    { id: 3, summary: 'The same meeting also defined a rollback archive.', evidence_ids: [10] },
+    { id: 4, summary: 'On 2026-02-02 the context budget became 600 tokens.', evidence_ids: [20] },
+    { id: 5, summary: 'On 2026-03-03 project memory stayed repository-bound.', evidence_ids: [30] },
+    { id: 6, summary: 'On 2026-04-04 failures were made fail-open.', evidence_ids: [40] },
+  ];
+  const score_breakdowns = Object.fromEntries(events.map(({ id }) => [id, { cosine: 0.8 }]));
+  const candidate_evidence = Object.fromEntries(events.map(({ id }) => [id, {
+    dense: true, lexical: true, direct_capsule: true,
+  }]));
+  const output = await composePromptMemoryContext(resolved(), 'How should local memory behave?', {
+    request: async () => ({ events, trace: { retrieval: { score_breakdowns, candidate_evidence } } }),
+  });
+  assert.match(output, /chose SQLite/);
+  assert.doesNotMatch(output, /Nik chose SQLite for local memory on|rollback archive/);
+  assert.match(output, /600 tokens|repository-bound|fail-open/);
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 4);
 });
 
 test('prompt recall injects nothing when relevance evidence is weak or absent', async () => {
@@ -337,6 +379,24 @@ test('prompt recall rejects the observed unrelated capsule but keeps a relevant 
   });
   assert.equal(unrelated, '');
   assert.match(relevant, /short titled sections/);
+});
+
+test('lexical agreement keeps a borderline capsule without admitting dense-only noise', async () => {
+  const response = (lexical) => ({
+    events: [{ id: 1, summary: 'A borderline but exact project memory.' }],
+    trace: { retrieval: {
+      score_breakdowns: { 1: { cosine: 0.46 } },
+      candidate_evidence: { 1: { dense: true, lexical, direct_capsule: true } },
+    } },
+  });
+  const exact = await composePromptMemoryContext(resolved(), 'Exact project question', {
+    request: async () => response(true),
+  });
+  const semanticOnly = await composePromptMemoryContext(resolved(), 'Unrelated general question', {
+    request: async () => response(false),
+  });
+  assert.match(exact, /borderline but exact/);
+  assert.equal(semanticOnly, '');
 });
 
 test('a weak direct capsule never falls through to the lower archive threshold', async () => {

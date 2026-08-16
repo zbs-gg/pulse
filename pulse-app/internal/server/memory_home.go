@@ -949,10 +949,10 @@ var memoryHomeTemplate = template.Must(template.New("memory-home").Parse(`<!doct
       </div>
       {{if .Historical.CanAuthorizeEgress}}
       <div class="history-final">
-        <div><strong>Allow {{.Historical.TotalUnits}} isolated Luna turns for this exact snapshot?</strong><p>Pulse will send {{.Historical.EvidenceBytes}} of normalized records from these {{.Historical.SourceRootCount}} root trees to <strong>GPT-5.6 Luna · low</strong> through your existing Codex/ChatGPT subscription. Local paths, attachments, credentials, hidden reasoning, inherited summaries, and raw source files are excluded. This may consume significant subscription quota; Pulse pauses on quota and never falls back to an API or another model. This creates a dry-run manifest only; it cannot write memory.</p><p class="receipt">Snapshot <code>{{.Historical.SnapshotDigest}}</code> · {{.Historical.SourceFileCount}} files · {{.Historical.TotalUnits}} model turns</p></div>
+        <div><strong>Allow {{.Historical.TotalUnits}} isolated GPT-5.4 turns for this exact snapshot?</strong><p>Pulse will send {{.Historical.EvidenceBytes}} of normalized records from these {{.Historical.SourceRootCount}} root trees to <strong>GPT-5.4 · low</strong> through your existing Codex/ChatGPT subscription. Local paths, attachments, credentials, hidden reasoning, inherited summaries, and raw source files are excluded. This may consume significant subscription quota; Pulse pauses on quota and never falls back to an API or another model. This creates a dry-run manifest only; it cannot write memory.</p><p class="receipt">Snapshot <code>{{.Historical.SnapshotDigest}}</code> · {{.Historical.SourceFileCount}} files · {{.Historical.TotalUnits}} model turns</p></div>
         <form method="post" action="history/{{.Historical.JobID}}/authorize-egress" data-home-mutation data-home-pending-label="Authorizing only this frozen snapshot…">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="snapshot_digest" value="{{.Historical.SnapshotDigest}}"><input type="hidden" name="runner_contract_digest" value="{{.Historical.RunnerContract}}"><input type="hidden" name="confirmation_digest" value="{{.Historical.EgressConfirmationDigest}}">
-          <button class="primary">Authorize {{.Historical.TotalUnits}} Luna turns</button>
+          <button class="primary">Authorize {{.Historical.TotalUnits}} GPT-5.4 turns</button>
         </form>
       </div>
       {{end}}
