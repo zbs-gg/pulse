@@ -15,7 +15,7 @@ const fixturePaths = [
   'plugins/pulse/.claude-plugin/plugin.json', 'plugins/pulse/.codex-plugin/plugin.json',
   'plugins/pulse/.cursor-plugin/plugin.json', 'README.md', 'llms.txt', 'pulse-app/PRODUCT.md',
   'docs/INSTALL_WITH_AGENT.md', 'docs/PERSONAL_PULSE_ONBOARDING.md',
-  'docs/SECURITY_INSTALL_CHECKLIST.md', 'CHANGELOG.md', 'docs/releases/v0.8.1.md',
+  'docs/SECURITY_INSTALL_CHECKLIST.md', 'CHANGELOG.md', 'docs/releases/v0.8.2.md',
 ];
 
 function publicationFixture() {
@@ -46,10 +46,10 @@ test('preview publication binds package, signed release, docs, npm bytes, and Gi
     const result = verifyPreviewPublication(fixture);
     assert.equal(result.schema, 'pulse.preview_publication_verification.v1');
     assert.equal(result.package, '@zbs-gg/pulse');
-    assert.equal(result.version, '0.8.1');
-    assert.equal(result.release_epoch, 35);
+    assert.equal(result.version, '0.8.2');
+    assert.equal(result.release_epoch, 36);
     assert.match(result.archive_sha256, /^[a-f0-9]{64}$/);
-    assert.equal(result.github_tag, 'v0.8.1');
+    assert.equal(result.github_tag, 'v0.8.2');
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -58,8 +58,21 @@ test('preview publication binds package, signed release, docs, npm bytes, and Gi
 test('preview publication refuses stale product documentation', () => {
   const fixture = publicationFixture();
   try {
-    writeFileSync(join(fixture, 'README.md'), readFileSync(join(fixture, 'README.md'), 'utf8').replaceAll('0.8.1', '0.8.0'));
+    writeFileSync(join(fixture, 'README.md'), readFileSync(join(fixture, 'README.md'), 'utf8').replaceAll('0.8.2', '0.8.0'));
     assert.throws(() => verifyPreviewPublication(fixture), /preview_publication_documentation_stale/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('preview publication requires a content-addressed archive URL', () => {
+  const fixture = publicationFixture();
+  try {
+    const path = join(fixture, 'docs/release/PREVIEW_PUBLICATION.json');
+    const publication = JSON.parse(readFileSync(path, 'utf8'));
+    publication.archive.url = publication.archive.url.replace(/-final-[a-f0-9]{12}\//, '-final/');
+    writeFileSync(path, `${JSON.stringify(publication, null, 2)}\n`);
+    assert.throws(() => verifyPreviewPublication(fixture), /preview_publication_url_invalid/);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

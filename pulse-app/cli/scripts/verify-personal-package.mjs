@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { auditPublicPackageRoot } from './public-package-audit.mjs';
 
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const sourceManifest = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -79,7 +80,7 @@ try {
     }
   }
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
-  if (manifest.name !== '@zbs-gg/pulse' || manifest.version !== '0.8.1' || !isAbsolute(archive)) {
+  if (manifest.name !== sourceManifest.name || manifest.version !== sourceManifest.version || !isAbsolute(archive)) {
     throw new Error('packed Personal identity mismatch');
   }
   process.stdout.write(`${JSON.stringify({

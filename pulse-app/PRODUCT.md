@@ -7,17 +7,17 @@ knowledge they need at the moment they need it, stays silent when nothing
 relevant is found, and lets the owner inspect, correct, or delete memories in
 Memory Home.
 
-The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.1 is
+The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.2 is
 published under the npm `preview` tag for the same target; it is not production
 ready. It has no Team server, cloud synchronization, or shared-memory command.
 Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
 reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
 
-The repository contains an unreleased 0.8.2 candidate. It expands historical
-import, retrieves up to four short, distinct memories within the existing
-context budget, preserves the embedder protocol after caller cancellation, and
-makes Doctor prove a real semantic query. It is not the package currently
-served by npm.
+The 0.8.2 preview expands historical import, retrieves up to four short,
+distinct memories within the existing context budget, preserves the embedder
+protocol after caller cancellation, and makes Doctor prove a real semantic
+query. Its publication flow installs the exact archive on a clean Apple Silicon
+runner and blocks release unless semantic retrieval answers.
 
 ## Users
 
@@ -69,9 +69,10 @@ five-second semantic probe loaded the intact model; the same Hermes query then
 returned relevant candidates in 496 ms. The data and model were healthy, but
 the readiness claim was not.
 
-The one-day owner-machine dogfood is therefore not complete. Newly signed 0.8.2
-bytes must pass a real cold semantic query, a warm query, and normal recall and
-writing in Codex and Claude Code before daily-use status can be restored.
+The one-day owner-machine dogfood is therefore not complete. Exact public 0.8.2
+bytes must still be activated on that Mac and pass a cold semantic query, a
+warm query, and normal recall and writing in Codex and Claude Code before
+daily-use status can be restored.
 Cursor live recall remains pending.
 
 A frozen 50-case baseline on a copy of the active Personal vault did not pass
@@ -93,14 +94,14 @@ valid product score: 30 of its 35 questions depend on hidden state, biometrics,
 or Atlas-like graph traversal that Pulse does not receive. It must be rebuilt
 before it can be used for product comparison.
 
-The unreleased 0.8.2 candidate completed the full 1,535-question LoCoMo path
+The 0.8.2 preview candidate completed the full 1,535-question LoCoMo path
 with GPT-5.4 low used for extraction, answering, and judging. It scored 1,230
 correct answers (80.13%), compared with 1,231 (80.20%) for equal-model Mem0 and
 959 (62.48%) for the previous Pulse baseline. Median context was 120 estimated
 tokens, maximum context 198, and warm retrieval p95 70.8 ms. The candidate
 improved Pulse substantially but did not meet its predeclared 82% and
 beat-Mem0 acceptance target. This is development evidence rather than a
-published 0.8.1 capability claim. Details are in
+production-readiness claim. Details are in
 `docs/evals/2026-08-16-full-locomo-candidate.md`.
 
 On 2026-08-11, a separate Claude Chat experiment automatically recalled the
@@ -112,10 +113,10 @@ The resulting visible tool call and additional tool round trip happen on every
 ordinary message. The hosted store is not synchronized with the local Personal
 0.8 vault, so this is remote-connector evidence rather than Personal support.
 
-Personal 0.8.1 is a public preview with a known cold-search readiness defect.
-The stable `latest` package remains 0.7.2, Team was not enabled, and daily-use
-acceptance in Codex and Claude Code is paused until signed 0.8.2 bytes pass the
-real semantic-search gate.
+Personal 0.8.2 is the public preview. The stable `latest` package remains
+0.7.2, Team was not enabled, and daily-use acceptance in Codex and Claude Code
+is paused until exact public 0.8.2 bytes pass the owner-machine recall and write
+cycle.
 
 ## Interface
 
@@ -147,13 +148,12 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 remains the stable public release; Personal 0.8.1 is a
-public npm preview with a known cold-search readiness defect. Its clean-install
-gate did not make a real semantic query. Epoch 34 remains installed locally,
-but the Codex and Claude Code day is not accepted as complete. Signed 0.8.2
-must pass cold and warm semantic search plus real host recall and writing. It
-is not production ready.
+Status: Personal 0.7.2 remains the stable public release; Personal 0.8.2 is the
+public npm preview, whose publication gate includes a real semantic query.
+Epoch 34 from 0.8.0 remains installed locally, so the Codex and Claude Code day
+is not accepted as complete. Exact public 0.8.2 bytes must pass cold and warm
+semantic search plus real host recall and writing on the owner Mac. It is not
+production ready.
 Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.
-The repository's 0.8.2 candidate is unreleased.

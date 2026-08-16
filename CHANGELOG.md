@@ -2,7 +2,7 @@
 
 All notable changes to Pulse.
 
-## 0.8.2 — Unreleased
+## 0.8.2 — 2026-08-17
 
 - Expanded bounded historical-memory extraction and review metadata.
 - Return up to four short, distinct memory capsules within the existing

@@ -1,26 +1,26 @@
 {
   "schema": "pulse.preview_publication.v1",
   "package": "@zbs-gg/pulse",
-  "version": "0.8.1",
-  "release_epoch": 35,
+  "version": "0.8.2",
+  "release_epoch": 36,
   "npm_tag": "preview",
   "archive": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/npm/epoch-35-final/zbs-gg-pulse-0.8.1.tgz",
-    "sha256": "a121011028e5377398dc04e282a7ce8ef231f05de49f034b220d1b40e7160cb3",
-    "tree_sha256": "0901e5c9db26abdb54ffac43f9293f3b6766e818206c34cedb85bdba310055ea"
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/npm/epoch-36-final-850879da408e/zbs-gg-pulse-0.8.2.tgz",
+    "sha256": "850879da408e68fd3b6d9f35f95f8e0661b0274869643438ab7f1ec081348fc4",
+    "tree_sha256": "75838017665677cbe61f0f99958cedd5d1dd05ff4cb51e8f0bd77046e13e456b"
   },
   "artifact_set": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/epoch-35/catalog/artifact-set.json",
-    "sha256": "f4b4efed35f2897888577e3a654a1341033eb8639d505fbc8bfad9768069e02f"
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/epoch-36/catalog/artifact-set.json",
+    "sha256": "e3848c88ce1c11b9b04b4474e1f56a85840aa63d617458d340bb549a5c74326b"
   },
   "snapshot": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.1/catalog/snapshot.json",
-    "sha256": "6ee4024b6c7ce6647f15723f28bd922d6f5897f08f0f9042af6f153bd25b5cb7"
+    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/catalog/snapshot.json",
+    "sha256": "2004c8797cd42cc3e0148f00e9e6a914d084cc75b24edc310c6cc27c3feae5d5"
   },
   "github": {
-    "tag": "v0.8.1",
-    "title": "Pulse Personal 0.8.1 preview",
+    "tag": "v0.8.2",
+    "title": "Pulse Personal 0.8.2 preview",
     "prerelease": true,
-    "notes": "docs/releases/v0.8.1.md"
+    "notes": "docs/releases/v0.8.2.md"
   }
 }
