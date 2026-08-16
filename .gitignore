@@ -26,7 +26,6 @@ node_modules/
 /pulse-app/native/pulse-presence-helper/dist/*.dmg
 /pulse-app/cli/release/dist/
 /pulse-app/cli/release/personal-preview-manifest.payload.json
-/pulse-app/cli/release/personal-preview-manifest.json
 /pulse-app/pulse
 /pulse-app/pulse-data/
 /pulse-app/pulse-dev/
