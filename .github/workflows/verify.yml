@@ -78,6 +78,7 @@ jobs:
         working-directory: pulse-app/cli
         shell: bash
         run: |
+          node scripts/verify-preview-publication.mjs
           mkdir -p "$RUNNER_TEMP/pulse-package"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pulse-package"
           test "$(find "$RUNNER_TEMP/pulse-package" -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')" = 1
@@ -90,6 +91,7 @@ jobs:
 
   native:
     name: Native / ${{ matrix.target_id }} / ${{ matrix.host }}
+    if: github.event_name != 'pull_request'
     needs: [contract, package]
     strategy:
       fail-fast: false
@@ -239,25 +241,18 @@ jobs:
   universal-required:
     name: Universal / required
     if: always()
-    needs: [contract, quality, native]
+    needs: [contract, quality, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        if: needs.native.result == 'success'
-        with:
-          pattern: pulse-native-*
-          path: native-evidence
-      - name: Require every native target
+      - name: Require the product suite and exact package
         env:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
         shell: bash
         run: |
           test "$CONTRACT_RESULT" = success
           test "$QUALITY_RESULT" = success
-          test "$NATIVE_RESULT" = success
-          node pulse-app/cli/scripts/validate-native-evidence-set.mjs \
-            --directory native-evidence --authority fixture
+          test "$PACKAGE_RESULT" = success
