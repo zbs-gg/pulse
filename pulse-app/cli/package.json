@@ -47,6 +47,7 @@
     "src/personal-live-readiness.js",
     "src/personal-principal.js",
     "src/pulse-launcher.js",
+    "src/product-retrieval-health.js",
     "src/storage-maintenance.js",
     "src/personal-runtime-installer.js",
     "src/product-hook-entrypoint.js",

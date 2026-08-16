@@ -6,29 +6,29 @@ found. Version `0.8.1` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
-> **0.8.1 is published as an npm preview, not as the stable default.** It passed
-> live owner-machine use in Codex and Claude Code on Apple Silicon. Cursor live
-> acceptance and production readiness remain pending. Use 0.7.2 for the stable
-> installation or select `@preview` explicitly to try 0.8.1.
+> **0.8.1 is published as an npm preview, not as the stable default.** Its
+> signed daemon can leave a cold BGE-M3 search unavailable after a short or
+> cancelled request while still reporting itself ready. Use 0.7.2 for the
+> stable installation; 0.8.1 is preserved as development evidence, not the
+> candidate recommended for daily use.
 
 The repository now contains an unreleased 0.8.2 candidate. It expands
-historical import and returns up to four short, distinct memories for a
-question. It is not the package currently served by npm and must pass the
-signed release flow before the `preview` tag can move.
+historical import, returns up to four short, distinct memories, keeps the
+embedder protocol intact after a cancelled caller, and makes Doctor prove a
+real semantic query. It is not the package currently served by npm and must
+pass the signed release flow before the `preview` tag can move.
 
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
-preserved in a verified encrypted external archive. On 2026-08-12, installed
-local epoch 34 passed automatic semantic recall and one-call writing across
-fresh Codex and Claude Code sessions. A cancelled search no longer disabled
-full semantic retrieval for the next question. Personal memory crossed
-projects, project memory stayed inside its repository, an unrelated question
-received no memory, and both hosts kept working with Pulse stopped. The
-owner-machine one-day dogfood is now running in those two hosts. One broad,
-ambiguous Claude question still surfaced an unrelated old memory before a more
-specific semantic question found the intended decision; this remains a
-dogfood risk rather than a release claim. Cursor live acceptance remains
-pending.
+preserved in a verified encrypted external archive. Earlier fresh-session
+checks showed recall, one-call writing, project boundaries, silence on an
+unrelated question, and fail-open host work in Codex and Claude Code. A later
+live check on 2026-08-16 exposed the missing reliability gate: the installed
+epoch 34 daemon reported BGE-M3 ready while ordinary queries timed out. A
+five-second semantic probe loaded the intact local model and the Hermes query
+then returned relevant candidates in 496 ms. Daily-use acceptance therefore
+remains incomplete until newly signed 0.8.2 bytes pass the same cold and warm
+query checks in both hosts.
 
 The first frozen large-vault baseline on 2026-08-12 did not pass its combined
 practical bar. On a copy containing 76,795 real events, published `0.8.0` found
@@ -203,15 +203,15 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: Personal 0.8.1 is published under the npm `preview` tag. Signed epoch
-35 passed the complete Personal release gate; installed epoch 34 remains the
-owner-machine dogfood baseline that passed the
-local-store migration, cancellation-safe semantic search, one-call writes,
-cross-host recall, project boundary, irrelevant-query silence, and fail-open
-operation in fresh Codex and Claude Code sessions. An owner-machine one-day
-dogfood started in those two hosts on 2026-08-12. Version 0.8.1 removes the
-confirmed weak-capsule noise path; raw-history recall and Cursor acceptance
-remain pending product limits. A separate Claude Chat
+Status: Personal 0.8.1 is published under the npm `preview` tag, but its
+clean-install gate did not make a real semantic query. Installed epoch 34
+passed narrower migration, recall, write, project-boundary, silence, and
+fail-open checks, then exposed a cold-search failure while still reporting
+itself ready. The one-day Codex and Claude Code acceptance is therefore not
+complete. Signed 0.8.2 must pass real cold and warm semantic queries plus host
+recall and writing. Version 0.8.1 removes the confirmed weak-capsule noise
+path; raw-history recall and Cursor acceptance remain pending product limits.
+A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
 is not Personal sync or a supported install. Version 0.8 is not the stable
 default or production ready. The repository's 0.8.2 candidate is unreleased.

@@ -159,6 +159,7 @@ import {
 import { nativePackedFixtureAttestation } from './native-packed-fixture.js';
 import { defaultPlatformServices, PlatformServicesError } from './platform-services.js';
 import { cleanPulseStorage, inspectPulseStorage, writeStorageHomeSnapshot } from './storage-maintenance.js';
+import { probeProductRetrieval } from './product-retrieval-health.js';
 
 const DEFAULT_BASE_URL = process.env.PULSE_BASE_URL || 'http://127.0.0.1:18789';
 // `||` on purpose: an empty PULSE_DATA_DIR must not become a relative path
@@ -2358,12 +2359,15 @@ async function codexDoctorReport({
 			const liveStatus = await boundPulseRequest({ binding, runtime }, '/memory/status', {
 				method: 'GET', timeoutMs: liveProbeTimeoutMs,
 			});
-			return { liveStatus };
+			const retrievalHealth = await probeProductRetrieval({ binding, runtime }, {
+				request: boundPulseRequest, timeoutMs: 5000,
+			});
+			return { liveStatus, retrievalHealth };
 		} catch (error) {
 			return { liveError: error.message };
 		}
 	})();
-	let [nativeHookTrust, { liveStatus, liveError }] = await Promise.all([
+	let [nativeHookTrust, { liveStatus, liveError, retrievalHealth }] = await Promise.all([
 		nativeHookTrustPromise,
 		liveProbePromise,
 	]);
@@ -2433,9 +2437,9 @@ async function codexDoctorReport({
     capture: captureEnabledForHost(capture, 'codex')
       ? { ok: true, detail: 'host-extracted structured capture enabled' }
       : { ok: false, detail: 'automatic capture disabled' },
-    retrieval: liveStatus?.full_retrieval === true
-      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
-      : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
+    retrieval: liveStatus?.full_retrieval === true && retrievalHealth?.ok === true
+			? { ok: true, detail: `full retrieval via ${liveStatus.embedder}; ${retrievalHealth.detail}` }
+			: { ok: false, detail: retrievalHealth?.detail ?? 'semantic retrieval is unavailable' },
     hooks: hookReadiness.ready
 		  ? { ok: true, detail: hookReadiness.detail }
       : { ok: false, reason: hookReadiness.reason, detail: hookReadiness.detail ?? hookReadiness.reason },
@@ -2646,10 +2650,14 @@ async function claudeLegacyProductDoctorReport() {
   const capture = runtime ? safeReadJSON(join(runtime.data_dir, 'capture-state.json')) : undefined;
   let liveStatus;
   let liveError;
+  let retrievalHealth;
   if (binding && runtime && runtimeStatus.status === 'running') {
     try {
       liveStatus = await boundPulseRequest({ binding, runtime }, '/memory/status', {
         method: 'GET', timeoutMs: 1500,
+      });
+      retrievalHealth = await probeProductRetrieval({ binding, runtime }, {
+        request: boundPulseRequest, timeoutMs: 5000,
       });
     } catch (error) {
       liveError = error.message;
@@ -2696,9 +2704,9 @@ async function claudeLegacyProductDoctorReport() {
     capture: captureEnabledForHost(capture, 'claude-code')
       ? { ok: true, detail: 'host-extracted structured capture enabled' }
       : { ok: false, detail: 'automatic capture disabled' },
-    retrieval: liveStatus?.full_retrieval === true
-      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
-      : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
+    retrieval: liveStatus?.full_retrieval === true && retrievalHealth?.ok === true
+      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}; ${retrievalHealth.detail}` }
+      : { ok: false, detail: retrievalHealth?.detail ?? 'semantic retrieval is unavailable' },
   };
   const personalLiveReadiness = projectSupportedHostLiveReadiness('claude-code', checks, new Date());
   const ready = personalLiveReadiness.outcome === 'ready';
@@ -2770,9 +2778,13 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
     resolve(locator.entry.data_dir) === resolve(DATA_DIR);
   let liveStatus;
   let liveError;
+  let retrievalHealth;
   if (resolved && runtimeStatus.status === 'running') {
     try {
       liveStatus = await boundPulseRequest(resolved, '/memory/status', { method: 'GET', timeoutMs: 1500 });
+      retrievalHealth = await probeProductRetrieval(resolved, {
+        request: boundPulseRequest, timeoutMs: 5000,
+      });
     } catch (error) { liveError = error.message; }
   }
   const liveVault = liveStatus && liveStatus.storage_path === join(resolved.runtime.data_dir, 'pulse.db') &&
@@ -2818,9 +2830,9 @@ async function claudeNativeProductDoctorReport({ detection, pluginInspection, pr
     capture: resolved && captureEnabledForHost(capture, 'claude-code')
       ? { ok: true, detail: 'host-extracted structured capture enabled' }
       : { ok: false, detail: 'automatic capture disabled' },
-    retrieval: liveStatus?.full_retrieval === true
-      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}` }
-      : { ok: false, detail: 'fallback only; configure local MLX or Cohere embedding' },
+    retrieval: liveStatus?.full_retrieval === true && retrievalHealth?.ok === true
+      ? { ok: true, detail: `full retrieval via ${liveStatus.embedder}; ${retrievalHealth.detail}` }
+      : { ok: false, detail: retrievalHealth?.detail ?? 'semantic retrieval is unavailable' },
   };
   const personalLiveReadiness = projectSupportedHostLiveReadiness('claude-code', checks, new Date());
   const ready = personalLiveReadiness.outcome === 'ready';

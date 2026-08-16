@@ -342,6 +342,9 @@ test('npm publication runs the repository release gate before preparing package 
   assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
   assert.match(workflow, /init codex --only codex --yes --json/);
   assert.match(workflow, /r\.outcome!=="ready"/);
+  assert.match(workflow, /doctor codex --json/);
+  assert.match(workflow, /checks\.retrieval\.ok == true/);
+  assert.match(workflow, /semantic retrieval answered in/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish_npm/);
   assert.match(workflow, /--tag preview --provenance/);
   assert.match(workflow, /gh release create "\$EXPECTED_GITHUB_TAG"/);

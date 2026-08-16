@@ -6,10 +6,11 @@ Memory Home, and local connections for Codex, Claude Code, and Cursor. Emotional
 memory stays local, describes a moment rather than a personality, and can be
 confirmed, corrected, or deleted separately from the event.
 
-Personal 0.8.1 remains the published preview, not the stable default. It passed live
-owner-machine use in Codex and Claude Code; Cursor live acceptance remains
-pending, and the preview is not production ready. The npm `latest` tag remains
-on 0.7.2. This 0.8.2 source must complete the signed release flow before the
+Personal 0.8.1 remains the published preview, not the stable default. A later
+owner-machine check found that its signed daemon could report BGE-M3 ready
+while cold semantic queries timed out, so daily-use and Cursor acceptance
+remain pending. The npm `latest` tag remains on 0.7.2. This 0.8.2 source must
+complete the signed release flow, including a real semantic query, before the
 `preview` tag moves.
 
 ```bash

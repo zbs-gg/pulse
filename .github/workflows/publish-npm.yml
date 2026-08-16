@@ -180,6 +180,12 @@ jobs:
             > "$RUNNER_TEMP/pulse-install.json"
           node -e 'const r=require(process.argv[1]); if (r.outcome!=="ready" || r.reason_code!=="installed" || r.host_status?.hosts?.[0]?.installed!==true) process.exit(1)' \
             "$RUNNER_TEMP/pulse-install.json"
+          set +e
+          (cd "$workspace" && HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" doctor codex --json) \
+            > "$RUNNER_TEMP/pulse-doctor.json"
+          set -e
+          jq -e '.checks.retrieval.ok == true and (.checks.retrieval.detail | startswith("full retrieval via bge-m3; semantic retrieval answered in "))' \
+            "$RUNNER_TEMP/pulse-doctor.json" >/dev/null
 
       - name: Detect an existing exact npm publication
         shell: bash

@@ -14,8 +14,10 @@ Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
 reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
 
 The repository contains an unreleased 0.8.2 candidate. It expands historical
-import and retrieves up to four short, distinct memories within the existing
-context budget. It is not the package currently served by npm.
+import, retrieves up to four short, distinct memories within the existing
+context budget, preserves the embedder protocol after caller cancellation, and
+makes Doctor prove a real semantic query. It is not the package currently
+served by npm.
 
 ## Users
 
@@ -58,23 +60,19 @@ path produced and atomically activated a reviewed Personal database. The old
 Pulse database, Claude Mem database, migration sources, and recovery files are
 preserved in a verified encrypted external archive.
 
-On 2026-08-12, installed local epoch 34 passed fresh Codex and Claude Code
-acceptance. Both hosts automatically recalled old memory without its exact
-wording, wrote durable changes with one `pulse_memory` call, and recalled each
-other's new records. A deliberately cancelled search returned control
-immediately, while the following question still used full BGE-M3 semantic
-retrieval. Personal memory followed the owner into another project; the Pulse
-Personal project decision stayed inside its repository. An unrelated question
-received no memory. With Pulse deliberately unavailable, terminal and file
-work, cancellation, and normal session completion remained usable in both
-hosts.
+On 2026-08-12, fresh Codex and Claude Code checks demonstrated automatic recall,
+one-call writing, cross-host memory, project isolation, silence on an unrelated
+question, and fail-open host work. The signed epoch 34 daemon did not contain
+the later cancellation repair, however. On 2026-08-16 it still reported full
+BGE-M3 retrieval while ordinary queries timed out against an unloaded model. A
+five-second semantic probe loaded the intact model; the same Hermes query then
+returned relevant candidates in 496 ms. The data and model were healthy, but
+the readiness claim was not.
 
-The owner-machine one-day dogfood is now running with Pulse enabled in Codex and
-Claude Code. One broad, ambiguous Claude question surfaced an unrelated old
-memory before a more specific semantic question found the intended decision.
-That ambiguity remains under observation during dogfood. Cursor live recall
-remains pending, so this is evidence for two local hosts rather than full
-three-host acceptance.
+The one-day owner-machine dogfood is therefore not complete. Newly signed 0.8.2
+bytes must pass a real cold semantic query, a warm query, and normal recall and
+writing in Codex and Claude Code before daily-use status can be restored.
+Cursor live recall remains pending.
 
 A frozen 50-case baseline on a copy of the active Personal vault did not pass
 the combined practical bar. Published `0.8.0` retrieved the expected memory in
@@ -114,9 +112,10 @@ The resulting visible tool call and additional tool round trip happen on every
 ordinary message. The hosted store is not synchronized with the local Personal
 0.8 vault, so this is remote-connector evidence rather than Personal support.
 
-Personal 0.8.1 is now a public preview but is not production ready. The stable
-`latest` package remains 0.7.2, Team was not enabled, and the bounded dogfood
-continues in Codex and Claude Code.
+Personal 0.8.1 is a public preview with a known cold-search readiness defect.
+The stable `latest` package remains 0.7.2, Team was not enabled, and daily-use
+acceptance in Codex and Claude Code is paused until signed 0.8.2 bytes pass the
+real semantic-search gate.
 
 ## Interface
 
@@ -149,9 +148,11 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
 Status: Personal 0.7.2 remains the stable public release; Personal 0.8.1 is a
-public npm preview. Signed epoch 35 passed the complete Personal release gate,
-and epoch 34 is installed locally for the Codex and Claude Code dogfood that
-started on 2026-08-12. It is not production ready.
+public npm preview with a known cold-search readiness defect. Its clean-install
+gate did not make a real semantic query. Epoch 34 remains installed locally,
+but the Codex and Claude Code day is not accepted as complete. Signed 0.8.2
+must pass cold and warm semantic search plus real host recall and writing. It
+is not production ready.
 Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.

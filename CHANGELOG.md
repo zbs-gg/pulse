@@ -11,6 +11,9 @@ All notable changes to Pulse.
   adapters used by the full LoCoMo development run.
 - Added one versioned preview-publication descriptor and a CI gate that binds
   documentation, signed artifacts, npm bytes, and the GitHub prerelease.
+- Doctor and preview publication now require a real local semantic query;
+  process presence and `full_retrieval` metadata alone no longer count as a
+  healthy BGE-M3 search path.
 
 ## 0.8.1 — 2026-08-14
 
@@ -18,9 +21,10 @@ All notable changes to Pulse.
   through to the looser archive threshold.
 - Added a reproducible installed-product memory benchmark and published its
   bounded aggregate evidence without changing the stable `latest` release.
-- Published the exact Apple Silicon package under npm `preview`; Codex and
-  Claude Code owner-machine acceptance passed, while Cursor and production
-  readiness remain pending.
+- Published the exact Apple Silicon package under npm `preview`. Narrow Codex
+  and Claude Code checks succeeded, but a later cold-search failure showed that
+  the release gate had not proved semantic retrieval; daily-use, Cursor, and
+  production readiness remain pending.
 
 ## 0.8.0 — 2026-08-12
 
@@ -36,8 +40,9 @@ All notable changes to Pulse.
 - Added content-free recall/write receipts in Memory Home, safe storage
   reporting and cleanup, Codex executable selection, and safe handling of
   Claude Code's `.in_use` files and Windows storage metadata.
-- Published this release under the npm `preview` tag. Stable `latest` remains
-  0.7.2; live Cursor acceptance and production readiness remain pending.
+- The source fix for keeping semantic retrieval healthy after a cancelled
+  question was not present in the signed daemon later reused by the 0.8.1
+  archive. Stable `latest` remains 0.7.2.
 
 ## 0.7.0 — 2026-08-01
 
