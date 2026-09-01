@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 import { createPlatformServices, PlatformServicesError } from './platform-services.js';
 
-export const SUPPORTED_HOST_IDS = Object.freeze(['claude-code', 'codex', 'cursor']);
+export const SUPPORTED_HOST_IDS = Object.freeze(['claude-code', 'codex', 'cursor', 'opencode']);
 
 function detectCLI({ candidates, executablePath, label, platformServices, versionProbe }) {
   if (!Array.isArray(candidates) || candidates.length > 32 ||
@@ -57,7 +57,15 @@ export function probeHostVersion(executable, args = ['--version'], timeout = 500
 	try {
 		return spawnSync(executable, args, {
 			encoding: 'utf8',
-			env: { ...process.env, CODEX_HOME: probeHome },
+			env: {
+				...process.env,
+				HOME: probeHome,
+				USERPROFILE: probeHome,
+				XDG_CONFIG_HOME: join(probeHome, '.config'),
+				XDG_DATA_HOME: join(probeHome, '.local', 'share'),
+				XDG_CACHE_HOME: join(probeHome, '.cache'),
+				CODEX_HOME: join(probeHome, '.codex'),
+			},
 			stdio: ['ignore', 'pipe', 'pipe'],
 			timeout,
 			killSignal: 'SIGTERM',
@@ -132,6 +140,32 @@ export function detectCursorInstallation({
   };
 }
 
+export function detectOpenCodeCLI({
+  candidates,
+  opencodePath,
+  platformServices = createPlatformServices(),
+  versionProbe,
+} = {}) {
+  const detected = detectCLI({
+    candidates: candidates ?? platformServices.hostCandidates().opencode,
+    executablePath: opencodePath,
+    label: 'opencode',
+    platformServices,
+    versionProbe: versionProbe ?? probeHostVersion,
+  });
+  if (!detected.available) return detected;
+  const compatiblePlatform = platformServices.platform === 'darwin' && platformServices.architecture === 'arm64';
+  const compatibleVersion = /^1\.18\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(detected.version ?? '');
+  if (compatiblePlatform && compatibleVersion) return { ...detected, compatible: true };
+  return {
+    ...detected,
+    available: false,
+    detected: true,
+    compatible: false,
+    reason_code: compatiblePlatform ? 'opencode_version_incompatible' : 'opencode_platform_incompatible',
+  };
+}
+
 function hostRecord(host, result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) {
     throw new TypeError('supported_host_detection_invalid');
@@ -154,13 +188,15 @@ export function detectSupportedHosts({
   detectClaude = () => detectClaudeCodeCLI({ home, platformServices }),
   detectCodex = () => detectCodexCLI({ platformServices }),
   detectCursor = () => detectCursorInstallation({ home, platformServices }),
+  detectOpenCode = () => detectOpenCodeCLI({ platformServices }),
 } = {}) {
-  if (![detectClaude, detectCodex, detectCursor].every((detector) => typeof detector === 'function')) {
+  if (![detectClaude, detectCodex, detectCursor, detectOpenCode].every((detector) => typeof detector === 'function')) {
     throw new TypeError('supported_host_detector_invalid');
   }
   return Object.freeze([
     hostRecord('claude-code', detectClaude()),
     hostRecord('codex', detectCodex()),
     hostRecord('cursor', detectCursor()),
+    hostRecord('opencode', detectOpenCode()),
   ]);
 }

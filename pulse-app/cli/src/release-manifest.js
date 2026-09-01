@@ -59,7 +59,7 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const TEAM_ID = /^[A-Z0-9]{10}$/;
-const GOLD_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
+const RELEASE_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor', 'opencode']);
 
 export class ReleaseManifestError extends Error {
   constructor(code) {
@@ -440,7 +440,7 @@ function validateSnapshotURL(value, expectedPathSuffix) {
 
 function validateHostPolicy(policy) {
   exactKeys(policy, ['harnesses'], 'release_host_policy_invalid');
-  if (!Array.isArray(policy.harnesses) || policy.harnesses.length !== GOLD_HOSTS.length) {
+  if (!Array.isArray(policy.harnesses) || policy.harnesses.length !== RELEASE_HOSTS.length) {
     fail('release_host_policy_invalid');
   }
   const hosts = [];
@@ -449,8 +449,8 @@ function validateHostPolicy(policy) {
       'distribution', 'downloads', 'executable', 'executable_digest_policy', 'host', 'identity', 'supported_targets',
       'vendor', 'vendor_source', 'version',
     ], 'release_host_policy_invalid');
-    if (!GOLD_HOSTS.includes(harness.host) || typeof harness.vendor !== 'string' || harness.vendor.length < 1 ||
-        typeof harness.distribution !== 'string' || !SAFE_ID.test(harness.distribution) ||
+    if (!RELEASE_HOSTS.includes(harness.host) || typeof harness.vendor !== 'string' || harness.vendor.length < 1 ||
+        !['npm', 'vendor-desktop-installer'].includes(harness.distribution) ||
         typeof harness.identity !== 'string' || harness.identity.length < 1 || harness.identity.length > 256 ||
         typeof harness.version !== 'string' || !/^\d+\.\d+(?:\.\d+)?$/.test(harness.version) ||
         typeof harness.executable !== 'string' || !SAFE_ID.test(harness.executable) ||
@@ -461,13 +461,19 @@ function validateHostPolicy(policy) {
         vendorSource.search || vendorSource.hash || vendorSource.pathname.split('/').some((part) => part === '..' || part === '.')) {
       fail('release_host_policy_invalid');
     }
-    if (!Array.isArray(harness.supported_targets) ||
-        harness.supported_targets.join('\0') !== DESKTOP_TARGET_IDS.join('\0')) fail('release_host_policy_invalid');
-    if (!harness.downloads || Array.isArray(harness.downloads) || typeof harness.downloads !== 'object' ||
-        Object.keys(harness.downloads).sort().join('\0') !== DESKTOP_TARGET_IDS.join('\0')) {
+    if (!Array.isArray(harness.supported_targets) || harness.supported_targets.length < 1 ||
+        harness.supported_targets.length > DESKTOP_TARGET_IDS.length ||
+        new Set(harness.supported_targets).size !== harness.supported_targets.length ||
+        harness.supported_targets.some((targetID) => !DESKTOP_TARGET_IDS.includes(targetID)) ||
+        harness.supported_targets.join('\0') !==
+          DESKTOP_TARGET_IDS.filter((targetID) => harness.supported_targets.includes(targetID)).join('\0')) {
       fail('release_host_policy_invalid');
     }
-    for (const targetID of DESKTOP_TARGET_IDS) {
+    if (!harness.downloads || Array.isArray(harness.downloads) || typeof harness.downloads !== 'object' ||
+        Object.keys(harness.downloads).sort().join('\0') !== [...harness.supported_targets].sort().join('\0')) {
+      fail('release_host_policy_invalid');
+    }
+    for (const targetID of harness.supported_targets) {
       let download;
       try { download = new URL(harness.downloads[targetID]); } catch { fail('release_host_policy_invalid'); }
       const expectedOrigin = harness.distribution === 'npm' ? 'https://registry.npmjs.org' : 'https://api2.cursor.sh';
@@ -476,7 +482,7 @@ function validateHostPolicy(policy) {
     }
     hosts.push(harness.host);
   }
-  if (hosts.sort().join('\0') !== GOLD_HOSTS.join('\0')) fail('release_host_policy_invalid');
+  if (hosts.sort().join('\0') !== RELEASE_HOSTS.join('\0')) fail('release_host_policy_invalid');
 }
 
 function validateArtifactSetPayload(payload, options) {

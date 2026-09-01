@@ -115,14 +115,16 @@ function writeExecutable(path, content) {
 function runWithDetectedHost(args, host) {
   const home = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-home.'));
   const cwd = mkdtempSync(join(tmpdir(), 'pulse-cli-detected-host-cwd.'));
-  const executable = host === 'codex'
-    ? join(home, '.local', 'bin', 'codex')
+  const executable = host === 'codex' || host === 'opencode'
+    ? join(home, '.local', 'bin', host)
     : process.platform === 'darwin'
       ? join(home, 'Applications', 'Cursor.app', 'Contents', 'MacOS', 'Cursor')
       : join(home, '.local', 'bin', 'cursor');
   mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
   writeExecutable(executable, host === 'codex'
     ? '#!/bin/sh\nprintf "codex-cli 0.146.0\\n"\n'
+    : host === 'opencode'
+      ? '#!/bin/sh\nprintf "1.18.15\\n"\n'
     : '#!/bin/sh\nexit 0\n');
   return { home, cwd, result: runInWorkspace(args, cwd, home) };
 }
@@ -355,7 +357,7 @@ test('install-plan claude-code --json returns a stable agent contract', () => {
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.product, 'Pulse MCP Preview');
-  assert.equal(plan.version, '0.8.2');
+  assert.equal(plan.version, '0.8.3');
   assert.equal(plan.target_host, 'claude-code');
   assert.equal(plan.mode, 'developer_preview');
   assert.deepEqual(plan.will_install, [
@@ -405,8 +407,8 @@ test('install-plan --json exposes the host-neutral Personal product contract wit
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.schema, 'pulse.personal_install_plan.v2');
   assert.equal('target_host' in plan, false);
-  assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
-  assert.deepEqual(plan.detected.hosts.map((host) => host.host), ['claude-code', 'codex', 'cursor']);
+  assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor', 'opencode']);
+  assert.deepEqual(plan.detected.hosts.map((host) => host.host), ['claude-code', 'codex', 'cursor', 'opencode']);
   assert.equal(plan.stage, 'personal_stage_1');
   assert.equal(plan.privacy.raw_transcript_capture, 'off');
   assert.equal(plan.privacy.backend_model_calls, 'off');
@@ -542,21 +544,31 @@ test('init claude-code dry run prints install plan and writes nothing', () => {
   assert.equal(existsSync(join(cwd, '.mcp.json')), false);
 });
 
-for (const host of ['codex', 'cursor']) {
+for (const host of ['codex', 'cursor', 'opencode']) {
   test(`init ${host} --only dry run limits the plan and writes nothing`, {
-    skip: process.platform === 'win32' ? 'POSIX CLI fixture; Windows detection has native adapter coverage' : false,
+    skip: host === 'opencode' && (process.platform !== 'darwin' || process.arch !== 'arm64')
+      ? 'OpenCode 1.18.x is qualified only on Apple Silicon macOS'
+      : process.platform === 'win32' ? 'POSIX CLI fixture; Windows detection has native adapter coverage' : false,
   }, () => {
     const { cwd, home, result } = runWithDetectedHost(
-      ['init', host, '--only', host, '--dry-run'], host,
+      [
+        'init', host, '--only', host, '--dry-run',
+        ...(host === 'opencode' ? ['--fun-facts', 'small-model'] : []),
+      ], host,
     );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Pulse Personal install/);
     assert.match(result.stdout, /Activation: only the selected compatible AI app/);
     assert.match(result.stdout, new RegExp(`- ${host}: will be connected`, 'i'));
+    if (host === 'opencode') {
+      assert.match(result.stdout, /OpenCode fun facts: small-model/);
+      assert.match(result.stdout, /\.config\/opencode\/opencode\.json/);
+    }
     assert.match(result.stdout, /Dry run only\. Nothing was written\./);
     assert.equal(existsSync(join(home, '.pulse')), false);
     assert.equal(existsSync(join(cwd, '.cursor')), false);
+    assert.equal(existsSync(join(home, '.config', 'opencode')), false);
   });
 }
 
@@ -566,7 +578,7 @@ test('doctor --json reports machine-readable missing setup without a stack trace
   assert.notEqual(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.product, 'Pulse Local Preview');
-  assert.equal(report.version, '0.8.2');
+  assert.equal(report.version, '0.8.3');
   assert.equal(report.target_host, 'claude-code');
   assert.equal(report.trust.backend_llm_enabled, false);
   assert.equal(report.trust.raw_capture_enabled, false);
@@ -610,6 +622,24 @@ test('doctor cursor --json reports the native Cursor product contract', () => {
     assert.equal(typeof report.checks[key].ok, 'boolean');
     assert.equal(typeof report.checks[key].detail, 'string');
   }
+  assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
+});
+
+test('doctor opencode --json reports the bounded candidate contract without mutation', () => {
+  const { home, result } = run(['doctor', 'opencode', '--json'], {
+    PATH: '/tmp/pulse-missing-tools',
+  });
+
+  assert.notEqual(result.status, 0);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.schema, 'pulse.opencode_doctor.v1');
+  assert.equal(report.host, 'opencode');
+  assert.equal(report.supported_contract, '1.18.x on Apple Silicon macOS');
+  for (const key of ['opencode', 'binding', 'plugin', 'access', 'capture', 'options', 'daemon', 'lifecycle']) {
+    assert.equal(typeof report.checks[key].ok, 'boolean');
+    assert.equal(typeof report.checks[key].detail, 'string');
+  }
+  assert.equal(existsSync(join(home, '.config', 'opencode')), false);
   assert.doesNotMatch(result.stderr + result.stdout, /at async|stack|PULSE_API_KEY|secret\.key/i);
 });
 
@@ -973,6 +1003,27 @@ test('disconnect claude-code never overwrites invalid hook JSON', () => {
   assert.equal(readFileSync(settingsPath, 'utf8'), invalid);
 });
 
+test('remove opencode removes an orphaned global loader and preserves unrelated config', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-opencode-remove-home.'));
+  const cwd = mkdtempSync(join(tmpdir(), 'pulse-opencode-remove-cwd.'));
+  const configRoot = join(home, '.config', 'opencode');
+  mkdirSync(join(configRoot, 'pulse'), { recursive: true });
+  writeFileSync(join(configRoot, 'pulse', 'pulse.js'), 'export const Pulse = async () => ({});\n');
+  writeFileSync(join(configRoot, 'opencode.json'), `${JSON.stringify({
+    provider: { local: { npm: 'kept-provider' } },
+    plugin: ['existing-plugin', './pulse/pulse.js'],
+  }, null, 2)}\n`);
+
+  const result = runInWorkspace(['remove', 'opencode'], cwd, home);
+
+  assert.equal(result.status, 0, result.stderr);
+  const config = JSON.parse(readFileSync(join(configRoot, 'opencode.json'), 'utf8'));
+  assert.deepEqual(config.plugin, ['existing-plugin']);
+  assert.equal(config.provider.local.npm, 'kept-provider');
+  assert.equal(existsSync(join(configRoot, 'pulse')), false);
+  assert.match(result.stdout, /Local memory was not wiped/);
+});
+
 test('viewer prints local authenticated viewer URL', () => {
   const { result } = run(['viewer']);
 
@@ -1048,11 +1099,11 @@ test('home rejects print-url instead of exposing a bootstrap capability', () => 
   assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
 });
 
-test('home accepts only the three supported Personal harness selectors', () => {
+test('home accepts only the four supported Personal harness selectors', () => {
   for (const args of [['home', '--host'], ['home', '--host', 'gemini']]) {
     const { result } = run(args);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /pulse home --host must be claude-code, codex, or cursor/);
+    assert.match(result.stderr, /pulse home --host must be claude-code, codex, cursor, or opencode/);
     assert.doesNotMatch(result.stdout + result.stderr, /https?:\/\/|key=|token=|secret/i);
   }
 });

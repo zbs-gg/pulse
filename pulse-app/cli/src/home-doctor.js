@@ -12,7 +12,7 @@ export async function selectHomeDoctorReport({ requestedHost, enabledHosts = [],
   if ((requestedHost !== undefined && !supported(requestedHost)) ||
       !Array.isArray(enabledHosts) || enabledHosts.some((host) => !supported(host)) ||
       typeof doctorForHost !== 'function') {
-    throw new TypeError('pulse home --host must be claude-code, codex, or cursor.');
+    throw new TypeError('pulse home --host must be claude-code, codex, cursor, or opencode.');
   }
   const hosts = requestedHost === undefined
     ? (enabledHosts.length > 0 ? [...new Set(enabledHosts)] : [...SUPPORTED_HOST_IDS])

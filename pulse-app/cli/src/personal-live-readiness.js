@@ -2,7 +2,7 @@ import { normalizePersonalAuthorityProfile } from './personal-authority-profile.
 
 const SCHEMA = 'pulse.personal_live_readiness.v1';
 const SUPPORTED_HOST_SCHEMA = 'pulse.supported_host_live_readiness.v1';
-const SUPPORTED_HOSTS = new Set(['claude-code', 'codex', 'cursor']);
+const SUPPORTED_HOSTS = new Set(['claude-code', 'codex', 'cursor', 'opencode']);
 
 const CONTRACTS = Object.freeze({
   personal_live_ready: Object.freeze({

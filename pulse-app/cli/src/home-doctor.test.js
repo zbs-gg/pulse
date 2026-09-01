@@ -14,7 +14,7 @@ function report(host, outcome = 'ready') {
 }
 
 test('Home explicit selector inspects exactly the requested supported host', async () => {
-  for (const host of ['claude-code', 'codex', 'cursor']) {
+  for (const host of ['claude-code', 'codex', 'cursor', 'opencode']) {
     const called = [];
     const selected = await selectHomeDoctorReport({
       requestedHost: host,
@@ -28,15 +28,15 @@ test('Home explicit selector inspects exactly the requested supported host', asy
 test('Home auto-selection skips failed doctors and returns the first ready enabled host', async () => {
   const called = [];
   const selected = await selectHomeDoctorReport({
-    enabledHosts: ['claude-code', 'codex', 'cursor'],
+    enabledHosts: ['claude-code', 'codex', 'cursor', 'opencode'],
     doctorForHost: async (host) => {
       called.push(host);
       if (host === 'claude-code') throw new Error('missing');
-      return report(host, host === 'codex' ? 'action_required' : 'ready');
+      return report(host, ['claude-code', 'codex', 'cursor'].includes(host) ? 'action_required' : 'ready');
     },
   });
-  assert.equal(selected.target_host, 'cursor');
-  assert.deepEqual(called, ['claude-code', 'codex', 'cursor']);
+  assert.equal(selected.target_host, 'opencode');
+  assert.deepEqual(called, ['claude-code', 'codex', 'cursor', 'opencode']);
 });
 
 test('Home auto-selection preserves the first actionable report and fails only when all doctors fail', async () => {
@@ -50,5 +50,5 @@ test('Home auto-selection preserves the first actionable report and fails only w
   }), /could not inspect any supported host/);
   await assert.rejects(selectHomeDoctorReport({
     requestedHost: 'gemini', doctorForHost: async () => report('gemini'),
-  }), /must be claude-code, codex, or cursor/);
+  }), /must be claude-code, codex, cursor, or opencode/);
 });

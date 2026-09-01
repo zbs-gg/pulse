@@ -21,7 +21,7 @@ export function captureEnabledForHost(state, host) {
 export function writeCaptureStateFiles({
   globalDataDir, binding, host, enabled, globalEnabled, reason, changedAt = new Date(),
 }) {
-  if (!['codex', 'claude-code', 'cursor'].includes(host)) throw new Error('capture host is required');
+  if (!['codex', 'claude-code', 'cursor', 'opencode'].includes(host)) throw new Error('capture host is required');
 	for (const path of captureStatePaths(globalDataDir, binding)) {
 		const effectiveEnabled = path === join(globalDataDir, 'capture-state.json') && globalEnabled !== undefined
 			? globalEnabled

@@ -1030,7 +1030,7 @@ func newMemoryID(index int) (string, error) {
 
 func validHost(host string) bool {
 	switch host {
-	case "chatgpt", "claude", "codex", "claude-code", "gemini-cli", "cursor", "langchain", "crewai", "pulse-cli":
+	case "chatgpt", "claude", "codex", "claude-code", "gemini-cli", "cursor", "opencode", "langchain", "crewai", "pulse-cli":
 		return true
 	default:
 		return false

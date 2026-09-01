@@ -101,7 +101,7 @@ var supportedHostLiveReadinessContracts = map[string]personalLiveReadinessContra
 }
 
 func supportedHostID(value string) bool {
-	return value == "claude-code" || value == "codex" || value == "cursor"
+	return value == "claude-code" || value == "codex" || value == "cursor" || value == "opencode"
 }
 
 func validatePersonalLiveReadiness(snapshot personalLiveReadinessSnapshot) error {

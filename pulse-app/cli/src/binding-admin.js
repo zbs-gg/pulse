@@ -468,6 +468,20 @@ export async function recoverWorkspaceBindingTransaction({
   }), { platformServices, timeoutSeconds: lockTimeoutSeconds });
 }
 
+export function personalWorkspaceBindingCreationMode({
+  home = homedir(),
+  registryPath = defaultBindingPaths(home).registryPath,
+  anchorPath = defaultBindingPaths(home).anchorPath,
+} = {}) {
+  if (!isAbsolute(home) || !isAbsolute(registryPath) || !isAbsolute(anchorPath)) {
+    fail('request_invalid');
+  }
+  const registryPresent = existsSync(registryPath);
+  const anchorPresent = existsSync(anchorPath);
+  if (registryPresent !== anchorPresent) fail('anchor_state_inconsistent');
+  return registryPresent ? 'attach' : 'initial';
+}
+
 export async function createWorkspaceBinding({
   cwd = process.cwd(),
   mode,

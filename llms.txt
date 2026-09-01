@@ -1,4 +1,9 @@
-# Pulse Personal 0.8.2
+# Pulse Personal 0.8.3 candidate
+
+Version 0.8.3 is an unpublished source candidate. It adds OpenCode 1.18.x on
+Apple Silicon macOS; it is not available through npm or GitHub releases.
+Stable 0.7.2 and public preview 0.8.2 do not contain OpenCode support. Do not
+reuse the 0.8.2 descriptor or signed artifacts as evidence for 0.8.3.
 
 Version 0.8.2 is published under the npm `preview` tag. It is not the stable
 default or production ready. The owner-machine migration passed on 2026-08-09, and
@@ -47,7 +52,8 @@ instructions alone were insufficient. Each ordinary message makes one visible
 pulse_recall call; this is neither local Personal synchronization nor a
 published installation path.
 
-Pulse is memory for AI tools: it gives Codex and Claude Code the knowledge they
+Pulse is memory for AI tools: it gives Codex, Claude Code, Cursor, and—in the
+0.8.3 candidate—OpenCode the knowledge they
 need when they need it and stays silent when nothing relevant is found. The
 public package `@zbs-gg/pulse` contains only Personal: no shared-memory server,
 cloud synchronization, team command, device key, or shared database is shipped.
@@ -72,11 +78,18 @@ Preview installation:
 
     npx -y @zbs-gg/pulse@preview init codex
 
+Unpublished OpenCode candidate, from an explicitly reviewed local package only:
+
+    pulse init opencode --dry-run
+    pulse init opencode --only opencode --fun-facts small-model
+    pulse doctor opencode
+
 Per-harness preview and confirmation:
 
     pulse init codex --dry-run
     pulse init claude-code --dry-run
     pulse init cursor --dry-run
+    pulse init opencode --dry-run
     pulse init <harness> --yes
     pulse init <harness> --only <harness>
 
@@ -86,6 +99,9 @@ Trust boundaries:
 - raw transcript capture and old-chat import are off by default;
 - transcript-, secret-, and path-like capsules are rejected;
 - no backend model call is enabled by default;
+- OpenCode fun facts remain opt-in with `--fun-facts small-model`; the service
+  model receives at most six approved candidate IDs and texts, never the user
+  request or other memory, and failure falls back locally;
 - failure of optional memory must not block terminal, files, Stop/Cancel,
   goal controls, or session completion, and must not create an automatic
   continuation;
@@ -107,6 +123,9 @@ Trust boundaries:
 - retrieve temporarily on each user question, save neither the question nor a
   session-start context package, and offer at most four memories / 600 tokens;
 - omit memory context when relevance is weak.
+- in OpenCode 0.8.3, register exactly one tool named `pulse_memory`, inject
+  recall before the first response of that request, and keep the global loader
+  inert outside signed Pulse projects;
 - let `pulse storage` report protected and removable data; let `pulse storage
   clean` remove only unchanged generated artifacts while preserving the active
   release, one rollback, the vault, keys, sources, and unknown files.
@@ -134,3 +153,6 @@ one-day acceptance is not complete until the exact public 0.8.2 bytes pass host
 recall and writing in Codex and Claude Code. Cursor remains pending; separate
 Claude Chat remote recall used a visible per-message tool call and no Personal
 sync. This is not the stable default or production ready.
+OpenCode exists only in the unpublished 0.8.3 candidate. Contract tests do not
+replace an outside-source package install or the separately approved physical
+OpenCode 1.18.15 acceptance on the owner Mac.

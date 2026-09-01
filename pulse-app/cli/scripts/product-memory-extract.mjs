@@ -3,6 +3,8 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  createReadStream,
+  createWriteStream,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -10,7 +12,9 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
+import { once } from 'node:events';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { runBenchmarkModel } from './benchmark-model-runner.mjs';
@@ -70,7 +74,7 @@ function parseArgs(argv) {
   for (const name of ['dataset', 'output', 'checkpoint_dir']) {
     if (!isAbsolute(options[name] ?? '') || resolve(options[name]) !== options[name]) fail('extract_path_invalid', name);
   }
-  if (!new Set(['locomo', 'longmemeval', 'emobench']).has(options.suite)) fail('extract_suite_invalid');
+  if (!new Set(['locomo', 'longmemeval', 'emobench', 'real-personal']).has(options.suite)) fail('extract_suite_invalid');
   if (!new Set(['benchmark-v2', 'product-v3', 'product-v4', 'product-v5']).has(options.protocol)) fail('extract_protocol_invalid');
   options.workers = Number(options.workers);
   options.chunk_bytes = Number(options.chunk_bytes);
@@ -81,6 +85,16 @@ function parseArgs(argv) {
   if (options.max_cases !== undefined) {
     options.max_cases = Number(options.max_cases);
     if (!Number.isSafeInteger(options.max_cases) || options.max_cases < 1) fail('extract_max_cases_invalid');
+  }
+  if (options.max_records !== undefined) {
+    options.max_records = Number(options.max_records);
+    if (!Number.isSafeInteger(options.max_records) || options.max_records < 1) fail('extract_max_records_invalid');
+  }
+  if (options.suite === 'real-personal') {
+    if (!isAbsolute(options.corpus_manifest ?? '') || resolve(options.corpus_manifest) !== options.corpus_manifest) {
+      fail('extract_path_invalid', 'corpus_manifest');
+    }
+    if (options.protocol !== 'product-v5') fail('extract_protocol_invalid');
   }
   return options;
 }
@@ -637,8 +651,141 @@ function buildEmoBenchOutput(options, dataset, extracted) {
   };
 }
 
+function realPersonalManifest(options) {
+  const manifest = readJSON(options.corpus_manifest, 'extract_corpus_manifest_invalid', 4 * 1024 * 1024);
+  const info = lstatSync(options.dataset);
+  if (manifest?.schema !== 'pulse.private_mixed_archive_manifest.v2' ||
+      !manifest.corpus || !/^[a-f0-9]{64}$/.test(manifest.corpus.sha256 ?? '') ||
+      !Number.isSafeInteger(manifest.corpus.records) || manifest.corpus.records < 1 ||
+      info.isSymbolicLink() || !info.isFile() || info.nlink !== 1 || info.size !== manifest.corpus.bytes) {
+    fail('extract_corpus_manifest_invalid');
+  }
+  return manifest;
+}
+
+function realPersonalRecord(value) {
+  if (value?.schema !== 'pulse.private_mixed_archive_record.v2' ||
+      typeof value.source_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value.source_id) ||
+      typeof value.timestamp !== 'string' || Number.isNaN(Date.parse(value.timestamp)) ||
+      typeof value.speaker !== 'string' || value.speaker.length < 1 || value.speaker.length > 128 ||
+      typeof value.text !== 'string' || value.text.trim() === '' || Buffer.byteLength(value.text, 'utf8') > 64 * 1024) {
+    fail('extract_dataset_invalid');
+  }
+  return {
+    source_id: value.source_id,
+    date: new Date(value.timestamp).toISOString(),
+    speaker: value.speaker,
+    text: value.text,
+  };
+}
+
+async function extractRealPersonal(options, schemaPath, manifest) {
+  const input = createReadStream(options.dataset, { encoding: 'utf8' });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  const extracted = [];
+  const inflight = new Set();
+  let records = [];
+  let bytes = 2;
+  let ordinal = 0;
+  let parsed = 0;
+  const dispatch = async () => {
+    if (records.length === 0) return;
+    const task = { case_id: 'real-personal-v2', ordinal, records };
+    ordinal += 1;
+    records = [];
+    bytes = 2;
+    let promise;
+    promise = extractChunk({ task, options, schemaPath })
+      .then((checkpoint) => extracted.push(checkpoint))
+      .finally(() => inflight.delete(promise));
+    inflight.add(promise);
+    if (inflight.size >= options.workers) await Promise.race(inflight);
+  };
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    let raw;
+    try { raw = JSON.parse(line); } catch { fail('extract_dataset_invalid'); }
+    const record = realPersonalRecord(raw);
+    const encodedBytes = Buffer.byteLength(JSON.stringify(record), 'utf8') + 1;
+    if (encodedBytes > options.chunk_bytes) fail('extract_record_too_large', record.source_id);
+    if (records.length > 0 && bytes + encodedBytes > options.chunk_bytes) await dispatch();
+    records.push(record);
+    bytes += encodedBytes;
+    parsed += 1;
+    if (options.max_records !== undefined && parsed >= options.max_records) break;
+  }
+  input.destroy();
+  await dispatch();
+  await Promise.all(inflight);
+  const expected = options.max_records === undefined ? manifest.corpus.records : Math.min(options.max_records, manifest.corpus.records);
+  if (parsed !== expected) fail('extract_corpus_count_mismatch', `${parsed}:${expected}`);
+  extracted.sort((left, right) => left.ordinal - right.ordinal);
+  return { extracted, records: parsed };
+}
+
+async function writeRealPersonalOutput(options, manifest, run) {
+  const unique = new Map();
+  for (const checkpoint of run.extracted) {
+    for (const memory of checkpoint.memories) {
+      const normalized = memory.summary.replaceAll(/\s+/g, ' ').trim();
+      const clipped = [...normalized].length <= 400
+        ? normalized : `${[...normalized].slice(0, 399).join('').trimEnd()}…`;
+      const digest = sha256(`${memory.kind}\0${clipped}`);
+      const existing = unique.get(digest);
+      if (!existing) unique.set(digest, { ...memory, summary: clipped, digest });
+      else existing.source_ids = [...new Set([...existing.source_ids, ...memory.source_ids])].sort();
+    }
+  }
+  const usage = {};
+  for (const checkpoint of run.extracted) {
+    for (const key of ['input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens']) {
+      usage[key] = (usage[key] ?? 0) + Number(checkpoint.receipt?.usage?.[key] ?? 0);
+    }
+  }
+  mkdirSync(dirname(options.output), { recursive: true, mode: 0o700 });
+  const temporary = `${options.output}.${process.pid}.${Date.now()}.new`;
+  const output = createWriteStream(temporary, { flags: 'wx', mode: 0o600 });
+  const write = async (value) => {
+    if (!output.write(`${JSON.stringify(value)}\n`)) await once(output, 'drain');
+  };
+  await write({
+    schema: 'pulse.benchmark_extracted_memory.v2', record_type: 'header', suite: 'real-personal',
+    source_sha256: manifest.corpus.sha256, source_records: run.records,
+    source_record_limit: options.max_records ?? null,
+    extraction: {
+      model: options.model, effort: options.effort, prompt_version: 'historical_prompt_v5',
+      chunk_bytes: options.chunk_bytes, chunks: run.extracted.length, memories: unique.size, usage,
+    },
+  });
+  for (const memory of unique.values()) {
+    await write({
+      schema: 'pulse.benchmark_extracted_memory_item.v2', record_type: 'memory',
+      id: `atom-${memory.digest.slice(0, 24)}`, kind: productKind(memory.kind), scope: 'project',
+      summary: memory.summary, source_ids: memory.source_ids,
+    });
+  }
+  output.end();
+  await once(output, 'close');
+  renameSync(temporary, options.output);
+  chmodSync(options.output, 0o600);
+  return { cases: 1, chunks: run.extracted.length, memories: unique.size };
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  if (options.suite === 'real-personal') {
+    const manifest = realPersonalManifest(options);
+    mkdirSync(options.checkpoint_dir, { recursive: true, mode: 0o700 });
+    const schemaPath = join(options.checkpoint_dir, 'product-historical-output.schema.json');
+    const schemaBytes = codexHistoricalIngestOutputSchemaBytes();
+    if (existsSync(schemaPath)) {
+      if (!readFileSync(schemaPath).equals(schemaBytes)) fail('extract_product_schema_changed');
+    } else writeFileSync(schemaPath, schemaBytes, { mode: 0o600, flag: 'wx' });
+    const run = await extractRealPersonal(options, schemaPath, manifest);
+    const summary = await writeRealPersonalOutput(options, manifest, run);
+    process.stdout.write(`${JSON.stringify({ status: 'completed', ...summary, output: options.output })}\n`);
+    return;
+  }
   const document = readJSON(options.dataset, 'extract_dataset_invalid');
   let dataset = options.suite === 'emobench'
     ? document?.schema === 'pulse.emotional_memory_benchmark.v1' && Array.isArray(document.cases) ? document.cases : null

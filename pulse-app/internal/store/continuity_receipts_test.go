@@ -456,6 +456,46 @@ func TestCursorContinuityOffersAndAcknowledgementsNeverBecomeProviderMeasurement
 	}
 }
 
+func TestOpenCodeContinuityOffersAndAcknowledgementsNeverBecomeProviderMeasurements(t *testing.T) {
+	s := openContinuityDeliveryStore(t)
+	var disposition string
+	if err := s.DB().QueryRow(`
+		SELECT disposition FROM schema_migration_applicability WHERE version=45`,
+	).Scan(&disposition); err != nil || disposition != "applied" {
+		t.Fatalf("personal v45 disposition=%q err=%v", disposition, err)
+	}
+
+	offerRequest := testContinuityOfferRequest()
+	offerRequest.Host = "opencode"
+	offerRequest.ContextID = continuityDeliveryContextID(offerRequest)
+	offerRequest.IdempotencyKey = continuityDeliveryOfferIdempotencyKey(offerRequest)
+	offer, err := s.RecordContinuityOffer(context.Background(), offerRequest, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := s.RecordContinuityHostObserved(
+		context.Background(), testContinuityObservationRequest(offerRequest), time.Now().Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offer.Host != "opencode" || observed.Host != "opencode" ||
+		offer.State != ContinuityDeliveryOfferedToHost || observed.State != ContinuityDeliveryHostObserved {
+		t.Fatalf("OpenCode delivery receipts=%#v %#v", offer, observed)
+	}
+
+	provider := continuityProviderMeasurementRequest{
+		ContextID: offerRequest.ContextID, IdempotencyKey: "opencode_provider_measurement_forbidden",
+		BindingDigest: offerRequest.BindingDigest, RepositoryID: offerRequest.RepositoryID,
+		Host: offerRequest.Host, SessionRef: offerRequest.SessionRef,
+		ProviderActualInputTokens: 500, ProviderActualSource: "codex_provider_usage_v1",
+		ProviderEvidenceDigest: testContinuityDeliveryDigest("invented opencode provider receipt"),
+	}
+	if _, err := s.recordContinuityProviderMeasurement(context.Background(), provider, time.Now()); !errors.Is(err, ErrContinuityDeliveryInvalid) {
+		t.Fatalf("OpenCode provider measurement err=%v, want %v", err, ErrContinuityDeliveryInvalid)
+	}
+}
+
 func TestContinuityObservationRequiresASeparateLaterLifecycleEvent(t *testing.T) {
 	s := openContinuityDeliveryStore(t)
 	offerRequest := testContinuityOfferRequest()
