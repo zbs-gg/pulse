@@ -2,6 +2,27 @@
 
 All notable changes to Pulse.
 
+## 0.8.3 — unreleased
+
+- Added the first OpenCode adapter for OpenCode 1.18.x on Apple Silicon macOS.
+  One reviewed global loader remains inert outside signed Pulse projects;
+  `pulse init opencode`, `pulse doctor opencode`, `--only opencode`, disconnect,
+  removal, repair, and Memory Home use the same local project-bound vault.
+- OpenCode recalls relevant memory before the first response of the current
+  request and exposes exactly one write tool, `pulse_memory`. Raw prompts are
+  not stored, sessions remain isolated, and daemon, hook, model, cancel, and
+  idle failures do not block normal OpenCode work or start another turn.
+- Added opt-in `--fun-facts small-model`. Once per session, OpenCode may choose
+  one of at most six approved local facts using explicit `small_model` or a
+  provably cheaper active text model from the same provider. The request has no
+  user prompt or other memory, tools are disabled, output is capped at 32
+  tokens, and the stored receipt is content-free.
+- Added safe JSON/JSONC plugin-list editing, exact pre-consent disclosure,
+  idempotent installation/removal, temporary-HOME host probing, OpenCode
+  continuity migration, privacy filters, and contract tests.
+- This version is an unpublished candidate. Stable 0.7.2 and public preview
+  0.8.2 do not include OpenCode; no npm or GitHub release was made.
+
 ## 0.8.2 — 2026-08-17
 
 - Expanded bounded historical-memory extraction and review metadata.

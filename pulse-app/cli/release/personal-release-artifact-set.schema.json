@@ -22,20 +22,20 @@
           "properties": {
             "harnesses": {
               "type": "array",
-              "minItems": 3,
-              "maxItems": 3,
+              "minItems": 4,
+              "maxItems": 4,
               "items": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["distribution", "downloads", "executable", "executable_digest_policy", "host", "identity", "supported_targets", "vendor", "vendor_source", "version"],
                 "properties": {
                   "distribution": { "enum": ["npm", "vendor-desktop-installer"] },
-                  "downloads": { "type": "object", "minProperties": 6, "maxProperties": 6, "additionalProperties": { "type": "string", "pattern": "^https://" } },
+                  "downloads": { "type": "object", "minProperties": 1, "maxProperties": 6, "additionalProperties": { "type": "string", "pattern": "^https://" } },
                   "executable": { "type": "string" },
                   "executable_digest_policy": { "const": "native_evidence_sha256" },
-                  "host": { "enum": ["claude-code", "codex", "cursor"] },
+                  "host": { "enum": ["claude-code", "codex", "cursor", "opencode"] },
                   "identity": { "type": "string" },
-                  "supported_targets": { "type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": { "type": "string" } },
+                  "supported_targets": { "type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": { "type": "string" } },
                   "vendor": { "type": "string" },
                   "vendor_source": { "type": "string", "pattern": "^https://" },
                   "version": { "type": "string" }

@@ -13,6 +13,11 @@ ready. It has no Team server, cloud synchronization, or shared-memory command.
 Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
 reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
 
+The source tree is now the unpublished 0.8.3 candidate. It adds OpenCode
+1.18.x support on Apple Silicon macOS and has been contract-tested against the
+installed 1.18.15. Stable 0.7.2 and public preview 0.8.2 do not contain this
+adapter. No npm or GitHub publication is authorized by this candidate work.
+
 The 0.8.2 preview expands historical import, retrieves up to four short,
 distinct memories within the existing context budget, preserves the embedder
 protocol after caller cancellation, and makes Doctor prove a real semantic
@@ -23,8 +28,9 @@ runner and blocks release unless semantic retrieval answers.
 
 Pulse Personal is for people who work across coding AI programs and do not want
 to explain the same project decisions, constraints, and open questions again in
-every new session. The current supported programs are Codex, Claude Code, and
-Cursor. Ordinary ChatGPT chat is not a supported Pulse connection yet.
+every new session. The published line supports Codex, Claude Code, and Cursor;
+the 0.8.3 candidate also supports OpenCode under the narrower target above.
+Ordinary ChatGPT chat is not a supported Pulse connection yet.
 
 ## Product principles
 
@@ -52,6 +58,20 @@ tools. Stable operating rules belong in host instruction files, not in Pulse.
 Personal facts can follow the owner between projects. Project decisions remain
 inside their project. Emotional observations describe a single moment, mark
 inference as inference, and decay under the existing influence rules.
+
+In OpenCode, one inert global loader is registered in the user's config and
+activates only inside a project with a signed Pulse binding. `chat.message`
+runs local recall and `experimental.chat.system.transform` supplies it before
+the first response. OpenCode sees exactly one administrative surface:
+`pulse_memory`; daemon failure, memory errors, cancel, and idle remain fail-open.
+
+OpenCode fun facts are opt-in. Once per session, at most six approved local
+candidates may be offered to the configured `small_model`, or to a provably
+cheaper active text model from the same provider. The service session receives
+no user request or other memory, has tools disabled and a 32-token output cap,
+and may return only one candidate ID or `none`. Its content-free receipt records
+model, latency, optional usage, and candidate digest. Failure uses the local
+deterministic choice and does not break the main response.
 
 ## Current Evidence
 
@@ -117,6 +137,8 @@ Personal 0.8.2 is the public preview. The stable `latest` package remains
 0.7.2, Team was not enabled, and daily-use acceptance in Codex and Claude Code
 is paused until exact public 0.8.2 bytes pass the owner-machine recall and write
 cycle.
+The 0.8.3 OpenCode adapter remains an unpublished candidate until new signed
+artifacts, a new descriptor, and physical owner-machine acceptance exist.
 
 ## Interface
 
@@ -154,6 +176,8 @@ Epoch 34 from 0.8.0 remains installed locally, so the Codex and Claude Code day
 is not accepted as complete. Exact public 0.8.2 bytes must pass cold and warm
 semantic search plus real host recall and writing on the owner Mac. It is not
 production ready.
+OpenCode support is present only in candidate 0.8.3 and still awaits the
+separately approved physical OpenCode 1.18.15 qualification.
 Separate Claude Chat remote
 recall passed with an account-level instruction and a visible per-message tool
 call; it is not part of the Personal installation.

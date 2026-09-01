@@ -7,7 +7,7 @@ import {
 } from './personal-host-adapters.js';
 
 function hosts(...targets) {
-  return ['claude-code', 'codex', 'cursor'].map((host) => ({
+  return ['claude-code', 'codex', 'cursor', 'opencode'].map((host) => ({
     host,
     detected: targets.includes(host),
     compatible: targets.includes(host),
@@ -32,9 +32,9 @@ function adapter(state, calls, host) {
 }
 
 test('singleton activation invokes only the detected adapter', async () => {
-  for (const selected of ['claude-code', 'codex', 'cursor']) {
+  for (const selected of ['claude-code', 'codex', 'cursor', 'opencode']) {
     const calls = [];
-    const states = Object.fromEntries(['claude-code', 'codex', 'cursor'].map((host) => [host, { ready: false }]));
+    const states = Object.fromEntries(['claude-code', 'codex', 'cursor', 'opencode'].map((host) => [host, { ready: false }]));
     const registry = Object.fromEntries(Object.keys(states).map((host) => [host, adapter(states[host], calls, host)]));
     const result = await activateDetectedPersonalHosts({
       context: { store_id: 'store_personal_test' }, hosts: hosts(selected), registry,
@@ -55,6 +55,7 @@ test('healthy adapters are reused and a failed secondary host degrades parity wi
       activate: async () => { calls.push('activate:codex'); },
     },
     cursor: adapter({ ready: false }, calls, 'cursor'),
+    opencode: adapter({ ready: false }, calls, 'opencode'),
   };
   const result = await activateDetectedPersonalHosts({
     context: { store_id: 'store_personal_test' }, hosts: hosts('claude-code', 'codex'), registry,
@@ -75,6 +76,7 @@ test('activation skips prior verified mutation but returns fresh evidence for ev
     'claude-code': adapter({ ready: true }, calls, 'claude-code'),
     codex: adapter({ ready: false }, calls, 'codex'),
     cursor: adapter(cursorState, calls, 'cursor'),
+    opencode: adapter({ ready: false }, calls, 'opencode'),
   };
   const prior = {
     product_ready: true,
@@ -108,6 +110,7 @@ test('activation retries a prior installed host whose MCP never became ready', a
       'claude-code': adapter(claudeState, calls, 'claude-code'),
       codex: adapter({ ready: false }, calls, 'codex'),
       cursor: adapter({ ready: false }, calls, 'cursor'),
+      opencode: adapter({ ready: false }, calls, 'opencode'),
     },
     prior: {
       product_ready: false,
@@ -132,6 +135,7 @@ test('a prior verified host that disappears cannot make the final result ready',
       inspect: async () => ({ ready: false, lifecycle_ready: false, reason_code: 'cursor_activation_required' }),
       activate: async () => { throw new Error('cursor unavailable'); },
     },
+    opencode: adapter({ ready: false }, [], 'opencode'),
   };
   const result = await activateDetectedPersonalHosts({
     context: { store_id: 'store_personal_test' },
@@ -161,6 +165,7 @@ test('inspection never activates and reports zero verified hosts as not ready', 
     'claude-code': adapter({ ready: false }, calls, 'claude-code'),
     codex: adapter({ ready: false }, calls, 'codex'),
     cursor: adapter({ ready: false }, calls, 'cursor'),
+    opencode: adapter({ ready: false }, calls, 'opencode'),
   };
   const result = await inspectDetectedPersonalHosts({
     context: { store_id: 'store_personal_test' }, hosts: hosts('cursor'), registry,
@@ -176,6 +181,7 @@ test('static plugin readiness completes installation while lifecycle evidence re
     'claude-code': adapter({ ready: false }, calls, 'claude-code'),
     codex: adapter({ ready: true, lifecycleReady: false }, calls, 'codex'),
     cursor: adapter({ ready: false }, calls, 'cursor'),
+    opencode: adapter({ ready: false }, calls, 'opencode'),
   };
   const result = await inspectDetectedPersonalHosts({
     context: { store_id: 'store_personal_test' }, hosts: hosts('codex'), registry,

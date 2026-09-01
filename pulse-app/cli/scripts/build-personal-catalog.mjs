@@ -16,6 +16,9 @@ import {
   DESKTOP_TARGET_IDS, desktopTargetDefinition,
 } from '../src/desktop-target.js';
 import { loadNativeUniversalMatrix } from './native-universal-matrix.mjs';
+import {
+  loadPersonalReleaseHostPolicy, personalReleaseHostTargetCount,
+} from './personal-release-host-policy.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptRoot = dirname(scriptPath);
@@ -387,6 +390,7 @@ export function buildPersonalCatalog({
       })];
     }));
     const matrix = loadNativeUniversalMatrix();
+    const hostPolicy = loadPersonalReleaseHostPolicy(matrix);
     const snapshotURL = `${origin}/pulse/${PACKAGE_VERSION}/catalog/snapshot.json`;
     const artifactSetPayload = Object.freeze({
       allowed_origins: [origin],
@@ -395,7 +399,7 @@ export function buildPersonalCatalog({
         'plugin-runtime': commonArtifacts['plugin-runtime'],
       },
       host_policy: {
-        harnesses: matrix.harnesses.map((harness) => Object.freeze({ ...harness })),
+        harnesses: hostPolicy.map((harness) => Object.freeze({ ...harness })),
       },
       release: {
         channel: 'preview',
@@ -472,8 +476,8 @@ export function buildPersonalCatalog({
       artifact_set_digest: artifactSetDigest,
       artifact_set_url: snapshotPayload.artifact_set.url,
       channel_key_id: channelAuthority.keyID,
-      host_target_count: matrix.harnesses.length * targetIDs.length,
-      hosts: matrix.harnesses.map((harness) => harness.host).sort(),
+      host_target_count: personalReleaseHostTargetCount(hostPolicy, targetIDs),
+      hosts: hostPolicy.map((harness) => harness.host).sort(),
       manifest_digest: artifactSetDigest,
       production_ready: testMode !== true,
       release_epoch: epoch,

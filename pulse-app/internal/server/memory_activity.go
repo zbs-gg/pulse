@@ -53,7 +53,7 @@ func readMemoryActivity(path string) (memoryActivitySnapshot, error) {
 		return memoryActivitySnapshot{}, fmt.Errorf("memory activity file is invalid")
 	}
 	for host, activity := range value.Hosts {
-		if (host != "codex" && host != "claude-code") || activity.Host != host ||
+		if (host != "codex" && host != "claude-code" && host != "opencode") || activity.Host != host ||
 			activity.RepositoryID == "" || activity.ResultCount < 0 || activity.ResultCount > memoryRecallMaximumItems ||
 			!memoryActivityDigest.MatchString(activity.ResultDigest) ||
 			activity.RecalledAt == "" || (time.Time{}).Equal(mustParseActivityTime(activity.RecalledAt)) {

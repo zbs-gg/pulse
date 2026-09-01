@@ -4,13 +4,14 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
   createInitialPersonalWorkspaceBinding,
   createWorkspaceBinding,
+  personalWorkspaceBindingCreationMode,
   recoverWorkspaceBindingTransaction,
 } from './binding-admin.js';
 import {
@@ -145,6 +146,28 @@ test('initial Personal binding uses an ephemeral portable signer and persists on
     /binding_admin_initial_binding_exists/,
   );
   assert.equal(publicKeyInstalls, 1);
+});
+
+test('Personal install creates the first registry once and attaches every later project', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pulse-binding-creation-mode.'));
+  const registryPath = join(home, '.pulse', 'supervisor', 'workspace-bindings.json');
+  const anchorPath = join(home, 'trust', 'workspace-bindings.anchor.json');
+  try {
+    assert.equal(personalWorkspaceBindingCreationMode({ home, registryPath, anchorPath }), 'initial');
+
+    mkdirSync(dirname(registryPath), { recursive: true, mode: 0o700 });
+    writeFileSync(registryPath, '{}\n', { mode: 0o600 });
+    assert.throws(
+      () => personalWorkspaceBindingCreationMode({ home, registryPath, anchorPath }),
+      /binding_admin_anchor_state_inconsistent/,
+    );
+
+    mkdirSync(dirname(anchorPath), { recursive: true, mode: 0o700 });
+    writeFileSync(anchorPath, '{}\n', { mode: 0o600 });
+    assert.equal(personalWorkspaceBindingCreationMode({ home, registryPath, anchorPath }), 'attach');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('same-principal Personal projects reuse one exact vault while retaining separate bindings', async () => {

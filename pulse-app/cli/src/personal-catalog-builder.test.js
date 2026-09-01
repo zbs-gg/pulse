@@ -144,8 +144,8 @@ test('personal catalog builder emits one signed exact six-target release', (t) =
   assert.equal(receipt.production_ready, false, 'injected test authority can never claim a production catalog');
   assert.equal(receipt.target_count, 6);
   assert.equal(receipt.artifact_count, 14);
-  assert.equal(receipt.host_target_count, 18);
-  assert.deepEqual(receipt.hosts, ['claude-code', 'codex', 'cursor']);
+  assert.equal(receipt.host_target_count, 19);
+  assert.deepEqual(receipt.hosts, ['claude-code', 'codex', 'cursor', 'opencode']);
   assert.equal(receipt.release_epoch, EPOCH);
   assert.equal(receipt.snapshot_digest, digest(readFileSync(result.snapshotPath)));
   assert.equal(receipt.artifact_set_digest, digest(readFileSync(result.artifactSetPath)));
@@ -193,7 +193,7 @@ test('personal catalog builder can emit a signed Mac Apple Silicon release first
   assert.deepEqual(Object.keys(envelope.payload.targets), ['darwin-arm64']);
   assert.equal(receipt.target_count, 1);
   assert.equal(receipt.artifact_count, 4);
-  assert.equal(receipt.host_target_count, 3);
+  assert.equal(receipt.host_target_count, 4);
   const release = verifyPersonalReleaseArtifactSet(envelope, snapshot, {
     architecture: 'arm64', minimumAcceptedEpoch: EPOCH, now: new Date(), osVersion: '26.2',
     packageVersion: PACKAGE_VERSION, platform: 'darwin', trustedKeys: current.trustedKeys,

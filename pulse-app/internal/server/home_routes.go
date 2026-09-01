@@ -671,7 +671,7 @@ func parseHomeMemoryFilter(r *http.Request) (store.MemoryHomeFilter, bool) {
 	if len([]rune(filter.Text)) > 160 ||
 		(filter.Project != "" && !homeFilterIdentifier.MatchString(filter.Project)) ||
 		(filter.Harness != "" && filter.Harness != "codex" &&
-			filter.Harness != "claude-code" && filter.Harness != "cursor") ||
+			filter.Harness != "claude-code" && filter.Harness != "cursor" && filter.Harness != "opencode") ||
 		(filter.Scope != "" && filter.Scope != store.MemoryScopeProject &&
 			filter.Scope != store.MemoryScopePersonalGlobal) {
 		return store.MemoryHomeFilter{}, false

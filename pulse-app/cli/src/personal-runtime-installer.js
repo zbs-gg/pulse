@@ -11,6 +11,7 @@ import {
   materializeVerifiedTree,
   readActivatedArtifactSet,
   readArtifactGenerationFloor,
+  readCommittedArtifactSet,
   readStagedArtifactSet,
   recoverArtifactActivation,
 } from './artifact-installer.js';
@@ -476,10 +477,29 @@ export function inspectPersonalRuntime({
         release,
       });
     } catch {
+      let committed;
+      let committedError;
+      try {
+        committed = readCommittedArtifactSet({
+          installRoot: join(root, 'artifacts'), platformServices,
+        });
+      } catch (error) {
+        committedError = error;
+      }
+      if (committed?.record?.epoch < release.epoch) {
+        return Object.freeze({
+          activationSet: null,
+          ready: false,
+          reason_code: 'runtime_upgrade_required',
+          release,
+        });
+      }
       return Object.freeze({
         activationSet: null,
         ready: false,
-        reason_code: typeof activeError?.code === 'string' ? activeError.code : 'runtime_not_staged',
+        reason_code: typeof committedError?.code === 'string'
+          ? committedError.code
+          : typeof activeError?.code === 'string' ? activeError.code : 'runtime_not_staged',
         release,
       });
     }

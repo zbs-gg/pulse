@@ -1,7 +1,8 @@
 # Security Install Checklist
 
 Use this checklist before installing stable Pulse Personal 0.7.2 or the
-explicit 0.8.2 preview for a user.
+explicit 0.8.2 preview for a user. OpenCode exists only in the unpublished
+0.8.3 candidate; stable 0.7.2 and preview 0.8.2 do not contain it.
 
 ## Required Checks
 
@@ -14,7 +15,8 @@ explicit 0.8.2 preview for a user.
 - [ ] Old chat import is not run by default.
 - [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2` for stable
       or `@zbs-gg/pulse@0.8.2` for the selected preview, or the user explicitly
-      provided an exact source bundle, tarball, or local checkout.
+      provided an exact source bundle, tarball, or local checkout. Candidate
+      0.8.3 must come from that reviewed local source, not an npm claim.
 - [ ] The exact OS, architecture, and harness are green in
       `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not
       presented as public support.
@@ -34,11 +36,20 @@ explicit 0.8.2 preview for a user.
       and does not persist the user's question.
 - [ ] No session-start memory package, Stop interception, automatic
       continuation, or second model pass is installed.
+- [ ] For OpenCode, the exact global JSON/JSONC path and plugin-list diff are
+      shown before approval; providers, MCP servers, and unrelated plugins are
+      preserved.
+- [ ] The OpenCode loader is inert outside a signed Pulse project and exposes
+      exactly one tool, `pulse_memory`.
+- [ ] OpenCode fun facts are off unless `--fun-facts small-model` was selected.
+      When enabled, only up to six approved IDs and texts leave Pulse; tools are
+      disabled, output is capped at 32 tokens, and the receipt excludes content.
 
 ## Expected Install Plan
 
 ```bash
 pulse init codex --dry-run
+pulse init opencode --dry-run
 ```
 
 The plan should say Pulse will install:

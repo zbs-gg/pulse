@@ -5,8 +5,9 @@
 - This public repository and npm package contain Pulse Personal only. Memory
   stays in a local project-bound vault; there is no Team server, shared memory,
   cloud synchronization, or `pulse team` command here.
-- The supported AI programs are Codex, Claude Code, and Cursor. Ordinary
-  ChatGPT chat is not a supported Pulse connection.
+- The published AI programs are Codex, Claude Code, and Cursor. The unpublished
+  0.8.3 candidate also supports OpenCode 1.18.x on Apple Silicon macOS.
+  Ordinary ChatGPT chat is not a supported Pulse connection.
 - Personal memory is optional. A broken daemon, activation, or memory request
   must not block terminal or file tools, Stop/Cancel, goal control, or normal
   session completion, and must not create an automatic continuation.
@@ -19,9 +20,11 @@
 ## Installation and repository work
 
 - The stable public release is Personal 0.7.2 for Apple Silicon Macs. Personal
-  0.8.1 is a public npm preview for the same target; it is not the stable
-  default or a production-ready release. Do not present Intel Mac, Windows, or
-  Linux as publicly supported from fixture evidence alone.
+  0.8.2 is a public npm preview for the same target; it is not the stable
+  default or a production-ready release. Personal 0.8.3 is an unpublished
+  candidate and must not reuse the 0.8.2 publication descriptor or artifacts.
+  Do not present Intel Mac, Windows, or Linux as publicly supported from fixture
+  evidence alone.
 - Before installation, show the exact files and settings that will change and
   ask the person to confirm. `--yes` does not bypass macOS protected actions.
 - Do not change global AI-program settings, system trust, or an existing Pulse

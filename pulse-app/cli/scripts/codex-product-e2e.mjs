@@ -400,7 +400,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(personalPlan.outcome, 'action_required');
 	assert.deepEqual(personalPlan.reason_codes, ['synthetic_authority_forbidden']);
 	assert.equal('target_host' in personalPlan, false);
-	assert.deepEqual(personalPlan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+	assert.deepEqual(personalPlan.supported_hosts, ['claude-code', 'codex', 'cursor', 'opencode']);
 	assert.equal(personalPlan.detected.hosts.some((host) => host.host === 'codex' && host.activation_target), true);
 	assert.equal(personalPlan.release.artifacts.length, 5);
 	assert.equal(personalPlan.release.total_download_bytes > 0, true);

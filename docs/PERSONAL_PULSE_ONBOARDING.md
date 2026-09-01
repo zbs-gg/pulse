@@ -10,13 +10,20 @@ installs the exact archive on a clean Apple Silicon runner and requires a real
 semantic query. Daily-use, Cursor, and production acceptance remain pending;
 ordinary stable installation stays on 0.7.2.
 
+The repository currently names an unpublished 0.8.3 candidate. It adds
+OpenCode 1.18.x on Apple Silicon macOS; stable 0.7.2 and public preview 0.8.2 do
+not contain the adapter. Source and fixture tests are not publication or live
+acceptance proof.
+
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
 
 ## Before the command
 
 The supported release target is an Apple Silicon Mac with Node 20+, a Git
-project, and at least one of Claude Code, Cursor, or Codex. Personal Pulse
+project, and at least one host supported by the selected release. Candidate
+0.8.3 admits Claude Code, Cursor, Codex, or OpenCode 1.18.x on Apple Silicon.
+Personal Pulse
 does not require Go, Python, Make, Docker, or a model API key. It also requires no
 manual host config editing.
 
@@ -74,6 +81,7 @@ the Personal vault and does not repeat already verified runtime work.
 pulse doctor claude-code  # when detected
 pulse doctor cursor       # when detected
 pulse doctor codex        # when detected
+pulse doctor opencode     # candidate 0.8.3, when detected
 pulse home
 ```
 
@@ -95,7 +103,8 @@ pulse consolidate report
 ```
 
 The same report appears in the terminal, Memory Home's **Memory ocean** section,
-and the Pulse tool available to Claude Code, Cursor, and Codex. It identifies
+and the Pulse tool available to Claude Code, Cursor, Codex, and candidate
+OpenCode. It identifies
 the bound destination first, then shows content-free source aliases,
 classifications, counts, blockers, and one next action. It does not import,
 merge, delete, clean up, publish, or call a model. Paths and memory bodies stay
@@ -104,7 +113,7 @@ separate human approval.
 
 ## First-memory proof
 
-1. Do normal work in a verified Claude Code, Cursor, or Codex task.
+1. Do normal work in a verified Claude Code, Cursor, Codex, or OpenCode task.
 2. Let that harness propose one compact structured memory through Pulse.
 3. Confirm that deterministic validation automatically saved it and that the
    exact card appears in Memory Home with edit, move, and delete controls.
@@ -124,10 +133,18 @@ adds nothing for a weak match. A durable result is saved through the single
 `pulse_memory` tool inside the same ordinary turn. Session start and Stop do not
 run memory model passes.
 
+For OpenCode, run `pulse init opencode --dry-run` first. The approved install
+adds `./pulse/pulse.js` to the global plugin list and binds only the current
+project. A later project needs `pulse init opencode` again but reuses the global
+loader. Optional `--fun-facts small-model` is once-per-session and sends only
+approved short candidates to the person's OpenCode model configuration.
+
 ## Privacy and removal
 
 - Personal memory lives in the bound local vault, not Git.
 - Raw transcripts and backend model calls are off by default.
+- OpenCode fun-fact model calls are off unless explicitly selected; their
+  receipts contain no candidate text or user prompt.
 - The managed local embedder uses no model API key.
 - Old chats are imported only through a separate preview-first flow.
 - `pulse consolidate report` inventories old stores without adopting them.
@@ -139,6 +156,7 @@ Remove one host integration while preserving memory:
 pulse disconnect claude-code
 pulse disconnect cursor
 pulse disconnect codex
+pulse disconnect opencode
 ```
 
 Whole-vault wipe is separately protected by fresh macOS presence. Disconnect,
@@ -155,3 +173,5 @@ Personal 0.7.2 passed the clean Apple Silicon Mac release installation before
 publication. That proves the packaged installation path, not long-term use by
 another person or support for Intel Mac, Windows, or Linux. Those remain
 separate future boundaries.
+Candidate 0.8.3 still requires an outside-source package install and a separate
+approval before changing the owner Mac's current OpenCode configuration.

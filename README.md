@@ -1,11 +1,17 @@
 # Pulse Personal
 
-Pulse is memory for AI tools. It gives Codex and Claude Code the knowledge they
-need at the moment they need it, and stays silent when nothing relevant is
-found. Version `0.8.2` can also remember emotions attached to a specific
+Pulse is memory for AI tools. It gives coding agents the knowledge they need at
+the moment they need it, and stays silent when nothing relevant is found.
+Version `0.8.2` can also remember emotions attached to a specific
 moment. It does not turn repeated emotions into personality traits, save the
 full conversation, or send Personal memory to a cloud server.
 
+> **OpenCode support exists only in the unpublished 0.8.3 candidate.** Stable
+> `0.7.2` and public preview `0.8.2` do not contain it. The candidate supports
+> OpenCode `1.18.x` on Apple Silicon macOS and has been contract-tested against
+> the locally installed `1.18.15`; npm and GitHub publication are not part of
+> this change.
+>
 > **0.8.2 is the npm preview, not the stable default.** Its release flow
 > installs the exact archive on a clean Apple Silicon runner and makes a real
 > BGE-M3 semantic query before publication. Use 0.7.2 for the stable
@@ -16,6 +22,17 @@ Version 0.8.2 expands historical import, returns up to four short, distinct
 memories, keeps the embedder protocol intact after a cancelled caller, and
 makes Doctor prove a real semantic query. Owner-machine daily-use acceptance
 still requires installing these exact public bytes in Codex and Claude Code.
+
+The 0.8.3 candidate adds a global OpenCode loader that stays inert outside a
+signed Pulse project. `pulse init opencode` binds the current project, recalls
+memory before the first model response, and exposes exactly one write tool,
+`pulse_memory`. Optional `--fun-facts small-model` sends at most six already
+approved short facts to OpenCode's configured smaller model once per session;
+the user request, other memory, secrets, and paths are excluded, and failure
+falls back locally without blocking the normal answer.
+The integration follows OpenCode's documented
+[`small_model`](https://github.com/anomalyco/opencode/blob/dev/packages/web/src/content/docs/config.mdx)
+setting and [plugin API](https://dev.opencode.ai/docs/plugins/).
 
 The owner-machine migration and atomic database switch passed on 2026-08-09.
 The old Pulse and Claude Mem sources, migration copies, and recovery files are
@@ -72,6 +89,9 @@ with the local Personal 0.8 vault and is not part of the published install.
 
 Version `0.7.2` remains the stable release for Macs with Apple Silicon. Version
 `0.8.2` is published under the npm `preview` tag for the same public target.
+The source tree names the next unpublished candidate `0.8.3`; it must not be
+presented as npm-installable until new signed artifacts and a publication
+descriptor exist.
 Its exact archive must pass installation and a real semantic query on a clean
 Apple Silicon GitHub runner before publication. Intel Mac, Windows, and Linux
 are not public support claims yet; fixture and packaging checks on those
@@ -92,20 +112,23 @@ To try the 0.8 preview explicitly:
 npx -y @zbs-gg/pulse@preview init codex
 ```
 
-The installer finds Codex, Claude Code, and Cursor, shows every file it will
-change, and offers to connect all detected programs. To inspect the same plan
-without changing anything:
+The 0.8.3 candidate installer finds Codex, Claude Code, Cursor, and compatible
+OpenCode, shows every file it will change plus the OpenCode plugin-list diff,
+and offers to connect all detected programs. To inspect the same plan without
+changing anything:
 
 ```bash
 pulse init codex --dry-run
 pulse init claude-code --dry-run
 pulse init cursor --dry-run
+pulse init opencode --dry-run
 
 # Install into every detected program after reviewing the displayed changes:
 pulse init codex --yes
 
 # Or limit installation to one program:
 pulse init codex --only codex
+pulse init opencode --only opencode --fun-facts small-model
 ```
 
 The installer keeps one local Personal store and connects every supported AI
@@ -123,7 +146,9 @@ names remain compatibility aliases but are not advertised to the model.
 
 Raw conversation capture and old-chat import are off by default. Secret-like,
 transcript-like, and path-like payloads are rejected. No backend model call is
-enabled as a hidden default.
+enabled as a hidden default. OpenCode fun facts are public opt-in; when enabled,
+the service call uses the person's OpenCode model configuration and records
+only model, latency, optional usage, and a candidate-set digest.
 
 Memory stays in the local Pulse data directory. It is not committed to Git and
 is not sent to a Pulse server. Disconnecting an AI program preserves memory;
@@ -156,7 +181,7 @@ normal session completion available. A failed memory attempt must not create
 an automatic continuation. The repository tests this boundary, but a packaged
 test is not a substitute for a fresh real session in each AI program.
 
-The 0.8 preview does not preload a session memory package. Each user
+The 0.8 candidate does not preload a session memory package. Each user
 question triggers one temporary local relevance search; the question is not
 saved. At most four memories and about 600 tokens are offered, and weak matches
 produce no memory context. Stable rules remain in `AGENTS.md` or `CLAUDE.md`
@@ -208,6 +233,10 @@ a cold-search failure while reporting itself ready. The one-day Codex and
 Claude Code acceptance is therefore not complete until exact public 0.8.2 bytes
 are installed and pass real recall and writing. Raw-history recall and Cursor
 acceptance remain pending product limits.
+A separate unpublished 0.8.3 candidate adds OpenCode 1.18.x support on Apple
+Silicon macOS. Source tests are not physical acceptance: the candidate still
+needs an outside-checkout package install and then a separately approved live
+OpenCode session on the owner Mac. It has not been published.
 A separate Claude Chat
 remote-recall experiment passed with a visible tool call on every message, but
 is not Personal sync or a supported install. Version 0.8 is not the stable
