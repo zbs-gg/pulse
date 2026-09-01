@@ -3,6 +3,11 @@
 > Personal 0.8.2 is published under the npm `preview` tag. Use
 > `@zbs-gg/pulse@0.7.2` for the stable installation; select `@preview`
 > deliberately because owner-machine daily-use acceptance is still pending.
+>
+> OpenCode is available only in the unpublished 0.8.3 candidate. Stable 0.7.2
+> and public preview 0.8.2 do not include it. Install 0.8.3 only from an exact
+> locally packed candidate after reviewing its source and archive; do not use
+> an old preview descriptor or artifact set.
 
 The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
 and was published to npm on 7 August 2026.
@@ -31,8 +36,9 @@ npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The Personal installer verifies a signed release, provisions one shared Core,
-and attaches every detected compatible Claude Code, Cursor, and Codex plugin
-to the same project-bound vault. Any one of those hosts is sufficient.
+and attaches every detected compatible Claude Code, Cursor, Codex, and (in
+candidate 0.8.3) OpenCode plugin to the same project-bound vault. Any one of
+those hosts is sufficient within its documented release target.
 It does not require Go, Python, Make, Docker, a model API key, or manual config
 editing. Memory remains in a private project-bound local vault; raw transcript
 capture, backend model calls, old-chat import, and Personal-to-Git publication
@@ -47,12 +53,19 @@ The wizard may pause for real human actions such as protected-action presence,
 Codex hook trust, Claude Code plugin approval, or a Cursor reload. Rerun the
 same command or use `pulse repair`; verified Core and host work is reused.
 
+For OpenCode, the plan must show the exact existing `opencode.json` or
+`opencode.jsonc`, the plugin-list diff, `~/.config/opencode/pulse/pulse.js`, and
+the project option file before consent. Existing providers, MCP servers, and
+plugins remain. A conflicting pair of JSON and JSONC configs stops installation
+without mutation.
+
 ## What the agent must show you
 
 ```bash
 pulse doctor claude-code  # when detected
 pulse doctor cursor       # when detected
 pulse doctor codex        # when detected
+pulse doctor opencode     # candidate 0.8.3, when detected
 pulse home
 ```
 
@@ -80,6 +93,12 @@ For the 0.8 preview behavior, the host should advertise only
 tokens, while weak matches add nothing. The install must not add a session-start
 memory package, a Stop hook, or a second model turn for saving memory.
 
+OpenCode must expose exactly one Pulse tool, `pulse_memory`, and keep its global
+loader inert outside signed Pulse projects. Optional fun facts require the
+visible `--fun-facts small-model` flag. The service request receives only up to
+six approved candidate IDs and texts, disables tools, is capped at 32 output
+tokens, and must not receive the user prompt or the rest of memory.
+
 ## Repair, disconnect, and data
 
 ```bash
@@ -87,6 +106,7 @@ pulse repair
 pulse disconnect claude-code
 pulse disconnect cursor
 pulse disconnect codex
+pulse disconnect opencode
 ```
 
 Disconnect preserves memory. Whole-vault wipe is a separate OS-presence-bound
@@ -107,7 +127,8 @@ Please audit and install Pulse Personal for this project.
 5. After I approve, run:
      npx -y @zbs-gg/pulse@0.7.2 init codex
 6. For every host returned in `host_status.hosts`, run its exact doctor command:
-   `pulse doctor claude-code`, `pulse doctor cursor`, or `pulse doctor codex`.
+   `pulse doctor claude-code`, `pulse doctor cursor`, `pulse doctor codex`, or
+   `pulse doctor opencode`.
    Then run `pulse home`.
 7. Help me create one visible automatically saved memory, start a fresh task, and show the
    continuity and token-economy receipts in Memory Home.

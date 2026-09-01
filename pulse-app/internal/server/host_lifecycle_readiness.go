@@ -8,7 +8,7 @@ import (
 
 const supportedHostLifecycleReadinessSchema = "pulse.supported_host_lifecycle_readiness.v1"
 
-var supportedProductHosts = []string{"claude-code", "codex", "cursor"}
+var supportedProductHosts = []string{"claude-code", "codex", "cursor", "opencode"}
 
 type supportedHostLifecycleState struct {
 	Host           string   `json:"host"`

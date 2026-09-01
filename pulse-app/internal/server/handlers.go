@@ -294,7 +294,7 @@ func (s *Server) handleMemoryRecallActivity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	host, ok := exactSingleHeader(r, "X-Pulse-Product-Host")
-	if !ok || (host != "codex" && host != "claude-code") {
+	if !ok || (host != "codex" && host != "claude-code" && host != "opencode") {
 		http.Error(w, "product host is invalid", http.StatusBadRequest)
 		return
 	}

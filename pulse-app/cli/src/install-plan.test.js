@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
-  buildPersonalInstallPlan,
+  buildPersonalInstallPlan as buildPersonalInstallPlanRaw,
   canonicalInstallPlanJSON,
   detectCodexCLI,
   detectInstallResources,
@@ -35,6 +35,11 @@ const codexReady = () => ({ available: true, version: '1.2.3', reason_code: null
 const hostMissing = (host) => () => ({ available: false, version: null, reason_code: `${host}_missing` });
 const claudeReady = () => ({ available: true, version: '2.1.196', reason_code: null });
 const cursorReady = () => ({ available: true, reason_code: null });
+const openCodeReady = () => ({ available: true, compatible: true, version: '1.18.15', reason_code: null });
+
+function buildPersonalInstallPlan(options) {
+  return buildPersonalInstallPlanRaw({ detectOpenCode: hostMissing('opencode'), ...options });
+}
 
 function verifiedRelease({
   targetID = 'darwin-arm64', capabilities = targetID.startsWith('darwin-') ? ['presence-helper'] : [], historical = false,
@@ -104,6 +109,10 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
       ['claude-code', { detectClaude: claudeReady, detectCodex: hostMissing('codex'), detectCursor: hostMissing('cursor') }],
       ['codex', { detectClaude: hostMissing('claude'), detectCodex: codexReady, detectCursor: hostMissing('cursor') }],
       ['cursor', { detectClaude: hostMissing('claude'), detectCodex: hostMissing('codex'), detectCursor: cursorReady }],
+      ['opencode', {
+        detectClaude: hostMissing('claude'), detectCodex: hostMissing('codex'),
+        detectCursor: hostMissing('cursor'), detectOpenCode: openCodeReady,
+      }],
     ].map(([host, detectors]) => [host, buildPersonalInstallPlan({
       cwd, home, codexHome: join(home, '.codex'), platform: 'darwin', architecture: 'arm64',
       nodeVersion: '20.18.0', ...detectors,
@@ -115,7 +124,7 @@ test('supported singleton-host Stage 1 plans are stable, explicit, and have no G
     assert.equal(plan.contract_version, 2);
     assert.equal(plan.stage, 'personal_stage_1');
     assert.equal('target_host' in plan, false);
-    assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+    assert.deepEqual(plan.supported_hosts, ['claude-code', 'codex', 'cursor', 'opencode']);
     assert.equal(plan.activation_policy, 'all_detected_supported_hosts');
     assert.equal(plan.outcome, 'ready_to_install');
     assert.deepEqual(plan.reason_codes, []);
@@ -578,6 +587,35 @@ test('normal install introduction explains the product without exposing internal
     assert.match(output, /do not need to choose a model, storage path, port, or hooks/i);
     assert.match(output, /Technical details: pulse install-plan --json/);
     assert.doesNotMatch(output, /workspace_|repository_|Current state:|Local writes:|Authority:|binding\.change|vault\.wipe/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode disclosure shows the plugin diff and small-model call without leaking config secrets', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-opencode-disclosure.'));
+  try {
+    const home = join(root, 'home');
+    const cwd = repository(root, 'opencode-project');
+    const configRoot = join(home, '.config', 'opencode');
+    mkdirSync(configRoot, { recursive: true });
+    writeFileSync(join(configRoot, 'opencode.json'), JSON.stringify({
+      provider: { local: { options: { apiKey: 'must-not-appear' } } },
+      plugin: ['existing-plugin'],
+    }));
+    const plan = buildPersonalInstallPlan({
+      cwd, home, platform: 'darwin', architecture: 'arm64', nodeVersion: '20.18.0',
+      detectClaude: hostMissing('claude'), detectCodex: hostMissing('codex'),
+      detectCursor: hostMissing('cursor'), detectOpenCode: openCodeReady,
+      funFacts: 'small-model', release: verifiedRelease(), detectResources: () => ampleResources,
+    });
+    const introduction = formatPersonalInstallIntroduction(plan);
+    const details = formatPersonalInstallPlan(plan);
+    assert.match(introduction, /one short OpenCode model call/i);
+    assert.doesNotMatch(introduction, /no paid model API calls/i);
+    assert.match(details, /opencode\.json: plugin \["existing-plugin"\] -> \["existing-plugin","\.\/pulse\/pulse\.js"\]/);
+    assert.match(details, /OpenCode fun facts: small-model/);
+    assert.doesNotMatch(`${introduction}\n${details}`, /must-not-appear/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

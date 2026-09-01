@@ -27,7 +27,7 @@ func TestSupportedHostLifecycleReadinessRequiresOneSameHostSaveRecallChain(t *te
 	projection := projectSupportedHostLifecycleReadiness(
 		[]TerminalMemoryReadinessFact{terminal}, []ContextDeliveryReadinessFact{offer, observed},
 	)
-	if projection.Schema != supportedHostLifecycleReadinessSchema || len(projection.Hosts) != 3 {
+	if projection.Schema != supportedHostLifecycleReadinessSchema || len(projection.Hosts) != len(supportedProductHosts) {
 		t.Fatalf("projection=%#v", projection)
 	}
 	for _, host := range projection.Hosts {

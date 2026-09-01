@@ -20,7 +20,7 @@ import { defaultPlatformServices } from './platform-services.js';
 
 const RUNTIME_MANIFEST = 'runtime-manifest.json';
 const MARKETPLACE_SNAPSHOT_MANIFEST = 'snapshot.json';
-const PRODUCT_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor']);
+const PRODUCT_HOSTS = Object.freeze(['claude-code', 'codex', 'cursor', 'opencode']);
 
 export function codexProductActivationReady(report) {
 	const required = [
@@ -532,7 +532,7 @@ function runtimeRoot(dataDir) {
   return join(dataDir, 'runtime', 'codex');
 }
 
-function codexProductWorkspaceDigest(canonicalPath) {
+export function codexProductWorkspaceDigest(canonicalPath) {
   return createHash('sha256')
     .update('pulse-codex-product-locator-v1\x00')
     .update(canonicalPath)

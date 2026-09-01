@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const cliRoot = resolve(scriptRoot, '..');
 const packageVersion = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version;
-const HOSTS = ['claude-code', 'codex', 'cursor'];
+const HOSTS = ['claude-code', 'codex', 'cursor', 'opencode'];
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -86,7 +86,7 @@ function gitRepository(root) {
 function verifiedRelease() {
   return {
     schema: 'pulse.verified_release_manifest.v2',
-    version: '0.8.1',
+    version: '0.8.3',
     epoch: 7,
     manifest_digest: 'a'.repeat(64),
     catalog_schema: 'pulse.personal_preview.release_catalog.v2',
@@ -131,9 +131,9 @@ function detector(host, selected, incompatible) {
   if (host === 'cursor') return () => ({ available: true, app_path: '/Applications/Cursor.app', reason_code: null });
   return () => ({
     available: true,
-    executable_path: `/usr/local/bin/${host === 'claude-code' ? 'claude' : 'codex'}`,
+    executable_path: `/usr/local/bin/${host === 'claude-code' ? 'claude' : host}`,
     executable_sha256: 'b'.repeat(64),
-    version: host === 'claude-code' ? '2.1.196' : '0.114.0',
+    version: host === 'claude-code' ? '2.1.196' : host === 'opencode' ? '1.18.15' : '0.114.0',
     reason_code: null,
   });
 }
@@ -211,6 +211,7 @@ try {
     detectClaude: detector('claude-code', selected, incompatible),
     detectCodex: detector('codex', selected, incompatible),
     detectCursor: detector('cursor', selected, incompatible),
+    detectOpenCode: detector('opencode', selected, incompatible),
     detectWorkspace: (path) => ({
       schema: 'pulse.workspace-identity.v1',
       workspace_id: 'workspace_multiharness_fixture',

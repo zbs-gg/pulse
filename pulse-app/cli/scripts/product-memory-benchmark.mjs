@@ -67,6 +67,13 @@ function parseArgs(argv) {
   if (out.e2e_input !== undefined && (!isAbsolute(out.e2e_input) || resolve(out.e2e_input) !== out.e2e_input)) {
     fail('benchmark_path_invalid', 'e2e_input');
   }
+  if (out.package_archive !== undefined &&
+      (!isAbsolute(out.package_archive) || resolve(out.package_archive) !== out.package_archive ||
+       !out.package_archive.endsWith('.tgz') || !existsSync(out.package_archive) ||
+       !lstatSync(out.package_archive).isFile() || lstatSync(out.package_archive).isSymbolicLink() ||
+       lstatSync(out.package_archive).size < 1 || lstatSync(out.package_archive).size > 512 * 1024 * 1024)) {
+    fail('benchmark_path_invalid', 'package_archive');
+  }
   if (out.candidate_daemon !== undefined &&
       (!isAbsolute(out.candidate_daemon) || resolve(out.candidate_daemon) !== out.candidate_daemon ||
        !existsSync(out.candidate_daemon) || !lstatSync(out.candidate_daemon).isFile() ||
@@ -574,21 +581,29 @@ function initializeRepository(path) {
   run('/usr/bin/git', ['commit', '--allow-empty', '-q', '-m', 'fixture'], { cwd: path });
 }
 
-async function resolvePublishedPackage(root, version) {
-  const metadataURL = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/${version}`;
-  const response = await fetch(metadataURL, { signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) fail('benchmark_package_metadata_unavailable', String(response.status));
-  const metadata = await response.json();
-  if (metadata?.name !== PACKAGE_NAME || metadata?.version !== version ||
-      typeof metadata?.dist?.tarball !== 'string' || !metadata.dist.tarball.startsWith('https://registry.npmjs.org/') ||
-      typeof metadata?.dist?.integrity !== 'string' || !metadata.dist.integrity.startsWith('sha512-')) {
-    fail('benchmark_package_metadata_invalid');
-  }
-  const archiveResponse = await fetch(metadata.dist.tarball, { signal: AbortSignal.timeout(120_000) });
-  if (!archiveResponse.ok) fail('benchmark_package_download_failed', String(archiveResponse.status));
-  const archive = Buffer.from(await archiveResponse.arrayBuffer());
-  if (createHash('sha512').update(archive).digest('base64') !== metadata.dist.integrity.slice(7)) {
-    fail('benchmark_package_integrity_mismatch');
+async function resolvePublishedPackage(root, version, packageArchive) {
+  let archive;
+  let packageSource;
+  if (packageArchive) {
+    archive = readFileSync(packageArchive);
+    packageSource = 'local_archive';
+  } else {
+    const metadataURL = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/${version}`;
+    const response = await fetch(metadataURL, { signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) fail('benchmark_package_metadata_unavailable', String(response.status));
+    const metadata = await response.json();
+    if (metadata?.name !== PACKAGE_NAME || metadata?.version !== version ||
+        typeof metadata?.dist?.tarball !== 'string' || !metadata.dist.tarball.startsWith('https://registry.npmjs.org/') ||
+        typeof metadata?.dist?.integrity !== 'string' || !metadata.dist.integrity.startsWith('sha512-')) {
+      fail('benchmark_package_metadata_invalid');
+    }
+    const archiveResponse = await fetch(metadata.dist.tarball, { signal: AbortSignal.timeout(120_000) });
+    if (!archiveResponse.ok) fail('benchmark_package_download_failed', String(archiveResponse.status));
+    archive = Buffer.from(await archiveResponse.arrayBuffer());
+    if (createHash('sha512').update(archive).digest('base64') !== metadata.dist.integrity.slice(7)) {
+      fail('benchmark_package_integrity_mismatch');
+    }
+    packageSource = 'npm_registry';
   }
   const archivePath = join(root, `pulse-${version}.tgz`);
   writeFileSync(archivePath, archive, { mode: 0o600, flag: 'wx' });
@@ -610,6 +625,7 @@ async function resolvePublishedPackage(root, version) {
     unpacked_physical_bytes: physicalTreeBytes(packageRoot),
     installed_dependency_tree_physical_bytes: physicalTreeBytes(join(installRoot, 'node_modules')),
     npm_install_elapsed_ms: installElapsed,
+    package_source: packageSource,
     version,
   };
 }
@@ -1104,12 +1120,14 @@ function aggregateResult({ options, packageProof, releaseProof, suite, writes, r
     product: {
       package: PACKAGE_NAME,
       version: packageProof.version,
+      package_source: packageProof.package_source,
       npm_archive_sha256: packageProof.archive_sha256,
       release_epoch: releaseProof.activation.release_epoch,
       daemon_sha256: releaseProof.activation.daemon_digest,
       embedder: 'bge-m3',
       path: 'pulse_memory -> Personal daemon -> automatic prompt context',
-      compositor: options.candidate_compositor ? 'source_candidate' : 'published_package',
+      compositor: options.candidate_compositor ? 'source_candidate'
+        : packageProof.package_source === 'local_archive' ? 'local_package' : 'published_package',
       compositor_sha256: sha256File(compositorPath),
       runtime_proof: releaseProof.runtime_proof,
     },
@@ -1175,7 +1193,7 @@ export async function main(argv = process.argv.slice(2)) {
       path: join(root, 'workspaces', `${String(index + 1).padStart(3, '0')}-${sha256(item.id).slice(0, 12)}`),
     }));
     for (const workspace of workspaces) initializeRepository(workspace.path);
-    const packageProof = await resolvePublishedPackage(root, options.package_version);
+    const packageProof = await resolvePublishedPackage(root, options.package_version, options.package_archive);
     const releaseProof = activeReleaseProof(packageProof.root, options.package_version, {
       compatibleActiveRuntime: options.compatible_active_runtime === true,
     });

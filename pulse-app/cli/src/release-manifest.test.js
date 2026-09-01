@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { loadNativeUniversalMatrix } from '../scripts/native-universal-matrix.mjs';
+import { loadPersonalReleaseHostPolicy } from '../scripts/personal-release-host-policy.mjs';
 import { DESKTOP_TARGET_IDS } from './desktop-target.js';
 import {
   ReleaseManifestError,
@@ -266,7 +267,7 @@ function artifactSetEnvelope(channelKeys, overrides = {}) {
   payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
   payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.8.1/catalog/snapshot.json';
   payload.host_policy = {
-    harnesses: loadNativeUniversalMatrix().harnesses.map((harness) => structuredClone(harness)),
+    harnesses: loadPersonalReleaseHostPolicy(loadNativeUniversalMatrix()).map((harness) => structuredClone(harness)),
   };
   Object.assign(payload, overrides);
   return {

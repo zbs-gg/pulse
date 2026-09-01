@@ -21,6 +21,18 @@ The six targets are `darwin-arm64`, `darwin-x64`, `linux-arm64-gnu`,
 may still run, but doctor must report `harness_version_unverified`; it does not
 extend this ledger.
 
+## Unpublished OpenCode candidate
+
+OpenCode is outside the historical Gold matrix above. Candidate 0.8.3 has one
+bounded contract only: OpenCode `1.18.x` on `darwin-arm64`, physically anchored
+to the locally installed `1.18.15`. Repository contract and temporary-HOME
+tests are green; outside-source package installation, owner-machine live
+recall/write/fun-fact/fail-open acceptance, and public support are pending.
+
+| Harness | Version | Target | Contract tests | Physical candidate | Public support |
+|---|---:|---|---:|---:|---:|
+| OpenCode | `1.18.x` (`1.18.15` anchor) | `darwin-arm64` | pass | pending | unavailable |
+
 ## Evidence authority
 
 - `fixture` proves repository orchestration only. It always has

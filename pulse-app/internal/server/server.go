@@ -433,6 +433,7 @@ func (s *Server) localHandler() http.Handler {
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
 			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)
 			r.Post("/memory/activity/recall", s.handleMemoryRecallActivity)
+			r.Get("/memory/fun-fact-candidates", s.handleOpenCodeFunFactCandidates)
 		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)

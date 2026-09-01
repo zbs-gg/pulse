@@ -772,7 +772,7 @@ export function resolveProductEnvironment({
   windowsAdapter,
   edgeProfile = 'runtime',
 } = {}) {
-  if (!['claude-code', 'codex', 'cursor'].includes(host)) {
+  if (!['claude-code', 'codex', 'cursor', 'opencode'].includes(host)) {
     throw new Error('Pulse product host identity is missing or invalid.');
   }
   if (!['refresh', 'reuse'].includes(integrity)) {
@@ -959,6 +959,7 @@ export function resolveProductEnvironment({
     PULSE_RUNTIME_DIGEST: activation.runtime_tree_digest,
     PULSE_PLUGIN_TREE_DIGEST: activation.plugin_tree_digest,
     PULSE_RELEASE_MANIFEST_DIGEST: activation.release_manifest_digest,
+    PULSE_WORKSPACE_DIGEST: key,
   };
   if (entry.trust_mode === 'test') {
     productEnvironment.PULSE_TRUST_MODE = 'test';

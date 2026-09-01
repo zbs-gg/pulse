@@ -878,7 +878,7 @@ func humanMemoryHomeSessionLabel(host, createdAt string) string {
 
 func humanMemoryHomeHarnessLabel(host string) string {
 	if label := map[string]string{
-		"codex": "Codex", "claude-code": "Claude Code", "cursor": "Cursor",
+		"codex": "Codex", "claude-code": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode",
 	}[host]; label != "" {
 		return label
 	}

@@ -1,7 +1,7 @@
 {
   "name": "@zbs-gg/pulse",
-  "version": "0.8.2",
-  "description": "Local Personal memory for Codex, Claude Code, and Cursor.",
+  "version": "0.8.3",
+  "description": "Local Personal memory for Codex, Claude Code, Cursor, and OpenCode.",
   "license": "AGPL-3.0-only",
   "author": "ZBS GG",
   "type": "module",
@@ -25,6 +25,8 @@
     "src/claude-plugin-install.js",
     "src/cursor-hooks.js",
     "src/cursor-install.js",
+    "src/opencode-install.js",
+    "src/opencode-bridge.js",
     "src/codex-install.js",
     "src/codex-runtime.js",
     "src/product-compositor.js",

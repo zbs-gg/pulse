@@ -122,6 +122,7 @@ function windowsCandidates(home, env, pathAPI) {
       pathAPI.join(localAppData, 'Programs', 'cursor', 'Cursor.exe'),
       pathAPI.join(programFiles, 'Cursor', 'Cursor.exe'),
     ],
+    opencode: [],
     git: [
       pathAPI.join(programFiles, 'Git', 'bin', 'git.exe'),
       pathAPI.join(programFiles, 'Git', 'cmd', 'git.exe'),
@@ -159,6 +160,9 @@ function posixCandidates(platform, home, env, pathAPI) {
     cursor: isolatedNativePacked ? [] : platform === 'darwin'
       ? [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), '/Applications/Cursor.app', pathAPI.join(home, 'Applications', 'Cursor.app')]
       : [...protectedHarnessCandidates(env, pathAPI, 'CURSOR_APP'), pathAPI.join(home, '.local', 'bin', 'cursor'), '/usr/local/bin/cursor', '/usr/bin/cursor', '/opt/Cursor/cursor'],
+    opencode: platform === 'darwin'
+      ? [pathAPI.join(home, '.local', 'bin', 'opencode'), '/opt/homebrew/bin/opencode', '/usr/local/bin/opencode']
+      : [],
   };
 }
 
