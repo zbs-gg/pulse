@@ -106,9 +106,12 @@ export function assertTruthfulWriteResponse(value: unknown): void {
     throw new Error('Pulse write receipt result is incomplete');
   }
   exactKeys(value, [
-		'ledger_id', 'status', 'finalize_receipt', 'receipts',
+		'ledger_id', 'status', 'finalize_receipt', 'receipts', 'moment_id',
 		'event_ids', 'event_results', 'emotion_question',
 	], 'Pulse product write response');
+  if (value.moment_id !== undefined && (typeof value.moment_id !== 'string' || !/^moment:[a-f0-9]{64}$/.test(value.moment_id))) {
+    throw new Error('Pulse moment identity is invalid');
+  }
   if (!STABLE_ID.test(value.ledger_id) ||
       (value.status !== 'candidates' && value.status !== 'rejected') ||
       !isRecord(value.finalize_receipt)) {

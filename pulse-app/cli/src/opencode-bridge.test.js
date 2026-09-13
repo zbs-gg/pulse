@@ -82,7 +82,7 @@ test('OpenCode pulse_memory consumes the exact session lease and never marks raw
     },
     now: () => new Date('2026-08-22T00:00:00.000Z'),
   });
-  assert.deepEqual(result, { status: 'stored', ids: ['object_one'] });
+  assert.deepEqual(result, { status: 'stored', ids: ['object_one'], moment_id: undefined, accepted: 1, stored: 1 });
   assert.equal(calls[0][0], 'write');
   assert.equal(calls[1][0], 'consume');
   const body = calls[2][2].body;
@@ -161,4 +161,22 @@ test('OpenCode rejects a path or secret-shaped fun fact even if the daemon respo
       }),
     }), /opencode_fun_fact_candidates_invalid/);
   }
+});
+
+test('OpenCode reads a complete moment using the current host turn lease', async () => {
+  const id = 'moment:' + 'a'.repeat(64), calls = [];
+  const result = await handleOpenCodeBridge('moment', {
+    session_id: 'session_read', turn_id: 'message_read', source_event_key: 'event_read',
+    idempotency_key: 'write_read', tool_use_id: 'tool_read', moment_id: id, cursor: 20,
+  }, {
+    resolveRuntime: () => resolved,
+    readTurnContext: () => {calls.push('context'); return {};},
+    writeToolLease: () => calls.push('write'), consumeToolLease: () => calls.push('consume'),
+    request: async (_resolved, path, options) => {
+      assert.equal(path, `/memory/moments/${id}?cursor=20&status=false`);
+      assert.equal(options.method, 'GET'); return {moment_id:id,items:[{object_id:'part21'}]};
+    },
+  });
+  assert.deepEqual(calls,['context','write','consume']);
+  assert.equal(result.items[0].object_id,'part21');
 });

@@ -397,6 +397,8 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/memory/consolidate", s.handleMemoryConsolidate)
 		r.Post("/graph/delta", s.handleGraphDelta)
 		r.Post("/turn/finalize", s.handleTurnFinalize)
+		r.Post("/memory/moments", s.handleMemoryMomentWrite)
+		r.Get("/memory/moments/{id}", s.handleMemoryMomentRead)
 		r.Post("/turn/no-change", s.handleTurnNoChange)
 		r.Get("/memory/tray", s.handleMemoryTrayList)
 		r.Get("/memory/receipts/{id}", s.handleMemoryReceiptGet)

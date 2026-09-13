@@ -483,7 +483,7 @@ try {
   const pluginEnv = { ...env, CLAUDE_PLUGIN_ROOT: claudePlugin.installPath };
   const promptOutput = runHook(claudeHooks, 'UserPromptSubmit', promptPayload, workspace, pluginEnv);
   assert.equal(promptOutput.continue, true);
-  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Call pulse_memory once/);
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Save all meaningful parts/);
   const claudeReadinessPath = join(vaultDir, 'claude-code-hook-readiness.json');
   assert.equal(existsSync(claudeReadinessPath), true, 'native prompt must record Claude readiness');
 

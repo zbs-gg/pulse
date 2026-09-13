@@ -3,17 +3,11 @@
 Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
 platforms follow after the Mac installation has been tested end to end.
 
-Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
-published on 7 August 2026 after a clean remote Mac installation. Personal
-0.8.2 is published under the npm `preview` tag. Its publication workflow
-installs the exact archive on a clean Apple Silicon runner and requires a real
-semantic query. Daily-use, Cursor, and production acceptance remain pending;
-ordinary stable installation stays on 0.7.2.
-
-The repository currently names an unpublished 0.8.3 candidate. It adds
-OpenCode 1.18.x on Apple Silicon macOS; stable 0.7.2 and public preview 0.8.2 do
-not contain the adapter. Source and fixture tests are not publication or live
-acceptance proof.
+Personal 0.8.3 is the opt-in preview for Apple Silicon macOS, with complete
+moments and OpenCode 1.18.x support. Stable installation stays on 0.7.2.
+The release workflow requires installation of the exact signed archive and a
+real semantic query. Source tests and that CI gate do not prove one-day
+owner-machine acceptance or production readiness.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
@@ -21,7 +15,7 @@ at least one supported harness, a visible first memory, and continuity into a fr
 ## Before the command
 
 The supported release target is an Apple Silicon Mac with Node 20+, a Git
-project, and at least one host supported by the selected release. Candidate
+project, and at least one host supported by the selected release. Version
 0.8.3 admits Claude Code, Cursor, Codex, or OpenCode 1.18.x on Apple Silicon.
 Personal Pulse
 does not require Go, Python, Make, Docker, or a model API key. It also requires no
@@ -173,5 +167,29 @@ Personal 0.7.2 passed the clean Apple Silicon Mac release installation before
 publication. That proves the packaged installation path, not long-term use by
 another person or support for Intel Mac, Windows, or Linux. Those remain
 separate future boundaries.
-Candidate 0.8.3 still requires an outside-source package install and a separate
+Version 0.8.3 requires an outside-source package install and a separate
 approval before changing the owner Mac's current OpenCode configuration.
+
+
+## Complete moments in 0.8.3
+
+Explicit memory requests preserve all meaningful parts and coexisting feelings.
+Pulse validates the full structured set before accepting it locally, then
+materializes individual parts with durable receipts. A `stored` result covers
+all submitted parts; `pending` or `partial` does not. A lost response permits one
+bounded replay of the identical operation. A validation refusal before admission
+permits correcting the input. Stop does not create an automatic continuation.
+
+A moment reference lets the agent read all currently eligible linked parts with
+pagination, independently of the short automatic context budget. Deleted items
+are excluded; current corrections and personal/project boundaries still apply.
+The write transport envelope is 16 MiB, not a limit on the number of feelings.
+Oversized input is explicitly refused before admission, never truncated.
+Structured summaries longer than one storage row are split without dropping text.
+Historical feelings remain remembered even after their current-state influence
+fades; inferred emotions are identified as hypotheses about that moment.
+
+Native Codex, Claude Code, Cursor and OpenCode adapters and the BB adapter share
+this behavior. Raw transcripts, secrets, old-chat import and backend model calls
+remain off by default. Build/tests are not an installed-runtime or public-release
+claim; publication and owner-machine checks must use the exact signed archive.

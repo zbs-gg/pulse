@@ -1,0 +1,26 @@
+{
+  "name": "bb-plugin-pulse",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "bb": ">=0.41.0",
+    "bbPluginSdk": ">=0.4.34"
+  },
+  "bb": {
+    "name": "Pulse",
+    "description": "Scoped local Pulse recall and useful memory capture in BB projects.",
+    "branding": {
+      "icon": "Zap"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "skills": []
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.34"
+  },
+  "dependencies": {
+    "zod": "^4.5.4"
+  }
+}

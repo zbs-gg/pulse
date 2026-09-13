@@ -724,7 +724,7 @@ try {
     extra: { prompt: 'Do not store this raw prompt.' },
   }), { cwd: workspace, env: hookEnv });
   assert.equal(firstPrompt.continue, true);
-  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /Call pulse_memory once/);
+  assert.match(firstPrompt.hookSpecificOutput?.additionalContext, /Save all meaningful parts/);
   markFirstValueStage('prompt_submit');
 
   const summary = 'Use one trusted local runtime for native packed Codex lifecycle memory.';

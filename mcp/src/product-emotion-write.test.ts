@@ -22,30 +22,38 @@ test('bound pulse_memory writes one scoped emotional moment through the governed
 	const workspace = realpathSync(join(process.cwd()));
 	const requests: Record<string, unknown>[] = [];
 	const backend = createServer(async (req, res) => {
-		if (req.method !== 'POST' || req.url !== '/turn/finalize') {
+        if (req.method === 'GET' && req.url?.startsWith('/memory/moments/')) {
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({moment_id:'moment:'+'d'.repeat(64),items:[{object_id:'part21'}],next_cursor:40}));
+          return;
+        }
+		if (req.method !== 'POST' || req.url !== '/memory/moments') {
 			res.writeHead(404).end();
 			return;
 		}
 		requests.push(await jsonBody(req));
+        const parts = requests.at(-1)!.candidates as unknown[];
+
 		const provenance = {
 			host: 'codex', session_id: 'session:opaque', turn_id: 'turn:opaque', source_event_key: 'event:opaque',
 		};
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({
 			ledger_id: 'turn_emotion_01', status: 'candidates',
+            ...(parts.length>1?{moment_id:'moment:'+'d'.repeat(64)}:{}),
 			finalize_receipt: {
 				schema: 'pulse.turn_finalize_receipt.v1', receipt_id: 'receipt_finalize_01',
 				ledger_id: 'turn_emotion_01', status: 'candidates', destination: 'personal',
 				destination_store_id: 'store_personal_test', safe_provenance: provenance,
 				policy_epoch: 0, resolver_epoch: 7, created_at: '2026-08-06T10:00:00Z',
 			},
-			receipts: [{
+			receipts: parts.map((_, index) => ({
 				schema: 'pulse.write_receipt.v1', receipt_id: 'receipt_item_01', ledger_id: 'turn_emotion_01',
 				candidate_id: 'candidate_emotion_01', candidate_version: 1, status: 'created', destination: 'personal',
 				destination_store_id: 'store_personal_test', safe_provenance: provenance,
-				content_digest: 'b'.repeat(64), object_id: 'semantic_emotion_01', policy_epoch: 0,
+				content_digest: 'b'.repeat(64), object_id: index===0?'semantic_emotion_01':`semantic_${index}`, policy_epoch: 0,
 				resolver_epoch: 7, measurement_method: 'host_structured_v1', created_at: '2026-08-06T10:00:00Z',
-			}],
+			})),
 			event_ids: [41], event_results: [{ client_id: 'moment:1', id: 41, result: 'created' }],
 			emotion_question: {
 				question_id: `emotion_question:${'c'.repeat(32)}`, event_id: 41, event_client_id: 'moment:1',
@@ -100,7 +108,7 @@ export function writeHostFinalizeMarker() {}
 		});
 		assert.equal(result.structuredContent, undefined);
 		assert.deepEqual(JSON.parse(result.content[0].text as string), {
-			status: 'stored', ids: ['semantic_emotion_01'],
+			status: 'stored', ids: ['semantic_emotion_01'], accepted: 1, stored: 1,
 		});
 		assert.equal(requests.length, 1);
 		const candidate = (requests[0].candidates as Array<Record<string, unknown>>)[0];
@@ -114,6 +122,22 @@ export function writeHostFinalizeMarker() {}
 		const event = (delta.events as Array<Record<string, unknown>>)[0];
 		assert.equal(event.emotion_derivation, 'inferred');
 		assert.deepEqual(event.emotions, { fear: 0.8 });
+        const bulk = await client.callTool({name:'pulse_memory',arguments:{items:Array.from({length:61},(_,index)=>({
+          kind:'emotion',scope:'personal',summary:`Событие ${index}: `+'Важные чувства и причины. '.repeat(80).trim(),
+          emotions:[{label:'trust',name:'Теплота',intensity:0.8,source:'user'},
+                    {label:'sadness',name:'Светлая грусть',intensity:0.4,source:'inferred'}],
+        }))}});
+        assert.notEqual(bulk.isError,true,JSON.stringify(bulk.content));
+        const bulkReceipt=JSON.parse(bulk.content[0].text as string);
+        const expanded=requests.at(-1)!.candidates as Array<{semantic_delta:{events:Array<{observed_label:string,emotion_derivation:string}>}}>;
+        assert.equal(bulkReceipt.status,'stored');
+        assert.equal(bulkReceipt.accepted,expanded.length);
+        assert.ok(expanded.length>122);
+        assert.deepEqual(expanded.slice(0,2).map(c=>c.semantic_delta.events[0].observed_label),['Теплота','Светлая грусть']);
+        const read=await client.callTool({name:'pulse_memory',arguments:{moment_id:bulkReceipt.moment_id,cursor:20}});
+        const page=JSON.parse(read.content[0].text as string);
+        assert.equal(page.items[0].object_id,'part21');
+        assert.equal(page.next_cursor,40);
 	} finally {
 		await client.close().catch(() => {});
 		await new Promise<void>((resolve) => backend.close(() => resolve()));

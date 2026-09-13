@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { safeText } from './validation.js';
 /**
  * Pulse MCP server for host-extracted memory.
  *
@@ -215,7 +216,9 @@ interface PulseMemoryItem {
   kind: PulseMemoryKind;
   scope: 'personal' | 'project';
   summary: string;
+  emotions?: NonNullable<PulseMemoryItem['emotion']>[];
   emotion?: {
+    name?: string;
     label: 'joy' | 'sadness' | 'anger' | 'fear' | 'trust' | 'disgust' |
       'anticipation' | 'surprise' | 'shame' | 'guilt';
     intensity: number;
@@ -330,6 +333,7 @@ interface SemanticDeltaBody {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(path.startsWith('/memory/moments') ? { signal: AbortSignal.timeout(5000) } : {}),
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -444,8 +448,8 @@ function validatePulseMemoryBody(value: unknown): PulseMemoryBody {
   }
   const body = value as Record<string, unknown>;
   if (Object.keys(body).some((key) => key !== 'items') || !Array.isArray(body.items) ||
-      body.items.length < 1 || body.items.length > 3) {
-    throw new Error('pulse_memory requires 1..3 items');
+      body.items.length < 1) {
+    throw new Error('pulse_memory requires a nonempty items array and no extra fields');
   }
   const kinds = new Set<PulseMemoryKind>([
     'decision', 'preference', 'open_loop', 'project_state', 'correction', 'emotion',
@@ -459,32 +463,33 @@ function validatePulseMemoryBody(value: unknown): PulseMemoryBody {
       throw new Error(`pulse_memory items[${index}] is invalid`);
     }
     const item = raw as Record<string, unknown>;
-    if (Object.keys(item).some((key) => !['kind', 'scope', 'summary', 'emotion'].includes(key)) ||
+    if (Object.keys(item).some((key) => !['kind', 'scope', 'summary', 'emotion', 'emotions'].includes(key)) ||
         !kinds.has(item.kind as PulseMemoryKind) ||
         (item.scope !== 'personal' && item.scope !== 'project') ||
         typeof item.summary !== 'string' || item.summary.trim() !== item.summary ||
-        item.summary.length < 1 || item.summary.length > 400 ||
-        Buffer.byteLength(item.summary, 'utf8') > 1200) {
+        item.summary.length < 1 || Buffer.byteLength(item.summary, 'utf8') > 1024 * 1024) {
       throw new Error(`pulse_memory items[${index}] is invalid`);
     }
+    safeText('memory summary', item.summary, 1024 * 1024, true);
     if (item.kind !== 'emotion') {
-      if (item.emotion !== undefined) throw new Error(`pulse_memory items[${index}].emotion is unexpected`);
+      if (item.emotion !== undefined || item.emotions !== undefined) throw new Error(`pulse_memory items[${index}].emotion is unexpected`);
       return item as unknown as PulseMemoryItem;
     }
-    if (!item.emotion || typeof item.emotion !== 'object' || Array.isArray(item.emotion)) {
-      throw new Error(`pulse_memory items[${index}].emotion is required`);
+    const feelings = item.emotions ?? (item.emotion ? [item.emotion] : []);
+    if (!Array.isArray(feelings) || feelings.length === 0 || (item.emotions && item.emotion)) {
+      throw new Error(`pulse_memory items[${index}] requires emotion or nonempty emotions`);
     }
-    const emotion = item.emotion as Record<string, unknown>;
-    if (Object.keys(emotion).some((key) => !['label', 'intensity', 'source', 'cause'].includes(key)) ||
-        !emotions.has(String(emotion.label)) || typeof emotion.intensity !== 'number' ||
-        !Number.isFinite(emotion.intensity) || emotion.intensity < 0 || emotion.intensity > 1 ||
-        (emotion.source !== 'user' && emotion.source !== 'inferred') ||
-        (emotion.cause !== undefined && (typeof emotion.cause !== 'string' ||
-          emotion.cause.trim() !== emotion.cause || emotion.cause.length < 1 || emotion.cause.length > 240))) {
-      throw new Error(`pulse_memory items[${index}].emotion is invalid`);
-    }
-    if (typeof emotion.cause === 'string' && Buffer.byteLength(emotion.cause, 'utf8') > 360) {
-      throw new Error(`pulse_memory items[${index}].emotion is invalid`);
+    for (const rawEmotion of feelings) {
+      const emotion = rawEmotion as Record<string, unknown>;
+      if (!emotion || typeof emotion !== 'object' || Array.isArray(emotion) ||
+          Object.keys(emotion).some((key) => !['label', 'name', 'intensity', 'source', 'cause'].includes(key)) ||
+          !emotions.has(String(emotion.label)) || typeof emotion.intensity !== 'number' ||
+          !Number.isFinite(emotion.intensity) || emotion.intensity < 0 || emotion.intensity > 1 ||
+          !['user','inferred'].includes(String(emotion.source)) ||
+          (emotion.name !== undefined && (typeof emotion.name !== 'string' || !emotion.name.trim() || Buffer.byteLength(emotion.name) > 120)) ||
+          (emotion.cause !== undefined && (typeof emotion.cause !== 'string' || !emotion.cause.trim() || Buffer.byteLength(emotion.cause) > 360))) {
+        throw new Error(`pulse_memory items[${index}] has an invalid emotion; nothing accepted`);
+      }
     }
     return item as unknown as PulseMemoryItem;
   });
@@ -528,8 +533,9 @@ function compactCursorRecall(result: unknown): Record<string, unknown> {
     const summary = [...normalized].length <= 400
       ? normalized
       : `${[...normalized].slice(0, 399).join('').trimEnd()}…`;
-    if (candidate?.direct_capsule === true) direct.push(summary);
-    else if (candidate?.dense === true && candidate?.lexical === true) archive.push(summary);
+    const linked = `${summary}${typeof event.moment_id === 'string' && /^moment:[a-f0-9]{64}$/.test(event.moment_id) ? ` [moment_id=${event.moment_id}]` : ''}`;
+    if (candidate?.direct_capsule === true) direct.push(linked);
+    else if (candidate?.dense === true && candidate?.lexical === true) archive.push(linked);
   }
   const selected = direct.length > 0 ? direct.slice(0, 1) : archive.slice(0, 2);
   if (selected.length === 0) return { status: 'no_relevant_memory' };
@@ -545,9 +551,23 @@ function compactCursorRecall(result: unknown): Record<string, unknown> {
     : { status: 'recalled', memory: memory.trimEnd() };
 }
 
+function expandMomentItems(items: PulseMemoryItem[]): PulseMemoryItem[] {
+  return items.flatMap(item => {
+    const parts: string[] = [];
+    let part = '';
+    for (const character of item.summary) {
+      if (Buffer.byteLength(part + character, 'utf8') > 1100) { parts.push(part); part = ''; }
+      part += character;
+    }
+    if (part) parts.push(part);
+    const feelings = item.kind === 'emotion' ? item.emotions ?? [item.emotion!] : [undefined];
+    return parts.flatMap(summary => feelings.map(emotion => ({ ...item, summary: summary.trim(), emotion, emotions: undefined })));
+  });
+}
+
 function productMemoryFinalizeBody(input: PulseMemoryBody, context: HostTurnContext): Record<string, unknown> {
   const timestamp = new Date().toISOString();
-  const candidates = input.items.map((item, index) => {
+  const candidates = expandMomentItems(input.items).map((item, index) => {
     const memoryScope = item.scope === 'personal' ? 'personal_global' : 'project';
     if (item.kind !== 'emotion') {
       return {
@@ -572,7 +592,7 @@ function productMemoryFinalizeBody(input: PulseMemoryBody, context: HostTurnCont
     const confidence = emotion.source === 'user' ? 1 : 0.8;
     const derivation = emotion.source === 'user' ? 'explicit' : 'inferred';
     const clientID = `emotion_${createHash('sha256').update([
-      context.source_event_key, String(index), item.summary, emotion.label,
+      context.source_event_key, String(index), item.summary, emotion.label, emotion.name ?? '',
     ].join('\x1f')).digest('hex').slice(0, 24)}`;
     return {
       kind: 'semantic_delta',
@@ -587,15 +607,15 @@ function productMemoryFinalizeBody(input: PulseMemoryBody, context: HostTurnCont
         },
         events: [{
           client_id: clientID,
-          title: `Emotional moment: ${emotion.label}`,
+          title: `Emotional moment: ${emotion.name ?? emotion.label}`,
           summary: item.summary,
           emotional_weight: emotion.intensity,
           confidence,
-          privacy_tier: 'normal',
+          privacy_tier: 'sensitive',
           emotions: { [emotion.label]: emotion.intensity },
           emotion_derivation: derivation,
           emotion_confidence: confidence,
-          observed_label: emotion.label,
+          observed_label: emotion.name ?? emotion.label,
           ...(emotion.cause === undefined ? {} : {
             trigger: {
               summary: emotion.cause,
@@ -714,7 +734,7 @@ function jsonText(value: unknown) {
 	return result;
 }
 
-function compactPulseMemoryResult(value: unknown) {
+function compactPulseMemoryResult(value: unknown, expected?: number) {
   const root = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
@@ -724,12 +744,20 @@ function compactPulseMemoryResult(value: unknown) {
     : [];
   const rejected = receipts.some((item) =>
     ['rejected', 'failed', 'canceled'].includes(String(item.status)));
-  const ids = [...new Set(receipts.map((item) => item.object_id ?? item.candidate_id)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0))].slice(0, 3);
+  if (typeof root.ledger_id !== 'string' || receipts.length === 0) {
+    throw new Error('pulse_write_receipt_invalid');
+  }
+  const stored = receipts.filter(item => ['created', 'updated', 'deduplicated'].includes(String(item.status)) &&
+    typeof item.object_id === 'string' && item.object_id.length > 0);
+  const complete = stored.length === receipts.length && (expected === undefined || receipts.length === expected);
   return {
     content: [{
       type: 'text' as const,
-      text: JSON.stringify({ status: rejected ? 'rejected' : 'stored', ids }),
+      text: JSON.stringify({
+        status: rejected ? 'rejected' : complete ? 'stored' : stored.length ? 'partial' : 'pending',
+        ids: stored.map(item => item.object_id), moment_id: root.moment_id,
+        accepted: receipts.length, stored: stored.length,
+      }),
     }],
   };
 }
@@ -1054,14 +1082,13 @@ const RESUME_OUTPUT_SCHEMA = {
 
 const PULSE_MEMORY_TOOL: Tool = {
   name: 'pulse_memory',
-  description: 'Save only a durable result from this normal turn. Never save raw wording, secrets, credentials, paths, or temporary instructions. Personal memory follows the person; project memory stays in this project. An inferred emotion is only a fading hypothesis about this moment.',
+  description: 'Save every meaningful part of the requested memory, including coexisting feelings, their names and causes. No item-count selection quota. Keep user-stated feelings distinct from inferences. Personal memory follows the person; project memory stays here. Never save raw transcripts, secrets or paths. Read a complete moment using moment_id and follow next_cursor.',
   inputSchema: {
     type: 'object',
     properties: {
       items: {
         type: 'array',
         minItems: 1,
-        maxItems: 3,
         items: {
           oneOf: [
             {
@@ -1072,7 +1099,7 @@ const PULSE_MEMORY_TOOL: Tool = {
                   enum: ['decision', 'preference', 'open_loop', 'project_state', 'correction'],
                 },
                 scope: { type: 'string', enum: ['personal', 'project'] },
-                summary: { type: 'string', minLength: 1, maxLength: 400 },
+                summary: { type: 'string', minLength: 1, description: 'All meaningful detail. Long summaries are split losslessly into linked parts.' },
               },
               required: ['kind', 'scope', 'summary'],
               additionalProperties: false,
@@ -1082,10 +1109,11 @@ const PULSE_MEMORY_TOOL: Tool = {
               properties: {
                 kind: { type: 'string', const: 'emotion' },
                 scope: { type: 'string', enum: ['personal', 'project'] },
-                summary: { type: 'string', minLength: 1, maxLength: 400 },
+                summary: { type: 'string', minLength: 1, description: 'All meaningful detail. Long summaries are split losslessly into linked parts.' },
                 emotion: {
                   type: 'object',
                   properties: {
+                    name: { type: 'string', description: 'Human feeling name, e.g. tenderness or bittersweet warmth.', maxLength: 60 },
                     label: {
                       type: 'string',
                       enum: ['joy', 'sadness', 'anger', 'fear', 'trust', 'disgust', 'anticipation', 'surprise', 'shame', 'guilt'],
@@ -1110,9 +1138,14 @@ const PULSE_MEMORY_TOOL: Tool = {
   },
 };
 
+const emotionalSchema = ((PULSE_MEMORY_TOOL.inputSchema.properties!.items as any).items.oneOf[1]);
+emotionalSchema.properties.emotions = { type: 'array', minItems: 1, items: emotionalSchema.properties.emotion };
+emotionalSchema.required = ['kind','scope','summary'];
+emotionalSchema.oneOf = [{ required:['emotion'], not:{required:['emotions']} }, { required:['emotions'], not:{required:['emotion']} }];
+
 const CURSOR_PULSE_MEMORY_TOOL: Tool = {
   name: 'pulse_memory',
-  description: 'Cursor only: call this tool exactly once before answering every user message. For lookup, the only valid input is exactly {"query":"short semantic paraphrase"}; never add action, limit, scope, mode, items, or another field. Omit secrets and paths, and use returned memory as factual context unless the user provides newer information. Use {items} only when this same normal turn produced a durable result. Never retry a failed call.',
+  description: 'Cursor only: call this tool exactly once before answering every user message. For lookup, the only valid input is exactly {"query":"short semantic paraphrase"}; never add action, limit, scope, mode, items, or another field. Omit secrets and paths, and use returned memory as factual context unless the user provides newer information. Use {items} only when this same normal turn produced a durable result. Correct validation refusals marked nothing accepted; check moment receipts after an interrupted response.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1889,19 +1922,29 @@ async function daemonToolCall(
       }
       return jsonText(compactCursorRecall(out));
     }
+    if (args && typeof args.moment_id === 'string') {
+      if (!/^moment:[a-f0-9]{64}$/.test(args.moment_id) || Object.keys(args).some(key => !['moment_id','cursor','status'].includes(key))) throw new Error('invalid moment request');
+      await consumeProductTurnContext('pulse_memory', args, requestTurnContext);
+      const cursor = args.cursor ?? 0;
+      if (!Number.isSafeInteger(cursor) || Number(cursor) < 0 || (args.status !== undefined && typeof args.status !== 'boolean')) throw new Error('invalid moment cursor');
+      return jsonText(await pulseFetch(`/memory/moments/${args.moment_id}?cursor=${cursor}&status=${args.status === true}`, undefined, 'GET'));
+    }
     const input = validatePulseMemoryBody(args);
     const context = await consumeProductTurnContext('pulse_memory', args, requestTurnContext);
     const body = productMemoryFinalizeBody(input, context);
-    const out = await pulseFetch<unknown>(
-      '/turn/finalize', body, 'POST', String(body.idempotency_key),
-    );
+    let out: unknown;
+    try { out = await pulseFetch<unknown>('/memory/moments', body, 'POST', String(body.idempotency_key)); }
+    catch (error) {
+      if (error instanceof Error && /^Pulse HTTP 4/.test(error.message)) throw error;
+      out = await pulseFetch<unknown>('/memory/moments', body, 'POST', String(body.idempotency_key));
+    }
     assertTruthfulWriteResponse(out);
     try {
       await writeProductFinalizeMarker(context, out);
     } catch {
       // The committed daemon receipt remains authoritative.
     }
-    return compactPulseMemoryResult(out);
+    return compactPulseMemoryResult(out, (body.candidates as unknown[]).length);
   }
 
   if (name === 'pulse_remember') {
@@ -2138,6 +2181,16 @@ function writeDevelopmentCors(res: ServerResponse): void {
 	res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID');
 	res.setHeader('Access-Control-Expose-Headers', 'MCP-Protocol-Version, MCP-Session-Id');
 	res.setHeader('Vary', 'Origin');
+}
+
+for (const schema of [PULSE_MEMORY_TOOL.inputSchema, CURSOR_PULSE_MEMORY_TOOL.inputSchema]) {
+  schema.properties!.moment_id = {type:'string',pattern:'^moment:[a-f0-9]{64}$',description:'Read all linked parts of a saved moment; follow next_cursor until absent.'};
+  schema.properties!.cursor = {type:'integer',minimum:0};
+  schema.properties!.status = {type:'boolean',description:'Check accepted and terminal write receipts after an interrupted response.'};
+  const write = {required:['items'],not:{anyOf:[{required:['query']},{required:['moment_id']},{required:['cursor']},{required:['status']}]}};
+  const read = {required:['moment_id'],not:{anyOf:[{required:['items']},{required:['query']}]}};
+  delete schema.required;
+  schema.oneOf = schema === CURSOR_PULSE_MEMORY_TOOL.inputSchema ? [write, read, {required:['query'],not:{anyOf:[{required:['items']},{required:['moment_id']},{required:['cursor']},{required:['status']}]}}] : [write,read];
 }
 
 const invokedAsEntrypoint = (() => {

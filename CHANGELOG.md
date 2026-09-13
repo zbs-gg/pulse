@@ -4,6 +4,13 @@ All notable changes to Pulse.
 
 ## 0.8.3 — unreleased
 
+- Preserve every meaningful part of a requested memory and coexisting feelings.
+- Add durable whole-moment admission, replay without duplicates, per-part
+  receipts and paginated complete recall; pending is never reported as stored.
+- Carry human feeling names and separate explicit/inferred emotion provenance
+  through native and BB adapters; long structured summaries retain all text.
+
+
 - Added the first OpenCode adapter for OpenCode 1.18.x on Apple Silicon macOS.
   One reviewed global loader remains inert outside signed Pulse projects;
   `pulse init opencode`, `pulse doctor opencode`, `--only opencode`, disconnect,

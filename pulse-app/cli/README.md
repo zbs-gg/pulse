@@ -1,18 +1,19 @@
 # @zbs-gg/pulse
 
-The package source for the unpublished Pulse Personal 0.8.3 candidate. It
-installs one local memory engine,
-Memory Home, and local connections for Codex, Claude Code, Cursor, and OpenCode.
-Emotional
-memory stays local, describes a moment rather than a personality, and can be
-confirmed, corrected, or deleted separately from the event.
+Pulse Personal 0.8.3 preview installs one local memory engine, Memory Home,
+and connections for Codex, Claude Code, Cursor and OpenCode 1.18.x on Apple
+Silicon macOS. Stable remains 0.7.2.
 
-Personal 0.8.2 is the preview, not the stable default. Its release flow installs
-the exact archive on a clean Apple Silicon runner and makes a real BGE-M3
-semantic query before publication. Owner-machine daily-use and Cursor
-acceptance remain pending. The npm `latest` tag remains on 0.7.2.
-OpenCode support is new in candidate 0.8.3 and is absent from both published
-versions; no 0.8.3 npm or GitHub release exists yet.
+Every meaningful part of an explicitly requested memory can be saved,
+including coexisting feelings, their causes and provenance. Pulse keeps
+per-part receipts, recovers accepted writes after restart, and lets the host
+read the complete linked moment with pagination. A pending or partial result
+is never reported as saved. Raw conversations and backend model calls remain
+off by default.
+
+The release workflow verifies the exact signed archive on a clean Mac before
+publishing npm and the matching GitHub prerelease. One-day use and production
+acceptance are separate from that verification.
 
 ```bash
 npx -y @zbs-gg/pulse@preview init codex

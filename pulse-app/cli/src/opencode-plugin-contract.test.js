@@ -12,7 +12,7 @@ test('OpenCode bridge uses Node instead of the native host executable', () => {
 
 function chain() {
   const value = {};
-  for (const name of ['min', 'max', 'optional']) value[name] = () => value;
+  for (const name of ['min', 'max', 'optional', 'int']) value[name] = () => value;
   return value;
 }
 
@@ -21,6 +21,7 @@ fakeTool.schema = {
   array: () => chain(),
   enum: () => chain(),
   number: () => chain(),
+  boolean: () => chain(),
   object: () => chain(),
   string: () => chain(),
 };

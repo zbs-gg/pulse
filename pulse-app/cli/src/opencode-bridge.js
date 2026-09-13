@@ -1,3 +1,4 @@
+import { validateMomentItems, memoryMomentBody, compactMomentResult, writeMemoryMoment } from './memory-moment.js';
 import { createHash } from 'node:crypto';
 
 import { recoverWorkspaceBindingTransaction } from './binding-admin.js';
@@ -16,7 +17,7 @@ import { defaultPlatformServices } from './platform-services.js';
 
 const HOST = 'opencode';
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
-const MAX_INPUT_BYTES = 128 * 1024;
+const MAX_INPUT_BYTES = 16 * 1024 * 1024;
 const FUN_FACT_UNSAFE = /(?:\b(?:api[_ -]?key|authorization|bearer|password|secret|token)\s*[:=]|\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]+|(?:^|\s)(?:\/Users\/|\/home\/|\/private\/|[A-Za-z]:\\)|[a-z][a-z0-9+.-]*:\/\/)/i;
 
 function safeFunFactText(value) {
@@ -65,37 +66,10 @@ function validateMemoryInput(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some((key) => ![
         'session_id', 'turn_id', 'source_event_key', 'idempotency_key', 'items', 'tool_use_id',
-      ].includes(key)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 3) {
+      ].includes(key)) || !Array.isArray(value.items) || value.items.length < 1) {
     throw new Error('pulse_memory_input_invalid');
   }
-  const kinds = new Set(['decision', 'preference', 'open_loop', 'project_state', 'correction', 'emotion']);
-  const emotionLabels = new Set([
-    'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust',
-    'anticipation', 'surprise', 'shame', 'guilt',
-  ]);
-  const items = value.items.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item) ||
-        Object.keys(item).some((key) => !['kind', 'scope', 'summary', 'emotion'].includes(key)) ||
-        !kinds.has(item.kind) || !['personal', 'project'].includes(item.scope) ||
-        typeof item.summary !== 'string' || item.summary.trim() !== item.summary ||
-        item.summary.length < 1 || item.summary.length > 400 || Buffer.byteLength(item.summary, 'utf8') > 1200) {
-      throw new Error('pulse_memory_item_invalid');
-    }
-    if (item.kind !== 'emotion') {
-      if (item.emotion !== undefined) throw new Error('pulse_memory_emotion_unexpected');
-      return item;
-    }
-    const emotion = item.emotion;
-    if (!emotion || typeof emotion !== 'object' || Array.isArray(emotion) ||
-        Object.keys(emotion).some((key) => !['label', 'intensity', 'source', 'cause'].includes(key)) ||
-        !emotionLabels.has(emotion.label) || !Number.isFinite(emotion.intensity) ||
-        emotion.intensity < 0 || emotion.intensity > 1 || !['user', 'inferred'].includes(emotion.source) ||
-        (emotion.cause !== undefined && (typeof emotion.cause !== 'string' ||
-          emotion.cause.trim() !== emotion.cause || emotion.cause.length < 1 || emotion.cause.length > 240))) {
-      throw new Error('pulse_memory_emotion_invalid');
-    }
-    return item;
-  });
+  const items = validateMomentItems(value.items);
   return {
     session_id: stable(value.session_id, 'opencode_session_invalid'),
     turn_id: stable(value.turn_id, 'opencode_turn_invalid'),
@@ -107,85 +81,9 @@ function validateMemoryInput(value) {
 }
 
 function memoryFinalizeBody(input, context, now = new Date()) {
-  const timestamp = now.toISOString();
-  const candidates = input.items.map((item, index) => {
-    const memoryScope = item.scope === 'personal' ? 'personal_global' : 'project';
-    if (item.kind !== 'emotion') {
-      return {
-        kind: 'memory_capsule',
-        memory_scope: memoryScope,
-        capsule: {
-          schema: 'pulse.memory_capsule.v1',
-          source: { host: HOST, conversation_scope: 'current_turn', timestamp },
-          items: [{
-            kind: item.kind,
-            redacted_summary: item.summary,
-            confidence: 1,
-            evidence_hint: 'current_turn',
-            privacy_tier: 'normal',
-            retention: item.scope === 'personal' ? 'long_term' : 'project',
-          }],
-          raw_input_included: false,
-        },
-      };
-    }
-    const emotion = item.emotion;
-    const confidence = emotion.source === 'user' ? 1 : 0.8;
-    const derivation = emotion.source === 'user' ? 'explicit' : 'inferred';
-    return {
-      kind: 'semantic_delta',
-      memory_scope: memoryScope,
-      semantic_delta: {
-        schema: 'pulse.semantic_delta.v1',
-        source: {
-          host: HOST, conversation_scope: 'current_turn', timestamp, session_id: context.session_id,
-        },
-        events: [{
-          client_id: `emotion_${createHash('sha256').update([
-            context.source_event_key, String(index), item.summary, emotion.label,
-          ].join('\x1f')).digest('hex').slice(0, 24)}`,
-          title: `Emotional moment: ${emotion.label}`,
-          summary: item.summary,
-          emotional_weight: emotion.intensity,
-          confidence,
-          privacy_tier: 'normal',
-          emotions: { [emotion.label]: emotion.intensity },
-          emotion_derivation: derivation,
-          emotion_confidence: confidence,
-          observed_label: emotion.label,
-          ...(emotion.cause === undefined ? {} : {
-            trigger: { summary: emotion.cause, derivation, confidence, confirmed: emotion.source === 'user' },
-          }),
-        }],
-        raw_input_included: false,
-      },
-    };
-  });
-  return {
-    schema: 'pulse.turn_finalize.v1',
-    host: HOST,
-    session_id: context.session_id,
-    turn_id: context.turn_id,
-    source_event_key: context.source_event_key,
-    idempotency_key: context.idempotency_key,
-    binding_digest: context.binding_digest,
-    policy_epoch: context.policy_epoch,
-    resolver_epoch: context.resolver_epoch,
-    candidates,
-  };
+  return memoryMomentBody(input, {...context, host:HOST}, now);
 }
-
-function compactWriteResult(result) {
-  const receipts = Array.isArray(result?.receipts) ? result.receipts : [];
-  if (typeof result?.ledger_id !== 'string' || !result.finalize_receipt || receipts.some((item) =>
-    !item || typeof item !== 'object' || typeof item.receipt_id !== 'string')) {
-    throw new Error('pulse_write_receipt_invalid');
-  }
-  const rejected = receipts.some((item) => ['rejected', 'failed', 'canceled'].includes(item.status));
-  const ids = [...new Set(receipts.map((item) => item.object_id ?? item.candidate_id)
-    .filter((id) => typeof id === 'string' && id.length > 0))].slice(0, 3);
-  return { status: rejected ? 'rejected' : 'stored', ids };
-}
+function compactWriteResult(result, expected) { return compactMomentResult(result, expected); }
 
 export async function handleOpenCodeBridge(action, input, dependencies = {}) {
   const resolveRuntime = dependencies.resolveRuntime ?? ((value) => resolveBoundCodexRuntime(value, { host: HOST }));
@@ -215,6 +113,20 @@ export async function handleOpenCodeBridge(action, input, dependencies = {}) {
       idempotency_key: event.idempotency_key,
     };
   }
+  if (action === 'moment') {
+    if (!/^moment:[a-f0-9]{64}$/.test(input.moment_id??'') || !Number.isSafeInteger(input.cursor??0) || (input.cursor??0)<0) throw new Error('invalid_moment_read');
+    const event = {
+      session_id: stable(input.session_id, 'opencode_session_invalid'),
+      turn_id: stable(input.turn_id, 'opencode_turn_invalid'),
+      source_event_key: input.source_event_key, idempotency_key: input.idempotency_key,
+    };
+    const resolved=resolveRuntime({cwd:process.cwd()});
+    (dependencies.readTurnContext ?? readHostTurnContext)(resolved,event,HOST,now);
+    const query={moment_id:input.moment_id,cursor:input.cursor??0,status:input.status===true};
+    (dependencies.writeToolLease ?? writeHostToolLease)(resolved,event,HOST,'pulse_memory',query,input.tool_use_id,now);
+    (dependencies.consumeToolLease ?? consumeHostToolLease)(resolved,HOST,'pulse_memory',query,now);
+    return request(resolved,`/memory/moments/${query.moment_id}?cursor=${query.cursor}&status=${query.status}`,{method:'GET',productHost:HOST,timeoutMs:2500});
+  }
   if (action === 'memory') {
     const validated = validateMemoryInput(input);
     const resolved = resolveRuntime({ cwd: process.cwd() });
@@ -232,10 +144,8 @@ export async function handleOpenCodeBridge(action, input, dependencies = {}) {
       resolved, HOST, 'pulse_memory', { items: validated.items }, now,
     );
     const body = memoryFinalizeBody(validated, context, now);
-    const result = await request(resolved, '/turn/finalize', {
-      body, productHost: HOST, timeoutMs: 4_000, idempotencyKey: body.idempotency_key,
-    });
-    const compact = compactWriteResult(result);
+    const result = await writeMemoryMoment((path, options) => request(resolved,path,{...options,productHost:HOST}),body);
+    const compact = compactWriteResult(result,body.candidates.length);
     try { (dependencies.writeFinalizeMarker ?? writeHostFinalizeMarker)(resolved, event, HOST, result, now); }
     catch { /* the daemon receipt remains authoritative */ }
     return compact;

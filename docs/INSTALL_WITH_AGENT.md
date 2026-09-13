@@ -1,20 +1,12 @@
 # Install Pulse With Your AI Agent
 
-> Personal 0.8.2 is published under the npm `preview` tag. Use
-> `@zbs-gg/pulse@0.7.2` for the stable installation; select `@preview`
-> deliberately because owner-machine daily-use acceptance is still pending.
->
-> OpenCode is available only in the unpublished 0.8.3 candidate. Stable 0.7.2
-> and public preview 0.8.2 do not include it. Install 0.8.3 only from an exact
-> locally packed candidate after reviewing its source and archive; do not use
-> an old preview descriptor or artifact set.
+> Personal 0.8.3 is an opt-in Apple Silicon preview. Stable remains 0.7.2.
+> The preview includes complete-moment memory and OpenCode 1.18.x support.
+> Verify the exact selected version and signed artifact set before installation.
 
-The exact 0.7.2 archive passed installation on a clean remote Apple Silicon Mac
-and was published to npm on 7 August 2026.
-The 0.8.2 publication workflow installs the exact preview archive on a clean
-Apple Silicon runner and requires a real BGE-M3 semantic query. Daily-use and
-production acceptance still require the owner-machine Codex and Claude Code
-cycle.
+The publication workflow installs the exact archive on a clean Apple Silicon
+runner and requires a real BGE-M3 semantic query. A successful workflow does
+not replace owner-machine host checks or one-day acceptance.
 
 Pulse is installed trust-first: your agent audits the exact package, explains
 the local changes, asks for consent, runs one command, and then proves one real
@@ -36,8 +28,8 @@ npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The Personal installer verifies a signed release, provisions one shared Core,
-and attaches every detected compatible Claude Code, Cursor, Codex, and (in
-candidate 0.8.3) OpenCode plugin to the same project-bound vault. Any one of
+and attaches every detected compatible Claude Code, Cursor, Codex, and
+OpenCode plugin to the same project-bound vault. Any one of
 those hosts is sufficient within its documented release target.
 It does not require Go, Python, Make, Docker, a model API key, or manual config
 editing. Memory remains in a private project-bound local vault; raw transcript
@@ -65,7 +57,7 @@ without mutation.
 pulse doctor claude-code  # when detected
 pulse doctor cursor       # when detected
 pulse doctor codex        # when detected
-pulse doctor opencode     # candidate 0.8.3, when detected
+pulse doctor opencode     # 0.8.3, when detected
 pulse home
 ```
 
@@ -143,3 +135,27 @@ memory to Git, or call fallback/synthetic evidence the product.
 Do not install 0.7.2 on an unsupported operating system or architecture. Wait
 for a separately proven native release instead of presenting a fallback as the
 product.
+
+
+## Complete moments in 0.8.3
+
+Explicit memory requests preserve all meaningful parts and coexisting feelings.
+Pulse validates the full structured set before accepting it locally, then
+materializes individual parts with durable receipts. A `stored` result covers
+all submitted parts; `pending` or `partial` does not. A lost response permits one
+bounded replay of the identical operation. A validation refusal before admission
+permits correcting the input. Stop does not create an automatic continuation.
+
+A moment reference lets the agent read all currently eligible linked parts with
+pagination, independently of the short automatic context budget. Deleted items
+are excluded; current corrections and personal/project boundaries still apply.
+The write transport envelope is 16 MiB, not a limit on the number of feelings.
+Oversized input is explicitly refused before admission, never truncated.
+Structured summaries longer than one storage row are split without dropping text.
+Historical feelings remain remembered even after their current-state influence
+fades; inferred emotions are identified as hypotheses about that moment.
+
+Native Codex, Claude Code, Cursor and OpenCode adapters and the BB adapter share
+this behavior. Raw transcripts, secrets, old-chat import and backend model calls
+remain off by default. Build/tests are not an installed-runtime or public-release
+claim; publication and owner-machine checks must use the exact signed archive.

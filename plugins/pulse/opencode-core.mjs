@@ -158,6 +158,7 @@ async function selectSessionFunFact(client, directory, state, parentSessionID, m
 
 export function pulseMemoryTool(tool, bridge, state) {
   const emotion = tool.schema.object({
+    name: tool.schema.string().min(1).max(60).optional(),
     label: tool.schema.enum([
       'joy', 'sadness', 'anger', 'fear', 'trust', 'disgust',
       'anticipation', 'surprise', 'shame', 'guilt',
@@ -172,18 +173,22 @@ export function pulseMemoryTool(tool, bridge, state) {
       items: tool.schema.array(tool.schema.object({
         kind: tool.schema.enum(['decision', 'preference', 'open_loop', 'project_state', 'correction', 'emotion']),
         scope: tool.schema.enum(['personal', 'project']),
-        summary: tool.schema.string().min(1).max(400),
+        summary: tool.schema.string().min(1),
         emotion: emotion.optional(),
-      })).min(1).max(3),
+        emotions: tool.schema.array(emotion).min(1).optional(),
+      })).min(1).optional(),
+      moment_id: tool.schema.string().optional(),
+      cursor: tool.schema.number().int().min(0).optional(),
+      status: tool.schema.boolean().optional(),
     },
     async execute(args, context) {
       const turn = state.turns.get(context.sessionID);
       if (!turn) return JSON.stringify({ status: 'unavailable' });
       try {
-        const result = await bridge('memory', {
+        const result = await bridge(args.moment_id ? 'moment' : 'memory', {
           ...turn,
           session_id: context.sessionID,
-          items: args.items,
+          ...(args.moment_id ? {moment_id:args.moment_id,cursor:args.cursor??0,status:args.status??false} : {items:args.items}),
           tool_use_id: stableID(context.messageID, 'tool'),
         }, { signal: context.abort, timeoutMs: 8_000 });
         return JSON.stringify(result);

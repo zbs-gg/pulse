@@ -2,49 +2,27 @@
 
 Pulse is memory for AI tools. It gives coding agents the knowledge they need at
 the moment they need it, and stays silent when nothing relevant is found.
-Version `0.8.2` can also remember emotions attached to a specific
-moment. It does not turn repeated emotions into personality traits, save the
-full conversation, or send Personal memory to a cloud server.
+The 0.8.3 preview preserves complete meaningful moments: multiple feelings,
+their names, causes, and the distinction between user-stated and inferred
+emotions. Every submitted part receives a durable receipt. An interrupted
+response can be replayed without duplication, and accepted writes recover
+after a daemon restart.
 
-> **OpenCode support exists only in the unpublished 0.8.3 candidate.** Stable
-> `0.7.2` and public preview `0.8.2` do not contain it. The candidate supports
-> OpenCode `1.18.x` on Apple Silicon macOS and has been contract-tested against
-> the locally installed `1.18.15`; npm and GitHub publication are not part of
-> this change.
->
-> **0.8.2 is the npm preview, not the stable default.** Its release flow
-> installs the exact archive on a clean Apple Silicon runner and makes a real
-> BGE-M3 semantic query before publication. Use 0.7.2 for the stable
-> installation. Version 0.8.1 remains preserved as evidence of the cold-search
-> defect that 0.8.2 fixes.
+The preview targets Apple Silicon macOS with Codex, Claude Code, Cursor, and
+OpenCode 1.18.x. Stable `0.7.2` remains the default. The BB integration lives in
+[`integrations/bb`](./integrations/bb); it uses the same local engine and adds
+`pulse_moment` for reading all linked parts. Native hosts use `pulse_memory`
+with a `moment_id` for the same paginated read.
 
-Version 0.8.2 expands historical import, returns up to four short, distinct
-memories, keeps the embedder protocol intact after a cancelled caller, and
-makes Doctor prove a real semantic query. Owner-machine daily-use acceptance
-still requires installing these exact public bytes in Codex and Claude Code.
+The OpenCode loader stays inert outside a signed Pulse project. Its optional
+`--fun-facts small-model` mode sends at most six approved short facts to the
+configured smaller model once per session; it is off by default.
 
-The 0.8.3 candidate adds a global OpenCode loader that stays inert outside a
-signed Pulse project. `pulse init opencode` binds the current project, recalls
-memory before the first model response, and exposes exactly one write tool,
-`pulse_memory`. Optional `--fun-facts small-model` sends at most six already
-approved short facts to OpenCode's configured smaller model once per session;
-the user request, other memory, secrets, and paths are excluded, and failure
-falls back locally without blocking the normal answer.
-The integration follows OpenCode's documented
-[`small_model`](https://github.com/anomalyco/opencode/blob/dev/packages/web/src/content/docs/config.mdx)
-setting and [plugin API](https://dev.opencode.ai/docs/plugins/).
-
-The owner-machine migration and atomic database switch passed on 2026-08-09.
-The old Pulse and Claude Mem sources, migration copies, and recovery files are
-preserved in a verified encrypted external archive. Earlier fresh-session
-checks showed recall, one-call writing, project boundaries, silence on an
-unrelated question, and fail-open host work in Codex and Claude Code. A later
-live check on 2026-08-16 exposed the missing reliability gate: the installed
-epoch 34 daemon reported BGE-M3 ready while ordinary queries timed out. A
-five-second semantic probe loaded the intact local model and the Hermes query
-then returned relevant candidates in 496 ms. Daily-use acceptance therefore
-remains incomplete until the signed 0.8.2 bytes are activated and pass the same
-cold and warm query checks in both hosts on the owner machine.
+The publication workflow installs the exact signed archive on a clean Apple
+Silicon runner and requires a real BGE-M3 semantic query before publishing npm
+and the matching GitHub prerelease. That check does not establish one-day
+owner-machine acceptance or production readiness. See the
+[release notes](./docs/releases/v0.8.3.md) for this release's scope.
 
 The first frozen large-vault baseline on 2026-08-12 did not pass its combined
 practical bar. On a copy containing 76,795 real events, published `0.8.0` found
@@ -87,15 +65,9 @@ with the local Personal 0.8 vault and is not part of the published install.
 
 ## Install
 
-Version `0.7.2` remains the stable release for Macs with Apple Silicon. Version
-`0.8.2` is published under the npm `preview` tag for the same public target.
-The source tree names the next unpublished candidate `0.8.3`; it must not be
-presented as npm-installable until new signed artifacts and a publication
-descriptor exist.
-Its exact archive must pass installation and a real semantic query on a clean
-Apple Silicon GitHub runner before publication. Intel Mac, Windows, and Linux
-are not public support claims yet; fixture and packaging checks on those
-targets do not replace live product acceptance.
+Version `0.7.2` remains the stable release for Apple Silicon Macs. Select the
+`0.8.3` preview explicitly. Intel Mac, Windows, and Linux are not public
+support claims; fixture tests do not replace native acceptance.
 
 Ask your AI agent to inspect this repository and explain the changes before it
 installs anything. The current published Personal installation is:
@@ -112,7 +84,7 @@ To try the 0.8 preview explicitly:
 npx -y @zbs-gg/pulse@preview init codex
 ```
 
-The 0.8.3 candidate installer finds Codex, Claude Code, Cursor, and compatible
+The 0.8.3 installer finds Codex, Claude Code, Cursor, and compatible
 OpenCode, shows every file it will change plus the OpenCode plugin-list diff,
 and offers to connect all detected programs. To inspect the same plan without
 changing anything:
@@ -140,8 +112,7 @@ opens Memory Home for inspecting, correcting, and deleting local memories.
 In the 0.8 preview, Pulse exposes one memory tool, `pulse_memory`.
 The AI program may call it during an ordinary working turn when a durable
 decision, preference, open question, project state, correction, or emotional
-moment appears. One call accepts at most three short items and does not create
-a separate finalizing turn. The older `pulse_remember` and `pulse_graph_delta`
+moment appears. A save includes every meaningful part, including coexisting emotions and their causes. Long summaries are split into linked parts without discarding meaning. The complete set is durably accepted before individual materialization; a separate finalizing agent turn is never created. The older `pulse_remember` and `pulse_graph_delta`
 names remain compatibility aliases but are not advertised to the model.
 
 Raw conversation capture and old-chat import are off by default. Secret-like,
@@ -227,17 +198,30 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: Personal 0.8.2 is the npm preview and its publication gate includes a
-real semantic query. The owner Mac still runs epoch 34 from 0.8.0, which exposed
-a cold-search failure while reporting itself ready. The one-day Codex and
-Claude Code acceptance is therefore not complete until exact public 0.8.2 bytes
-are installed and pass real recall and writing. Raw-history recall and Cursor
-acceptance remain pending product limits.
-A separate unpublished 0.8.3 candidate adds OpenCode 1.18.x support on Apple
-Silicon macOS. Source tests are not physical acceptance: the candidate still
-needs an outside-checkout package install and then a separately approved live
-OpenCode session on the owner Mac. It has not been published.
-A separate Claude Chat
-remote-recall experiment passed with a visible tool call on every message, but
-is not Personal sync or a supported install. Version 0.8 is not the stable
-default or production ready.
+Status: stable remains 0.7.2; 0.8.3 is an opt-in preview. Exact-archive
+installation and real host recall/write checks are required separately from
+source tests. One-day acceptance and production readiness are not implied.
+Remote Claude Chat experiments are separate from the local Personal product.
+
+## Complete moments in 0.8.3
+
+Explicit memory requests preserve all meaningful parts and coexisting feelings.
+Pulse validates the full structured set before accepting it locally, then
+materializes individual parts with durable receipts. A `stored` result covers
+all submitted parts; `pending` or `partial` does not. A lost response permits one
+bounded replay of the identical operation. A validation refusal before admission
+permits correcting the input. Stop does not create an automatic continuation.
+
+A moment reference lets the agent read all currently eligible linked parts with
+pagination, independently of the short automatic context budget. Deleted items
+are excluded; current corrections and personal/project boundaries still apply.
+The write transport envelope is 16 MiB, not a limit on the number of feelings.
+Oversized input is explicitly refused before admission, never truncated.
+Structured summaries longer than one storage row are split without dropping text.
+Historical feelings remain remembered even after their current-state influence
+fades; inferred emotions are identified as hypotheses about that moment.
+
+Native Codex, Claude Code, Cursor and OpenCode adapters and the BB adapter share
+this behavior. Raw transcripts, secrets, old-chat import and backend model calls
+remain off by default. Build/tests are not an installed-runtime or public-release
+claim; publication and owner-machine checks must use the exact signed archive.

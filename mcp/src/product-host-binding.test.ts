@@ -66,34 +66,35 @@ for (const host of ['claude-code', 'cursor', 'codex'] as const) {
     const writeSchema = memory.inputSchema;
     if (host === 'cursor') {
       assert.equal(memory.inputSchema.type, 'object');
-      assert.equal(memory.inputSchema.oneOf.length, 2);
-      assert.deepEqual(memory.inputSchema.oneOf[0].required, ['query']);
+      assert.equal(memory.inputSchema.oneOf.length, 3);
+      assert.ok(memory.inputSchema.oneOf.some((branch: any) => branch.required.includes('query')));
       assert.equal(memory.inputSchema.properties.query.maxLength, 400);
       assert.equal(memory.inputSchema.additionalProperties, false);
     }
-    if (host === 'cursor') assert.deepEqual(writeSchema.oneOf[1].required, ['items']);
-    else assert.deepEqual(writeSchema.required, ['items']);
-    assert.equal(writeSchema.properties.items.maxItems, 3);
+    assert.ok(writeSchema.oneOf.some((branch: any) => branch.required.includes('items')));
+    assert.ok(writeSchema.oneOf.some((branch: any) => branch.required.includes('moment_id')));
+    assert.equal(writeSchema.properties.items.maxItems, undefined);
     const [durableItem, emotionalItem] = writeSchema.properties.items.items.oneOf;
     assert.deepEqual(durableItem.properties.kind.enum, [
       'decision', 'preference', 'open_loop', 'project_state', 'correction',
     ]);
-    assert.equal(durableItem.properties.summary.maxLength, 400);
+    assert.equal(durableItem.properties.summary.maxLength, undefined);
     assert.equal(durableItem.properties.emotion, undefined);
     assert.equal(emotionalItem.properties.kind.const, 'emotion');
-    assert.equal(emotionalItem.properties.summary.maxLength, 400);
-    assert.ok(emotionalItem.required.includes('emotion'));
+    assert.equal(emotionalItem.properties.summary.maxLength, undefined);
+    assert.ok(emotionalItem.properties.emotions);
+    assert.ok(emotionalItem.oneOf.some((branch: any) => branch.required.includes('emotions')));
     assert.equal(memory.outputSchema, undefined);
     const result = messages.find((message) => message.id === 3)?.result;
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /pulse_memory requires 1\.\.3 items/);
+    assert.match(result.content[0].text, /pulse_memory requires a nonempty items array/);
     assert.doesNotMatch(result.content[0].text, /runtime lease must not be reached/);
     const queryResult = messages.find((message) => message.id === 4)?.result;
     assert.equal(queryResult.isError, true);
     if (host === 'cursor') {
       assert.match(queryResult.content[0].text, /runtime lease must not be reached/);
     } else {
-      assert.match(queryResult.content[0].text, /pulse_memory requires 1\.\.3 items/);
+      assert.match(queryResult.content[0].text, /pulse_memory requires a nonempty items array/);
       assert.doesNotMatch(queryResult.content[0].text, /runtime lease must not be reached/);
     }
   });
