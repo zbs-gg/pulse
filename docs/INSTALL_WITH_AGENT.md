@@ -37,9 +37,10 @@ capture, backend model calls, old-chat import, and Personal-to-Git publication
 are off by default.
 
 The intended target set is macOS, Windows, and GNU/Linux on arm64 and x64.
-Before presenting the command as supported, the agent must find the exact
-target and harness in the [native support ledger](release/NATIVE_SUPPORT_LEDGER.md).
-PR fixture evidence alone does not authorize a public support claim.
+The selected Apple Silicon preview must advertise the host in its signed
+release policy and have exact-package installation evidence. The separate
+[native support ledger](release/NATIVE_SUPPORT_LEDGER.md) governs broader Gold
+platform claims. PR fixture evidence alone does not authorize those claims.
 
 The wizard may pause for real human actions such as protected-action presence,
 Codex hook trust, Claude Code plugin approval, or a Cursor reload. Rerun the
@@ -142,7 +143,9 @@ product.
 Explicit memory requests preserve all meaningful parts and coexisting feelings.
 Pulse validates the full structured set before accepting it locally, then
 materializes individual parts with durable receipts. A `stored` result covers
-all submitted parts; `pending` or `partial` does not. A lost response permits one
+all submitted parts; `pending` or `partial` does not. Canonical storage and
+explicit moment reading do not wait for the background search index. Each part
+keeps its own pending index receipt until indexing actually finishes. A lost response permits one
 bounded replay of the identical operation. A validation refusal before admission
 permits correcting the input. Stop does not create an automatic continuation.
 

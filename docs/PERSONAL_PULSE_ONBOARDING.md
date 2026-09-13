@@ -176,7 +176,9 @@ approval before changing the owner Mac's current OpenCode configuration.
 Explicit memory requests preserve all meaningful parts and coexisting feelings.
 Pulse validates the full structured set before accepting it locally, then
 materializes individual parts with durable receipts. A `stored` result covers
-all submitted parts; `pending` or `partial` does not. A lost response permits one
+all submitted parts; `pending` or `partial` does not. Canonical storage and
+explicit moment reading do not wait for the background search index. Each part
+keeps its own pending index receipt until indexing actually finishes. A lost response permits one
 bounded replay of the identical operation. A validation refusal before admission
 permits correcting the input. Stop does not create an automatic continuation.
 

@@ -1,11 +1,17 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/nkkmnk/pulse/internal/embed"
+	"github.com/nkkmnk/pulse/internal/retrieve"
 	"github.com/nkkmnk/pulse/internal/store"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -203,4 +209,88 @@ func TestMemoryMomentHTTPPreservesNamedCoexistingFeelings(t *testing.T) {
 	if ref := vault.MomentForEvent(result.EventIDs[0], req.BindingDigest, ""); ref != result.MomentID {
 		t.Fatalf("recall lost full-moment reference: %q", ref)
 	}
+}
+
+type blockedMomentEmbedder struct {
+	gate    <-chan struct{}
+	entered chan<- struct{}
+}
+
+func (e blockedMomentEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	select {
+	case e.entered <- struct{}{}:
+	default:
+	}
+	<-e.gate
+	return productTestEmbedder{}.Embed(context.Background(), texts, embed.InputType("document"))
+}
+func (blockedMomentEmbedder) Model() string { return "blocked-moment-test" }
+
+func TestMemoryMomentReceiptAndFullReadDoNotWaitForSearchIndex(t *testing.T) {
+	vault, initial := newProductMemoryServer(t)
+	initial.Close()
+	gate, entered := make(chan struct{}), make(chan struct{}, 1)
+	var release sync.Once
+	defer release.Do(func() { close(gate) })
+	engine := retrieve.New(retrieve.Config{Store: vault, Embedder: blockedMomentEmbedder{gate: gate, entered: entered}})
+	if err := engine.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{IPCSecret: "secret", Store: vault, Retrieval: engine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	body, _ := json.Marshal(momentServerRequest(4))
+	request, _ := http.NewRequest(http.MethodPost, ts.URL+"/memory/moments", bytes.NewReader(body))
+	request.Header.Set("X-Pulse-Key", "secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 2 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("write waited for blocked search index: %v", err)
+	}
+	defer response.Body.Close()
+	var result store.TurnFinalizeResult
+	if err = json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	for _, receipt := range result.Receipts {
+		if receipt.Status != store.MemoryWriteCreated {
+			t.Fatal(receipt)
+		}
+	}
+	page, err := vault.ReadMemoryMoment(result.MomentID, momentServerRequest(1).BindingDigest, "", 0)
+	if err != nil || len(page.Items) != 4 {
+		t.Fatalf("canonical moment unavailable before indexing: %+v %v", page, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("background indexing never started")
+	}
+	pending, err := vault.ListPendingPrivateProjectionReceipts("", 200)
+	if err != nil || len(pending) != 4 {
+		t.Fatalf("unindexed receipts lost: %d %v", len(pending), err)
+	}
+	gate <- struct{}{}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("next part never reached indexing")
+	}
+	pending, err = vault.ListPendingPrivateProjectionReceipts("", 200)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("indexing one part incorrectly completed the others: %d %v", len(pending), err)
+	}
+	release.Do(func() { close(gate) })
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pending, err = vault.ListPendingPrivateProjectionReceipts("", 200)
+		if err == nil && len(pending) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background indexing did not complete")
 }

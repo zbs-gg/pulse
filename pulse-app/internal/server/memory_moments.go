@@ -32,7 +32,7 @@ func (s *Server) handleMemoryMomentWrite(w http.ResponseWriter, r *http.Request)
 	}
 	// All candidates are durable before materialization. Startup recovery handles
 	// an interrupted request without rerunning the model or inventing new turns.
-	result = s.commitTurnResultNowForAuthority(result, authority)
+	result = s.commitTurnWithProjection(result, authority, true)
 	writeJSON(w, result)
 }
 

@@ -450,8 +450,16 @@ func (s *Server) commitTurnResultNowForAuthority(
 	result store.TurnFinalizeResult,
 	authority *productBindingAuthority,
 ) store.TurnFinalizeResult {
+	return s.commitTurnWithProjection(result, authority, false)
+}
+
+func (s *Server) commitTurnWithProjection(result store.TurnFinalizeResult, authority *productBindingAuthority, backgroundProjection bool) store.TurnFinalizeResult {
+	var newlyCommitted []store.MemoryWriteReceipt
 	for index, receipt := range result.Receipts {
-		result.Receipts[index] = s.commitReceiptNowForAuthority(receipt, authority)
+		result.Receipts[index] = s.commitReceiptWithProjection(receipt, authority, !backgroundProjection)
+		if backgroundProjection && receipt.Status == store.MemoryWritePending && result.Receipts[index].ObjectID != "" {
+			newlyCommitted = append(newlyCommitted, result.Receipts[index])
+		}
 		committed := result.Receipts[index]
 		ids, eventResults, question, err := s.cfg.Store.SemanticWriteOutcome(committed, time.Now().UTC())
 		if err == nil && len(eventResults) > 0 {
@@ -462,6 +470,16 @@ func (s *Server) commitTurnResultNowForAuthority(
 			}
 		}
 	}
+	if backgroundProjection && s.cfg.Retrieval != nil && len(newlyCommitted) > 0 {
+		// Storage receipts are already durable. The persisted projection outbox is
+		// independent of the caller's timeout and is recovered after a restart.
+		go func() {
+			for _, receipt := range newlyCommitted {
+				s.refreshProductRetrieval(receipt)
+			}
+		}()
+	}
+
 	return result
 }
 
@@ -473,6 +491,10 @@ func (s *Server) commitReceiptNowForAuthority(
 	receipt store.MemoryWriteReceipt,
 	authority *productBindingAuthority,
 ) store.MemoryWriteReceipt {
+	return s.commitReceiptWithProjection(receipt, authority, true)
+}
+
+func (s *Server) commitReceiptWithProjection(receipt store.MemoryWriteReceipt, authority *productBindingAuthority, projectNow bool) store.MemoryWriteReceipt {
 	if receipt.Status != store.MemoryWritePending {
 		return receipt
 	}
@@ -489,7 +511,9 @@ func (s *Server) commitReceiptNowForAuthority(
 		)
 	}
 	if err == nil {
-		s.refreshProductRetrieval(committed)
+		if projectNow {
+			s.refreshProductRetrieval(committed)
+		}
 		return committed
 	}
 	// The candidate itself is already durable. Retry transient materialization
@@ -769,7 +793,7 @@ func (s *Server) refreshProductRetrievalAttempt(receipt store.MemoryWriteReceipt
 		}
 	}
 	now := time.Now().UTC()
-	if err := s.cfg.Store.SetPendingPrivateProjectionStatus(status, now); err != nil {
+	if err := s.cfg.Store.SetPrivateProjectionStatus(receipt.ObjectID, status, now); err != nil {
 		log.Printf("memory tray projection: persist pending %s status failed: %v", status, err)
 	}
 	if receipt.ReasonCode == "user_deleted" && status == "failed" {

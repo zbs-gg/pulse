@@ -119,7 +119,7 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	&& ( if [ -f integrations/bb/package.json ]; then \
 	       cd integrations/bb \
 	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
-	       && node --import ../../mcp/node_modules/tsx/dist/loader.mjs --test contract.test.ts scope-guard.test.mjs; \
+	       && node --import ../../mcp/node_modules/tsx/dist/loader.mjs --test contract.test.ts *.test.mjs; \
 	     fi ) \
 	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
 	       cd $(CLI_DIR) \

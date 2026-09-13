@@ -77,13 +77,16 @@ export async function callPulse(input, callerSignal, lifecycleSignal) {
         body: options.body ? JSON.stringify(options.body) : undefined,
         // AI-SURPRISE: installed semantic recall takes ~4.5s on this vault;
         // the compositor's 2.5s budget rejects a healthy local response.
-        // Keep the independent 10s operation deadline and never retry.
+        // Recall keeps its independent deadline; writes use one exact replay.
         signal: AbortSignal.any([signal, AbortSignal.timeout(path === '/context/query' ? 6000 : options.timeoutMs ?? 4000)]),
         redirect: 'error',
       });
       if (!res.ok) {
+        const detail = res.status === 400 && path === '/memory/moments' ? await res.text() : '';
         await res.body?.cancel();
-        throw new Error(res.status === 409 ? 'turn_already_finalized' : 'pulse_request_unavailable');
+        const reason = detail.includes('nothing accepted') ? 'memory_validation_nothing_accepted' :
+          res.status === 409 ? 'turn_already_finalized' : 'pulse_request_unavailable';
+        throw Object.assign(new Error(reason), { status: res.status });
       }
       const chunks = [];
       let size = 0;
@@ -109,7 +112,7 @@ export async function callPulse(input, callerSignal, lifecycleSignal) {
     const health = await request(null, '/memory/status');
     // AI-SURPRISE: a listening Pulse daemon may lack semantic retrieval; its
     // status alone is not recall proof. Never enable a configured paid backend.
-    if (health.backend_llm_enabled !== false || health.full_retrieval !== true) {
+    if (health.backend_llm_enabled !== false || (['status','recall'].includes(input.action) && health.full_retrieval !== true)) {
       return result({ status: 'unavailable', reason: 'local_semantic_retrieval_not_ready', fullRetrieval: false });
     }
     if (input.action === 'status') {
@@ -141,7 +144,21 @@ export async function callPulse(input, callerSignal, lifecycleSignal) {
   } catch (error) {
     // Error strings from child processes or HTTP bodies can contain private
     // paths/data. Return a stable diagnosis; never echo or log those strings.
-    return result({ status: 'unavailable', reason: signal.aborted || ['TimeoutError', 'AbortError'].includes(error.name) ? 'cancelled_or_timeout' :
-      error.message === 'turn_already_finalized' ? 'turn_already_finalized' : 'binding_required_or_pulse_unavailable' });
+    return result(classifyPulseError(error, signal.aborted));
   }
+}
+
+// Expose only fixed error codes. A pre-admission rejection permits correction;
+// transport uncertainty must never imply that an accepted write was discarded.
+export function classifyPulseError(error, aborted = false) {
+  const validation = new Set([
+    'memory_items_required_nothing_accepted', 'memory_item_invalid_nothing_accepted',
+    'unsafe_memory_nothing_accepted', 'memory_emotions_required_nothing_accepted',
+    'memory_emotion_invalid_nothing_accepted', 'memory_emotions_unexpected_nothing_accepted',
+    'memory_validation_nothing_accepted',
+  ]);
+  if (validation.has(error?.message)) return {status:'rejected',reason:error.message};
+  return {status:'unavailable',reason:aborted || ['TimeoutError','AbortError'].includes(error?.name)
+    ? 'cancelled_or_timeout' : error?.message==='turn_already_finalized'
+      ? 'turn_already_finalized' : 'binding_required_or_pulse_unavailable'};
 }

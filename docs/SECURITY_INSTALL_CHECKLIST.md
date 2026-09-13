@@ -16,9 +16,10 @@ preview on Apple Silicon macOS.
 - [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2` for stable
       or `@zbs-gg/pulse@0.8.3` for the selected preview, or the user explicitly
       provided an exact source bundle, tarball, or local checkout.
-- [ ] The exact OS, architecture, and harness are green in
-      `docs/release/NATIVE_SUPPORT_LEDGER.md`; PR fixture evidence is not
-      presented as public support.
+- [ ] The signed selected release advertises the exact OS, architecture and
+      harness. The Apple Silicon preview has exact-package installation
+      evidence; broader Gold claims require the separate native support ledger.
+      Fixture evidence is never presented as physical acceptance.
 - [ ] Local storage path is shown.
 - [ ] The selected AI program's connection files are shown.
 - [ ] Local viewer URL is shown.
@@ -87,7 +88,9 @@ Stop and explain if:
 Explicit memory requests preserve all meaningful parts and coexisting feelings.
 Pulse validates the full structured set before accepting it locally, then
 materializes individual parts with durable receipts. A `stored` result covers
-all submitted parts; `pending` or `partial` does not. A lost response permits one
+all submitted parts; `pending` or `partial` does not. Canonical storage and
+explicit moment reading do not wait for the background search index. Each part
+keeps its own pending index receipt until indexing actually finishes. A lost response permits one
 bounded replay of the identical operation. A validation refusal before admission
 permits correcting the input. Stop does not create an automatic continuation.
 
