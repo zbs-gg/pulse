@@ -102,6 +102,7 @@ jobs:
         shell: bash
         env:
           PULSE_REQUIRE_RELEASE_MANIFEST: '1'
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(uname -s)" = Darwin
@@ -111,10 +112,10 @@ jobs:
 
           expected_manifest="$RUNNER_TEMP/personal-preview-manifest.json"
           expected_snapshot="$RUNNER_TEMP/personal-release-snapshot.json"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$expected_manifest" "$EXPECTED_ARTIFACT_SET_URL"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$expected_snapshot" "$EXPECTED_SNAPSHOT_URL"
+          gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${EXPECTED_ARTIFACT_SET_URL##*/}" --output "$expected_manifest"
+          gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${EXPECTED_SNAPSHOT_URL##*/}" --output "$expected_snapshot"
           test "$(shasum -a 256 "$expected_manifest" | cut -d ' ' -f 1)" = "$EXPECTED_ARTIFACT_SET_SHA256"
           test "$(shasum -a 256 "$expected_snapshot" | cut -d ' ' -f 1)" = "$EXPECTED_SNAPSHOT_SHA256"
 
@@ -122,8 +123,8 @@ jobs:
           unpack_dir="$RUNNER_TEMP/pulse-unpacked"
           mkdir -p "$package_dir" "$unpack_dir"
           archive="$package_dir/zbs-gg-pulse-$EXPECTED_VERSION.tgz"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$archive" "$EXPECTED_ARCHIVE_URL"
+          gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${EXPECTED_ARCHIVE_URL##*/}" --output "$archive"
           test "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$unpack_dir"
           cmp "$expected_manifest" "$unpack_dir/package/release/personal-preview-manifest.json"
@@ -160,28 +161,55 @@ jobs:
           test "$tree_sha256" = "$EXPECTED_TREE_SHA256"
           echo "PULSE_NPM_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
+      - name: Verify every staged runtime asset before public distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/pulse-release-assets"
+          mkdir -p "$assets"
+          gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.tar.gz' --dir "$assets"
+          node pulse-app/cli/scripts/verify-github-release-assets.mjs "$assets"
+          git fetch origin "refs/tags/$EXPECTED_GITHUB_TAG:refs/tags/$EXPECTED_GITHUB_TAG"
+          test "$(git rev-list -n 1 "$EXPECTED_GITHUB_TAG")" = "$GITHUB_SHA"
+
+      - name: Expose verified GitHub assets for the public installer
+        if: github.ref == 'refs/heads/main' && inputs.publish_github_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test "$(gh release view "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true; then
+            printf '%s\n' 'Signed installation assets are available. Clean-Mac installation and npm publication are still being verified by the release workflow.' > "$RUNNER_TEMP/release-in-progress.md"
+            gh release edit "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --prerelease --title "$EXPECTED_GITHUB_TITLE" --notes-file "$RUNNER_TEMP/release-in-progress.md"
+          fi
+
       - name: Install the exact archive on a clean Mac
         shell: bash
         run: |
           set -euo pipefail
-          home="$RUNNER_TEMP/pulse-home"
+          pulse_home="$RUNNER_TEMP/pulse-home"
           install="$RUNNER_TEMP/pulse-install"
           workspace="$RUNNER_TEMP/pulse-workspace"
-          mkdir -p "$home" "$install" "$workspace"
+          mkdir -p "$pulse_home" "$install" "$workspace"
           git -C "$workspace" init -q
           npm install --ignore-scripts --no-audit --no-fund --prefix "$install" "$PULSE_NPM_ARCHIVE"
-          npm install --global --ignore-scripts --no-audit --no-fund --prefix "$home/.local" @openai/codex@0.146.1
+          npm install --global --ignore-scripts --no-audit --no-fund --prefix "$pulse_home/.local" @openai/codex@0.146.1
           cli="$install/node_modules/@zbs-gg/pulse/src/cli.js"
-          test -x "$home/.local/bin/codex"
-          export PATH="$home/.local/bin:$install/node_modules/.bin:$PATH"
+          test -x "$pulse_home/.local/bin/codex"
+          export PATH="$pulse_home/.local/bin:$install/node_modules/.bin:$PATH"
           test "$(codex --version)" = "codex-cli 0.146.1"
-          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" --help >/dev/null
-          HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" init codex --only codex --yes --json \
+          HOME="$pulse_home" PULSE_DATA_DIR="$pulse_home/.pulse" node "$cli" --help >/dev/null
+          (cd "$workspace" && HOME="$pulse_home" PULSE_DATA_DIR="$pulse_home/.pulse" node "$cli" init codex --only codex --yes --json) \
             > "$RUNNER_TEMP/pulse-install.json"
           node -e 'const r=require(process.argv[1]); if (r.outcome!=="ready" || r.reason_code!=="installed" || r.host_status?.hosts?.[0]?.installed!==true) process.exit(1)' \
             "$RUNNER_TEMP/pulse-install.json"
           set +e
-          (cd "$workspace" && HOME="$home" PULSE_DATA_DIR="$home/.pulse" node "$cli" doctor codex --json) \
+          (cd "$workspace" && HOME="$pulse_home" PULSE_DATA_DIR="$pulse_home/.pulse" node "$cli" doctor codex --json) \
             > "$RUNNER_TEMP/pulse-doctor.json"
           set -e
           jq -e '.checks.retrieval.ok == true and (.checks.retrieval.detail | startswith("full retrieval via bge-m3; semantic retrieval answered in "))' \
@@ -215,29 +243,17 @@ jobs:
           test "${#published[@]}" = 1
           test "$(shasum -a 256 "${published[0]}" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
 
-      - name: Create the matching GitHub prerelease
+      - name: Finalize the matching GitHub prerelease
         if: github.ref == 'refs/heads/main' && inputs.publish_github_release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          checksums="$RUNNER_TEMP/SHA256SUMS"
-          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "zbs-gg-pulse-$EXPECTED_VERSION.tgz" > "$checksums"
-          if gh release view "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            git fetch origin "refs/tags/$EXPECTED_GITHUB_TAG:refs/tags/$EXPECTED_GITHUB_TAG" --force
-            test "$(git rev-list -n 1 "$EXPECTED_GITHUB_TAG")" = "$GITHUB_SHA"
-            existing="$RUNNER_TEMP/existing-release"
-            mkdir -p "$existing"
-            gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
-              --pattern "zbs-gg-pulse-$EXPECTED_VERSION.tgz" --dir "$existing"
-            test "$(shasum -a 256 "$existing/zbs-gg-pulse-$EXPECTED_VERSION.tgz" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
-          else
-            gh release create "$EXPECTED_GITHUB_TAG" \
-              "$PULSE_NPM_ARCHIVE#zbs-gg-pulse-$EXPECTED_VERSION.tgz" \
-              "$checksums#SHA256SUMS" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$EXPECTED_GITHUB_TITLE" \
-              --notes-file "$EXPECTED_GITHUB_NOTES" \
-              --prerelease
+          existing="$RUNNER_TEMP/existing-release"
+          mkdir -p "$existing"
+          gh release download "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${EXPECTED_ARCHIVE_URL##*/}" --dir "$existing"
+          test "$(shasum -a 256 "$existing/${EXPECTED_ARCHIVE_URL##*/}" | cut -d ' ' -f 1)" = "$EXPECTED_ARCHIVE_SHA256"
+          gh release edit "$EXPECTED_GITHUB_TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$EXPECTED_GITHUB_TITLE" --notes-file "$EXPECTED_GITHUB_NOTES" --prerelease

@@ -1,5 +1,12 @@
 # Install Pulse With Your AI Agent
 
+The 0.8.3 installer downloads signed runtime and model assets from the public
+GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
+`release-assets.githubusercontent.com`; signatures, exact sizes and SHA-256
+digests are still checked before activation. No paid release storage service
+is required. Personal memory remains on the local machine.
+
+
 > Personal 0.8.3 is an opt-in Apple Silicon preview. Stable remains 0.7.2.
 > The preview includes complete-moment memory and OpenCode 1.18.x support.
 > Verify the exact selected version and signed artifact set before installation.

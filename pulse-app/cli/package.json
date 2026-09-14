@@ -40,6 +40,7 @@
     "src/product-binding-verifier.js",
     "src/local-supervisor.js",
     "src/artifact-installer.js",
+    "src/github-release-download.js",
     "src/install-journal.js",
     "src/install-plan.js",
     "src/local-merge-review.js",

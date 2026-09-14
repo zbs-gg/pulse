@@ -1,5 +1,12 @@
 # Pulse Personal
 
+The 0.8.3 installer downloads signed runtime and model assets from the public
+GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
+`release-assets.githubusercontent.com`; signatures, exact sizes and SHA-256
+digests are still checked before activation. No paid release storage service
+is required. Personal memory remains on the local machine.
+
+
 Pulse is memory for AI tools. It gives coding agents the knowledge they need at
 the moment they need it, and stays silent when nothing relevant is found.
 The 0.8.3 preview preserves complete meaningful moments: multiple feelings,
@@ -20,7 +27,7 @@ configured smaller model once per session; it is off by default.
 
 The publication workflow installs the exact signed archive on a clean Apple
 Silicon runner and requires a real BGE-M3 semantic query before publishing npm
-and the matching GitHub prerelease. That check does not establish one-day
+and finalizing the matching GitHub prerelease. That check does not establish one-day
 owner-machine acceptance or production readiness. See the
 [release notes](./docs/releases/v0.8.3.md) for this release's scope.
 

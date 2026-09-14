@@ -432,9 +432,13 @@ function validateArtifactSetRelease(release, options) {
 function validateSnapshotURL(value, expectedPathSuffix) {
   let parsed;
   try { parsed = new URL(value); } catch { fail('release_snapshot_url_invalid'); }
+  const github = expectedPathSuffix.match(/^\/pulse\/(\d+\.\d+\.\d+)\/(?:epoch-\d+\/)?catalog\/(snapshot|artifact-set)\.json$/);
+  const expectedGitHubPath = github && `/zbs-gg/pulse/releases/download/v${github[1]}/${github[2] === 'artifact-set' ? 'catalog-artifact-set' : 'snapshot'}.json`;
+  const pathMatches = parsed.origin === 'https://github.com'
+    ? parsed.pathname === expectedGitHubPath : parsed.pathname.endsWith(expectedPathSuffix);
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
       parsed.pathname.split('/').some((part) => part === '..' || part === '.') ||
-      !parsed.pathname.endsWith(expectedPathSuffix)) fail('release_snapshot_url_invalid');
+      !pathMatches) fail('release_snapshot_url_invalid');
   return parsed;
 }
 

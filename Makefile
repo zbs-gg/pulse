@@ -88,6 +88,7 @@ personal-native-packed-e2e: ## Install the exact archive into an isolated native
 
 preview-publication-verify: ## Bind version, signed epoch, docs, npm bytes, and GitHub prerelease notes
 	cd $(CLI_DIR) && $(NPM) run --silent verify:preview-publication
+	cd $(CLI_DIR) && node --test scripts/verify-preview-publication.test.mjs
 
 release-verify: verify preview-publication-verify personal-package-verify personal-native-packed-e2e ## Reproducible Personal npm release gate
 

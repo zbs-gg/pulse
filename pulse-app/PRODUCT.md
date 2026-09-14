@@ -1,5 +1,12 @@
 # Pulse Personal
 
+The 0.8.3 installer downloads signed runtime and model assets from the public
+GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
+`release-assets.githubusercontent.com`; signatures, exact sizes and SHA-256
+digests are still checked before activation. No paid release storage service
+is required. Personal memory remains on the local machine.
+
+
 ## Current product
 
 Pulse Personal is memory for AI tools. It gives Codex and Claude Code the

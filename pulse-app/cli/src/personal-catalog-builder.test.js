@@ -293,3 +293,17 @@ test('personal catalog builder removes partial output when any carrier is corrup
   );
   assert.equal(existsSync(current.options.outputRoot), false);
 });
+
+test('GitHub hosting signs versioned flat asset URLs with the same trusted catalog', (t) => {
+  const current = fixture(t);
+  const result = buildPersonalCatalog({...current.options, origin:'https://github.com'});
+  const envelope = JSON.parse(readFileSync(result.manifestPath,'utf8'));
+  const snapshot = JSON.parse(readFileSync(result.snapshotPath,'utf8'));
+  const prefix = `https://github.com/zbs-gg/pulse/releases/download/v${PACKAGE_VERSION}/`;
+  assert.deepEqual(envelope.payload.allowed_origins, ['https://github.com']);
+  assert.equal(envelope.payload.snapshot_url, prefix+'snapshot.json');
+  assert.equal(snapshot.payload.artifact_set.url, prefix+'catalog-artifact-set.json');
+  assert.equal(envelope.payload.common_artifacts.model.url, prefix+'common-model.tar.gz');
+  assert.equal(envelope.payload.targets['darwin-arm64'].artifacts.daemon.url,prefix+'darwin-arm64-daemon.tar.gz');
+  assert.equal(result.receipt.artifact_count, 14);
+});

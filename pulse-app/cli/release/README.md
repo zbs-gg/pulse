@@ -63,7 +63,22 @@ The Apple Silicon Personal preview is published only through
 archive and tree hashes, signed artifact set, snapshot, and GitHub notes.
 `npm run verify:preview-publication` checks that contract. The workflow installs
 the exact archive, proves semantic retrieval, publishes the npm `preview` tag
-through trusted publishing, and creates the matching GitHub prerelease.
+through trusted publishing, and finalizes the matching GitHub prerelease.
+
+Use `build-personal-catalog.mjs --origin https://github.com` for this release
+line. It signs flat asset URLs under `zbs-gg/pulse/releases/download/v<version>`.
+Stage all four runtime/model carriers, `catalog-artifact-set.json`,
+`snapshot.json`, the hash-named npm archive and `SHA256SUMS` in one draft
+prerelease whose tag points to the reviewed main commit. Uploads to this draft
+are preparation; the existing publication workflow owns public release and npm
+publication together. It verifies all staged bytes, exposes the signed assets
+for the clean-Mac install, then publishes npm and finalizes the release notes.
+If installation fails, the prerelease explicitly remains a candidate with npm
+publication unconfirmed. The installer needs no GitHub account or token.
+
+GitHub Releases replaces paid object storage for the new preview. Previously
+published versions may still reference historical storage; this change does
+not delete their artifacts or silently break those installers.
 
 The separate universal production-candidate workflows do not broaden this
 Personal preview's supported platforms. Fixture and signing evidence alone

@@ -238,12 +238,13 @@ function resignCatalog(value) {
   ).toString('base64');
 }
 
-function v3Fixture(value, { expiresAt = '2026-08-14T00:00:00.000Z' } = {}) {
+function v3Fixture(value, { expiresAt = '2026-08-14T00:00:00.000Z', github = false } = {}) {
   const payload = structuredClone(value.envelope.payload);
   delete payload.release.expires_at;
   delete payload.release.issued_at;
   payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
-  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json';
+  payload.snapshot_url = github ? 'https://github.com/zbs-gg/pulse/releases/download/v0.7.0/snapshot.json' : 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json';
+  if (github) payload.allowed_origins = ['https://github.com', ...payload.allowed_origins];
   payload.host_policy = {
     harnesses: loadPersonalReleaseHostPolicy(loadNativeUniversalMatrix()).map((harness) => structuredClone(harness)),
   };
@@ -699,4 +700,30 @@ test('Personal provisioning serializes epoch verification behind the install loc
     release();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('signed snapshot accepts the exact GitHub CDN redirect and rejects a foreign CDN', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-github-snapshot.'));
+  const manifestPath = join(root, 'artifact-set.json');
+  const value = fixture();
+  const release = v3Fixture(value, {github:true});
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(release.artifactSet)}\n`, {mode:0o600});
+  const options = {
+    architecture:'arm64', dataDir:join(root,'data'), manifestPath,
+    now:new Date('2026-07-16T00:00:00.000Z'), osVersion:'14.5',
+    packageVersion:'0.7.0', platform:'darwin', testMode:true,
+    trustedKeys:[{key_id:value.keyID, public_key_pem:value.publicKey, valid_from_epoch:1, valid_through_epoch:20}],
+  };
+  const cdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/123/abc-def?sig=temporary';
+  try {
+    const result = await refreshPersonalReleaseSnapshot({...options, fetchImpl:async (url) =>
+      url === release.artifactSet.payload.snapshot_url
+        ? new Response(null, {status:302, headers:{location:cdn}})
+        : new Response(release.snapshotBytes, {status:200})});
+    assert.equal(result.refreshed, true);
+    assert.equal(readFileSync(join(options.dataDir,'runtime/release-snapshot.json'),'utf8'),release.snapshotBytes);
+    await assert.rejects(refreshPersonalReleaseSnapshot({...options, fetchImpl:async () =>
+      new Response(null,{status:302,headers:{location:'https://evil.test/asset'}})}),
+    error => error.code === 'release_snapshot_redirect_forbidden');
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

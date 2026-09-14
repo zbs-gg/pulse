@@ -26,6 +26,7 @@ import {
 } from './release-manifest.js';
 import { createPlatformServices } from './platform-services.js';
 import { detectDesktopLibc } from './desktop-target.js';
+import { isGitHubReleaseAssetRedirect } from './github-release-download.js';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_MANIFEST_PATH = join(PACKAGE_ROOT, 'release', 'personal-preview-manifest.json');
@@ -80,10 +81,21 @@ async function fetchCanonicalSnapshot(url, { fetchImpl, timeoutMs = SNAPSHOT_TIM
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
+  let current = parsed;
   try {
-    response = await fetchImpl(parsed.href, { redirect: 'manual', signal: controller.signal });
-  } catch {
+    for (let redirects = 0; ; redirects += 1) {
+      response = await fetchImpl(current.href, { redirect: 'manual', signal: controller.signal });
+      if (![301, 302, 303, 307, 308].includes(response?.status)) break;
+      const location = response.headers?.get?.('location');
+      let next;
+      try { next = new URL(location, current); } catch { fail('release_snapshot_redirect_forbidden'); }
+      if (redirects >= 3 || !location || !isGitHubReleaseAssetRedirect(parsed, next)) fail('release_snapshot_redirect_forbidden');
+      await response.body?.cancel?.();
+      current = next;
+    }
+  } catch (error) {
     clearTimeout(timeout);
+    if (error instanceof PersonalRuntimeInstallerError) throw error;
     fail('release_snapshot_unavailable');
   }
   try {
@@ -94,7 +106,7 @@ async function fetchCanonicalSnapshot(url, { fetchImpl, timeoutMs = SNAPSHOT_TIM
     if (response.url) {
       let finalURL;
       try { finalURL = new URL(response.url); } catch { fail('release_snapshot_redirect_forbidden'); }
-      if (finalURL.href !== parsed.href || finalURL.origin !== parsed.origin) fail('release_snapshot_redirect_forbidden');
+      if (finalURL.href !== current.href) fail('release_snapshot_redirect_forbidden');
     }
     const declaredHeader = response.headers?.get?.('content-length');
     const declaredLength = declaredHeader === null || declaredHeader === undefined ? null : Number(declaredHeader);

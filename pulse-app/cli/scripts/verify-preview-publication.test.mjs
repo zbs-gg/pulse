@@ -9,13 +9,15 @@ import { verifyPreviewPublication } from './verify-preview-publication.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
+const reference = JSON.parse(readFileSync(join(root, 'docs/release/PREVIEW_PUBLICATION.json'), 'utf8'));
+
 const fixturePaths = [
   'docs/release/PREVIEW_PUBLICATION.json', 'pulse-app/cli/package.json', 'pulse-app/cli/package-lock.json',
   'pulse-app/cli/release/personal-preview-manifest.json', 'pulse-app/cli/release/personal-release-snapshot.json',
   'plugins/pulse/.claude-plugin/plugin.json', 'plugins/pulse/.codex-plugin/plugin.json',
   'plugins/pulse/.cursor-plugin/plugin.json', 'README.md', 'llms.txt', 'pulse-app/PRODUCT.md',
   'docs/INSTALL_WITH_AGENT.md', 'docs/PERSONAL_PULSE_ONBOARDING.md',
-  'docs/SECURITY_INSTALL_CHECKLIST.md', 'CHANGELOG.md', 'docs/releases/v0.8.2.md',
+  'docs/SECURITY_INSTALL_CHECKLIST.md', 'CHANGELOG.md', reference.github.notes,
 ];
 
 function publicationFixture() {
@@ -46,10 +48,10 @@ test('preview publication binds package, signed release, docs, npm bytes, and Gi
     const result = verifyPreviewPublication(fixture);
     assert.equal(result.schema, 'pulse.preview_publication_verification.v1');
     assert.equal(result.package, '@zbs-gg/pulse');
-    assert.equal(result.version, '0.8.2');
-    assert.equal(result.release_epoch, 36);
+    assert.equal(result.version, reference.version);
+    assert.equal(result.release_epoch, reference.release_epoch);
     assert.match(result.archive_sha256, /^[a-f0-9]{64}$/);
-    assert.equal(result.github_tag, 'v0.8.2');
+    assert.equal(result.github_tag, reference.github.tag);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -58,7 +60,7 @@ test('preview publication binds package, signed release, docs, npm bytes, and Gi
 test('preview publication refuses stale product documentation', () => {
   const fixture = publicationFixture();
   try {
-    writeFileSync(join(fixture, 'README.md'), readFileSync(join(fixture, 'README.md'), 'utf8').replaceAll('0.8.2', '0.8.0'));
+    writeFileSync(join(fixture, 'README.md'), readFileSync(join(fixture, 'README.md'), 'utf8').replaceAll(reference.version, '0.0.0'));
     assert.throws(() => verifyPreviewPublication(fixture), /preview_publication_documentation_stale/);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
@@ -70,7 +72,7 @@ test('preview publication requires a content-addressed archive URL', () => {
   try {
     const path = join(fixture, 'docs/release/PREVIEW_PUBLICATION.json');
     const publication = JSON.parse(readFileSync(path, 'utf8'));
-    publication.archive.url = publication.archive.url.replace(/-final-[a-f0-9]{12}\//, '-final/');
+    publication.archive.url = publication.archive.url.replace(/-[a-f0-9]{12}\.tgz$/, '.tgz');
     writeFileSync(path, `${JSON.stringify(publication, null, 2)}\n`);
     assert.throws(() => verifyPreviewPublication(fixture), /preview_publication_url_invalid/);
   } finally {

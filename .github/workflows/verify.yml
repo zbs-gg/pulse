@@ -69,6 +69,9 @@ jobs:
         run: |
           npm ci --ignore-scripts
           node --import ../../mcp/node_modules/tsx/dist/loader.mjs --test contract.test.ts *.test.mjs
+      - name: Verify preview publication contract
+        working-directory: pulse-app/cli
+        run: node --test scripts/verify-preview-publication.test.mjs
 
   package:
     name: Packed npm input

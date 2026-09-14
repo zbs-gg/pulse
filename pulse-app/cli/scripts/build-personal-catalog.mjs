@@ -339,7 +339,10 @@ export function buildPersonalCatalog({
     }
     copyCarrier(modelRoot, model.artifact.filename, model.artifact, join(commonAssets, 'model.tar.gz'));
     copyCarrier(pluginRoot, plugin.artifact.filename, plugin.artifact, join(commonAssets, 'plugin-runtime.tar.gz'));
-    const prefix = `${origin}/pulse/${PACKAGE_VERSION}/epoch-${epoch}`;
+    const github = origin === 'https://github.com';
+    const prefix = github ? `${origin}/zbs-gg/pulse/releases/download/v${PACKAGE_VERSION}`
+      : `${origin}/pulse/${PACKAGE_VERSION}/epoch-${epoch}`;
+    const assetURL = (path) => `${prefix}/${github ? path.replaceAll('/', '-') : path}`;
     const commonArtifacts = {
       model: descriptor({
         artifact: model.artifact,
@@ -351,7 +354,7 @@ export function buildPersonalCatalog({
         origin,
         platform: 'all',
         signing: commonSigning(),
-        url: `${prefix}/common/model.tar.gz`,
+        url: assetURL('common/model.tar.gz'),
       }),
       'plugin-runtime': descriptor({
         artifact: plugin.artifact,
@@ -363,7 +366,7 @@ export function buildPersonalCatalog({
         origin,
         platform: 'all',
         signing: commonSigning(),
-        url: `${prefix}/common/plugin-runtime.tar.gz`,
+        url: assetURL('common/plugin-runtime.tar.gz'),
       }),
     };
     const catalogTargets = Object.fromEntries(targetIDs.map((targetID) => {
@@ -378,7 +381,7 @@ export function buildPersonalCatalog({
         origin,
         platform: input.definition.platform,
         signing: targetSigning(kind, input.definition, input.fragment.verification_profile),
-        url: `${prefix}/${targetID}/${kind}.tar.gz`,
+        url: assetURL(`${targetID}/${kind}.tar.gz`),
       })]));
       return [targetID, Object.freeze({
         architecture: input.definition.architecture,
@@ -391,7 +394,7 @@ export function buildPersonalCatalog({
     }));
     const matrix = loadNativeUniversalMatrix();
     const hostPolicy = loadPersonalReleaseHostPolicy(matrix);
-    const snapshotURL = `${origin}/pulse/${PACKAGE_VERSION}/catalog/snapshot.json`;
+    const snapshotURL = github ? `${prefix}/snapshot.json` : `${origin}/pulse/${PACKAGE_VERSION}/catalog/snapshot.json`;
     const artifactSetPayload = Object.freeze({
       allowed_origins: [origin],
       common_artifacts: {
@@ -425,7 +428,7 @@ export function buildPersonalCatalog({
     const snapshotPayload = Object.freeze({
       artifact_set: {
         sha256: artifactSetDigest,
-        url: `${prefix}/catalog/artifact-set.json`,
+        url: assetURL('catalog/artifact-set.json'),
       },
       channel: {
         key_id: channelAuthority.keyID,

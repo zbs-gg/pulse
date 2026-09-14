@@ -4,6 +4,9 @@ All notable changes to Pulse.
 
 ## 0.8.3 — unreleased
 
+- Serve signed preview runtime and model assets from GitHub Releases, with verified CDN redirects and one GitHub-to-npm publication workflow.
+
+
 - Preserve every meaningful part of a requested memory and coexisting feelings.
 - Add durable whole-moment admission, replay without duplicates, per-part
   receipts and paginated complete recall; pending is never reported as stored.
