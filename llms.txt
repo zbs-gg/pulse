@@ -6,15 +6,17 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
 Pulse provides local Personal memory for Codex, Claude Code, Cursor and
-OpenCode 1.18.x on Apple Silicon macOS. Stable remains 0.7.2. Version 0.8.3 is
+OpenCode 1.18.x on Apple Silicon macOS. The historical stable release is 0.7.2.
+Version 0.8.3 is
 an opt-in preview, not a production-readiness claim. Ordinary ChatGPT chat is
 not a supported Personal connection. Pulse Team is a separate private pilot.
-
-Install stable:
-
-    npx -y @zbs-gg/pulse@0.7.2 init codex
 
 Select this preview explicitly:
 

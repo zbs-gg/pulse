@@ -6,8 +6,13 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
-> Personal 0.8.3 is an opt-in Apple Silicon preview. Stable remains 0.7.2.
+> Personal 0.8.3 is an opt-in Apple Silicon preview. The historical stable release is 0.7.2.
 > The preview includes complete-moment memory and OpenCode 1.18.x support.
 > Verify the exact selected version and signed artifact set before installation.
 
@@ -22,16 +27,11 @@ memory across fresh tasks in a verified host. The maintained agent procedure is
 
 ## The command
 
-From the Git project that should receive Personal memory:
+To select the preview explicitly, run from the Git project that should
+receive Personal memory:
 
 ```bash
-npx -y @zbs-gg/pulse@0.7.2 init codex
-```
-
-To install the preview deliberately:
-
-```bash
-npx -y @zbs-gg/pulse@preview init codex
+npx -y @zbs-gg/pulse@0.8.3 init codex
 ```
 
 The Personal installer verifies a signed release, provisions one shared Core,
@@ -120,12 +120,13 @@ Please audit and install Pulse Personal for this project.
 
 1. Read README.md, AGENTS.md, llms.txt, and docs/SECURITY_INSTALL_CHECKLIST.md.
 2. Check `npm view @zbs-gg/pulse dist-tags --json`. Host-neutral Personal
-   requires published 0.7.2 or newer, `pulse.personal_install_plan.v2`, and its
-   signed manifest plus exact release assets.
+   requires the explicitly selected published 0.8.3 preview,
+   `pulse.personal_install_plan.v2`, and its signed manifest plus exact
+   release assets. Do not use `latest`: its legacy installer is retired.
 3. Explain every local write, privacy default, repair step, and removal step.
 4. Ask me before installing.
 5. After I approve, run:
-     npx -y @zbs-gg/pulse@0.7.2 init codex
+     npx -y @zbs-gg/pulse@0.8.3 init codex
 6. For every host returned in `host_status.hosts`, run its exact doctor command:
    `pulse doctor claude-code`, `pulse doctor cursor`, `pulse doctor codex`, or
    `pulse doctor opencode`.
@@ -140,7 +141,7 @@ Do not import old chats, store raw transcripts, print secrets, push Personal
 memory to Git, or call fallback/synthetic evidence the product.
 ```
 
-Do not install 0.7.2 on an unsupported operating system or architecture. Wait
+Do not install Pulse on an unsupported operating system or architecture. Wait
 for a separately proven native release instead of presenting a fallback as the
 product.
 

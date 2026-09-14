@@ -6,9 +6,14 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
-Use this checklist before installing stable Pulse Personal 0.7.2 or the
-explicit 0.8.3 preview for a user. OpenCode 1.18.x requires the 0.8.3
+Use this checklist before installing the explicit Pulse Personal 0.8.3
+preview for a user. OpenCode 1.18.x requires the 0.8.3
 preview on Apple Silicon macOS.
 
 ## Required Checks
@@ -20,8 +25,8 @@ preview on Apple Silicon macOS.
 - [ ] Emotional marks remain in Personal SQLite and cannot be published to
       Pulse Team.
 - [ ] Old chat import is not run by default.
-- [ ] The install source is real: npm reports `@zbs-gg/pulse@0.7.2` for stable
-      or `@zbs-gg/pulse@0.8.3` for the selected preview, or the user explicitly
+- [ ] The install source is real: npm reports `@zbs-gg/pulse@0.8.3`
+      for the explicitly selected preview, or the user explicitly
       provided an exact source bundle, tarball, or local checkout.
 - [ ] The signed selected release advertises the exact OS, architecture and
       harness. The Apple Silicon preview has exact-package installation

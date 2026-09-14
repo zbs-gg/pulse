@@ -76,9 +76,12 @@ for the clean-Mac install, then publishes npm and finalizes the release notes.
 If installation fails, the prerelease explicitly remains a candidate with npm
 publication unconfirmed. The installer needs no GitHub account or token.
 
-GitHub Releases replaces paid object storage for the new preview. Previously
-published versions may still reference historical storage; this change does
-not delete their artifacts or silently break those installers.
+GitHub Releases replaces paid object storage for the new preview. The legacy
+Google Cloud release bucket was retired on 2026-09-14, including all versions
+of its release artifacts. Fresh installs of 0.7.2 and older previews that
+reference that bucket are unavailable. Existing local installations and vaults
+are preserved. Select the published 0.8.3 preview explicitly; npm `latest`
+still points to 0.7.2 and has not been promoted to a preview.
 
 The separate universal production-candidate workflows do not broaden this
 Personal preview's supported platforms. Fixture and signing evidence alone

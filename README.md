@@ -6,6 +6,11 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
 Pulse is memory for AI tools. It gives coding agents the knowledge they need at
 the moment they need it, and stays silent when nothing relevant is found.
@@ -16,7 +21,8 @@ response can be replayed without duplication, and accepted writes recover
 after a daemon restart.
 
 The preview targets Apple Silicon macOS with Codex, Claude Code, Cursor, and
-OpenCode 1.18.x. Stable `0.7.2` remains the default. The BB integration lives in
+OpenCode 1.18.x. npm `latest` still points to retired installer `0.7.2`.
+The BB integration lives in
 [`integrations/bb`](./integrations/bb); it uses the same local engine and adds
 `pulse_moment` for reading all linked parts. Native hosts use `pulse_memory`
 with a `moment_id` for the same paginated read.
@@ -72,23 +78,17 @@ with the local Personal 0.8 vault and is not part of the published install.
 
 ## Install
 
-Version `0.7.2` remains the stable release for Apple Silicon Macs. Select the
-`0.8.3` preview explicitly. Intel Mac, Windows, and Linux are not public
-support claims; fixture tests do not replace native acceptance.
+For a new Apple Silicon Mac installation, select the `0.8.3` preview
+explicitly; the historical stable installer is retired. Intel Mac, Windows,
+and Linux are not public support claims; fixture tests do not replace native acceptance.
 
 Ask your AI agent to inspect this repository and explain the changes before it
-installs anything. The current published Personal installation is:
+installs anything. To install the published preview explicitly:
 
 ```bash
-npx -y @zbs-gg/pulse@0.7.2 init codex
+npx -y @zbs-gg/pulse@0.8.3 init codex
 pulse doctor
 pulse home
-```
-
-To try the 0.8 preview explicitly:
-
-```bash
-npx -y @zbs-gg/pulse@preview init codex
 ```
 
 The 0.8.3 installer finds Codex, Claude Code, Cursor, and compatible
@@ -205,7 +205,7 @@ Read [AGENTS.md](AGENTS.md) before an agent changes installation or global
 harness configuration. Security and rollback details are in
 [docs/SECURITY_INSTALL_CHECKLIST.md](docs/SECURITY_INSTALL_CHECKLIST.md).
 
-Status: stable remains 0.7.2; 0.8.3 is an opt-in preview. Exact-archive
+Status: the historical stable release is 0.7.2; 0.8.3 is an opt-in preview. Exact-archive
 installation and real host recall/write checks are required separately from
 source tests. One-day acceptance and production readiness are not implied.
 Remote Claude Chat experiments are separate from the local Personal product.
