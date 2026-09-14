@@ -12,7 +12,8 @@ Existing local installations and vaults are preserved. npm `latest` still
 points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
 Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
-> Personal 0.8.3 is an opt-in Apple Silicon preview. The historical stable release is 0.7.2.
+> Personal 0.8.3 is an opt-in Apple Silicon preview.
+> The historical stable release is 0.7.2; its installer is retired.
 > The preview includes complete-moment memory and OpenCode 1.18.x support.
 > Verify the exact selected version and signed artifact set before installation.
 
