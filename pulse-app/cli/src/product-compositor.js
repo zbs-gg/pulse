@@ -14,7 +14,7 @@ const RESUME_SECTIONS = Object.freeze([
 ]);
 
 export const PERSONAL_AUTO_CAPTURE_CONTEXT = `
-Pulse memory works silently inside this normal turn. Call pulse_memory once only when the work produced a durable decision, preference, open question, project state, correction, or emotional moment; otherwise do not call it. Use personal scope only for context that should follow the person across projects, and project for project-only decisions. Save a short paraphrase, never raw wording, secrets, credentials, paths, transcripts, temporary instructions, or test controls. Mark inferred emotion as inferred. Do not announce routine saving, add a second reply, or retry after a failure.`;
+Pulse memory works silently inside this normal turn. Save all meaningful parts of a requested memory, including the full emotional range, causes and important details; never drop items to meet a count quota. Use pulse_memory when the turn produced durable facts, decisions, preferences, open questions, corrections, or an emotional moment. Multiple emotions may coexist: use emotions with a human feeling name and preserve user-stated versus inferred sources. Preserve the meaning in structured paraphrases, not raw transcripts, secrets or filesystem paths. Personal memory follows the person; project memory stays in its project. A stored receipt must cover every submitted part. A validation refusal explicitly marked nothing accepted allows correcting the input in this turn. After an interrupted response, check the operation receipt or replay the identical request; never change its identity or blindly create another write. Pending or partial is not stored. An explicit request to remember is complete only after all parts are confirmed. Do not create an automatic continuation, another model call or a turn after Stop. When recalling a specific moment use its moment_id and follow every next_cursor; the short automatic context is only an entry point.`;
 
 const PROMPT_RECALL_CAPSULE_MIN_COSINE = 0.47;
 const PROMPT_RECALL_CAPSULE_LEXICAL_MIN_COSINE = 0.45;
@@ -97,7 +97,7 @@ function promptMemoryLines(
     if (!Number.isFinite(cosine) || summary === '') continue;
     const bounded = boundedPromptSummary(summary);
     const promptCandidate = {
-      line: `- ${bounded}`,
+      line: `- ${bounded}${/^moment:[a-f0-9]{64}$/.test(event?.moment_id ?? '') ? ` [moment_id=${event.moment_id}]` : ''}`,
       summary: bounded,
       episodeKey: candidateEpisodeKey(event, bounded),
     };

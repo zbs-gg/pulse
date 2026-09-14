@@ -1,3 +1,4 @@
+import { isGitHubReleaseAssetRedirect } from './github-release-download.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -192,8 +193,10 @@ async function manualFetch(url, options, artifact, fetchImpl, redirects = 0) {
     const location = response.headers?.get?.('location');
     let next;
     try { next = new URL(location, url); } catch { fail('artifact_redirect_not_allowed'); }
-    if (next.protocol !== 'https:' || next.origin !== artifact.origin || next.username || next.password || next.search || next.hash ||
-        next.pathname.split('/').some((part) => part === '.' || part === '..')) fail('artifact_redirect_not_allowed');
+    const sameOrigin = next.protocol === 'https:' && next.origin === artifact.origin &&
+      !next.username && !next.password && !next.search && !next.hash;
+    if (!sameOrigin && !isGitHubReleaseAssetRedirect(artifact.url, next)) fail('artifact_redirect_not_allowed');
+    await response.body?.cancel?.();
     return manualFetch(next, options, artifact, fetchImpl, redirects + 1);
   }
   return response;

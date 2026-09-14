@@ -400,7 +400,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(personalPlan.outcome, 'action_required');
 	assert.deepEqual(personalPlan.reason_codes, ['synthetic_authority_forbidden']);
 	assert.equal('target_host' in personalPlan, false);
-	assert.deepEqual(personalPlan.supported_hosts, ['claude-code', 'codex', 'cursor']);
+	assert.deepEqual(personalPlan.supported_hosts, ['claude-code', 'codex', 'cursor', 'opencode']);
 	assert.equal(personalPlan.detected.hosts.some((host) => host.host === 'codex' && host.activation_target), true);
 	assert.equal(personalPlan.release.artifacts.length, 5);
 	assert.equal(personalPlan.release.total_download_bytes > 0, true);
@@ -627,7 +627,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   });
   const promptOutput = JSON.parse(prompt.stdout);
   assert.equal(promptOutput.continue, true);
-  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Call pulse_memory once/);
+  assert.match(promptOutput.hookSpecificOutput.additionalContext, /Save all meaningful parts/);
   assert.doesNotMatch(promptOutput.hookSpecificOutput.additionalContext, /pulse\.context\.v1/);
 
   const memoryArguments = {
@@ -984,7 +984,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 	});
 	const workspaceBContext = JSON.parse(workspaceBRecall.stdout).hookSpecificOutput.additionalContext;
 	assert.doesNotMatch(workspaceBContext, /trusted local runtime for Codex lifecycle memory/i);
-	assert.match(workspaceBContext, /Call pulse_memory once/);
+	assert.match(workspaceBContext, /Save all meaningful parts/);
 	const receiptBv2 = JSON.parse(readFileSync(join(runtimeA.data_dir, 'supervisor-runtime.json'), 'utf8'));
 	assert.equal(receiptBv2.executable_digest, activationV4.daemon_digest,
 		'another bound workspace must read through the upgraded Personal runtime');

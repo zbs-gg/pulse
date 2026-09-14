@@ -115,7 +115,7 @@ function rejectAuthorityFields(value: Record<string, unknown>, what: string): vo
 
 // Mirror of validateSemanticText: trims, enforces max length, rejects
 // transcript/secret/path-like content. Returns the trimmed value.
-function safeText(field: string, value: unknown, max: number, required: boolean): string {
+export function safeText(field: string, value: unknown, max: number, required: boolean): string {
   if (value === undefined || value === null || value === '') {
     if (required) fail(`${field} is required`);
     return '';

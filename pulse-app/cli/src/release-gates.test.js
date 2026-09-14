@@ -355,7 +355,10 @@ test('npm publication runs the repository release gate before preparing package 
   assert.match(workflow, /semantic retrieval answered in/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main' && inputs\.publish_npm/);
   assert.match(workflow, /--tag preview --provenance/);
-  assert.match(workflow, /gh release create "\$EXPECTED_GITHUB_TAG"/);
+  assert.match(workflow, /gh release edit "\$EXPECTED_GITHUB_TAG"/);
+  assert.ok(workflow.indexOf('verify-github-release-assets.mjs') < workflow.indexOf('--draft=false'));
+  assert.ok(workflow.indexOf('Install the exact archive on a clean Mac') < workflow.indexOf('npm publish'));
+  assert.ok(workflow.indexOf('Verify exact public npm bytes') < workflow.indexOf('Finalize the matching GitHub prerelease'));
   assert.match(workflow, /--prerelease/);
 
 });

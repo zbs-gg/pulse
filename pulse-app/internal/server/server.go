@@ -397,6 +397,8 @@ func (s *Server) localHandler() http.Handler {
 		r.Post("/memory/consolidate", s.handleMemoryConsolidate)
 		r.Post("/graph/delta", s.handleGraphDelta)
 		r.Post("/turn/finalize", s.handleTurnFinalize)
+		r.Post("/memory/moments", s.handleMemoryMomentWrite)
+		r.Get("/memory/moments/{id}", s.handleMemoryMomentRead)
 		r.Post("/turn/no-change", s.handleTurnNoChange)
 		r.Get("/memory/tray", s.handleMemoryTrayList)
 		r.Get("/memory/receipts/{id}", s.handleMemoryReceiptGet)
@@ -433,6 +435,7 @@ func (s *Server) localHandler() http.Handler {
 			r.Post("/continuity/delivery/offers", s.handleContinuityDeliveryOffer)
 			r.Post("/continuity/delivery/observations", s.handleContinuityDeliveryObservation)
 			r.Post("/memory/activity/recall", s.handleMemoryRecallActivity)
+			r.Get("/memory/fun-fact-candidates", s.handleOpenCodeFunFactCandidates)
 		}
 		r.Get("/viewer", s.handleViewer)
 		r.Get("/viewer/data", s.handleViewerData)

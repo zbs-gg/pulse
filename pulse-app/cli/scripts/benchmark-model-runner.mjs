@@ -22,7 +22,7 @@ import { pathToFileURL } from 'node:url';
 const MAX_PROMPT_BYTES = 2 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DISABLED_FEATURES = Object.freeze([
-  'shell_tool', 'unified_exec', 'code_mode_host', 'apps', 'plugins',
+  'shell_tool', 'unified_exec', 'apps', 'plugins',
   'browser_use', 'browser_use_external', 'browser_use_full_cdp_access',
   'computer_use', 'in_app_browser', 'image_generation', 'multi_agent',
   'goals', 'workspace_dependencies', 'hooks', 'tool_suggest',
@@ -31,6 +31,8 @@ const DISABLED_FEATURES = Object.freeze([
 ]);
 const PROVIDER_ENV = /^(?:OPENAI|AZURE_OPENAI|ANTHROPIC|COHERE|CODEX_(?:API|PROVIDER)|PULSE_API_KEY)/;
 const DISABLED_CODE_MODE_NOTICE = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
+const RESPONSE_RETRY_NOTICE = /^Reconnecting\.\.\. [1-5]\/5 \(/;
+const HTTPS_FALLBACK_NOTICE = /^Falling back from WebSockets to HTTPS transport\./;
 
 function fail(code, detail = '') {
   throw new Error(detail ? `${code}:${detail}` : code);
@@ -115,11 +117,17 @@ function parseEventStream(stdout) {
     try { return JSON.parse(line); } catch { fail('benchmark_model_event_invalid'); }
   });
   const completed = events.filter((event) => event?.type === 'turn.completed');
+  const benignTransportError = (event) =>
+    event?.type === 'error' && RESPONSE_RETRY_NOTICE.test(String(event?.message ?? ''));
+  const benignItemError = (event) => event?.type === 'item.completed' && event?.item?.type === 'error' &&
+    (event.item.message === DISABLED_CODE_MODE_NOTICE ||
+      HTTPS_FALLBACK_NOTICE.test(String(event.item.message ?? '')));
   const unsafeItem = events.some((event) => event?.type?.startsWith('item.') &&
-    !(event.type === 'item.completed' && event?.item?.type === 'error' && event.item.message === DISABLED_CODE_MODE_NOTICE) &&
+    !benignItemError(event) &&
     !new Set(['agent_message', 'reasoning', 'plan', 'todo_list']).has(event?.item?.type));
   if (events.filter((event) => event?.type === 'thread.started').length !== 1 || completed.length !== 1 ||
-      events.some((event) => event?.type === 'turn.failed' || event?.type === 'error') ||
+      events.some((event) => event?.type === 'turn.failed' ||
+        (event?.type === 'error' && !benignTransportError(event))) ||
       unsafeItem) {
     const shape = events.map((event) => ({ type: event?.type, item_type: event?.item?.type }));
     fail('benchmark_model_event_invalid', JSON.stringify(shape).slice(0, 4000));
@@ -164,8 +172,10 @@ export async function runBenchmarkModel({
     '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', root,
     '--model', model, '--config', `model_reasoning_effort="${effort}"`,
     '--config', 'approval_policy="never"', '--config', 'web_search="disabled"',
+    '--config', 'skills.include_instructions=false',
     ...(!fileCredentials ? ['--config', 'cli_auth_credentials_store="keyring"'] : []),
-    ...featureArgs(), ...(schema ? ['--output-schema', schema] : []), '--output-last-message', outputPath,
+    ...featureArgs(), '--enable', 'code_mode_host',
+    ...(schema ? ['--output-schema', schema] : []), '--output-last-message', outputPath,
     '--json', prompt,
   ];
   const started = performance.now();

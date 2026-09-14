@@ -1031,6 +1031,16 @@ func (s *Store) viewerGraphFunFacts(limit int) ([]string, error) {
 	return s.viewerGraphFunFactsForScope(limit, &scope)
 }
 
+// FunFactCandidates returns only the already redacted, human-readable facts
+// visible to the current Personal project scope. It deliberately excludes raw
+// memories, paths, hidden actors, and any caller-provided query.
+func (s *Store) FunFactCandidates(limit int) ([]string, error) {
+	if limit < 1 || limit > 6 {
+		limit = 6
+	}
+	return s.viewerGraphFunFacts(limit)
+}
+
 func (s *Store) viewerGraphFunFactsForScope(
 	limit int,
 	requestedScope *PersonalMemoryScopeSnapshot,

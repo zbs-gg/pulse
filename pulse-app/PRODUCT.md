@@ -1,5 +1,12 @@
 # Pulse Personal
 
+The 0.8.3 installer downloads signed runtime and model assets from the public
+GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
+`release-assets.githubusercontent.com`; signatures, exact sizes and SHA-256
+digests are still checked before activation. No paid release storage service
+is required. Personal memory remains on the local machine.
+
+
 ## Current product
 
 Pulse Personal is memory for AI tools. It gives Codex and Claude Code the
@@ -7,24 +14,29 @@ knowledge they need at the moment they need it, stays silent when nothing
 relevant is found, and lets the owner inspect, correct, or delete memories in
 Memory Home.
 
-The stable public release is 0.7.2 for Apple Silicon Macs. Personal 0.8.2 is
-published under the npm `preview` tag for the same target; it is not production
-ready. It has no Team server, cloud synchronization, or shared-memory command.
-Ordinary ChatGPT chat is not connected to Pulse. Emotional moments and the
-reviewed local-store migration are part of the 0.8 preview, not 0.7.2.
+Stable remains 0.7.2 for Apple Silicon Macs. The opt-in 0.8.3 preview adds
+complete-moment writing and OpenCode 1.18.x to Codex, Claude Code and Cursor.
+The BB adapter uses the same local engine. There is no Team server, cloud
+synchronization or shared-memory command; ordinary ChatGPT chat is not a
+Personal connection.
 
-The 0.8.2 preview expands historical import, retrieves up to four short,
-distinct memories within the existing context budget, preserves the embedder
-protocol after caller cancellation, and makes Doctor prove a real semantic
-query. Its publication flow installs the exact archive on a clean Apple Silicon
-runner and blocks release unless semantic retrieval answers.
+All meaningful requested parts are accepted together and individually
+receipted. Multiple feelings retain their names, causes and user-stated versus
+inferred provenance. A small automatic context budget never limits what can be
+stored or read explicitly as a complete moment.
+
+The release flow binds one signed artifact set, npm archive, documentation and
+GitHub prerelease. It installs that archive on a clean Apple Silicon runner and
+requires a real semantic query. One-day owner use and production readiness are
+separate acceptance boundaries.
 
 ## Users
 
 Pulse Personal is for people who work across coding AI programs and do not want
 to explain the same project decisions, constraints, and open questions again in
-every new session. The current supported programs are Codex, Claude Code, and
-Cursor. Ordinary ChatGPT chat is not a supported Pulse connection yet.
+every new session. The published line supports Codex, Claude Code, and Cursor;
+the 0.8.3 preview also supports OpenCode under the narrower target above.
+Ordinary ChatGPT chat is not a supported Pulse connection yet.
 
 ## Product principles
 
@@ -44,14 +56,29 @@ temporary local relevance search and offers at most four memories within about
 600 tokens; weak matches add nothing. It does not save the question or preload
 a general context package at session start.
 
-The model sees one write tool, `pulse_memory`, and may save at most three short
-durable items during the ordinary working turn. There is no second model pass,
+The model sees one write tool, `pulse_memory`, and saves the complete meaningful moment during the ordinary working turn.
+There is no three-item quota. Multiple emotions, human feeling names, causes and
+explicit versus inferred provenance remain distinct. There is no second model pass,
 Stop interception, automatic continuation, or Pulse check before unrelated
 tools. Stable operating rules belong in host instruction files, not in Pulse.
 
 Personal facts can follow the owner between projects. Project decisions remain
 inside their project. Emotional observations describe a single moment, mark
 inference as inference, and decay under the existing influence rules.
+
+In OpenCode, one inert global loader is registered in the user's config and
+activates only inside a project with a signed Pulse binding. `chat.message`
+runs local recall and `experimental.chat.system.transform` supplies it before
+the first response. OpenCode sees exactly one administrative surface:
+`pulse_memory`; daemon failure, memory errors, cancel, and idle remain fail-open.
+
+OpenCode fun facts are opt-in. Once per session, at most six approved local
+candidates may be offered to the configured `small_model`, or to a provably
+cheaper active text model from the same provider. The service session receives
+no user request or other memory, has tools disabled and a 32-token output cap,
+and may return only one candidate ID or `none`. Its content-free receipt records
+model, latency, optional usage, and candidate digest. Failure uses the local
+deterministic choice and does not break the main response.
 
 ## Current Evidence
 
@@ -69,8 +96,8 @@ five-second semantic probe loaded the intact model; the same Hermes query then
 returned relevant candidates in 496 ms. The data and model were healthy, but
 the readiness claim was not.
 
-The one-day owner-machine dogfood is therefore not complete. Exact public 0.8.2
-bytes must still be activated on that Mac and pass a cold semantic query, a
+The one-day owner-machine dogfood is therefore not complete. The exact selected preview
+bytes must be activated on that Mac and pass a cold semantic query, a
 warm query, and normal recall and writing in Codex and Claude Code before
 daily-use status can be restored.
 Cursor live recall remains pending.
@@ -113,10 +140,8 @@ The resulting visible tool call and additional tool round trip happen on every
 ordinary message. The hosted store is not synchronized with the local Personal
 0.8 vault, so this is remote-connector evidence rather than Personal support.
 
-Personal 0.8.2 is the public preview. The stable `latest` package remains
-0.7.2, Team was not enabled, and daily-use acceptance in Codex and Claude Code
-is paused until exact public 0.8.2 bytes pass the owner-machine recall and write
-cycle.
+The 0.8.3 preview requires exact-archive host checks after publication. Earlier
+measurements above describe their dated builds, not acceptance of this release.
 
 ## Interface
 
@@ -148,12 +173,31 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: Personal 0.7.2 remains the stable public release; Personal 0.8.2 is the
-public npm preview, whose publication gate includes a real semantic query.
-Epoch 34 from 0.8.0 remains installed locally, so the Codex and Claude Code day
-is not accepted as complete. Exact public 0.8.2 bytes must pass cold and warm
-semantic search plus real host recall and writing on the owner Mac. It is not
-production ready.
-Separate Claude Chat remote
-recall passed with an account-level instruction and a visible per-message tool
-call; it is not part of the Personal installation.
+Status: stable remains 0.7.2; 0.8.3 is an opt-in preview. Installation and
+semantic retrieval checks are required for the exact published version.
+One-day acceptance and production readiness are not implied by passing tests.
+
+## Complete moments in 0.8.3
+
+Explicit memory requests preserve all meaningful parts and coexisting feelings.
+Pulse validates the full structured set before accepting it locally, then
+materializes individual parts with durable receipts. A `stored` result covers
+all submitted parts; `pending` or `partial` does not. Canonical storage and
+explicit moment reading do not wait for the background search index. Each part
+keeps its own pending index receipt until indexing actually finishes. A lost response permits one
+bounded replay of the identical operation. A validation refusal before admission
+permits correcting the input. Stop does not create an automatic continuation.
+
+A moment reference lets the agent read all currently eligible linked parts with
+pagination, independently of the short automatic context budget. Deleted items
+are excluded; current corrections and personal/project boundaries still apply.
+The write transport envelope is 16 MiB, not a limit on the number of feelings.
+Oversized input is explicitly refused before admission, never truncated.
+Structured summaries longer than one storage row are split without dropping text.
+Historical feelings remain remembered even after their current-state influence
+fades; inferred emotions are identified as hypotheses about that moment.
+
+Native Codex, Claude Code, Cursor and OpenCode adapters and the BB adapter share
+this behavior. Raw transcripts, secrets, old-chat import and backend model calls
+remain off by default. Build/tests are not an installed-runtime or public-release
+claim; publication and owner-machine checks must use the exact signed archive.

@@ -49,7 +49,7 @@ test('the shared Core transaction does not grant access to a host adapter', () =
 
 test('Codex adapter completes fallible file preflight before creating a plugin backup', () => {
   const registry = between(
-    'function personalInstallHostRegistry(targets)',
+    "function personalInstallHostRegistry(targets, { openCodeFunFacts = 'off' } = {})",
     'function personalInstallCoreHealth',
   );
   const codexAdapter = registry.slice(registry.indexOf('codex: {'), registry.indexOf('cursor: {'));
@@ -84,7 +84,7 @@ test('install health verifies a one-shot Memory Home session before reporting re
 
 test('Claude adapter grants workspace access before enabling its MCP and rolls it back on failure', () => {
   const registry = between(
-    'function personalInstallHostRegistry(targets)',
+    "function personalInstallHostRegistry(targets, { openCodeFunFacts = 'off' } = {})",
     'function personalInstallCoreHealth',
   );
   const claudeAdapter = registry.slice(
@@ -119,7 +119,7 @@ test('Claude local MCP removal does not reject a same-name server from another s
 
 test('Codex adapter verifies the signed marketplace source before reusing an installed plugin', () => {
   const registry = between(
-    'function personalInstallHostRegistry(targets)',
+    "function personalInstallHostRegistry(targets, { openCodeFunFacts = 'off' } = {})",
     'function personalInstallCoreHealth',
   );
   const codexAdapter = registry.slice(

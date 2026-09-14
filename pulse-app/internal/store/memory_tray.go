@@ -86,6 +86,9 @@ type TurnFinalizeRequest struct {
 	PolicyEpoch                 int64                    `json:"policy_epoch"`
 	ResolverEpoch               int64                    `json:"resolver_epoch"`
 	Candidates                  []PrivateMemoryCandidate `json:"candidates"`
+	momentID                    string
+	sourceTurnRef               string
+	momentRepositoryID          string
 	operation                   string
 	targetObjectID              string
 	expectedTargetContentDigest string
@@ -105,6 +108,7 @@ type TurnNoChangeRequest struct {
 }
 
 type TurnFinalizeResult struct {
+	MomentID        string                     `json:"moment_id,omitempty"`
 	LedgerID        string                     `json:"ledger_id"`
 	Status          string                     `json:"status"`
 	FinalizeReceipt TurnFinalizeReceipt        `json:"finalize_receipt"`
@@ -435,7 +439,7 @@ func (s *Store) finalizeTurnForAuthority(
 	if req.BindingDigest != expectedBinding || req.PolicyEpoch != expectedPolicy || req.ResolverEpoch != expectedResolver {
 		return TurnFinalizeResult{}, ErrProductRuntimeMismatch
 	}
-	if len(req.Candidates) == 0 || len(req.Candidates) > 20 {
+	if len(req.Candidates) == 0 || (len(req.Candidates) > 20 && req.momentID == "") {
 		return TurnFinalizeResult{}, errors.New("finalize requires 1..20 candidates")
 	}
 	operation := req.operation
@@ -561,10 +565,17 @@ func (s *Store) finalizeTurnForAuthority(
 		if !found {
 			return TurnFinalizeResult{}, ErrTurnFinalizeConflict
 		}
+		existing.MomentID = req.momentID
 		return existing, nil
+	}
+	if req.momentID != "" {
+		if _, err := tx.Exec(`UPDATE turn_ledgers SET moment_id=?, source_turn_ref=?, moment_repository_id=? WHERE ledger_id=?`, req.momentID, req.sourceTurnRef, req.momentRepositoryID, ledgerID); err != nil {
+			return TurnFinalizeResult{}, err
+		}
 	}
 
 	result := TurnFinalizeResult{
+		MomentID: req.momentID,
 		LedgerID: ledgerID,
 		Status:   state,
 		FinalizeReceipt: newTurnFinalizeReceipt(

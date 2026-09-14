@@ -61,6 +61,8 @@ export function nativePackedFixtureApprovalDigest(plan) {
     detected: plan.detected ?? null,
     release: plan.release ?? null,
     local_writes: plan.local_writes ?? null,
+    host_options: plan.host_options ?? null,
+    host_changes: plan.host_changes ?? null,
     privacy: plan.privacy ?? null,
     authority_profile: plan.authority_profile ?? null,
     protected_actions: plan.protected_actions ?? null,
@@ -168,7 +170,9 @@ export async function requestConsent({
       `Pulse checked ${project} and is ready.`,
       `It will connect ${hosts || 'your compatible AI app'} automatically.`,
       'Useful structured memory is saved automatically and can be edited or deleted in Memory Home.',
-      'No old-chat import, raw transcript storage, or paid model API calls.',
+      plan.host_options?.opencode?.fun_facts === 'small-model'
+        ? 'No old-chat import or raw transcript storage. One optional OpenCode fun-fact call may use your configured model.'
+        : 'No old-chat import, raw transcript storage, or paid model API calls.',
     ].join('  ');
     const script = `display dialog ${appleScriptString(message)} buttons {"Cancel", "Install"} default button "Cancel" cancel button "Cancel" with title "Pulse Personal"`;
     const result = runDialog('/usr/bin/osascript', ['-e', script], {

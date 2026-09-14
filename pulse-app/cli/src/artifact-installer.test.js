@@ -739,3 +739,27 @@ test('portable archive rejects file-count, depth, and signed tree-digest confusi
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('GitHub asset CDN redirects retain exact size and digest verification', async () => {
+  const root = sandbox();
+  const bytes = Buffer.from('signed GitHub release bytes');
+  const descriptor = artifact(bytes, {
+    origin: 'https://github.com',
+    url: 'https://github.com/zbs-gg/pulse/releases/download/v0.8.3/darwin-arm64-daemon.tar.gz',
+  });
+  const cdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/123/abc-def?sig=temporary';
+  const calls = [];
+  try {
+    const result = await downloadVerifiedArtifact(descriptor, {
+      stagingRoot: root, availableBytes: () => 10_000, minimumFreeBytes: 0,
+      fetchImpl: async (url, options) => {
+        calls.push(String(url));
+        assert.equal(options.redirect, 'manual');
+        return calls.length === 1 ? response(302, null, {location: cdn})
+          : response(200, bytes, {etag: '"github-asset"'});
+      },
+    });
+    assert.deepEqual(calls, [descriptor.url, cdn]);
+    assert.ok(result);
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});

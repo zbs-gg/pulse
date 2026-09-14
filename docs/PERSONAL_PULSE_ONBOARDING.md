@@ -1,14 +1,20 @@
 # Personal Pulse onboarding
 
+The 0.8.3 installer downloads signed runtime and model assets from the public
+GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
+`release-assets.githubusercontent.com`; signatures, exact sizes and SHA-256
+digests are still checked before activation. No paid release storage service
+is required. Personal memory remains on the local machine.
+
+
 Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
 platforms follow after the Mac installation has been tested end to end.
 
-Publication status: Personal 0.7.2 and its signed Apple Silicon artifacts were
-published on 7 August 2026 after a clean remote Mac installation. Personal
-0.8.2 is published under the npm `preview` tag. Its publication workflow
-installs the exact archive on a clean Apple Silicon runner and requires a real
-semantic query. Daily-use, Cursor, and production acceptance remain pending;
-ordinary stable installation stays on 0.7.2.
+Personal 0.8.3 is the opt-in preview for Apple Silicon macOS, with complete
+moments and OpenCode 1.18.x support. Stable installation stays on 0.7.2.
+The release workflow requires installation of the exact signed archive and a
+real semantic query. Source tests and that CI gate do not prove one-day
+owner-machine acceptance or production readiness.
 
 This is the Stage 1 product path: one person, one project-bound local vault,
 at least one supported harness, a visible first memory, and continuity into a fresh task.
@@ -16,7 +22,9 @@ at least one supported harness, a visible first memory, and continuity into a fr
 ## Before the command
 
 The supported release target is an Apple Silicon Mac with Node 20+, a Git
-project, and at least one of Claude Code, Cursor, or Codex. Personal Pulse
+project, and at least one host supported by the selected release. Version
+0.8.3 admits Claude Code, Cursor, Codex, or OpenCode 1.18.x on Apple Silicon.
+Personal Pulse
 does not require Go, Python, Make, Docker, or a model API key. It also requires no
 manual host config editing.
 
@@ -74,6 +82,7 @@ the Personal vault and does not repeat already verified runtime work.
 pulse doctor claude-code  # when detected
 pulse doctor cursor       # when detected
 pulse doctor codex        # when detected
+pulse doctor opencode     # candidate 0.8.3, when detected
 pulse home
 ```
 
@@ -95,7 +104,8 @@ pulse consolidate report
 ```
 
 The same report appears in the terminal, Memory Home's **Memory ocean** section,
-and the Pulse tool available to Claude Code, Cursor, and Codex. It identifies
+and the Pulse tool available to Claude Code, Cursor, Codex, and candidate
+OpenCode. It identifies
 the bound destination first, then shows content-free source aliases,
 classifications, counts, blockers, and one next action. It does not import,
 merge, delete, clean up, publish, or call a model. Paths and memory bodies stay
@@ -104,7 +114,7 @@ separate human approval.
 
 ## First-memory proof
 
-1. Do normal work in a verified Claude Code, Cursor, or Codex task.
+1. Do normal work in a verified Claude Code, Cursor, Codex, or OpenCode task.
 2. Let that harness propose one compact structured memory through Pulse.
 3. Confirm that deterministic validation automatically saved it and that the
    exact card appears in Memory Home with edit, move, and delete controls.
@@ -124,10 +134,18 @@ adds nothing for a weak match. A durable result is saved through the single
 `pulse_memory` tool inside the same ordinary turn. Session start and Stop do not
 run memory model passes.
 
+For OpenCode, run `pulse init opencode --dry-run` first. The approved install
+adds `./pulse/pulse.js` to the global plugin list and binds only the current
+project. A later project needs `pulse init opencode` again but reuses the global
+loader. Optional `--fun-facts small-model` is once-per-session and sends only
+approved short candidates to the person's OpenCode model configuration.
+
 ## Privacy and removal
 
 - Personal memory lives in the bound local vault, not Git.
 - Raw transcripts and backend model calls are off by default.
+- OpenCode fun-fact model calls are off unless explicitly selected; their
+  receipts contain no candidate text or user prompt.
 - The managed local embedder uses no model API key.
 - Old chats are imported only through a separate preview-first flow.
 - `pulse consolidate report` inventories old stores without adopting them.
@@ -139,6 +157,7 @@ Remove one host integration while preserving memory:
 pulse disconnect claude-code
 pulse disconnect cursor
 pulse disconnect codex
+pulse disconnect opencode
 ```
 
 Whole-vault wipe is separately protected by fresh macOS presence. Disconnect,
@@ -155,3 +174,31 @@ Personal 0.7.2 passed the clean Apple Silicon Mac release installation before
 publication. That proves the packaged installation path, not long-term use by
 another person or support for Intel Mac, Windows, or Linux. Those remain
 separate future boundaries.
+Version 0.8.3 requires an outside-source package install and a separate
+approval before changing the owner Mac's current OpenCode configuration.
+
+
+## Complete moments in 0.8.3
+
+Explicit memory requests preserve all meaningful parts and coexisting feelings.
+Pulse validates the full structured set before accepting it locally, then
+materializes individual parts with durable receipts. A `stored` result covers
+all submitted parts; `pending` or `partial` does not. Canonical storage and
+explicit moment reading do not wait for the background search index. Each part
+keeps its own pending index receipt until indexing actually finishes. A lost response permits one
+bounded replay of the identical operation. A validation refusal before admission
+permits correcting the input. Stop does not create an automatic continuation.
+
+A moment reference lets the agent read all currently eligible linked parts with
+pagination, independently of the short automatic context budget. Deleted items
+are excluded; current corrections and personal/project boundaries still apply.
+The write transport envelope is 16 MiB, not a limit on the number of feelings.
+Oversized input is explicitly refused before admission, never truncated.
+Structured summaries longer than one storage row are split without dropping text.
+Historical feelings remain remembered even after their current-state influence
+fades; inferred emotions are identified as hypotheses about that moment.
+
+Native Codex, Claude Code, Cursor and OpenCode adapters and the BB adapter share
+this behavior. Raw transcripts, secrets, old-chat import and backend model calls
+remain off by default. Build/tests are not an installed-runtime or public-release
+claim; publication and owner-machine checks must use the exact signed archive.

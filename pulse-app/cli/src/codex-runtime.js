@@ -343,6 +343,7 @@ function hostSlug(host) {
   if (host === 'codex') return 'codex';
   if (host === 'claude-code') return 'claude-code';
   if (host === 'cursor') return 'cursor';
+  if (host === 'opencode') return 'opencode';
   throw new Error('unsupported_host_adapter');
 }
 
@@ -418,7 +419,7 @@ export function stageUnassignedProductCandidate(host, input, idempotencyKey, {
   stage = stageUnassignedCapsule,
   path,
 } = {}) {
-  if (!['codex', 'claude-code', 'cursor'].includes(host)) throw new Error('unassigned_host_invalid');
+  if (!['codex', 'claude-code', 'cursor', 'opencode'].includes(host)) throw new Error('unassigned_host_invalid');
   const inspected = inspectBinding({ cwd: process.cwd() });
   if (inspected?.status !== 'unassigned' ||
       !['binding_missing', 'workspace_not_git'].includes(inspected.reason)) {
@@ -493,7 +494,7 @@ export async function boundPulseRequest(resolved, path, options = {}) {
 	}),
   };
 	if (options.productHost !== undefined) {
-		if (!['codex', 'claude-code'].includes(options.productHost)) {
+		if (!['codex', 'claude-code', 'opencode'].includes(options.productHost)) {
 			throw new Error('product_request_host_invalid');
 		}
 		headers['X-Pulse-Product-Host'] = options.productHost;

@@ -88,6 +88,7 @@ personal-native-packed-e2e: ## Install the exact archive into an isolated native
 
 preview-publication-verify: ## Bind version, signed epoch, docs, npm bytes, and GitHub prerelease notes
 	cd $(CLI_DIR) && $(NPM) run --silent verify:preview-publication
+	cd $(CLI_DIR) && node --test scripts/verify-preview-publication.test.mjs
 
 release-verify: verify preview-publication-verify personal-package-verify personal-native-packed-e2e ## Reproducible Personal npm release gate
 
@@ -115,6 +116,11 @@ verify: ## ONE gate: Go + MCP + negative smoke + CLI; appends ~/.claude/verify-l
 	       && $(NPM) run --silent smoke:standalone-negative; \
 	     else \
 	       echo "$(MCP_DIR)/package.json not found, skipping mcp checks"; \
+	     fi ) \
+	&& ( if [ -f integrations/bb/package.json ]; then \
+	       cd integrations/bb \
+	       && { [ -d node_modules ] || $(NPM) ci --silent; } \
+	       && node --import ../../mcp/node_modules/tsx/dist/loader.mjs --test contract.test.ts *.test.mjs; \
 	     fi ) \
 	&& ( if [ -f $(CLI_DIR)/package.json ]; then \
 	       cd $(CLI_DIR) \

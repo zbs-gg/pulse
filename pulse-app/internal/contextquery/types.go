@@ -72,6 +72,7 @@ type ContextFact struct {
 }
 
 type ContextEvent struct {
+	MomentID     string  `json:"moment_id,omitempty"`
 	ID           int64   `json:"id"`
 	Kind         string  `json:"kind"`
 	Title        string  `json:"title"`

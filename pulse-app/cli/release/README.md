@@ -57,24 +57,29 @@ content-free receipt. Other platforms are added only after their own native
 build and installation run. Private key material is read only from explicit
 absolute paths with private file permissions and is never copied into output.
 
-These builders are release primitives, not publication authority.
-`.github/workflows/production-candidate.yml` is the protected orchestrator. It
-accepts only a reviewed `main` commit with a green `Universal` push run, builds
-on all six native runners, signs/notarizes Apple and Windows code in separate
-protected environments, exports the common model, and creates one root-signed
-catalog. It then packs one npm candidate whose embedded manifest must match
-that catalog byte-for-byte. The candidate carries `support_claim:false`; a
-green build proves release bytes, not a rollout support claim.
+The Apple Silicon Personal preview is published only through
+`.github/workflows/publish-npm.yml`. Its reviewed
+`docs/release/PREVIEW_PUBLICATION.json` binds the package version, epoch, exact
+archive and tree hashes, signed artifact set, snapshot, and GitHub notes.
+`npm run verify:preview-publication` checks that contract. The workflow installs
+the exact archive, proves semantic retrieval, publishes the npm `preview` tag
+through trusted publishing, and finalizes the matching GitHub prerelease.
 
-The workflow requires reviewer-gated GitHub Environments named
-`production-linux`, `production-apple`, `production-windows`,
-`production-model`, `production-catalog`, and `production-candidate`. Signing
-and catalog key values live only in their corresponding Environment secrets;
-the workflow checks that they exist without printing them and deletes its
-ephemeral keychains/key files. It emits retained GitHub artifacts but does not
-upload release assets, change an npm tag, publish, or approve a staged package.
+Use `build-personal-catalog.mjs --origin https://github.com` for this release
+line. It signs flat asset URLs under `zbs-gg/pulse/releases/download/v<version>`.
+Stage all four runtime/model carriers, `catalog-artifact-set.json`,
+`snapshot.json`, the hash-named npm archive and `SHA256SUMS` in one draft
+prerelease whose tag points to the reviewed main commit. Uploads to this draft
+are preparation; the existing publication workflow owns public release and npm
+publication together. It verifies all staged bytes, exposes the signed assets
+for the clean-Mac install, then publishes npm and finalizes the release notes.
+If installation fails, the prerelease explicitly remains a candidate with npm
+publication unconfirmed. The installer needs no GitHub account or token.
 
-The npm `preview` tag must remain unchanged until that exact production
-candidate is separately accepted by `stage-npm-preview.yml` and then approved
-with npm 2FA. A local unsigned build, a DMG by itself, or the PR fixture matrix
-can never cross this boundary.
+GitHub Releases replaces paid object storage for the new preview. Previously
+published versions may still reference historical storage; this change does
+not delete their artifacts or silently break those installers.
+
+The separate universal production-candidate workflows do not broaden this
+Personal preview's supported platforms. Fixture and signing evidence alone
+cannot establish native host acceptance.

@@ -6,6 +6,8 @@ import { DesktopTargetError, detectDesktopLibc, resolveDesktopTarget } from './d
 import { createPlatformServices, defaultPlatformServices } from './platform-services.js';
 import { assertSupportedNodeVersion } from './release-manifest.js';
 import { detectCodexCLI, detectSupportedHosts, SUPPORTED_HOST_IDS } from './supported-hosts.js';
+import { codexProductWorkspaceDigest } from './codex-install.js';
+import { opencodeOptionsPath, previewOpenCodeIntegration } from './opencode-install.js';
 import {
   PERSONAL_PROTECTED_ACTIONS,
   portablePersonalAuthorityProfile,
@@ -276,6 +278,7 @@ const HUMAN_HOST_NAMES = Object.freeze({
   'claude-code': 'Claude Code',
   codex: 'Codex',
   cursor: 'Cursor',
+  opencode: 'OpenCode',
 });
 
 function humanList(values) {
@@ -319,7 +322,9 @@ export function formatPersonalInstallIntroduction(plan) {
     download,
     bindingTrust,
     '- Keeps memory private on this computer.',
-    '- Imports no old chats, stores no raw transcripts, and makes no paid model API calls.',
+    plan.host_options?.opencode?.fun_facts === 'small-model'
+      ? '- Imports no old chats or raw transcripts. One short OpenCode model call may be used for an optional session fact.'
+      : '- Imports no old chats, stores no raw transcripts, and makes no paid model API calls.',
     '',
     'You do not need to choose a model, storage path, port, or hooks.',
     'Nothing is installed until you approve below.',
@@ -359,7 +364,7 @@ export function formatPersonalInstallPlan(plan) {
 Project: ${workspace?.canonical_path ?? 'unavailable'}
 Workspace: ${workspace?.workspace_id ?? 'unavailable'}
 Repository: ${workspace?.repository_id ?? 'unavailable'}
-Supported harnesses: Claude Code, Codex, Cursor
+Supported harnesses: Claude Code, Codex, Cursor, OpenCode
 Activation: ${plan.activation_policy === 'selected_supported_hosts'
     ? 'only the selected compatible AI app'
     : 'every compatible AI app found on this computer'}
@@ -393,7 +398,12 @@ Privacy:
   - backend model calls: ${plan.privacy.backend_model_calls}
   - old chat import: ${plan.privacy.old_chat_import}
   - memory: ${plan.privacy.memory_location}
+  - OpenCode fun facts: ${plan.host_options?.opencode?.fun_facts ?? 'off'}
 
+${(plan.host_changes ?? []).length > 0 ? `Host configuration changes:
+${plan.host_changes.map((change) => `  - ${change.config_path}: plugin ${JSON.stringify(change.before_plugin)} -> ${JSON.stringify(change.after_plugin)}
+  - ${change.loader_path}: install signed Pulse loader tree`).join('\n')}
+` : ''}
 Authority:
   - profile: ${authorityProfile.schema}
   - ordinary Personal memory: ready without enhanced presence
@@ -436,12 +446,14 @@ export function buildPersonalInstallPlan({
   detectClaude,
   detectCodex,
   detectCursor,
+  detectOpenCode,
   detectResources = detectInstallResources,
   platformServices = createPlatformServices({ platform, architecture, home }),
   release,
   releaseReasonCode,
   currentState,
   selectedHosts,
+  funFacts = 'off',
 } = {}) {
   const pulseRoot = dataDir ?? join(resolve(home), '.pulse');
   if (![cwd, home, codexHome, pulseRoot].every((value) => typeof value === 'string' && isAbsolute(value)) ||
@@ -457,17 +469,20 @@ export function buildPersonalInstallPlan({
     throw new TypeError('install_plan_selected_hosts_invalid');
   }
   const selected = selectedHosts === undefined ? null : new Set(selectedHosts);
+  if (!['off', 'small-model'].includes(funFacts)) throw new TypeError('install_plan_fun_facts_invalid');
   const detectedHosts = detectSupportedHosts({
     home, platformServices,
     ...(detectClaude ? { detectClaude } : {}),
     ...(detectCodex ? { detectCodex } : {}),
     ...(detectCursor ? { detectCursor } : {}),
+    ...(detectOpenCode ? { detectOpenCode } : {}),
   });
   const hosts = detectedHosts.map((host) => Object.freeze({
     ...host,
     activation_target: host.compatible && (selected === null || selected.has(host.host)),
   }));
   const codex = hosts.find((host) => host.host === 'codex');
+  const openCode = hosts.find((host) => host.host === 'opencode');
   const node = nodeStatus(nodeVersion);
   const verifiedRelease = releaseStatus(release);
   let target = null;
@@ -485,6 +500,11 @@ export function buildPersonalInstallPlan({
   }
   const requiredDiskBytes = (verifiedRelease?.total_download_bytes ?? 0) + INSTALL_HEADROOM_BYTES;
   const reasons = [];
+  let openCodePreview;
+  if (openCode?.activation_target) {
+    try { openCodePreview = previewOpenCodeIntegration({ home }); }
+    catch (error) { reasons.push(error?.code ?? 'opencode_config_invalid'); }
+  }
   if (!target) reasons.push('release_target_unavailable');
   if (!node.ok) reasons.push('node_unsupported');
   if (workspace.reason_code) reasons.push(workspace.reason_code);
@@ -530,6 +550,16 @@ export function buildPersonalInstallPlan({
     },
     release: verifiedRelease,
     current_state: detectedCurrentState,
+    host_options: {
+      opencode: { fun_facts: openCode?.activation_target ? funFacts : 'off' },
+    },
+    host_changes: openCodePreview ? [{
+      host: 'opencode',
+      config_path: openCodePreview.config_path,
+      loader_path: openCodePreview.loader_path,
+      before_plugin: openCodePreview.before_plugin,
+      after_plugin: openCodePreview.after_plugin,
+    }] : [],
     resources: {
       ...resources,
       minimum_memory_bytes: MINIMUM_MEMORY_BYTES,
@@ -560,6 +590,17 @@ export function buildPersonalInstallPlan({
       ...(hosts.find((host) => host.host === 'cursor')?.activation_target ? [
         { path: join(resolve(home), '.cursor', 'plugins', 'local', 'pulse'), purpose: 'cursor_local_pulse_plugin', preserved_on_uninstall: false },
       ] : []),
+      ...(openCode?.activation_target && openCodePreview ? [
+        { path: openCodePreview.config_path, purpose: 'opencode_global_plugin_registration', preserved_on_uninstall: false },
+        { path: join(resolve(home), '.config', 'opencode', 'pulse'), purpose: 'opencode_signed_pulse_loader', preserved_on_uninstall: false },
+        {
+          path: opencodeOptionsPath({
+            productHome: join(resolve(home), '.pulse'),
+            workspaceDigest: codexProductWorkspaceDigest(workspacePath),
+          }),
+          purpose: 'opencode_project_options', preserved_on_uninstall: false,
+        },
+      ] : []),
       { path: join(workspacePath, '.gitignore'), purpose: 'exclude_local_pulse_state', preserved_on_uninstall: false },
     ],
     network_effects: [
@@ -578,6 +619,7 @@ export function buildPersonalInstallPlan({
       backend_model_calls: 'off',
       old_chat_import: 'not_requested',
       memory_location: 'local_private_vault',
+      opencode_fun_fact_model_call: openCode?.activation_target ? funFacts : 'off',
     },
     authority_profile: portablePersonalAuthorityProfile(),
     protected_actions: {

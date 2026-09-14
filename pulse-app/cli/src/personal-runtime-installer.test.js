@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { loadNativeUniversalMatrix } from '../scripts/native-universal-matrix.mjs';
+import { loadPersonalReleaseHostPolicy } from '../scripts/personal-release-host-policy.mjs';
 import { canonicalReleaseJSON, releaseKeyID } from './release-manifest.js';
 import { readActivatedArtifactSet } from './artifact-installer.js';
 import { DESKTOP_TARGET_IDS, desktopTargetDefinition } from './desktop-target.js';
@@ -49,7 +50,7 @@ function treeDigest(value) {
   return digest(Buffer.from(canonicalReleaseJSON(value)));
 }
 
-function fixture() {
+function fixture({ epoch = 7, version = '0.7.0' } = {}) {
   const rootPair = generateKeyPairSync('ed25519');
   const channelPair = generateKeyPairSync('ed25519');
   const publicKey = rootPair.publicKey.export({ type: 'spki', format: 'pem' });
@@ -81,10 +82,10 @@ function fixture() {
     const executable = ['daemon', 'embedder-runtime', 'presence-helper'].includes(kind);
     const format = 'tar.gz';
     const carrier = Buffer.from(`carrier:${kind}`);
-    const url = `https://releases.zbs.gg/pulse/0.7.0/${kind}.${format}`;
+    const url = `https://releases.zbs.gg/pulse/${version}/${kind}.${format}`;
     carriers.set(url, carrier);
     artifacts[kind] = {
-      architecture: 'arm64', bytes: carrier.length, epoch: 7, executable, format,
+      architecture: 'arm64', bytes: carrier.length, epoch, executable, format,
       id: `pulse-${kind}`, kind, minimum_os: '13.0',
       model_policy: kind === 'model' ? portableModelPolicy() : null,
       origin: 'https://releases.zbs.gg', platform: 'darwin', sha256: digest(carrier),
@@ -95,7 +96,7 @@ function fixture() {
         gatekeeper: false, identifier: null, notarized: false,
         scheme: 'release-manifest', stapled: false, team_id: null,
       },
-      tree_digest: treeDigest(tree(files[kind])), url, version: '0.7.0',
+      tree_digest: treeDigest(tree(files[kind])), url, version,
     };
   }
   const targets = Object.fromEntries(DESKTOP_TARGET_IDS.map((targetID) => {
@@ -103,7 +104,7 @@ function fixture() {
     const capabilities = target.platform === 'darwin' ? ['presence-helper'] : [];
     const kinds = ['daemon', 'embedder-runtime', ...(capabilities.length > 0 ? ['presence-helper'] : [])];
     const targetArtifacts = Object.fromEntries(kinds.map((kind) => {
-      const url = `https://releases.zbs.gg/pulse/0.7.0/${targetID}/${kind}.tar.gz`;
+      const url = `https://releases.zbs.gg/pulse/${version}/${targetID}/${kind}.tar.gz`;
       const signing = target.platform === 'darwin' ? artifacts[kind].signing : {
         gatekeeper: false,
         identifier: null,
@@ -147,19 +148,19 @@ function fixture() {
       'plugin-runtime': { ...artifacts['plugin-runtime'], architecture: 'all', minimum_os: '0.0', platform: 'all' },
     },
     release: {
-      channel: 'preview', epoch: 7, expires_at: '2026-08-01T00:00:00.000Z',
+      channel: 'preview', epoch, expires_at: '2026-08-01T00:00:00.000Z',
       issued_at: '2026-07-15T00:00:00.000Z', key_id: channelKeyID,
-      package: '@zbs-gg/pulse', version: '0.7.0',
+      package: '@zbs-gg/pulse', version,
     },
     schema: 'pulse.personal_preview.release_catalog.v2',
     targets,
   };
   const authorityPayload = {
-    channel: 'preview', epoch: 7, expires_at: '2026-08-02T00:00:00.000Z',
+    channel: 'preview', epoch, expires_at: '2026-08-02T00:00:00.000Z',
     issued_at: '2026-07-15T00:00:00.000Z',
     keys: [{
       key_id: channelKeyID, public_key_pem: channelPublicKey,
-      valid_from_epoch: 7, valid_through_epoch: 9,
+      valid_from_epoch: epoch, valid_through_epoch: epoch + 2,
     }],
     revoked_key_ids: [], schema: 'pulse.release_authority.v1',
   };
@@ -237,14 +238,15 @@ function resignCatalog(value) {
   ).toString('base64');
 }
 
-function v3Fixture(value, { expiresAt = '2026-08-14T00:00:00.000Z' } = {}) {
+function v3Fixture(value, { expiresAt = '2026-08-14T00:00:00.000Z', github = false } = {}) {
   const payload = structuredClone(value.envelope.payload);
   delete payload.release.expires_at;
   delete payload.release.issued_at;
   payload.schema = 'pulse.personal_release_artifact_set_payload.v1';
-  payload.snapshot_url = 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json';
+  payload.snapshot_url = github ? 'https://github.com/zbs-gg/pulse/releases/download/v0.7.0/snapshot.json' : 'https://releases.zbs.gg/pulse/0.7.0/catalog/snapshot.json';
+  if (github) payload.allowed_origins = ['https://github.com', ...payload.allowed_origins];
   payload.host_policy = {
-    harnesses: loadNativeUniversalMatrix().harnesses.map((harness) => structuredClone(harness)),
+    harnesses: loadPersonalReleaseHostPolicy(loadNativeUniversalMatrix()).map((harness) => structuredClone(harness)),
   };
   const artifactSet = {
     payload,
@@ -404,6 +406,65 @@ test('empty Personal install stages a complete candidate then publishes one atom
         valid_from_epoch: 1, valid_through_epoch: 20,
       }],
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a verified older committed runtime is a normal upgrade, not a repair', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-personal-runtime-upgrade.'));
+  const manifestPath = join(root, 'manifest.json');
+  const dataDir = join(root, 'data');
+  const old = fixture({ epoch: 7, version: '0.7.0' });
+  const next = fixture({ epoch: 8, version: '0.7.1' });
+  const platformServices = createPlatformServices({ platform: 'darwin', architecture: 'arm64' });
+  const common = {
+    architecture: 'arm64', dataDir, manifestPath,
+    now: new Date('2026-07-16T00:00:00.000Z'), osVersion: '14.5',
+    platform: 'darwin', platformServices, testMode: true,
+  };
+  try {
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(old.envelope)}\n`, { mode: 0o600 });
+    const installed = await provisionPersonalRuntime({
+      ...common,
+      fetchImpl: async (url) => new Response(old.carriers.get(String(url)), {
+        status: 200,
+        headers: { etag: `"${digest(old.carriers.get(String(url)))}"` },
+      }),
+      materializers: old.materializers,
+      packageVersion: '0.7.0',
+      trustedKeys: [{
+        key_id: old.keyID, public_key_pem: old.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    commitPersonalRuntimeRelease(installed.release, { dataDir, platformServices });
+
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(next.envelope)}\n`, { mode: 0o600 });
+    const inspection = inspectPersonalRuntime({
+      ...common,
+      packageVersion: '0.7.1',
+      trustedKeys: [{
+        key_id: next.keyID, public_key_pem: next.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(inspection.ready, false);
+    assert.equal(inspection.reason_code, 'runtime_upgrade_required');
+    assert.equal(inspection.release.epoch, 8);
+
+    const replacement = fixture({ epoch: 7, version: '0.7.1' });
+    writeFileSync(manifestPath, `${canonicalReleaseJSON(replacement.envelope)}\n`, { mode: 0o600 });
+    const sameEpoch = inspectPersonalRuntime({
+      ...common,
+      packageVersion: '0.7.1',
+      trustedKeys: [{
+        key_id: replacement.keyID, public_key_pem: replacement.publicKey,
+        valid_from_epoch: 1, valid_through_epoch: 20,
+      }],
+    });
+    assert.equal(sameEpoch.ready, false);
+    assert.notEqual(sameEpoch.reason_code, 'runtime_upgrade_required');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -639,4 +700,30 @@ test('Personal provisioning serializes epoch verification behind the install loc
     release();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('signed snapshot accepts the exact GitHub CDN redirect and rejects a foreign CDN', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pulse-github-snapshot.'));
+  const manifestPath = join(root, 'artifact-set.json');
+  const value = fixture();
+  const release = v3Fixture(value, {github:true});
+  writeFileSync(manifestPath, `${canonicalReleaseJSON(release.artifactSet)}\n`, {mode:0o600});
+  const options = {
+    architecture:'arm64', dataDir:join(root,'data'), manifestPath,
+    now:new Date('2026-07-16T00:00:00.000Z'), osVersion:'14.5',
+    packageVersion:'0.7.0', platform:'darwin', testMode:true,
+    trustedKeys:[{key_id:value.keyID, public_key_pem:value.publicKey, valid_from_epoch:1, valid_through_epoch:20}],
+  };
+  const cdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/123/abc-def?sig=temporary';
+  try {
+    const result = await refreshPersonalReleaseSnapshot({...options, fetchImpl:async (url) =>
+      url === release.artifactSet.payload.snapshot_url
+        ? new Response(null, {status:302, headers:{location:cdn}})
+        : new Response(release.snapshotBytes, {status:200})});
+    assert.equal(result.refreshed, true);
+    assert.equal(readFileSync(join(options.dataDir,'runtime/release-snapshot.json'),'utf8'),release.snapshotBytes);
+    await assert.rejects(refreshPersonalReleaseSnapshot({...options, fetchImpl:async () =>
+      new Response(null,{status:302,headers:{location:'https://evil.test/asset'}})}),
+    error => error.code === 'release_snapshot_redirect_forbidden');
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

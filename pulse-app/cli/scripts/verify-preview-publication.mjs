@@ -27,7 +27,7 @@ function requireText(path, pattern, code) {
 }
 
 function exactReleaseURL(url, version, suffix) {
-  return url === `https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/${version}/${suffix}`;
+  return url === `https://github.com/zbs-gg/pulse/releases/download/v${version}/${suffix}`;
 }
 
 export function verifyPreviewPublication(root = repositoryRoot) {
@@ -48,9 +48,9 @@ export function verifyPreviewPublication(root = repositoryRoot) {
     publication.artifact_set?.sha256, publication.snapshot?.sha256,
   ]) if (!SHA256.test(value ?? '')) fail('preview_publication_digest_invalid');
   const archiveDigestPrefix = publication.archive.sha256.slice(0, 12);
-  if (!exactReleaseURL(publication.archive?.url, version, `npm/epoch-${epoch}-final-${archiveDigestPrefix}/zbs-gg-pulse-${version}.tgz`) ||
-      !exactReleaseURL(publication.artifact_set?.url, version, `epoch-${epoch}/catalog/artifact-set.json`) ||
-      !exactReleaseURL(publication.snapshot?.url, version, 'catalog/snapshot.json')) {
+  if (!exactReleaseURL(publication.archive?.url, version, `zbs-gg-pulse-${version}-${archiveDigestPrefix}.tgz`) ||
+      !exactReleaseURL(publication.artifact_set?.url, version, 'catalog-artifact-set.json') ||
+      !exactReleaseURL(publication.snapshot?.url, version, 'snapshot.json')) {
     fail('preview_publication_url_invalid');
   }
   if (packageJSON.name !== publication.package || packageJSON.version !== version ||

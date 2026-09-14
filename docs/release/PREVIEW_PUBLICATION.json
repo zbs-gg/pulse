@@ -1,26 +1,26 @@
 {
   "schema": "pulse.preview_publication.v1",
   "package": "@zbs-gg/pulse",
-  "version": "0.8.2",
-  "release_epoch": 36,
+  "version": "0.8.3",
+  "release_epoch": 42,
   "npm_tag": "preview",
   "archive": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/npm/epoch-36-final-850879da408e/zbs-gg-pulse-0.8.2.tgz",
-    "sha256": "850879da408e68fd3b6d9f35f95f8e0661b0274869643438ab7f1ec081348fc4",
-    "tree_sha256": "75838017665677cbe61f0f99958cedd5d1dd05ff4cb51e8f0bd77046e13e456b"
+    "url": "https://github.com/zbs-gg/pulse/releases/download/v0.8.3/zbs-gg-pulse-0.8.3-876471cf7b88.tgz",
+    "sha256": "876471cf7b885dbb068e139fd8c16a63d1f16044d80db23a3277aa3b63bfe307",
+    "tree_sha256": "662e77550c4523af793e546af7ae5416197d5be4bf2557b89aee75ed5250476c"
   },
   "artifact_set": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/epoch-36/catalog/artifact-set.json",
-    "sha256": "e3848c88ce1c11b9b04b4474e1f56a85840aa63d617458d340bb549a5c74326b"
+    "url": "https://github.com/zbs-gg/pulse/releases/download/v0.8.3/catalog-artifact-set.json",
+    "sha256": "06cc55f97e3aeb1f0a49e1a621e8e3787139cbc42c3c1b30c1ff1b5c08f4dd51"
   },
   "snapshot": {
-    "url": "https://pulse-personal-releases-zbs.storage.googleapis.com/pulse/0.8.2/catalog/snapshot.json",
-    "sha256": "2004c8797cd42cc3e0148f00e9e6a914d084cc75b24edc310c6cc27c3feae5d5"
+    "url": "https://github.com/zbs-gg/pulse/releases/download/v0.8.3/snapshot.json",
+    "sha256": "c946ef0d5e28fcbd354a683312ee3caf2c0cce7a7854b5959e2604b4f6c9e47f"
   },
   "github": {
-    "tag": "v0.8.2",
-    "title": "Pulse Personal 0.8.2 preview",
+    "tag": "v0.8.3",
+    "title": "Pulse Personal 0.8.3 preview",
     "prerelease": true,
-    "notes": "docs/releases/v0.8.2.md"
+    "notes": "docs/releases/v0.8.3.md"
   }
 }

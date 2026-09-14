@@ -27,6 +27,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createInitialPersonalWorkspaceBinding,
   createWorkspaceBinding,
+  personalWorkspaceBindingCreationMode,
   recoverWorkspaceBindingTransaction,
 } from './binding-admin.js';
 import {
@@ -45,7 +46,7 @@ import {
   formatPersonalInstallPlan,
 } from './install-plan.js';
 import {
-  detectClaudeCodeCLI, detectCursorInstallation, probeHostVersion, SUPPORTED_HOST_IDS,
+  detectClaudeCodeCLI, detectCursorInstallation, detectOpenCodeCLI, probeHostVersion, SUPPORTED_HOST_IDS,
 } from './supported-hosts.js';
 import { selectHomeDoctorReport } from './home-doctor.js';
 import { renderLocalMergeReview } from './local-merge-review.js';
@@ -87,6 +88,7 @@ import {
 } from './codex-hooks.js';
 import { claudeHookContractDigest, claudeWorkspaceDigest, runClaudeHookCLI } from './claude-hooks.js';
 import { runProductHookCLI } from './product-hook-dispatch.js';
+import { runOpenCodeBridgeCLI } from './opencode-bridge.js';
 import { activateClaudePlugin, disableClaudePlugin, parseClaudePluginList } from './claude-plugin-install.js';
 import { inspectCursorLifecycleReadiness, runCursorHookCLI } from './cursor-hooks.js';
 import {
@@ -125,7 +127,16 @@ import {
 	writeCodexProductLocator,
 	writeProductHostAccess,
 	writeProductLocator,
+  codexProductWorkspaceDigest,
 } from './codex-install.js';
+import {
+  inspectOpenCodeIntegration,
+  installOpenCodeIntegration,
+  opencodeOptionsPath,
+  readOpenCodeOptions,
+  removeOpenCodeIntegration,
+  writeOpenCodeOptions,
+} from './opencode-install.js';
 import { codexHookContractDigest, validateHookReadiness } from './host-adapter.js';
 import {
 	acquireVaultActivationLock,
@@ -169,7 +180,7 @@ const SECRET_PATH = join(DATA_DIR, 'secret.key');
 const MODE_PATH = join(DATA_DIR, 'mode');
 const CLI_PATH = fileURLToPath(import.meta.url);
 const CLI_PACKAGE_ROOT = resolve(dirname(CLI_PATH), '..');
-const PREVIEW_VERSION = '0.8.2';
+const PREVIEW_VERSION = '0.8.3';
 const IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v2';
 const LEGACY_IMPORT_PREVIEW_FLOW = 'pulse.import_preview.v1';
 const PUBLIC_REPO_URL = process.env.PULSE_REPO_URL ?? 'https://github.com/zbs-gg/pulse';
@@ -228,15 +239,16 @@ Usage:
   pulse cursor-hook sessionStart|beforeSubmitPrompt|preToolUse|postToolUse|preCompact|stop
   pulse connect cursor
   pulse install-plan [--json]
-  pulse install [--dry-run|--yes] [--only codex|claude-code|cursor]
+  pulse install [--dry-run|--yes] [--only codex|claude-code|cursor|opencode] [--fun-facts small-model]
   pulse repair [--json]
   pulse install-plan claude-code [--json]   legacy Claude Code preview plan
-  pulse init codex|claude-code|cursor [--dry-run|--yes] [--only codex|claude-code|cursor]
+  pulse init codex|claude-code|cursor|opencode [--dry-run|--yes] [--only codex|claude-code|cursor|opencode] [--fun-facts small-model]
   pulse demo [--clean]
   pulse doctor
   pulse doctor codex
   pulse doctor claude-code
   pulse doctor cursor
+  pulse doctor opencode
   pulse doctor --json
   pulse storage [--json]
   pulse storage clean
@@ -248,6 +260,7 @@ Usage:
   pulse connect claude-code [--remote-control]
   pulse connect codex
   pulse disconnect claude-code
+  pulse disconnect opencode
   pulse disconnect codex
   pulse disconnect cursor
   pulse stop
@@ -265,7 +278,7 @@ Usage:
   pulse migrate preview <export-folder-or-json-or-zip> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate preview-people-graph <graph-dir-or-people-index> [--json] [--html <file>] [--out <file>] [--open]
   pulse migrate commit <preview-json-file> --confirm "import pulse graph"|"merge local pulse memory" [--privacy private|sensitive|normal] [--open]
-  pulse home [--host claude-code|codex|cursor] [--base <url>] [--data-dir <path>]
+  pulse home [--host claude-code|codex|cursor|opencode] [--base <url>] [--data-dir <path>]
   pulse history ingest codex [--roots 50]
   pulse history status|explain|usage|resume|cancel|home [--job <job_id>]
   pulse viewer [--base <url>] [--data-dir <path>] [--thread-id <id>] [--open] [--print-url]   legacy inspection surface
@@ -416,7 +429,7 @@ function currentNativePackedFixtureAttestation(workspace, release) {
   return attestation;
 }
 
-async function currentPersonalInstallPlan({ selectedHosts } = {}) {
+async function currentPersonalInstallPlan({ selectedHosts, funFacts } = {}) {
   let releaseInspection;
   let releaseReasonCode;
   try {
@@ -428,6 +441,19 @@ async function currentPersonalInstallPlan({ selectedHosts } = {}) {
   let workspace;
   let workspaceError;
   try { workspace = canonicalizeWorkspace(process.cwd()); } catch (error) { workspaceError = error; }
+  if (funFacts === undefined) {
+    funFacts = 'off';
+    if (workspace) {
+      try {
+        const workspaceDigest = codexProductWorkspaceDigest(workspace.canonical_path);
+        const existing = readOpenCodeOptions({
+          productHome: join(homedir(), '.pulse'),
+          workspaceDigest,
+        });
+        if (existing.configured) funFacts = existing.fun_facts;
+      } catch { /* a repair plan replaces invalid options with the safe default */ }
+    }
+  }
   return buildPersonalInstallPlan({
     cwd: process.cwd(),
     home: homedir(),
@@ -437,6 +463,7 @@ async function currentPersonalInstallPlan({ selectedHosts } = {}) {
     releaseReasonCode,
     currentState: inspectPersonalPreflightState(workspace, releaseInspection?.release),
     selectedHosts,
+    funFacts,
     detectWorkspace: () => {
       if (workspaceError) throw workspaceError;
       return workspace;
@@ -448,19 +475,29 @@ const PERSONAL_INSTALL_HOST_NAMES = Object.freeze({
   codex: 'Codex',
   'claude-code': 'Claude Code',
   cursor: 'Cursor',
+  opencode: 'OpenCode',
 });
 
 function parsePersonalInstallOptions(argv, { requestedHost } = {}) {
-  const allowedFlags = new Set(['--dry-run', '--json', '--only', '--yes']);
+  const allowedFlags = new Set(['--dry-run', '--json', '--only', '--yes', '--fun-facts']);
   const positional = [];
   let onlyHost;
+  let funFacts = 'off';
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === '--only') {
       if (onlyHost !== undefined || index + 1 >= argv.length) {
-        throw new Error('pulse install requires --only codex|claude-code|cursor');
+        throw new Error('pulse install requires --only codex|claude-code|cursor|opencode');
       }
       onlyHost = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (value === '--fun-facts') {
+      if (funFacts !== 'off' || argv[index + 1] !== 'small-model') {
+        throw new Error('pulse install supports only --fun-facts small-model');
+      }
+      funFacts = argv[index + 1];
       index += 1;
       continue;
     }
@@ -472,7 +509,7 @@ function parsePersonalInstallOptions(argv, { requestedHost } = {}) {
   }
   if (positional.length > 0) throw new Error(`unexpected install argument: ${positional[0]}`);
   if (onlyHost !== undefined && !SUPPORTED_HOST_IDS.includes(onlyHost)) {
-    throw new Error('pulse install requires --only codex|claude-code|cursor');
+    throw new Error('pulse install requires --only codex|claude-code|cursor|opencode');
   }
   if (requestedHost && onlyHost && requestedHost !== onlyHost) {
     throw new Error(`pulse init ${requestedHost} cannot be combined with --only ${onlyHost}`);
@@ -480,10 +517,17 @@ function parsePersonalInstallOptions(argv, { requestedHost } = {}) {
   if (argv.includes('--dry-run') && argv.includes('--yes')) {
     throw new Error('choose either --dry-run or --yes, not both');
   }
+  if (funFacts === 'small-model' && requestedHost && requestedHost !== 'opencode' && onlyHost === undefined) {
+    throw new Error('--fun-facts small-model is available only with OpenCode');
+  }
+  if (funFacts === 'small-model' && onlyHost && onlyHost !== 'opencode') {
+    throw new Error('--fun-facts small-model is available only with OpenCode');
+  }
   return {
     dryRun: argv.includes('--dry-run'),
     json: argv.includes('--json'),
     onlyHost,
+    funFacts,
     yes: argv.includes('--yes'),
   };
 }
@@ -538,7 +582,7 @@ async function runPersonalInstallWizard({ argv, requestedHost } = {}) {
       return;
     }
   }
-  const buildPlan = () => currentPersonalInstallPlan({ selectedHosts });
+  const buildPlan = () => currentPersonalInstallPlan({ selectedHosts, funFacts: options.funFacts });
   if (options.dryRun) {
     const plan = await buildPlan();
     printPersonalInstallPlan(plan, { json: options.json });
@@ -567,6 +611,7 @@ async function connectInstalledPersonalHost(target) {
   }
   if (target === 'codex') await connectCodex();
   else if (target === 'cursor') await connectCursor();
+  else if (target === 'opencode') await connectOpenCode();
   else await connectClaudeCode();
 }
 
@@ -779,7 +824,10 @@ async function createPersonalBindingForInstall(principal, plan) {
       principalID: principal.principal_id,
     };
     if (process.env.PULSE_TRUST_MODE !== 'test') {
-      return await createInitialPersonalWorkspaceBinding(bindingRequest);
+      const creationMode = personalWorkspaceBindingCreationMode();
+      return creationMode === 'initial'
+        ? await createInitialPersonalWorkspaceBinding(bindingRequest)
+        : await createWorkspaceBinding({ ...bindingRequest, mode: 'personal' });
     }
     return await createWorkspaceBinding({
       ...bindingRequest,
@@ -1071,7 +1119,7 @@ function prewarmPersonalHostWorker(host, pluginRoot, binding) {
   return receipt;
 }
 
-function personalInstallHostRegistry(targets) {
+function personalInstallHostRegistry(targets, { openCodeFunFacts = 'off' } = {}) {
   const codexExecutable = targets.get('codex')?.executable_path;
   const claudeExecutable = targets.get('claude-code')?.executable_path;
   const captureFor = (context, host) => {
@@ -1115,6 +1163,13 @@ function personalInstallHostRegistry(targets) {
         ready = result.ready === true;
         if (ready) milestones = Object.entries(result.observed)
           .filter(([, observed]) => observed === true).map(([name]) => name).sort();
+      } else if (host === 'opencode') {
+        const result = await boundPulseRequest(context.resolved, '/memory/lifecycle-readiness', {
+          method: 'GET', timeoutMs: 1_000,
+        });
+        const state = result?.hosts?.find((item) => item?.host === 'opencode');
+        ready = state?.lifecycle_ready === true;
+        if (Array.isArray(state?.milestones)) milestones = [...state.milestones].sort();
       }
       return {
         host,
@@ -1295,6 +1350,73 @@ function personalInstallHostRegistry(targets) {
         }
       },
     },
+    opencode: {
+      inspect: async (context) => {
+        const result = inspectOpenCodeIntegration({
+          home: homedir(), expectedDigest: context.edge.plugin_tree_digest,
+        });
+        let optionsReady = false;
+        try {
+          const options = readOpenCodeOptions({
+            productHome: join(homedir(), '.pulse'),
+            workspaceDigest: codexProductWorkspaceDigest(context.binding.workspace.canonical_path),
+          });
+          optionsReady = options.configured === true && options.fun_facts === openCodeFunFacts;
+        } catch { optionsReady = false; }
+        const staticReady = result.ready === true && optionsReady &&
+          captureFor(context, 'opencode') && accessFor(context, 'opencode');
+        const lifecycle = staticReady
+          ? await lifecycleFor(context, 'opencode')
+          : { lifecycle_ready: false, milestones: [] };
+        return {
+          ready: staticReady,
+          installed: result.ready === true,
+          mcp_ready: staticReady,
+          lifecycle_ready: staticReady && lifecycle.lifecycle_ready,
+          milestones: lifecycle.milestones,
+          reason_code: !staticReady
+            ? (result.reason ?? (optionsReady ? 'opencode_activation_required' : 'opencode_options_required'))
+            : lifecycle.lifecycle_ready ? 'opencode_lifecycle_verified' : 'opencode_lifecycle_required',
+        };
+      },
+      activate: async (context) => {
+        const workspaceDigest = codexProductWorkspaceDigest(context.binding.workspace.canonical_path);
+        const localFiles = snapshotLocalFiles([
+          ...captureStatePaths(DATA_DIR, context.binding),
+          join(homedir(), '.pulse', 'product-locators.json'),
+          productHostAccessPath({ productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'opencode' }),
+          opencodeOptionsPath({ productHome: join(homedir(), '.pulse'), workspaceDigest }),
+        ]);
+        try {
+          const defaults = defaultBindingPaths();
+          writeSharedProductLocator({
+            binding: context.binding, dataDir: DATA_DIR,
+            registryPath: process.env.PULSE_BINDING_REGISTRY_PATH ?? defaults.registryPath,
+            publicKeyPath: process.env.PULSE_BINDING_PUBLIC_KEY_PATH ?? defaults.publicKeyPath,
+            anchorPath: process.env.PULSE_BINDING_ANCHOR_PATH ?? defaults.anchorPath,
+            trustMode: process.env.PULSE_TRUST_MODE === 'test' ? 'test' : 'production',
+          });
+          writeCaptureStateFiles({
+            globalDataDir: DATA_DIR, binding: context.binding, host: 'opencode', enabled: true,
+            reason: 'opencode_plugin_connected',
+          });
+          writeProductHostAccess({
+            productHome: join(homedir(), '.pulse'), binding: context.binding, host: 'opencode',
+          });
+          writeOpenCodeOptions({
+            productHome: join(homedir(), '.pulse'), workspaceDigest, funFacts: openCodeFunFacts,
+          });
+          installOpenCodeIntegration(context.edge.plugin_root, {
+            home: homedir(), expectedDigest: context.edge.plugin_tree_digest,
+          });
+        } catch (error) {
+          const failures = [];
+          try { restoreLocalFiles(localFiles); } catch (failure) { failures.push(failure); }
+          if (failures.length > 0) throw new PersonalInstallError('opencode_activation_rollback_failed');
+          throw error;
+        }
+      },
+    },
   };
 }
 
@@ -1364,7 +1486,9 @@ function personalInstallDependencies(plan) {
     .filter((host) => host?.activation_target === true)
     .map((host) => [host.host, host]));
   const target = (host) => targets.get(host);
-  const registry = personalInstallHostRegistry(targets);
+  const registry = personalInstallHostRegistry(targets, {
+    openCodeFunFacts: plan?.host_options?.opencode?.fun_facts ?? 'off',
+  });
   let identitiesVerified = false;
   function verifyExactCLIHosts() {
     if (identitiesVerified) return;
@@ -1435,6 +1559,25 @@ function personalInstallDependencies(plan) {
         throw new PersonalInstallError('cursor_identity_changed');
       }
     }
+    const openCode = target('opencode');
+    if (openCode) {
+      const executable = openCode.executable_path;
+      const expectedDigest = openCode.executable_sha256;
+      if (typeof executable !== 'string' || !isAbsolute(executable) ||
+          typeof expectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedDigest)) {
+        throw new PersonalInstallError('opencode_identity_invalid');
+      }
+      const probe = detectOpenCodeCLI({
+        opencodePath: executable,
+        versionProbe: (path) => spawnSync(path, ['--version'], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000, killSignal: 'SIGTERM',
+        }),
+      });
+      if (!probe.available) throw new PersonalInstallError(probe.reason_code ?? 'opencode_probe_failed');
+      if (probe.executable_path !== executable || probe.executable_sha256 !== expectedDigest) {
+        throw new PersonalInstallError('opencode_identity_changed');
+      }
+    }
     identitiesVerified = true;
   }
   return {
@@ -1445,6 +1588,7 @@ function personalInstallDependencies(plan) {
         const inspection = inspectPersonalRuntime(packagedPersonalReleaseInspectionOptions(DATA_DIR));
         if (inspection.ready) return inspection;
         if (activationSetStatus === 'missing') return inspection;
+        if (inspection.reason_code === 'runtime_upgrade_required') return inspection;
         throw new PersonalInstallError('runtime_repair_required');
       } catch (error) {
         if (error instanceof PersonalInstallError) throw error;
@@ -3945,6 +4089,86 @@ function memoryTotalLabel() {
   return 'unknown';
 }
 
+async function openCodeProductDoctorReport() {
+  const cli = detectOpenCodeCLI();
+  const checks = {
+    opencode: {
+      ok: cli.available === true,
+      detail: cli.available ? `OpenCode ${cli.version}` : (cli.reason_code ?? 'OpenCode unavailable'),
+    },
+    binding: { ok: false, detail: 'Pulse project binding unavailable' },
+    plugin: { ok: false, detail: 'OpenCode Pulse loader unavailable' },
+    access: { ok: false, detail: 'OpenCode project access unavailable' },
+    capture: { ok: false, detail: 'OpenCode capture disabled' },
+    options: { ok: false, detail: 'OpenCode project options unavailable' },
+    daemon: { ok: false, detail: 'Pulse daemon unavailable' },
+    lifecycle: { ok: false, detail: 'Complete one normal OpenCode recall and write' },
+  };
+  try {
+    await recoverBindingAuthority();
+    const resolved = resolveCodexMcpRuntime(process.cwd());
+    checks.binding = { ok: true, detail: 'signed project binding verified' };
+    const edge = committedCodexProductEdge(readProductActivationBundle(DATA_DIR));
+    const plugin = inspectOpenCodeIntegration({
+      home: homedir(), expectedDigest: edge.plugin_tree_digest,
+    });
+    checks.plugin = { ok: plugin.ready === true, detail: plugin.reason ?? 'OpenCode plugin inspection complete' };
+    try {
+      readProductHostAccess({ productHome: join(homedir(), '.pulse'), binding: resolved.binding, host: 'opencode' });
+      checks.access = { ok: true, detail: 'project-bound OpenCode access verified' };
+    } catch { /* stable missing detail above */ }
+    const capture = safeReadJSON(join(resolved.runtime.data_dir, 'capture-state.json'));
+    checks.capture = {
+      ok: captureEnabledForHost(capture, 'opencode'),
+      detail: captureEnabledForHost(capture, 'opencode') ? 'automatic memory enabled' : 'automatic memory disabled',
+    };
+    try {
+      const options = readOpenCodeOptions({
+        productHome: join(homedir(), '.pulse'),
+        workspaceDigest: codexProductWorkspaceDigest(resolved.binding.workspace.canonical_path),
+      });
+      checks.options = {
+        ok: options.configured === true,
+        detail: options.configured ? `fun facts: ${options.fun_facts}` : 'project options missing',
+      };
+    } catch (error) { checks.options.detail = error?.code ?? 'project options invalid'; }
+    try {
+      const readiness = await boundPulseRequest(resolved, '/memory/lifecycle-readiness', {
+        method: 'GET', timeoutMs: 1_000,
+      });
+      checks.daemon = { ok: true, detail: 'local Pulse daemon answered' };
+      const host = readiness?.hosts?.find((item) => item?.host === 'opencode');
+      checks.lifecycle = {
+        ok: host?.lifecycle_ready === true,
+        detail: host?.lifecycle_ready ? 'automatic recall and durable write observed' : (host?.state ?? checks.lifecycle.detail),
+      };
+    } catch { /* daemon and lifecycle remain fail-open failures */ }
+  } catch { /* report every unavailable layer without mutating it */ }
+  const ready = Object.values(checks).every((check) => check.ok);
+  return {
+    schema: 'pulse.opencode_doctor.v1',
+    host: 'opencode',
+    supported_contract: '1.18.x on Apple Silicon macOS',
+    checks,
+    verdict: ready ? 'ready' : 'action_required',
+  };
+}
+
+async function runOpenCodeProductDoctor(rest = []) {
+  const report = await openCodeProductDoctorReport();
+  if (rest.includes('--json')) console.log(JSON.stringify(report, null, 2));
+  else {
+    console.log('[pulse] doctor opencode');
+    for (const [name, check] of Object.entries(report.checks)) printDoctorLine(name, check);
+    console.log(`\nVerdict: ${report.verdict}`);
+    if (!report.checks.lifecycle.ok && Object.entries(report.checks)
+      .filter(([name]) => name !== 'lifecycle').every(([, check]) => check.ok)) {
+      console.log('Next: complete one normal OpenCode recall and one pulse_memory write, then run doctor again.');
+    }
+  }
+  if (report.verdict !== 'ready') process.exitCode = 1;
+}
+
 async function runDoctor(rest = []) {
   if (rest[0] === 'codex') {
     await runCodexDoctor(rest.slice(1));
@@ -3956,6 +4180,10 @@ async function runDoctor(rest = []) {
   }
   if (rest[0] === 'cursor') {
     await runCursorProductDoctor(rest.slice(1));
+    return;
+  }
+  if (rest[0] === 'opencode') {
+    await runOpenCodeProductDoctor(rest.slice(1));
     return;
   }
   const report = await doctorReport();
@@ -4316,6 +4544,87 @@ async function connectCursor() {
 	} finally {
 		await release();
 	}
+}
+
+async function connectOpenCode() {
+  const release = await acquireProductActivationLock();
+  try {
+    await recoverBindingAuthority();
+    const resolved = resolveCodexMcpRuntime(process.cwd());
+    await activatePersonalInstallCoreTransaction(resolved.binding);
+    const core = await inspectPersonalInstallCore(resolved.binding);
+    if (core.ready !== true) throw new Error('personal_core_activation_verification_failed');
+    const workspaceDigest = codexProductWorkspaceDigest(resolved.binding.workspace.canonical_path);
+    let funFacts = 'off';
+    try {
+      const existing = readOpenCodeOptions({ productHome: join(homedir(), '.pulse'), workspaceDigest });
+      if (existing.configured) funFacts = existing.fun_facts;
+    } catch { /* repair replaces invalid project options with the safe default */ }
+    const adapter = personalInstallHostRegistry(new Map([['opencode', {}]]), {
+      openCodeFunFacts: funFacts,
+    }).opencode;
+    const before = await adapter.inspect(core.context);
+    if (!before.ready) await adapter.activate(core.context);
+    const after = await adapter.inspect(core.context);
+    if (!after.ready) throw new Error(after.reason_code ?? 'opencode_activation_incomplete');
+    console.log('[pulse] OpenCode is connected to this project.');
+    console.log('[pulse] Restart OpenCode once so it loads the global Pulse plugin.');
+  } finally {
+    await release();
+  }
+}
+
+async function disconnectOpenCode({ removeGlobal = false } = {}) {
+  const release = await acquireProductActivationLock();
+  try {
+    let binding;
+    try {
+      await recoverBindingAuthority();
+      binding = resolveCodexMcpRuntime(process.cwd()).binding;
+    } catch (error) {
+      if (!removeGlobal) throw error;
+      const removed = removeOpenCodeIntegration({ home: homedir() });
+      console.log(removed.removed
+        ? '[pulse] The global Pulse loader was removed; no project binding was available to disconnect.'
+        : '[pulse] The global Pulse loader was already absent; no project binding was available to disconnect.');
+      return;
+    }
+    const workspaceDigest = codexProductWorkspaceDigest(binding.workspace.canonical_path);
+    const optionsPath = opencodeOptionsPath({ productHome: join(homedir(), '.pulse'), workspaceDigest });
+    const localFiles = snapshotLocalFiles([
+      ...captureStatePaths(DATA_DIR, binding),
+      join(homedir(), '.pulse', 'product-locators.json'),
+      productHostAccessPath({ productHome: join(homedir(), '.pulse'), binding, host: 'opencode' }),
+      optionsPath,
+    ]);
+    try {
+      const access = removeProductHostAccess({
+        productHome: join(homedir(), '.pulse'), binding, host: 'opencode',
+      });
+      writeCaptureStateFiles({
+        globalDataDir: DATA_DIR, binding, host: 'opencode',
+        enabled: access.remaining_for_host > 0,
+        globalEnabled: access.remaining_for_host > 0,
+        reason: 'host_disconnected',
+      });
+      rmSync(optionsPath, { force: true });
+      if (access.remaining_for_workspace === 0) {
+        try { removeProductLocator({ productHome: join(homedir(), '.pulse'), binding }); }
+        catch (error) { if (!/missing/i.test(error.message)) throw error; }
+      }
+      if (removeGlobal && access.remaining_for_host === 0) removeOpenCodeIntegration({ home: homedir() });
+      console.log(access.remaining_for_host > 0
+        ? '[pulse] OpenCode disconnected from this workspace; the global loader remains for another Pulse project.'
+        : removeGlobal
+          ? '[pulse] OpenCode disconnected and the global Pulse loader was removed.'
+          : '[pulse] OpenCode disconnected from this workspace; the inert global loader remains installed.');
+    } catch (error) {
+      try { restoreLocalFiles(localFiles); } catch { throw new Error('opencode_disconnect_rollback_failed'); }
+      throw error;
+    }
+  } finally {
+    await release();
+  }
 }
 
 async function disconnectCursor() {
@@ -7797,7 +8106,8 @@ async function personalDoctorForHost(host, { homeProbe = false, product } = {}) 
 	if (host === 'claude-code') return claudeProductDoctorReport();
 	if (host === 'codex') return codexDoctorReport();
 	if (host === 'cursor') return cursorProductDoctorReport();
-	throw new Error('pulse home --host must be claude-code, codex, or cursor.');
+	if (host === 'opencode') return openCodeProductDoctorReport();
+	throw new Error('pulse home --host must be claude-code, codex, cursor, or opencode.');
 }
 
 async function homeDoctorReport(product, requestedHost) {
@@ -7820,7 +8130,7 @@ async function runHome(rest) {
 	const explicitBaseURL = getRestArg(rest, '--base');
 	const explicitHost = getRestArg(rest, '--host');
 	if (rest.includes('--host') && explicitHost === undefined) {
-		throw new Error('pulse home --host must be claude-code, codex, or cursor.');
+		throw new Error('pulse home --host must be claude-code, codex, cursor, or opencode.');
 	}
 	let product;
 	if (explicitDataDir === undefined && explicitBaseURL === undefined) {
@@ -10445,6 +10755,11 @@ async function main() {
     return;
   }
 
+  if (command === 'opencode-bridge') {
+    await runOpenCodeBridgeCLI(args[1]);
+    return;
+  }
+
   if (command === '--why' || command === 'why') {
     console.log('Because repeating yourself to machines is a terrible way to live.');
     return;
@@ -10572,8 +10887,8 @@ async function main() {
 
   if (command === 'init') {
     const target = args[1];
-    if (!['codex', 'claude-code', 'cursor'].includes(target)) {
-      throw new Error('pulse init supports: codex | claude-code | cursor');
+    if (!SUPPORTED_HOST_IDS.includes(target)) {
+      throw new Error('pulse init supports: codex | claude-code | cursor | opencode');
     }
     await runPersonalInstallWizard({ argv: args.slice(2), requestedHost: target });
     return;
@@ -10585,7 +10900,7 @@ async function main() {
       await connectInstalledPersonalHost(target);
       return;
     }
-    throw new Error('pulse connect supports: codex | claude-code | cursor');
+    throw new Error('pulse connect supports: codex | claude-code | cursor | opencode');
   }
 
   if (command === 'disconnect') {
@@ -10598,8 +10913,12 @@ async function main() {
 			await disconnectCursor();
 			return;
 		}
+    if (target === 'opencode') {
+      await disconnectOpenCode();
+      return;
+    }
     if (target !== 'claude-code') {
-      throw new Error('v1 supports: pulse disconnect codex | claude-code | cursor');
+      throw new Error('pulse disconnect supports: codex | claude-code | cursor | opencode');
     }
 		await disconnectClaudeCode();
     return;
@@ -10612,8 +10931,13 @@ async function main() {
 
   if (command === 'remove') {
     const target = args[1];
+    if (target === 'opencode') {
+      await disconnectOpenCode({ removeGlobal: true });
+      console.log('[pulse] Local memory was not wiped.');
+      return;
+    }
     if (target !== 'claude-code') {
-      throw new Error('v1 supports only: pulse remove claude-code');
+      throw new Error('pulse remove supports: claude-code | opencode');
     }
 		await disconnectClaudeCode();
     stopPreviewDaemon();

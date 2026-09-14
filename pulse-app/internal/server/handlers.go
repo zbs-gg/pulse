@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"github.com/nkkmnk/pulse/internal/store"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -284,6 +285,15 @@ func (s *Server) handleContextQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "context query error", http.StatusInternalServerError)
 		return
 	}
+	if s.cfg.Store != nil && s.cfg.Store.StoreKind() == store.StoreKindPersonal {
+		binding, repository := s.cfg.Store.MemoryMomentLocalBinding(), ""
+		if personalScope != nil {
+			binding, repository = personalScope.BindingDigest, personalScope.RepositoryID
+		}
+		for i := range result.Events {
+			result.Events[i].MomentID = s.cfg.Store.MomentForEvent(result.Events[i].ID, binding, repository)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }
@@ -294,7 +304,7 @@ func (s *Server) handleMemoryRecallActivity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	host, ok := exactSingleHeader(r, "X-Pulse-Product-Host")
-	if !ok || (host != "codex" && host != "claude-code") {
+	if !ok || (host != "codex" && host != "claude-code" && host != "opencode") {
 		http.Error(w, "product host is invalid", http.StatusBadRequest)
 		return
 	}

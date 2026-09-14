@@ -309,13 +309,13 @@ type memoryHomeTemplateData struct {
 }
 
 func memoryHomeHostActivityCards(value supportedHostLifecycleReadiness) []memoryHomeHostActivityCard {
-	cards := make([]memoryHomeHostActivityCard, 0, 2)
+	cards := make([]memoryHomeHostActivityCard, 0, 3)
 	for _, host := range value.Hosts {
-		if host.Host != "codex" && host.Host != "claude-code" {
+		if host.Host != "codex" && host.Host != "claude-code" && host.Host != "opencode" {
 			continue
 		}
 		card := memoryHomeHostActivityCard{HostLabel: map[string]string{
-			"codex": "Codex", "claude-code": "Claude Code",
+			"codex": "Codex", "claude-code": "Claude Code", "opencode": "OpenCode",
 		}[host.Host]}
 		if host.LifecycleReady {
 			card.State, card.StateLabel = "ready", "Automatic memory observed"
