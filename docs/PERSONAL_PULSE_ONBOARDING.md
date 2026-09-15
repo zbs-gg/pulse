@@ -6,12 +6,18 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
-Pulse Personal 0.7.2 is released first for Macs with Apple Silicon. Other
-platforms follow after the Mac installation has been tested end to end.
+Pulse Personal targets Macs with Apple Silicon. Other platforms require
+separately verified native installation evidence.
 
 Personal 0.8.3 is the opt-in preview for Apple Silicon macOS, with complete
-moments and OpenCode 1.18.x support. Stable installation stays on 0.7.2.
+moments and OpenCode 1.18.x support. New installs must explicitly select
+the 0.8.3 preview.
 The release workflow requires installation of the exact signed archive and a
 real semantic query. Source tests and that CI gate do not prove one-day
 owner-machine acceptance or production readiness.
@@ -28,24 +34,18 @@ Personal Pulse
 does not require Go, Python, Make, Docker, or a model API key. It also requires no
 manual host config editing.
 
-The published 0.7.2 package contains a canonical signed release
-manifest plus the exact notarized daemon, managed local embedding runtime,
+The published 0.8.3 package contains a canonical signed release
+manifest that identifies the exact notarized daemon, managed local embedding runtime,
 data-only model, native plugin runtime, and presence helper. If any one is
 missing or invalid, installation stops before identity, binding, or host
 activation changes.
 
 ## One command
 
-Run this inside the project:
+To select the preview explicitly, run this inside the project:
 
 ```bash
-npx -y @zbs-gg/pulse@0.7.2 init codex
-```
-
-The explicit preview command is:
-
-```bash
-npx -y @zbs-gg/pulse@preview init codex
+npx -y @zbs-gg/pulse@0.8.3 init codex
 ```
 
 The first screen says what will be downloaded, how much disk it needs, every

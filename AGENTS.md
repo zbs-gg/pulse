@@ -25,6 +25,10 @@
   a version published. Never reuse an earlier publication descriptor or artifacts.
   Do not present Intel Mac, Windows, or Linux as publicly supported from fixture
   evidence alone.
+- The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+  installs using it (including 0.7.2) are unavailable. npm `latest` still
+  points to 0.7.2; new installs must explicitly select the 0.8.3 preview.
+  Do not describe it as stable or recreate paid storage.
 - Before installation, show the exact files and settings that will change and
   ask the person to confirm. `--yes` does not bypass macOS protected actions.
 - Do not change global AI-program settings, system trust, or an existing Pulse

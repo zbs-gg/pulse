@@ -2,7 +2,10 @@
 
 Pulse Personal 0.8.3 preview installs one local memory engine, Memory Home,
 and connections for Codex, Claude Code, Cursor and OpenCode 1.18.x on Apple
-Silicon macOS. Stable remains 0.7.2.
+Silicon macOS. The historical stable release is 0.7.2; its Google Cloud
+release storage was retired on 2026-09-14. New installs must explicitly
+select the 0.8.3 preview. npm `latest` still points to 0.7.2, whose fresh
+installation is unavailable. Existing local installations and vaults remain.
 
 Every meaningful part of an explicitly requested memory can be saved,
 including coexisting feelings, their causes and provenance. Pulse keeps
@@ -16,7 +19,7 @@ publishing npm and the matching GitHub prerelease. One-day use and production
 acceptance are separate from that verification.
 
 ```bash
-npx -y @zbs-gg/pulse@preview init codex
+npx -y @zbs-gg/pulse@0.8.3 init codex
 pulse doctor
 pulse home
 ```
@@ -50,5 +53,6 @@ Disconnect with `pulse disconnect codex`, `pulse disconnect claude-code`,
 Pulse memory only with the separate confirmed command
 `pulse wipe --confirm "wipe pulse memory"`.
 
-License: AGPL-3.0-only. Status: 0.8.3 is unpublished; Personal 0.8.2 remains the
-public preview and stable remains 0.7.2.
+License: AGPL-3.0-only. Status: 0.8.3 is the published opt-in preview,
+with signed runtime assets on GitHub Releases. It is not a stable promotion
+or a production-readiness claim.

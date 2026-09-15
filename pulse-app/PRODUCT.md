@@ -6,6 +6,11 @@ GitHub release in `zbs-gg/pulse`. GitHub may redirect downloads to
 digests are still checked before activation. No paid release storage service
 is required. Personal memory remains on the local machine.
 
+The legacy Google Cloud release bucket was retired on 2026-09-14. Fresh
+installs of 0.7.2 and older previews that use that bucket are unavailable.
+Existing local installations and vaults are preserved. npm `latest` still
+points to 0.7.2; select `@zbs-gg/pulse@0.8.3` explicitly for a new install.
+Version 0.8.3 remains an opt-in preview, not a stable promotion.
 
 ## Current product
 
@@ -14,7 +19,8 @@ knowledge they need at the moment they need it, stays silent when nothing
 relevant is found, and lets the owner inspect, correct, or delete memories in
 Memory Home.
 
-Stable remains 0.7.2 for Apple Silicon Macs. The opt-in 0.8.3 preview adds
+The historical stable release is 0.7.2 for Apple Silicon Macs.
+The opt-in 0.8.3 preview adds
 complete-moment writing and OpenCode 1.18.x to Codex, Claude Code and Cursor.
 The BB adapter uses the same local engine. There is no Team server, cloud
 synchronization or shared-memory command; ordinary ChatGPT chat is not a
@@ -173,7 +179,7 @@ Do not look like parchment, fake editorial notebooks, generic AI purple glass, b
 
 Default to accessible product UI: readable contrast, keyboard-focusable controls, reduced-motion-safe interactions, responsive layout, and no reliance on color alone for status.
 
-Status: stable remains 0.7.2; 0.8.3 is an opt-in preview. Installation and
+Status: the historical stable release is 0.7.2; 0.8.3 is an opt-in preview. Installation and
 semantic retrieval checks are required for the exact published version.
 One-day acceptance and production readiness are not implied by passing tests.
 

@@ -299,13 +299,17 @@ test('release verification includes the scanned archive and isolated native inst
 	assert.match(multiharness, /production_install_proof:\s*false/);
 	assert.match(multiharness, /daemon_backed_cross_host_recall:\s*false/);
 	assert.doesNotMatch(multiharness, /behavioral_cross_host_object_id|state\.memories/);
+	const publication = JSON.parse(readFileSync(join(root, 'docs', 'release', 'PREVIEW_PUBLICATION.json'), 'utf8'));
+	const installCommand = `npx -y @zbs-gg/pulse@${publication.version} init codex`;
 	for (const relative of [
 		'README.md', 'docs/INSTALL_WITH_AGENT.md',
 		'docs/PERSONAL_PULSE_ONBOARDING.md', 'pulse-app/cli/README.md',
 	]) {
 		const document = readFileSync(join(root, relative), 'utf8');
-		assert.match(document, /npx (?:-y )?@zbs-gg\/pulse@(?:preview|0\.7\.2) init codex/,
-			`${relative} must lead with the one-command Personal install`);
+		assert.ok(document.includes(installCommand),
+			`${relative} must publish the exact reviewed preview install: ${installCommand}`);
+		assert.doesNotMatch(document, /npx (?:-y )?@zbs-gg\/pulse@(?:latest|0\.7\.2) init codex/,
+			`${relative} must not recommend the retired stable installer`);
 		assert.match(document, /Codex/);
 		assert.match(document, /Memory Home/);
 		assert.doesNotMatch(document, /pulse (?:doctor|disconnect) <(?:installed-host|host)>/,

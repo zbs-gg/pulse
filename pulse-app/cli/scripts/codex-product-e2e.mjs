@@ -443,6 +443,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 	assert.equal(existsSync(join(codexHome, 'pulse', 'product-locators.json')), false);
 	const healthyDaemonBytes = Buffer.concat([daemonBytes, Buffer.from('\nPULSE_HEALTHY_AFTER_FAILED_ACTIVATION\n')]);
 	releaseFixture = await productReleaseFixture(healthyDaemonBytes, 8);
+	const healthyReleaseFixture = releaseFixture;
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
@@ -924,7 +925,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 		run('codex', ['plugin', 'marketplace', 'list'], { cwd: workspace, env }).stdout,
 	).root), realpathSync(marketplaceBeforeFailedManagedUpgrade),
 	'failed managed upgrade must restore the previous marketplace provenance');
-	releaseFixture = await productReleaseFixture(healthyDaemonBytes, 8);
+	// Rollback must reuse the exact installed release, including signed catalog
+	// and archive digests. Rebuilding the same epoch can produce different bytes.
+	releaseFixture = healthyReleaseFixture;
 	Object.assign(env, {
 		PULSE_RELEASE_MANIFEST_PATH: releaseFixture.manifestPath,
 		PULSE_RELEASE_TEST_ROOT_PATH: releaseFixture.rootPath,
